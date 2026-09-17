@@ -82,7 +82,10 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("bc5d-bridge-{label}-{}-{nonce}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "bc5d-bridge-{label}-{}-{nonce}",
+        std::process::id()
+    ))
 }
 
 /// Write the fixture as `bc5d_308.bin` in a fresh temp dir; returns (dir, file path).
@@ -367,7 +370,10 @@ fn card_rejects_malformed_bc_segments_and_bad_tables() {
         })),
     );
     assert!(
-        out["error"]["message"].as_str().unwrap().contains("bc must be > 0"),
+        out["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("bc must be > 0"),
         "{out}"
     );
 
@@ -426,11 +432,7 @@ fn solve_applies_the_table_to_zero_and_flight() {
 
     // And the flight: strictly more drop at the terminal sample.
     let terminal_drop = |out: &Value| {
-        out["samples"]
-            .as_array()
-            .unwrap()
-            .last()
-            .unwrap()["drop_m"]
+        out["samples"].as_array().unwrap().last().unwrap()["drop_m"]
             .as_f64()
             .unwrap()
     };
@@ -462,8 +464,10 @@ fn solve_warns_when_an_aux_drag_model_is_coerced_to_g1() {
 
     let warnings = corrected["warnings"].as_array().unwrap();
     assert!(
-        warnings.iter().any(|w| w["code"] == "bc5d_drag_model_coerced"
-            && w["path"] == "$.corrections.bc5d_table_path"),
+        warnings
+            .iter()
+            .any(|w| w["code"] == "bc5d_drag_model_coerced"
+                && w["path"] == "$.corrections.bc5d_table_path"),
         "a G5 request against a G1/G7 table must carry the coercion warning: {warnings:?}"
     );
 }
@@ -482,22 +486,28 @@ fn solve_rejects_corrupt_and_missing_tables_with_typed_envelopes() {
     std::fs::remove_dir_all(&dir).unwrap();
     assert_eq!(out["ok"], false, "{out}");
     assert_eq!(out["error"]["code"], "command_failed", "{out}");
-    assert_eq!(out["error"]["details"]["error"]["code"], "invalid_value", "{out}");
     assert_eq!(
-        out["error"]["details"]["error"]["path"],
-        "$.corrections.bc5d_table_path",
+        out["error"]["details"]["error"]["code"], "invalid_value",
+        "{out}"
+    );
+    assert_eq!(
+        out["error"]["details"]["error"]["path"], "$.corrections.bc5d_table_path",
         "{out}"
     );
 
     // Missing file -> io_error at the same path.
     let out = bridge_raw(
         "solve",
-        solve_request(Some(json!({"bc5d_table_path": "/nonexistent/bc5d_308.bin"}))),
+        solve_request(Some(
+            json!({"bc5d_table_path": "/nonexistent/bc5d_308.bin"}),
+        )),
     );
-    assert_eq!(out["error"]["details"]["error"]["code"], "io_error", "{out}");
     assert_eq!(
-        out["error"]["details"]["error"]["path"],
-        "$.corrections.bc5d_table_path",
+        out["error"]["details"]["error"]["code"], "io_error",
+        "{out}"
+    );
+    assert_eq!(
+        out["error"]["details"]["error"]["path"], "$.corrections.bc5d_table_path",
         "{out}"
     );
 
@@ -506,11 +516,17 @@ fn solve_rejects_corrupt_and_missing_tables_with_typed_envelopes() {
         "solve",
         solve_request(Some(json!({"bc5d_table_path": "x", "extra": 1}))),
     );
-    assert_eq!(out["error"]["details"]["error"]["code"], "unknown_field", "{out}");
+    assert_eq!(
+        out["error"]["details"]["error"]["code"], "unknown_field",
+        "{out}"
+    );
 
     // A non-string path is a shape error, not a coerced value.
     let out = bridge_raw("solve", solve_request(Some(json!({"bc5d_table_path": 42}))));
-    assert_eq!(out["error"]["details"]["error"]["code"], "invalid_value", "{out}");
+    assert_eq!(
+        out["error"]["details"]["error"]["code"], "invalid_value",
+        "{out}"
+    );
 }
 
 #[test]
@@ -592,14 +608,16 @@ fn cli_sampled_drops(table_dir: Option<&Path>) -> Vec<(f64, f64)> {
         let drop_in: f64 = fields[1].parse().expect("drop field");
         rows.push((distance_yd, drop_in));
     }
-    assert!(rows.len() >= 4, "expected several sampled CLI rows:\n{stdout}");
+    assert!(
+        rows.len() >= 4,
+        "expected several sampled CLI rows:\n{stdout}"
+    );
     rows
 }
 
 /// Bridge solve for the same load; returns (distance_m, drop_m) samples.
 fn bridge_sampled_drops(table_path: Option<&Path>) -> Vec<(f64, f64)> {
-    let corrections =
-        table_path.map(|p| json!({"bc5d_table_path": p.to_str().unwrap()}));
+    let corrections = table_path.map(|p| json!({"bc5d_table_path": p.to_str().unwrap()}));
     let result = bridge_ok("solve", solve_request(corrections));
     result["samples"]
         .as_array()
@@ -628,32 +646,35 @@ fn golden_cli_trajectory_and_bridge_solve_agree_on_bc5d_drops() {
     // Match bridge samples to CLI rows by downrange distance (CLI prints yards; the
     // sample grid itself is metric on both sides). Returns the aligned pairs so the
     // delta comparison below reuses the exact same rows.
-    let aligned = |cli: &[(f64, f64)], bridge: &[(f64, f64)], label: &str| -> Vec<(f64, f64, f64)> {
-        let mut pairs = Vec::new();
-        for &(distance_yd, cli_drop_in) in cli {
-            let distance_m = distance_yd * 0.9144;
-            let Some(&(_, bridge_drop_m)) = bridge
-                .iter()
-                .find(|(d, _)| (d - distance_m).abs() < 0.5)
-            else {
-                continue;
-            };
-            pairs.push((distance_m, cli_drop_in, bridge_drop_m * 39.3701));
-        }
-        assert!(
-            pairs.len() >= 4,
-            "{label}: too few aligned samples to be meaningful ({})",
-            pairs.len()
-        );
-        pairs
-    };
+    let aligned =
+        |cli: &[(f64, f64)], bridge: &[(f64, f64)], label: &str| -> Vec<(f64, f64, f64)> {
+            let mut pairs = Vec::new();
+            for &(distance_yd, cli_drop_in) in cli {
+                let distance_m = distance_yd * 0.9144;
+                let Some(&(_, bridge_drop_m)) =
+                    bridge.iter().find(|(d, _)| (d - distance_m).abs() < 0.5)
+                else {
+                    continue;
+                };
+                pairs.push((distance_m, cli_drop_in, bridge_drop_m * 39.3701));
+            }
+            assert!(
+                pairs.len() >= 4,
+                "{label}: too few aligned samples to be meaningful ({})",
+                pairs.len()
+            );
+            pairs
+        };
 
     let base_pairs = aligned(&cli_base, &bridge_base, "no table");
     let corrected_pairs = aligned(&cli_corrected, &bridge_corrected, "with BC5D table");
 
     // Direct agreement, every aligned range: the CLI prints drops at 0.01 in
     // resolution, so 0.05 in of headroom is rounding plus nothing.
-    for (label, pairs) in [("no table", &base_pairs), ("with BC5D table", &corrected_pairs)] {
+    for (label, pairs) in [
+        ("no table", &base_pairs),
+        ("with BC5D table", &corrected_pairs),
+    ] {
         for &(distance_m, cli_in, bridge_in) in pairs.iter() {
             assert!(
                 (bridge_in - cli_in).abs() < 0.05,

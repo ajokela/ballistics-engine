@@ -5,10 +5,10 @@ use ballistics_engine::{
 
 fn endpoint_m(enable_magnus: bool, enable_spin: bool) -> nalgebra::Vector3<f64> {
     let inputs = BallisticInputs {
-        muzzle_velocity: 823.0,                 // m/s (~2700 fps)
-        bullet_mass: 168.0 * 0.00006479891,     // kg
-        bullet_diameter: 0.308 * 0.0254,         // m
-        bullet_length: 1.215 * 0.0254,           // m
+        muzzle_velocity: 823.0,             // m/s (~2700 fps)
+        bullet_mass: 168.0 * 0.00006479891, // kg
+        bullet_diameter: 0.308 * 0.0254,    // m
+        bullet_length: 1.215 * 0.0254,      // m
         bc_value: 0.475,
         twist_rate: 12.0,
         is_twist_right: true,

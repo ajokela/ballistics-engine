@@ -136,17 +136,26 @@ impl CardAdjustmentUnit {
 pub enum CardError {
     /// The domain is not a forward, positive, finite interval. (Angular drop divides by the
     /// range, so a start at or below zero has no angular value at all.)
-    EmptyOrInvertedDomain { start_m: f64, end_m: f64 },
+    EmptyOrInvertedDomain {
+        start_m: f64,
+        end_m: f64,
+    },
     AnchorOutsideDomain {
         anchor_m: f64,
         start_m: f64,
         end_m: f64,
     },
-    NonPositiveBudget { axis: &'static str, value: f64 },
+    NonPositiveBudget {
+        axis: &'static str,
+        value: f64,
+    },
     ZeroMaxRows,
     /// The domain runs past the last sampled point of the curve, where there is no ground
     /// truth to verify against.
-    DomainOutsideCurve { requested_m: f64, curve_max_m: f64 },
+    DomainOutsideCurve {
+        requested_m: f64,
+        curve_max_m: f64,
+    },
     /// A tracking correction factor outside [`crate::adjustment::tracking_cf_in_range`]'s
     /// locked `(0.5, 1.5)` band (MBA-1358).
     ///
@@ -157,7 +166,10 @@ pub enum CardError {
     /// dial values reporting `budget_met: true`. That is a wrong answer on the one field
     /// this whole module exists to make trustworthy, and it is worse than the NaN a zero CF
     /// produces, which at least reports `budget_met: false`.
-    InvalidTrackingCf { axis: &'static str, value: f64 },
+    InvalidTrackingCf {
+        axis: &'static str,
+        value: f64,
+    },
 }
 
 impl fmt::Display for CardError {
@@ -443,10 +455,7 @@ fn adaptive_card_traced(
     // (see `CardError::InvalidTrackingCf`), and a `debug_assert` is compiled out of exactly
     // the builds that ship. `tracking_cf_in_range` is the crate's ONE locked band (MBA-1358),
     // shared with the CLI and the WASM terminal -- reused here, never restated as a literal.
-    for (axis, value) in [
-        ("elevation", req.elevation_cf),
-        ("windage", req.windage_cf),
-    ] {
+    for (axis, value) in [("elevation", req.elevation_cf), ("windage", req.windage_cf)] {
         if !crate::adjustment::tracking_cf_in_range(value) {
             return Err(CardError::InvalidTrackingCf { axis, value });
         }
@@ -710,7 +719,11 @@ mod adaptive_card_tests {
     /// An unbiased, uncorrected, unquantized request: in `Mil` the printed value is then
     /// exactly the curve's `drop_mil` / `wind_mil`, which keeps the independent checks below
     /// free of any conversion the engine could also get wrong.
-    fn plain_request(domain_m: (f64, f64), budget: f64, max_rows: usize) -> AdaptiveRequest<'static> {
+    fn plain_request(
+        domain_m: (f64, f64),
+        budget: f64,
+        max_rows: usize,
+    ) -> AdaptiveRequest<'static> {
         AdaptiveRequest {
             domain_m,
             anchors_m: Vec::new(),
@@ -750,7 +763,9 @@ mod adaptive_card_tests {
         ranges
             .into_iter()
             .map(|g| {
-                let p = curve.at_range(g).expect("audited range must be on the curve");
+                let p = curve
+                    .at_range(g)
+                    .expect("audited range must be on the curve");
                 (g, p.drop_mil, p.wind_mil)
             })
             .collect()
@@ -840,12 +855,19 @@ mod adaptive_card_tests {
         let curve = test_curve(900.0);
         let budget = 0.1;
         let req = plain_request((200.0, 800.0), budget, 500);
-        let report = adaptive_card(&curve, &req, CardAdjustmentUnit::Mil).expect("card should build");
+        let report =
+            adaptive_card(&curve, &req, CardAdjustmentUnit::Mil).expect("card should build");
 
-        assert!(report.budget_met, "0.1 mil over 200-800 m should be reachable");
+        assert!(
+            report.budget_met,
+            "0.1 mil over 200-800 m should be reachable"
+        );
         assert!(!report.rows_capped);
         assert_eq!(report.schema_version, ADAPTIVE_CARD_SCHEMA_VERSION_V1);
-        assert_eq!(report.verification_grid_step_m, HoldCurve::SAMPLE_INTERVAL_M);
+        assert_eq!(
+            report.verification_grid_step_m,
+            HoldCurve::SAMPLE_INTERVAL_M
+        );
 
         let (ranges, elevation, windage) = row_columns(&report);
         let audited = independent_audited(&curve, 200.0, 800.0);
@@ -874,9 +896,12 @@ mod adaptive_card_tests {
             .iter()
             .map(|&budget| {
                 let req = plain_request((200.0, 800.0), budget, 800);
-                let report =
-                    adaptive_card(&curve, &req, CardAdjustmentUnit::Mil).expect("card should build");
-                assert!(report.budget_met, "{budget} mil should be reachable unquantized");
+                let report = adaptive_card(&curve, &req, CardAdjustmentUnit::Mil)
+                    .expect("card should build");
+                assert!(
+                    report.budget_met,
+                    "{budget} mil should be reachable unquantized"
+                );
                 report.rows.len()
             })
             .collect();
@@ -906,7 +931,11 @@ mod adaptive_card_tests {
             assert!(report.budget_met, "{budget} mil should be reachable");
             assert!(report.rows.len() >= 4, "need enough rows to halve");
 
-            let gaps: Vec<f64> = report.rows.windows(2).map(|p| p[1].range - p[0].range).collect();
+            let gaps: Vec<f64> = report
+                .rows
+                .windows(2)
+                .map(|p| p[1].range - p[0].range)
+                .collect();
             let half = gaps.len() / 2;
             let near: f64 = gaps[..half].iter().sum::<f64>() / half as f64;
             let far: f64 = gaps[gaps.len() - half..].iter().sum::<f64>() / half as f64;
@@ -950,7 +979,8 @@ mod adaptive_card_tests {
         let (start_m, end_m, budget) = (200.0, 800.0, 0.1);
 
         let req = plain_request((start_m, end_m), budget, 800);
-        let report = adaptive_card(&curve, &req, CardAdjustmentUnit::Mil).expect("card should build");
+        let report =
+            adaptive_card(&curve, &req, CardAdjustmentUnit::Mil).expect("card should build");
         assert!(report.budget_met);
         let adaptive_rows = report.rows.len();
 
@@ -983,8 +1013,10 @@ mod adaptive_card_tests {
         let mut req = plain_request((200.0, 800.0), 0.15, 500);
         req.anchors_m.clone_from(&anchors);
 
-        let first = adaptive_card(&curve, &req, CardAdjustmentUnit::Mil).expect("card should build");
-        let second = adaptive_card(&curve, &req, CardAdjustmentUnit::Mil).expect("card should build");
+        let first =
+            adaptive_card(&curve, &req, CardAdjustmentUnit::Mil).expect("card should build");
+        let second =
+            adaptive_card(&curve, &req, CardAdjustmentUnit::Mil).expect("card should build");
 
         for anchor in &anchors {
             assert!(
@@ -1016,14 +1048,8 @@ mod adaptive_card_tests {
         );
         for (a, b) in first.rows.iter().zip(second.rows.iter()) {
             assert_eq!(a.range.to_bits(), b.range.to_bits());
-            assert_eq!(
-                a.drop_adj.map(f64::to_bits),
-                b.drop_adj.map(f64::to_bits)
-            );
-            assert_eq!(
-                a.wind_adj.map(f64::to_bits),
-                b.wind_adj.map(f64::to_bits)
-            );
+            assert_eq!(a.drop_adj.map(f64::to_bits), b.drop_adj.map(f64::to_bits));
+            assert_eq!(a.wind_adj.map(f64::to_bits), b.wind_adj.map(f64::to_bits));
         }
     }
 
@@ -1060,8 +1086,8 @@ mod adaptive_card_tests {
             bias_mil: 0.0,
         };
 
-        let (report, trace) = adaptive_card_traced(&curve, &req, CardAdjustmentUnit::Mil)
-            .expect("card should build");
+        let (report, trace) =
+            adaptive_card_traced(&curve, &req, CardAdjustmentUnit::Mil).expect("card should build");
 
         // Termination, stated as a bound rather than demonstrated by hanging: every
         // iteration inserts a distinct audited point or stops, so one pass per point plus
@@ -1117,7 +1143,8 @@ mod adaptive_card_tests {
     fn max_rows_caps_with_capped_flag() {
         let curve = test_curve(900.0);
         let req = plain_request((200.0, 800.0), 0.001, 5);
-        let report = adaptive_card(&curve, &req, CardAdjustmentUnit::Mil).expect("card should build");
+        let report =
+            adaptive_card(&curve, &req, CardAdjustmentUnit::Mil).expect("card should build");
 
         assert!(report.rows_capped);
         assert!(!report.budget_met);
@@ -1133,7 +1160,8 @@ mod adaptive_card_tests {
     fn report_carries_method_and_all_five_assumptions() {
         let curve = test_curve(900.0);
         let req = plain_request((200.0, 400.0), 0.2, 50);
-        let report = adaptive_card(&curve, &req, CardAdjustmentUnit::Mil).expect("card should build");
+        let report =
+            adaptive_card(&curve, &req, CardAdjustmentUnit::Mil).expect("card should build");
 
         assert_eq!(
             report.method,
@@ -1250,10 +1278,14 @@ mod adaptive_card_tests {
             windage_cf: 1.0,
             bias_mil,
         };
-        let report = adaptive_card(&curve, &req, CardAdjustmentUnit::Mil).expect("card should build");
+        let report =
+            adaptive_card(&curve, &req, CardAdjustmentUnit::Mil).expect("card should build");
 
         let row = &report.rows[1];
-        let true_mil = curve.at_range(row.range).expect("row on the curve").drop_mil;
+        let true_mil = curve
+            .at_range(row.range)
+            .expect("row on the curve")
+            .drop_mil;
 
         let right_order = ((true_mil + bias_mil) / cf / 0.1).round() * 0.1;
         let wrong_order = (((true_mil / cf) + bias_mil) / 0.1).round() * 0.1;
@@ -1269,7 +1301,10 @@ mod adaptive_card_tests {
         );
 
         // Windage carries its own CF and no bias, and is quantized on the same lattice.
-        let true_wind = curve.at_range(row.range).expect("row on the curve").wind_mil;
+        let true_wind = curve
+            .at_range(row.range)
+            .expect("row on the curve")
+            .wind_mil;
         let expected_wind = (true_wind / 0.1).round() * 0.1;
         assert!((row.wind_adj.expect("dial") - expected_wind).abs() < 1e-12);
     }
@@ -1287,9 +1322,13 @@ mod adaptive_card_tests {
 
         let curve = test_curve(900.0);
         let req = plain_request((300.0, 600.0), 0.5, 200);
-        let report = adaptive_card(&curve, &req, CardAdjustmentUnit::Moa).expect("card should build");
+        let report =
+            adaptive_card(&curve, &req, CardAdjustmentUnit::Moa).expect("card should build");
         let row = &report.rows[0];
-        let true_mil = curve.at_range(row.range).expect("row on the curve").drop_mil;
+        let true_mil = curve
+            .at_range(row.range)
+            .expect("row on the curve")
+            .drop_mil;
         assert_eq!(
             row.drop_adj.expect("dial").to_bits(),
             (true_mil * (3438.0 / 1000.0)).to_bits()
@@ -1322,7 +1361,10 @@ mod adaptive_card_tests {
         req.budget.windage = f64::NAN;
         assert!(matches!(
             adaptive_card(&curve, &req, CardAdjustmentUnit::Mil),
-            Err(CardError::NonPositiveBudget { axis: "windage", .. })
+            Err(CardError::NonPositiveBudget {
+                axis: "windage",
+                ..
+            })
         ));
 
         for domain in [(800.0, 200.0), (0.0, 500.0), (-10.0, 500.0), (300.0, 300.0)] {
@@ -1357,7 +1399,9 @@ mod adaptive_card_tests {
         );
 
         // Every variant renders as a sentence, so a CLI can print the reason verbatim.
-        assert!(CardError::ZeroMaxRows.to_string().contains("at least one row"));
+        assert!(CardError::ZeroMaxRows
+            .to_string()
+            .contains("at least one row"));
     }
 
     /// An out-of-band ELEVATION tracking CF is rejected with the exact variant and payload.
@@ -1380,7 +1424,11 @@ mod adaptive_card_tests {
                     assert_eq!(axis, "elevation");
                     // NaN never equals itself; compare bit patterns so the payload is pinned
                     // for every case including the non-finite ones.
-                    assert_eq!(value.to_bits(), bad.to_bits(), "payload must echo the input");
+                    assert_eq!(
+                        value.to_bits(),
+                        bad.to_bits(),
+                        "payload must echo the input"
+                    );
                 }
                 other => panic!("expected InvalidTrackingCf for {bad}, got {other:?}"),
             }
@@ -1404,7 +1452,11 @@ mod adaptive_card_tests {
             match err {
                 CardError::InvalidTrackingCf { axis, value } => {
                     assert_eq!(axis, "windage");
-                    assert_eq!(value.to_bits(), bad.to_bits(), "payload must echo the input");
+                    assert_eq!(
+                        value.to_bits(),
+                        bad.to_bits(),
+                        "payload must echo the input"
+                    );
                 }
                 other => panic!("expected InvalidTrackingCf for {bad}, got {other:?}"),
             }
@@ -1431,7 +1483,10 @@ mod adaptive_card_tests {
             value: 95.0,
         }
         .to_string();
-        assert!(text.contains("elevation") && text.contains("0.5") && text.contains("1.5"), "{text}");
+        assert!(
+            text.contains("elevation") && text.contains("0.5") && text.contains("1.5"),
+            "{text}"
+        );
     }
 
     /// Task 12: `adaptive-card -o json` prints this report pretty-printed VERBATIM (no
@@ -1445,12 +1500,22 @@ mod adaptive_card_tests {
     fn report_serializes_verbatim_with_stable_field_names() {
         let curve = test_curve(900.0);
         let req = plain_request((200.0, 400.0), 0.2, 50);
-        let report = adaptive_card(&curve, &req, CardAdjustmentUnit::Mil).expect("card should build");
+        let report =
+            adaptive_card(&curve, &req, CardAdjustmentUnit::Mil).expect("card should build");
 
         let json = serde_json::to_value(&report).expect("report must serialize");
         assert_eq!(json["schema_version"], ADAPTIVE_CARD_SCHEMA_VERSION_V1);
-        assert_eq!(json["method"], "greedy_worst_point_insertion_on_holdcurve_grid_v1");
-        assert_eq!(json["assumptions"].as_array().expect("assumptions array").len(), 5);
+        assert_eq!(
+            json["method"],
+            "greedy_worst_point_insertion_on_holdcurve_grid_v1"
+        );
+        assert_eq!(
+            json["assumptions"]
+                .as_array()
+                .expect("assumptions array")
+                .len(),
+            5
+        );
         assert_eq!(json["budget_met"], report.budget_met);
         assert_eq!(json["rows_capped"], report.rows_capped);
         assert!(json.get("worst_elevation_error").is_some());
@@ -1462,7 +1527,10 @@ mod adaptive_card_tests {
         assert_eq!(rows.len(), report.rows.len());
         let first = &rows[0];
         assert!(first["range"].is_number());
-        assert!(first["drop_adj"].is_number(), "a populated Some(..) field must serialize as a number");
+        assert!(
+            first["drop_adj"].is_number(),
+            "a populated Some(..) field must serialize as a number"
+        );
         // Fields every adaptive row leaves `None` serialize as explicit JSON null, not as an
         // absent key -- a consumer can tell "never populated by this engine" from "absent
         // because of a version skew" only if the key is always present.
@@ -1515,7 +1583,9 @@ mod adaptive_card_tests {
 
         // No extra keys, and none silently dropped: exactly CardRow's 11 fields.
         assert_eq!(
-            json.as_object().expect("row must serialize to a JSON object").len(),
+            json.as_object()
+                .expect("row must serialize to a JSON object")
+                .len(),
             11
         );
     }

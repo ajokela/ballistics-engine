@@ -319,7 +319,8 @@ pub fn sample_at_range(
     if !range_m.is_finite() {
         return None;
     }
-    let Bracket::Inside { lo, t } = bracket_param(samples.len(), |i| samples[i].distance_m, range_m)
+    let Bracket::Inside { lo, t } =
+        bracket_param(samples.len(), |i| samples[i].distance_m, range_m)
     else {
         return None;
     };
@@ -493,10 +494,7 @@ pub enum MarkToRangeOutcome {
     /// mark" is not well defined.
     InsideZero { far_zero_range_m: f64 },
     /// Angular drop never grows to the subtension within the searched trajectory.
-    BeyondSearch {
-        max_range_m: f64,
-        max_drop_mil: f64,
-    },
+    BeyondSearch { max_range_m: f64, max_drop_mil: f64 },
 }
 
 impl HoldCurve {

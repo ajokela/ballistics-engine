@@ -1,9 +1,7 @@
 //! MBA-959: verify aerodynamic jump is wired into the solver as an opt-in,
 //! default-off muzzle launch-angle perturbation.
 
-use ballistics_engine::{
-    AtmosphericConditions, BallisticInputs, TrajectorySolver, WindConditions,
-};
+use ballistics_engine::{AtmosphericConditions, BallisticInputs, TrajectorySolver, WindConditions};
 use std::f64::consts::PI;
 
 /// Build a solver for a representative .308-class load. `crosswind_mps` is applied
@@ -11,7 +9,7 @@ use std::f64::consts::PI;
 fn solve(enable_aj: bool, crosswind_mps: f64) -> ballistics_engine::TrajectoryResult {
     let inputs = BallisticInputs {
         muzzle_velocity: 800.0, // m/s
-        muzzle_angle: 0.01, // small positive elevation so it carries downrange
+        muzzle_angle: 0.01,     // small positive elevation so it carries downrange
         target_distance: 500.0,
         twist_rate: 11.0, // 1:11"
         is_twist_right: true,
@@ -81,8 +79,8 @@ fn litz_magnitude_matches_engine_sg_exactly() {
     let inputs = BallisticInputs {
         muzzle_velocity: 790.0,
         bullet_diameter: 0.00782, // ~.308"
-        bullet_length: 0.0312, // ~4.0 cal
-        bullet_mass: 0.01134, // ~175 gr
+        bullet_length: 0.0312,    // ~4.0 cal
+        bullet_mass: 0.01134,     // ~175 gr
         twist_rate: 11.0,
         is_twist_right: true,
         enable_aerodynamic_jump: true,
@@ -125,9 +123,15 @@ fn litz_magnitude_matches_engine_sg_exactly() {
     );
     // Physical anchor: a wind from the right pushes the bullet LEFT (z < 0)...
     let z = r.position_at_range(500.0).unwrap().z;
-    assert!(z < 0.0, "wind from the right should drift the bullet left, z={z}");
+    assert!(
+        z < 0.0,
+        "wind from the right should drift the bullet left, z={z}"
+    );
     // ...and for a right twist that crosswind jumps the impact UP.
-    assert!(aj.vertical_jump_moa > 0.0, "right twist + wind from right -> up");
+    assert!(
+        aj.vertical_jump_moa > 0.0,
+        "right twist + wind from right -> up"
+    );
 }
 
 #[test]
@@ -253,8 +257,7 @@ fn zeroing_ignores_aerodynamic_jump() {
     let z_off =
         calculate_zero_angle_with_conditions(make(false), 200.0, 0.0, wind.clone(), atmo.clone())
             .unwrap();
-    let z_on =
-        calculate_zero_angle_with_conditions(make(true), 200.0, 0.0, wind, atmo).unwrap();
+    let z_on = calculate_zero_angle_with_conditions(make(true), 200.0, 0.0, wind, atmo).unwrap();
     assert!(
         (z_on - z_off).abs() < 1e-12,
         "zero angle must not depend on AJ (on={z_on}, off={z_off})"
@@ -310,7 +313,7 @@ fn fast_path_launch_offset_sign_disabled_and_flips() {
         bullet_mass: 0.01134,
         twist_rate: 11.0,
         is_twist_right: true,
-        wind_speed: 4.4704, // m/s (~10 mph)
+        wind_speed: 4.4704,   // m/s (~10 mph)
         wind_angle: PI / 2.0, // BallisticInputs convention: 90deg = from the right
         ..BallisticInputs::default()
     };
@@ -555,9 +558,7 @@ fn fast_paths_use_muzzle_segment_wind_for_aerodynamic_jump() {
 
     for (path, solution) in [("plain", plain), ("segmented", segmented)] {
         let launch_elevation = solution.y[4][0].atan2(
-            (solution.y[3][0] * solution.y[3][0]
-                + solution.y[5][0] * solution.y[5][0])
-                .sqrt(),
+            (solution.y[3][0] * solution.y[3][0] + solution.y[5][0] * solution.y[5][0]).sqrt(),
         );
         assert!(
             (launch_elevation - main_jump_rad).abs() < 1e-12,
@@ -629,7 +630,9 @@ fn nan_twist_is_guarded_and_does_not_poison_trajectory() {
     };
     let mut solver = TrajectorySolver::new(inputs, wind, AtmosphericConditions::default());
     solver.set_max_range(600.0);
-    let r = solver.solve().expect("solve should succeed even with NaN twist");
+    let r = solver
+        .solve()
+        .expect("solve should succeed even with NaN twist");
     assert!(
         r.aerodynamic_jump.is_none(),
         "AJ must be suppressed for a non-finite twist"

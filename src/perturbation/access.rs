@@ -141,7 +141,10 @@ pub enum KernelError {
     /// constructed by `with_axis`/`evaluate`/`bisect_axis` themselves -- `tolerance_envelope`
     /// validates its own domain argument up front, before any solve, the same way
     /// `crate::error_budget::error_budget` validates its `ranges_m`/`sources` arguments.
-    InvalidDomain { axis: InputAxis, reason: &'static str },
+    InvalidDomain {
+        axis: InputAxis,
+        reason: &'static str,
+    },
 }
 
 impl std::fmt::Display for KernelError {
@@ -153,7 +156,10 @@ impl std::fmt::Display for KernelError {
             KernelError::AxisAbsent(a) => write!(f, "axis {a:?} is not present in this request"),
             KernelError::TypeMismatch(a) => write!(f, "value type does not match axis {a:?}"),
             KernelError::AxisUnsupportedForRequest { axis, reason } => {
-                write!(f, "axis {axis:?} is not supported for this request: {reason}")
+                write!(
+                    f,
+                    "axis {axis:?} is not supported for this request: {reason}"
+                )
             }
             KernelError::Solve { code, message } => write!(f, "solve failed ({code:?}): {message}"),
             KernelError::Observation(e) => write!(f, "observation failed: {e}"),
@@ -167,7 +173,10 @@ impl std::fmt::Display for KernelError {
                 write!(f, "axis {a:?} was declared more than once")
             }
             KernelError::InvalidDomain { axis, reason } => {
-                write!(f, "invalid tolerance-envelope domain for axis {axis:?}: {reason}")
+                write!(
+                    f,
+                    "invalid tolerance-envelope domain for axis {axis:?}: {reason}"
+                )
             }
         }
     }
@@ -191,8 +200,10 @@ impl KernelError {
     pub fn is_domain_rejection(&self) -> bool {
         matches!(
             self,
-            KernelError::Solve { code: SolveErrorCodeV1::InvalidValue, .. }
-                | KernelError::Observation(TrajectoryObservationError::OutOfRange { .. })
+            KernelError::Solve {
+                code: SolveErrorCodeV1::InvalidValue,
+                ..
+            } | KernelError::Observation(TrajectoryObservationError::OutOfRange { .. })
         )
     }
 }
@@ -437,7 +448,8 @@ mod tests {
             "atmosphere": {"latitude_rad": 0.6},
             "wind": {"speed_mps": 3.0, "direction_from_rad": std::f64::consts::FRAC_PI_2},
             "solver": {}, "effects": {}, "sampling": {"interval_m": 50.0}
-        }).to_string();
+        })
+        .to_string();
         let req = crate::solve_json::decode_solve_request_v1(&json).unwrap();
         crate::solve_v1::solve_v1(req).unwrap().resolved_request
     }
@@ -447,23 +459,42 @@ mod tests {
         let r = resolved();
         let v = read_axis(&r, InputAxis::MuzzleVelocityMps).expect("axis present");
         let rebuilt = with_axis(&r, InputAxis::MuzzleVelocityMps, v).unwrap();
-        assert_eq!(rebuilt.rifle.muzzle_velocity_mps, r.rifle.muzzle_velocity_mps);
+        assert_eq!(
+            rebuilt.rifle.muzzle_velocity_mps,
+            r.rifle.muzzle_velocity_mps
+        );
     }
 
     #[test]
     fn writing_an_axis_changes_only_that_axis() {
         let r = resolved();
-        let changed = with_axis(&r, InputAxis::MuzzleVelocityMps, AxisValue::Scalar(900.0)).unwrap();
+        let changed =
+            with_axis(&r, InputAxis::MuzzleVelocityMps, AxisValue::Scalar(900.0)).unwrap();
         let baseline: crate::solve_json::SolveRequestV1 = (&r).into();
         assert_eq!(changed.rifle.muzzle_velocity_mps, 900.0);
-        assert_eq!(changed.atmosphere.pressure_pa, baseline.atmosphere.pressure_pa);
+        assert_eq!(
+            changed.atmosphere.pressure_pa,
+            baseline.atmosphere.pressure_pa
+        );
         assert_eq!(changed.wind.speed_mps, baseline.wind.speed_mps);
         assert_eq!(changed.shot.max_range_m, baseline.shot.max_range_m);
         // The five axes added after the brief was written must also be carried unchanged.
-        assert_eq!(changed.projectile.drag_model, baseline.projectile.drag_model);
-        assert_eq!(changed.rifle.twist_rate_m_per_turn, baseline.rifle.twist_rate_m_per_turn);
-        assert_eq!(changed.rifle.twist_direction, baseline.rifle.twist_direction);
-        assert_eq!(changed.rifle.muzzle_height_m, baseline.rifle.muzzle_height_m);
+        assert_eq!(
+            changed.projectile.drag_model,
+            baseline.projectile.drag_model
+        );
+        assert_eq!(
+            changed.rifle.twist_rate_m_per_turn,
+            baseline.rifle.twist_rate_m_per_turn
+        );
+        assert_eq!(
+            changed.rifle.twist_direction,
+            baseline.rifle.twist_direction
+        );
+        assert_eq!(
+            changed.rifle.muzzle_height_m,
+            baseline.rifle.muzzle_height_m
+        );
         assert_eq!(changed.shot.target_height_m, baseline.shot.target_height_m);
     }
 
@@ -489,8 +520,12 @@ mod tests {
         let v = read_axis(&r, InputAxis::DragModel).expect("axis present");
         assert_eq!(v, AxisValue::DragModel(DragModelV1::G7));
 
-        let changed =
-            with_axis(&r, InputAxis::DragModel, AxisValue::DragModel(DragModelV1::G1)).unwrap();
+        let changed = with_axis(
+            &r,
+            InputAxis::DragModel,
+            AxisValue::DragModel(DragModelV1::G1),
+        )
+        .unwrap();
         assert_eq!(changed.projectile.drag_model, DragModelV1::G1);
         // Nothing else moved.
         assert_eq!(changed.projectile.mass_kg, r.projectile.mass_kg);
@@ -558,7 +593,11 @@ mod tests {
     #[test]
     fn twist_rate_and_muzzle_height_and_target_height_round_trip() {
         let r = resolved();
-        for axis in [InputAxis::TwistRate, InputAxis::MuzzleHeight, InputAxis::TargetHeight] {
+        for axis in [
+            InputAxis::TwistRate,
+            InputAxis::MuzzleHeight,
+            InputAxis::TargetHeight,
+        ] {
             let v = read_axis(&r, axis).unwrap_or_else(|| panic!("{axis:?} should be present"));
             let rebuilt = with_axis(&r, axis, v).unwrap();
             match (axis, v) {
@@ -820,15 +859,16 @@ mod tests {
                 }
                 TwistRate => {
                     let rebuilt = with_axis(&r, axis, AxisValue::Scalar(0.3556)).unwrap();
-                    assert_eq!(rebuilt.rifle.twist_rate_m_per_turn, Some(0.3556), "{axis:?}");
+                    assert_eq!(
+                        rebuilt.rifle.twist_rate_m_per_turn,
+                        Some(0.3556),
+                        "{axis:?}"
+                    );
                 }
                 TwistDirection => {
-                    let rebuilt = with_axis(
-                        &r,
-                        axis,
-                        AxisValue::TwistDirection(TwistDirectionV1::Right),
-                    )
-                    .unwrap();
+                    let rebuilt =
+                        with_axis(&r, axis, AxisValue::TwistDirection(TwistDirectionV1::Right))
+                            .unwrap();
                     assert_eq!(
                         rebuilt.rifle.twist_direction,
                         Some(TwistDirectionV1::Right),
@@ -967,11 +1007,17 @@ mod tests {
         .to_string();
         let req = crate::solve_json::decode_solve_request_v1(&json).unwrap();
         let r = crate::solve_v1::solve_v1(req).unwrap().resolved_request;
-        assert_eq!(r.atmosphere.pressure_reference, Some(PressureReferenceV1::Qnh));
+        assert_eq!(
+            r.atmosphere.pressure_reference,
+            Some(PressureReferenceV1::Qnh)
+        );
 
         let e = with_axis(&r, InputAxis::Altitude, AxisValue::Scalar(600.0));
         match e {
-            Err(KernelError::AxisUnsupportedForRequest { axis: InputAxis::Altitude, reason }) => {
+            Err(KernelError::AxisUnsupportedForRequest {
+                axis: InputAxis::Altitude,
+                reason,
+            }) => {
                 assert!(
                     reason.to_lowercase().contains("qnh"),
                     "reason should name QNH: {reason}"

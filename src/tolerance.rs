@@ -396,16 +396,20 @@ pub fn tolerance_envelope(
     // Validate range_m up front, before any solve -- identical rationale and construction to
     // error_budget's own check on its (plural) ranges_m.
     if !range_m.is_finite() {
-        return Err(KernelError::Observation(TrajectoryObservationError::NonFiniteQuery {
-            distance_m: range_m,
-        }));
+        return Err(KernelError::Observation(
+            TrajectoryObservationError::NonFiniteQuery {
+                distance_m: range_m,
+            },
+        ));
     }
     if range_m < 0.0 || range_m > base.shot.max_range_m {
-        return Err(KernelError::Observation(TrajectoryObservationError::OutOfRange {
-            requested_m: range_m,
-            minimum_m: 0.0,
-            maximum_m: base.shot.max_range_m,
-        }));
+        return Err(KernelError::Observation(
+            TrajectoryObservationError::OutOfRange {
+                requested_m: range_m,
+                minimum_m: 0.0,
+                maximum_m: base.shot.max_range_m,
+            },
+        ));
     }
 
     // The fixed reference point every axis's "inside" check is measured against: base's own
@@ -621,7 +625,8 @@ mod tests {
             "atmosphere": {}, "wind": {"speed_mps": 3.0,
                                        "direction_from_rad": std::f64::consts::FRAC_PI_2},
             "solver": {}, "effects": {}, "sampling": {"interval_m": 10.0}
-        }).to_string();
+        })
+        .to_string();
         let req = crate::solve_json::decode_solve_request_v1(&json).unwrap();
         crate::solve_v1::solve_v1(req).unwrap().resolved_request
     }
@@ -654,14 +659,35 @@ mod tests {
     fn a_larger_target_never_shrinks_a_bound() {
         let r = resolved();
         let domains = [(InputAxis::WindSpeed, (0.0_f64, 20.0_f64))];
-        let small = tolerance_envelope(&r, &[InputAxis::WindSpeed], 600.0,
-            TargetGeometryV1::Rect { width_m: 0.2, height_m: 0.3 }, &domains).unwrap();
-        let big = tolerance_envelope(&r, &[InputAxis::WindSpeed], 600.0,
-            TargetGeometryV1::Rect { width_m: 0.6, height_m: 0.9 }, &domains).unwrap();
+        let small = tolerance_envelope(
+            &r,
+            &[InputAxis::WindSpeed],
+            600.0,
+            TargetGeometryV1::Rect {
+                width_m: 0.2,
+                height_m: 0.3,
+            },
+            &domains,
+        )
+        .unwrap();
+        let big = tolerance_envelope(
+            &r,
+            &[InputAxis::WindSpeed],
+            600.0,
+            TargetGeometryV1::Rect {
+                width_m: 0.6,
+                height_m: 0.9,
+            },
+            &domains,
+        )
+        .unwrap();
         let s = &small.axes[0];
         let b = &big.axes[0];
         if let (Some(sf), Some(bf)) = (s.far_bound, b.far_bound) {
-            assert!(bf >= sf - 1e-6, "larger target shrank the bound: {sf} -> {bf}");
+            assert!(
+                bf >= sf - 1e-6,
+                "larger target shrank the bound: {sf} -> {bf}"
+            );
         }
     }
 
@@ -679,8 +705,17 @@ mod tests {
         let r = resolved();
         // A huge target cannot be missed by a small wind change.
         let domains = [(InputAxis::WindSpeed, (2.9_f64, 3.1_f64))];
-        let rep = tolerance_envelope(&r, &[InputAxis::WindSpeed], 600.0,
-            TargetGeometryV1::Rect { width_m: 50.0, height_m: 50.0 }, &domains).unwrap();
+        let rep = tolerance_envelope(
+            &r,
+            &[InputAxis::WindSpeed],
+            600.0,
+            TargetGeometryV1::Rect {
+                width_m: 50.0,
+                height_m: 50.0,
+            },
+            &domains,
+        )
+        .unwrap();
         assert!(rep.axes[0].unbounded_in_domain);
         assert!(rep.axes[0].near_bound.is_none() && rep.axes[0].far_bound.is_none());
         assert!(
@@ -704,7 +739,10 @@ mod tests {
     #[test]
     fn target_distance_axis_shows_no_measurable_effect_not_a_generic_unbounded_claim() {
         let r = resolved(); // max_range_m = 900.0, zero_distance_m = 600.0
-        let target = TargetGeometryV1::Rect { width_m: 0.5, height_m: 0.5 };
+        let target = TargetGeometryV1::Rect {
+            width_m: 0.5,
+            height_m: 0.5,
+        };
 
         let td_domains = [(InputAxis::TargetDistance, (500.0_f64, 1100.0_f64))];
         let td = tolerance_envelope(&r, &[InputAxis::TargetDistance], 400.0, target, &td_domains)
@@ -723,8 +761,8 @@ mod tests {
         // and finds real bounds -- proving `has_no_effect` genuinely discriminates rather than
         // being true for every `requires_rezero: false`-adjacent axis or every wide domain.
         let zd_domains = [(InputAxis::ZeroDistance, (400.0_f64, 800.0_f64))];
-        let zd = tolerance_envelope(&r, &[InputAxis::ZeroDistance], 400.0, target, &zd_domains)
-            .unwrap();
+        let zd =
+            tolerance_envelope(&r, &[InputAxis::ZeroDistance], 400.0, target, &zd_domains).unwrap();
         let b = &zd.axes[0];
         assert!(b.nominal_inside_target);
         assert!(
@@ -739,8 +777,14 @@ mod tests {
     fn the_report_refuses_to_imply_probability() {
         let r = resolved();
         let domains = [(InputAxis::WindSpeed, (0.0_f64, 20.0_f64))];
-        let rep = tolerance_envelope(&r, &[InputAxis::WindSpeed], 600.0,
-            TargetGeometryV1::Circle { radius_m: 0.25 }, &domains).unwrap();
+        let rep = tolerance_envelope(
+            &r,
+            &[InputAxis::WindSpeed],
+            600.0,
+            TargetGeometryV1::Circle { radius_m: 0.25 },
+            &domains,
+        )
+        .unwrap();
         assert_eq!(rep.method, "one_variable_deterministic_bisection");
         assert!(rep.assumptions.iter().any(|s| s.contains("probability")));
         assert!(rep.assumptions.iter().any(|s| s.contains("simultaneously")));
@@ -764,14 +808,30 @@ mod tests {
     fn assumptions_cover_all_four_correctness_requirements() {
         let r = resolved();
         let domains = [(InputAxis::WindSpeed, (0.0_f64, 20.0_f64))];
-        let rep = tolerance_envelope(&r, &[InputAxis::WindSpeed], 600.0,
-            TargetGeometryV1::Rect { width_m: 0.2, height_m: 0.3 }, &domains).unwrap();
-        assert_eq!(rep.assumptions.len(), 4, "exactly four assumption sentences are expected");
+        let rep = tolerance_envelope(
+            &r,
+            &[InputAxis::WindSpeed],
+            600.0,
+            TargetGeometryV1::Rect {
+                width_m: 0.2,
+                height_m: 0.3,
+            },
+            &domains,
+        )
+        .unwrap();
+        assert_eq!(
+            rep.assumptions.len(),
+            4,
+            "exactly four assumption sentences are expected"
+        );
         assert!(
             rep.assumptions[0].contains("simultaneously"),
             "one-variable-at-a-time must be stated"
         );
-        assert!(rep.assumptions[1].contains("probability"), "no probability must be stated");
+        assert!(
+            rep.assumptions[1].contains("probability"),
+            "no probability must be stated"
+        );
         assert!(
             rep.assumptions[2].to_lowercase().contains("domain"),
             "never-extrapolate-beyond-domain must be stated"
@@ -794,8 +854,17 @@ mod tests {
     fn a_degenerate_target_is_flagged_nominal_outside_not_confused_with_unbounded() {
         let r = resolved();
         let domains = [(InputAxis::WindSpeed, (0.0_f64, 20.0_f64))];
-        let rep = tolerance_envelope(&r, &[InputAxis::WindSpeed], 600.0,
-            TargetGeometryV1::Rect { width_m: 0.0, height_m: 0.3 }, &domains).unwrap();
+        let rep = tolerance_envelope(
+            &r,
+            &[InputAxis::WindSpeed],
+            600.0,
+            TargetGeometryV1::Rect {
+                width_m: 0.0,
+                height_m: 0.3,
+            },
+            &domains,
+        )
+        .unwrap();
         let a = &rep.axes[0];
         assert!(
             !a.nominal_inside_target,
@@ -833,7 +902,10 @@ mod tests {
             &r,
             &[InputAxis::MuzzleVelocityMps],
             x,
-            TargetGeometryV1::Rect { width_m: 1.0e6, height_m: 2.0 * half_height },
+            TargetGeometryV1::Rect {
+                width_m: 1.0e6,
+                height_m: 2.0 * half_height,
+            },
             &domains,
         )
         .unwrap();
@@ -849,14 +921,30 @@ mod tests {
         // near (v < v0): drop INCREASES, crossing where drop(v) = drop0 + half_height.
         let expected_near = x / (2.0 * (drop0 + half_height) / G).sqrt();
 
-        let far = a.far_bound.expect("a crossing exists well within (700, 1100)");
-        let near = a.near_bound.expect("a crossing exists well within (700, 1100)");
+        let far = a
+            .far_bound
+            .expect("a crossing exists well within (700, 1100)");
+        let near = a
+            .near_bound
+            .expect("a crossing exists well within (700, 1100)");
         let rel_far = ((far - expected_far) / expected_far).abs();
         let rel_near = ((near - expected_near) / expected_near).abs();
-        assert!(rel_far < 0.02, "far: expected ~{expected_far}, got {far} (rel {rel_far})");
-        assert!(rel_near < 0.02, "near: expected ~{expected_near}, got {near} (rel {rel_near})");
-        assert!((far - 900.0).abs() > 30.0, "far bound must not be the domain midpoint");
-        assert!((near - 900.0).abs() > 30.0, "near bound must not be the domain midpoint");
+        assert!(
+            rel_far < 0.02,
+            "far: expected ~{expected_far}, got {far} (rel {rel_far})"
+        );
+        assert!(
+            rel_near < 0.02,
+            "near: expected ~{expected_near}, got {near} (rel {rel_near})"
+        );
+        assert!(
+            (far - 900.0).abs() > 30.0,
+            "far bound must not be the domain midpoint"
+        );
+        assert!(
+            (near - 900.0).abs() > 30.0,
+            "near bound must not be the domain midpoint"
+        );
 
         assert_eq!(a.far_limiting_boundary, Some(LimitingBoundaryV1::Top));
         assert_eq!(a.near_limiting_boundary, Some(LimitingBoundaryV1::Bottom));
@@ -896,13 +984,18 @@ mod tests {
             &r,
             &[InputAxis::MuzzleVelocityMps],
             x,
-            TargetGeometryV1::Rect { width_m: 1.0e6, height_m: 2.0 * half_height },
+            TargetGeometryV1::Rect {
+                width_m: 1.0e6,
+                height_m: 2.0 * half_height,
+            },
             &domains,
         )
         .unwrap();
         let a = &rep.axes[0];
         let far_midpoint = 0.5 * (800.0_f64 + 800.00005_f64);
-        let far = a.far_bound.expect("a crossing must exist this close to nominal");
+        let far = a
+            .far_bound
+            .expect("a crossing must exist this close to nominal");
         assert!(
             (far - far_midpoint).abs() > 1e-7,
             "far_bound ({far}) must differ meaningfully from the domain's own exact midpoint \
@@ -922,12 +1015,17 @@ mod tests {
     #[test]
     fn a_found_bound_sits_on_the_target_boundary_verified_independently_of_with_axis() {
         let r = resolved();
-        let target = TargetGeometryV1::Rect { width_m: 0.2, height_m: 0.3 };
+        let target = TargetGeometryV1::Rect {
+            width_m: 0.2,
+            height_m: 0.3,
+        };
         let domains = [(InputAxis::WindSpeed, (0.0_f64, 20.0_f64))];
         let rep = tolerance_envelope(&r, &[InputAxis::WindSpeed], 600.0, target, &domains).unwrap();
         let a = &rep.axes[0];
         assert!(a.nominal_inside_target);
-        let far = a.far_bound.expect("this target/domain combination must produce a far bound");
+        let far = a
+            .far_bound
+            .expect("this target/domain combination must produce a far bound");
 
         fn independent_deviation(wind_speed: f64) -> (f64, f64) {
             let json = serde_json::json!({
@@ -1002,8 +1100,10 @@ mod tests {
         let mut near_became_unbounded = false;
 
         for &scale in &scales {
-            let target =
-                TargetGeometryV1::Rect { width_m: 0.2 * scale, height_m: 0.3 * scale };
+            let target = TargetGeometryV1::Rect {
+                width_m: 0.2 * scale,
+                height_m: 0.3 * scale,
+            };
             let rep =
                 tolerance_envelope(&r, &[InputAxis::WindSpeed], 600.0, target, &domains).unwrap();
             let a = &rep.axes[0];
@@ -1019,7 +1119,10 @@ mod tests {
                      scale"
                 );
             } else if let (Some(pf), Some(f)) = (prev_far, a.far_bound) {
-                assert!(f >= pf - 1e-6, "far bound shrank at scale {scale}: {pf} -> {f}");
+                assert!(
+                    f >= pf - 1e-6,
+                    "far bound shrank at scale {scale}: {pf} -> {f}"
+                );
             }
             if a.far_bound.is_none() {
                 far_became_unbounded = true;
@@ -1056,7 +1159,10 @@ mod tests {
         );
         // Sanity: the sweep must also have exercised at least one genuinely bounded pair on each
         // side, or the "shrank" assertions above would never fire either.
-        assert!(scales[0] < 1.0, "sweep must start comfortably inside the bounded regime");
+        assert!(
+            scales[0] < 1.0,
+            "sweep must start comfortably inside the bounded regime"
+        );
     }
 
     /// Same acceptance criterion, briefly, for the OTHER `TargetGeometryV1` shape -- a circle's
@@ -1071,21 +1177,29 @@ mod tests {
         let mut prev_far: Option<f64> = None;
         let mut far_became_unbounded = false;
         for &scale in &scales {
-            let target = TargetGeometryV1::Circle { radius_m: 0.15 * scale };
+            let target = TargetGeometryV1::Circle {
+                radius_m: 0.15 * scale,
+            };
             let rep =
                 tolerance_envelope(&r, &[InputAxis::WindSpeed], 600.0, target, &domains).unwrap();
             let a = &rep.axes[0];
             if far_became_unbounded {
                 assert!(a.far_bound.is_none(), "scale {scale}: far bound reappeared");
             } else if let (Some(pf), Some(f)) = (prev_far, a.far_bound) {
-                assert!(f >= pf - 1e-6, "far bound shrank at scale {scale}: {pf} -> {f}");
+                assert!(
+                    f >= pf - 1e-6,
+                    "far bound shrank at scale {scale}: {pf} -> {f}"
+                );
             }
             if a.far_bound.is_none() {
                 far_became_unbounded = true;
             }
             prev_far = a.far_bound;
         }
-        assert!(far_became_unbounded, "circle sweep never reached an unbounded far regime");
+        assert!(
+            far_became_unbounded,
+            "circle sweep never reached an unbounded far regime"
+        );
     }
 
     /// `axis`/`nominal` must each be tied to the axis they describe, not swapped or copied from
@@ -1104,7 +1218,10 @@ mod tests {
             &r,
             &[InputAxis::WindSpeed, InputAxis::MuzzleVelocityMps],
             600.0,
-            TargetGeometryV1::Rect { width_m: 0.4, height_m: 0.6 },
+            TargetGeometryV1::Rect {
+                width_m: 0.4,
+                height_m: 0.6,
+            },
             &domains,
         )
         .unwrap();
@@ -1145,8 +1262,17 @@ mod tests {
     fn windage_dominant_axis_reports_left_or_right_not_top_or_bottom() {
         let r = resolved();
         let domains = [(InputAxis::WindSpeed, (0.0_f64, 20.0_f64))];
-        let rep = tolerance_envelope(&r, &[InputAxis::WindSpeed], 600.0,
-            TargetGeometryV1::Rect { width_m: 0.2, height_m: 0.3 }, &domains).unwrap();
+        let rep = tolerance_envelope(
+            &r,
+            &[InputAxis::WindSpeed],
+            600.0,
+            TargetGeometryV1::Rect {
+                width_m: 0.2,
+                height_m: 0.3,
+            },
+            &domains,
+        )
+        .unwrap();
         let a = &rep.axes[0];
         assert!(a.far_bound.is_some() && a.near_bound.is_some());
         assert_eq!(a.far_limiting_boundary, Some(LimitingBoundaryV1::Left));
@@ -1164,8 +1290,17 @@ mod tests {
     fn drop_dominant_axis_reports_top_or_bottom_not_left_or_right() {
         let r = vacuum_resolved();
         let domains = [(InputAxis::MuzzleVelocityMps, (700.0_f64, 1100.0_f64))];
-        let rep = tolerance_envelope(&r, &[InputAxis::MuzzleVelocityMps], 400.0,
-            TargetGeometryV1::Rect { width_m: 1.0e6, height_m: 0.2 }, &domains).unwrap();
+        let rep = tolerance_envelope(
+            &r,
+            &[InputAxis::MuzzleVelocityMps],
+            400.0,
+            TargetGeometryV1::Rect {
+                width_m: 1.0e6,
+                height_m: 0.2,
+            },
+            &domains,
+        )
+        .unwrap();
         let a = &rep.axes[0];
         assert!(a.far_bound.is_some() && a.near_bound.is_some());
         assert_eq!(a.far_limiting_boundary, Some(LimitingBoundaryV1::Top));
@@ -1182,8 +1317,14 @@ mod tests {
     fn a_circle_target_always_reports_radial() {
         let r = resolved();
         let domains = [(InputAxis::WindSpeed, (0.0_f64, 20.0_f64))];
-        let rep = tolerance_envelope(&r, &[InputAxis::WindSpeed], 600.0,
-            TargetGeometryV1::Circle { radius_m: 0.15 }, &domains).unwrap();
+        let rep = tolerance_envelope(
+            &r,
+            &[InputAxis::WindSpeed],
+            600.0,
+            TargetGeometryV1::Circle { radius_m: 0.15 },
+            &domains,
+        )
+        .unwrap();
         let a = &rep.axes[0];
         assert!(a.far_bound.is_some() && a.near_bound.is_some());
         assert_eq!(a.far_limiting_boundary, Some(LimitingBoundaryV1::Radial));
@@ -1223,7 +1364,10 @@ mod tests {
             time_s: 1.0,
             velocity_mps: 500.0,
         };
-        let target = TargetGeometryV1::Rect { width_m: 2.0, height_m: 0.2 };
+        let target = TargetGeometryV1::Rect {
+            width_m: 2.0,
+            height_m: 0.2,
+        };
         assert_eq!(
             limiting_boundary(&o, &nominal, target),
             LimitingBoundaryV1::Bottom,
@@ -1232,7 +1376,10 @@ mod tests {
         // Mirror on the drop side (dy < 0) to also confirm Top is reachable from this same
         // aspect-ratio-skewed target, not just Bottom.
         let o_top = Observation { drop_m: -0.1, ..o };
-        assert_eq!(limiting_boundary(&o_top, &nominal, target), LimitingBoundaryV1::Top);
+        assert_eq!(
+            limiting_boundary(&o_top, &nominal, target),
+            LimitingBoundaryV1::Top
+        );
     }
 
     /// A categorical axis has no numeric domain to bisect -- must be recorded, not silently
@@ -1240,12 +1387,24 @@ mod tests {
     #[test]
     fn a_categorical_axis_is_recorded_unavailable_not_silently_dropped_or_hard_failed() {
         let r = resolved();
-        let rep = tolerance_envelope(&r, &[InputAxis::CoriolisEnabled], 600.0,
-            TargetGeometryV1::Circle { radius_m: 0.25 }, &[]).unwrap();
-        assert!(rep.axes.is_empty(), "a categorical axis must never appear in `axes`");
+        let rep = tolerance_envelope(
+            &r,
+            &[InputAxis::CoriolisEnabled],
+            600.0,
+            TargetGeometryV1::Circle { radius_m: 0.25 },
+            &[],
+        )
+        .unwrap();
+        assert!(
+            rep.axes.is_empty(),
+            "a categorical axis must never appear in `axes`"
+        );
         assert_eq!(rep.unavailable_axes.len(), 1);
         assert_eq!(rep.unavailable_axes[0].axis, InputAxis::CoriolisEnabled);
-        assert_eq!(rep.unavailable_axes[0].code, UnavailableReasonCodeV1::CategoricalAxis);
+        assert_eq!(
+            rep.unavailable_axes[0].code,
+            UnavailableReasonCodeV1::CategoricalAxis
+        );
         assert!(!rep.unavailable_axes[0].reason.is_empty());
     }
 
@@ -1268,12 +1427,24 @@ mod tests {
         .to_string();
         let req = crate::solve_json::decode_solve_request_v1(&json).unwrap();
         let r = crate::solve_v1::solve_v1(req).unwrap().resolved_request;
-        let rep = tolerance_envelope(&r, &[InputAxis::WindSpeed], 300.0,
-            TargetGeometryV1::Rect { width_m: 0.5, height_m: 0.5 }, &[]).unwrap();
+        let rep = tolerance_envelope(
+            &r,
+            &[InputAxis::WindSpeed],
+            300.0,
+            TargetGeometryV1::Rect {
+                width_m: 0.5,
+                height_m: 0.5,
+            },
+            &[],
+        )
+        .unwrap();
         assert!(rep.axes.is_empty());
         assert_eq!(rep.unavailable_axes.len(), 1);
         assert_eq!(rep.unavailable_axes[0].axis, InputAxis::WindSpeed);
-        assert_eq!(rep.unavailable_axes[0].code, UnavailableReasonCodeV1::AxisAbsent);
+        assert_eq!(
+            rep.unavailable_axes[0].code,
+            UnavailableReasonCodeV1::AxisAbsent
+        );
     }
 
     /// `Altitude` under a QNH-referenced atmosphere is refused by `with_axis` itself
@@ -1295,8 +1466,14 @@ mod tests {
         let req = crate::solve_json::decode_solve_request_v1(&json).unwrap();
         let r = crate::solve_v1::solve_v1(req).unwrap().resolved_request;
         let domains = [(InputAxis::Altitude, (0.0_f64, 1000.0_f64))];
-        let rep = tolerance_envelope(&r, &[InputAxis::Altitude], 600.0,
-            TargetGeometryV1::Circle { radius_m: 0.3 }, &domains).unwrap();
+        let rep = tolerance_envelope(
+            &r,
+            &[InputAxis::Altitude],
+            600.0,
+            TargetGeometryV1::Circle { radius_m: 0.3 },
+            &domains,
+        )
+        .unwrap();
         assert!(rep.axes.is_empty());
         assert_eq!(rep.unavailable_axes.len(), 1);
         assert_eq!(rep.unavailable_axes[0].axis, InputAxis::Altitude);
@@ -1304,7 +1481,10 @@ mod tests {
             rep.unavailable_axes[0].code,
             UnavailableReasonCodeV1::AxisUnsupportedForRequest
         );
-        assert!(rep.unavailable_axes[0].reason.to_lowercase().contains("qnh"));
+        assert!(rep.unavailable_axes[0]
+            .reason
+            .to_lowercase()
+            .contains("qnh"));
     }
 
     /// A domain whose lower bound, for `TargetDistance`, dips below the caller's OWN `range_m`
@@ -1317,10 +1497,22 @@ mod tests {
     fn a_genuine_observation_error_propagates_not_recorded_as_unavailable() {
         let r = resolved(); // max_range_m = 900.0, zero_distance_m = 600.0
         let domains = [(InputAxis::TargetDistance, (500.0_f64, 1100.0_f64))];
-        let err = tolerance_envelope(&r, &[InputAxis::TargetDistance], 600.0,
-            TargetGeometryV1::Rect { width_m: 0.5, height_m: 0.5 }, &domains).unwrap_err();
+        let err = tolerance_envelope(
+            &r,
+            &[InputAxis::TargetDistance],
+            600.0,
+            TargetGeometryV1::Rect {
+                width_m: 0.5,
+                height_m: 0.5,
+            },
+            &domains,
+        )
+        .unwrap_err();
         match err {
-            KernelError::Observation(TrajectoryObservationError::OutOfRange { requested_m, .. }) => {
+            KernelError::Observation(TrajectoryObservationError::OutOfRange {
+                requested_m,
+                ..
+            }) => {
                 assert_eq!(requested_m, 600.0);
             }
             other => panic!("expected Observation(OutOfRange {{ .. }}), got {other:?}"),
@@ -1332,8 +1524,14 @@ mod tests {
     #[test]
     fn a_missing_domain_is_reported_as_invalid_not_defaulted() {
         let r = resolved();
-        let err = tolerance_envelope(&r, &[InputAxis::WindSpeed], 600.0,
-            TargetGeometryV1::Circle { radius_m: 0.3 }, &[]).unwrap_err();
+        let err = tolerance_envelope(
+            &r,
+            &[InputAxis::WindSpeed],
+            600.0,
+            TargetGeometryV1::Circle { radius_m: 0.3 },
+            &[],
+        )
+        .unwrap_err();
         match err {
             KernelError::InvalidDomain { axis, .. } => assert_eq!(axis, InputAxis::WindSpeed),
             other => panic!("expected InvalidDomain, got {other:?}"),
@@ -1346,9 +1544,21 @@ mod tests {
     fn nominal_outside_the_configured_domain_is_rejected() {
         let r = resolved();
         let domains = [(InputAxis::WindSpeed, (5.0_f64, 20.0_f64))];
-        let err = tolerance_envelope(&r, &[InputAxis::WindSpeed], 600.0,
-            TargetGeometryV1::Circle { radius_m: 0.3 }, &domains).unwrap_err();
-        assert!(matches!(err, KernelError::InvalidDomain { axis: InputAxis::WindSpeed, .. }));
+        let err = tolerance_envelope(
+            &r,
+            &[InputAxis::WindSpeed],
+            600.0,
+            TargetGeometryV1::Circle { radius_m: 0.3 },
+            &domains,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            KernelError::InvalidDomain {
+                axis: InputAxis::WindSpeed,
+                ..
+            }
+        ));
     }
 
     /// An inverted or zero-width domain (`lo >= hi`) is rejected outright.
@@ -1356,9 +1566,21 @@ mod tests {
     fn an_inverted_domain_is_rejected() {
         let r = resolved();
         let domains = [(InputAxis::WindSpeed, (20.0_f64, 0.0_f64))];
-        let err = tolerance_envelope(&r, &[InputAxis::WindSpeed], 600.0,
-            TargetGeometryV1::Circle { radius_m: 0.3 }, &domains).unwrap_err();
-        assert!(matches!(err, KernelError::InvalidDomain { axis: InputAxis::WindSpeed, .. }));
+        let err = tolerance_envelope(
+            &r,
+            &[InputAxis::WindSpeed],
+            600.0,
+            TargetGeometryV1::Circle { radius_m: 0.3 },
+            &domains,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            KernelError::InvalidDomain {
+                axis: InputAxis::WindSpeed,
+                ..
+            }
+        ));
     }
 
     /// Review fix (most important finding): `nominal_outside_the_configured_domain_is_rejected`
@@ -1380,9 +1602,21 @@ mod tests {
     fn nominal_at_the_lower_domain_edge_is_rejected() {
         let r = resolved(); // WindSpeed nominal = 3.0
         let domains = [(InputAxis::WindSpeed, (3.0_f64, 20.0_f64))];
-        let err = tolerance_envelope(&r, &[InputAxis::WindSpeed], 600.0,
-            TargetGeometryV1::Circle { radius_m: 0.3 }, &domains).unwrap_err();
-        assert!(matches!(err, KernelError::InvalidDomain { axis: InputAxis::WindSpeed, .. }));
+        let err = tolerance_envelope(
+            &r,
+            &[InputAxis::WindSpeed],
+            600.0,
+            TargetGeometryV1::Circle { radius_m: 0.3 },
+            &domains,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            KernelError::InvalidDomain {
+                axis: InputAxis::WindSpeed,
+                ..
+            }
+        ));
     }
 
     /// Mirror of the above at the UPPER edge -- see that test's doc for the full rationale.
@@ -1390,9 +1624,21 @@ mod tests {
     fn nominal_at_the_upper_domain_edge_is_rejected() {
         let r = resolved(); // WindSpeed nominal = 3.0
         let domains = [(InputAxis::WindSpeed, (0.0_f64, 3.0_f64))];
-        let err = tolerance_envelope(&r, &[InputAxis::WindSpeed], 600.0,
-            TargetGeometryV1::Circle { radius_m: 0.3 }, &domains).unwrap_err();
-        assert!(matches!(err, KernelError::InvalidDomain { axis: InputAxis::WindSpeed, .. }));
+        let err = tolerance_envelope(
+            &r,
+            &[InputAxis::WindSpeed],
+            600.0,
+            TargetGeometryV1::Circle { radius_m: 0.3 },
+            &domains,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            KernelError::InvalidDomain {
+                axis: InputAxis::WindSpeed,
+                ..
+            }
+        ));
     }
 
     /// `range_m` itself must be a queryable point on the base trajectory, exactly as
@@ -1402,10 +1648,19 @@ mod tests {
     fn an_out_of_range_query_is_rejected_directly() {
         let r = resolved(); // max_range_m = 900.0
         let domains = [(InputAxis::WindSpeed, (0.0_f64, 20.0_f64))];
-        let err = tolerance_envelope(&r, &[InputAxis::WindSpeed], 5000.0,
-            TargetGeometryV1::Circle { radius_m: 0.3 }, &domains).unwrap_err();
+        let err = tolerance_envelope(
+            &r,
+            &[InputAxis::WindSpeed],
+            5000.0,
+            TargetGeometryV1::Circle { radius_m: 0.3 },
+            &domains,
+        )
+        .unwrap_err();
         match err {
-            KernelError::Observation(TrajectoryObservationError::OutOfRange { requested_m, .. }) => {
+            KernelError::Observation(TrajectoryObservationError::OutOfRange {
+                requested_m,
+                ..
+            }) => {
                 assert_eq!(requested_m, 5000.0);
             }
             other => panic!("expected Observation(OutOfRange {{ .. }}), got {other:?}"),
@@ -1432,8 +1687,17 @@ mod tests {
     fn the_report_round_trips_through_json() {
         let r = resolved();
         let domains = [(InputAxis::WindSpeed, (0.0_f64, 20.0_f64))];
-        let rep = tolerance_envelope(&r, &[InputAxis::WindSpeed], 600.0,
-            TargetGeometryV1::Rect { width_m: 0.2, height_m: 0.3 }, &domains).unwrap();
+        let rep = tolerance_envelope(
+            &r,
+            &[InputAxis::WindSpeed],
+            600.0,
+            TargetGeometryV1::Rect {
+                width_m: 0.2,
+                height_m: 0.3,
+            },
+            &domains,
+        )
+        .unwrap();
         let json = serde_json::to_string(&rep).unwrap();
         assert!(json.contains("\"axis\":\"wind_speed\""));
         let back: ToleranceReportV1 = serde_json::from_str(&json).unwrap();
@@ -1462,8 +1726,14 @@ mod tests {
     fn schema_version_matches_the_declared_constant() {
         let r = resolved();
         let domains = [(InputAxis::WindSpeed, (0.0_f64, 20.0_f64))];
-        let rep = tolerance_envelope(&r, &[InputAxis::WindSpeed], 600.0,
-            TargetGeometryV1::Circle { radius_m: 0.25 }, &domains).unwrap();
+        let rep = tolerance_envelope(
+            &r,
+            &[InputAxis::WindSpeed],
+            600.0,
+            TargetGeometryV1::Circle { radius_m: 0.25 },
+            &domains,
+        )
+        .unwrap();
         assert_eq!(rep.schema_version, TOLERANCE_SCHEMA_VERSION_V1);
     }
 }

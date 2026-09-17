@@ -121,9 +121,30 @@ Bullet struck ground at 446 yd
 #[test]
 fn no_density_altitude_json_output_is_byte_identical_to_pinned_pre_mba_1366_baseline() {
     let args: &[&str] = &[
-        "trajectory", "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308", "--units",
-        "metric", "--max-range", "300", "--ignore-ground-impact", "-o", "json", "--altitude",
-        "1500", "--pressure", "950", "--temperature", "10", "--humidity", "60",
+        "trajectory",
+        "-v",
+        "2700",
+        "-b",
+        "0.475",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "--units",
+        "metric",
+        "--max-range",
+        "300",
+        "--ignore-ground-impact",
+        "-o",
+        "json",
+        "--altitude",
+        "1500",
+        "--pressure",
+        "950",
+        "--temperature",
+        "10",
+        "--humidity",
+        "60",
     ];
     let output = run(args);
     assert!(
@@ -142,8 +163,21 @@ fn no_density_altitude_json_output_is_byte_identical_to_pinned_pre_mba_1366_base
 #[test]
 fn no_density_altitude_table_output_is_byte_identical_to_pinned_pre_mba_1366_baseline() {
     let args: &[&str] = &[
-        "trajectory", "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308", "--units",
-        "imperial", "--max-range", "500", "-o", "table",
+        "trajectory",
+        "-v",
+        "2700",
+        "-b",
+        "0.475",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "--units",
+        "imperial",
+        "--max-range",
+        "500",
+        "-o",
+        "table",
     ];
     let output = run(args);
     assert!(
@@ -161,8 +195,22 @@ fn no_density_altitude_table_output_is_byte_identical_to_pinned_pre_mba_1366_bas
 // ---- Smoke test: a DA-specified run matches an equivalent explicit run -----------------------
 
 const BASE_ARGS: &[&str] = &[
-    "trajectory", "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308", "--units", "metric",
-    "--max-range", "500", "--ignore-ground-impact", "-o", "json",
+    "trajectory",
+    "-v",
+    "2700",
+    "-b",
+    "0.475",
+    "-m",
+    "168",
+    "-d",
+    "0.308",
+    "--units",
+    "metric",
+    "--max-range",
+    "500",
+    "--ignore-ground-impact",
+    "-o",
+    "json",
 ];
 
 #[test]
@@ -207,7 +255,14 @@ fn density_altitude_matches_equivalent_explicit_atmosphere_to_printed_precision(
 fn density_altitude_at_zero_matches_sea_level_standard_atmosphere() {
     let sea_level = run_json(&with_extra(
         BASE_ARGS,
-        &["--altitude", "0", "--pressure", "1013.25", "--temperature", "15"],
+        &[
+            "--altitude",
+            "0",
+            "--pressure",
+            "1013.25",
+            "--temperature",
+            "15",
+        ],
     ));
     let via_da = run_json(&with_extra(BASE_ARGS, &["--density-altitude", "0"]));
     assert_eq!(
@@ -313,10 +368,7 @@ fn explicit_temperature_overrides_isa_default_under_density_altitude() {
 
 #[test]
 fn csv_da_column_is_used_when_flag_omitted() {
-    let csv_path = write_temp_csv(
-        "LOCATION_NAME,DA\nTestSite,2500\n",
-        "da_column",
-    );
+    let csv_path = write_temp_csv("LOCATION_NAME,DA\nTestSite,2500\n", "da_column");
     let via_csv = run_json(&with_extra(
         BASE_ARGS,
         &[
@@ -361,10 +413,7 @@ fn csv_density_altitude_column_name_is_also_recognized() {
 
 #[test]
 fn cli_density_altitude_flag_wins_over_csv_column() {
-    let csv_path = write_temp_csv(
-        "LOCATION_NAME,DA\nTestSite3,9000\n",
-        "flag_wins",
-    );
+    let csv_path = write_temp_csv("LOCATION_NAME,DA\nTestSite3,9000\n", "flag_wins");
     let via_both = run_json(&with_extra(
         BASE_ARGS,
         &[
@@ -402,8 +451,19 @@ mod density_altitude_on_zero_surfaces {
     fn zero_angle(args: &[&str]) -> f64 {
         let output = Command::new(get_cli_binary())
             .args([
-                "zero", "--velocity", "2700", "--bc", "0.243", "--mass", "175", "--diameter",
-                "0.308", "--target-distance", "300", "-o", "json",
+                "zero",
+                "--velocity",
+                "2700",
+                "--bc",
+                "0.243",
+                "--mass",
+                "175",
+                "--diameter",
+                "0.308",
+                "--target-distance",
+                "300",
+                "-o",
+                "json",
             ])
             .args(args)
             .output()
@@ -414,14 +474,31 @@ mod density_altitude_on_zero_surfaces {
             String::from_utf8_lossy(&output.stderr)
         );
         let doc: Value = serde_json::from_slice(&output.stdout).expect("json");
-        doc["zero_angle_degrees"].as_f64().expect("zero_angle_degrees")
+        doc["zero_angle_degrees"]
+            .as_f64()
+            .expect("zero_angle_degrees")
     }
 
     fn auto_zero_angle(args: &[&str]) -> f64 {
         let output = Command::new(get_cli_binary())
             .args([
-                "trajectory", "--velocity", "2700", "--bc", "0.243", "--drag-model", "g7", "-m",
-                "175", "-d", "0.308", "--max-range", "500", "--auto-zero", "300", "-o", "json",
+                "trajectory",
+                "--velocity",
+                "2700",
+                "--bc",
+                "0.243",
+                "--drag-model",
+                "g7",
+                "-m",
+                "175",
+                "-d",
+                "0.308",
+                "--max-range",
+                "500",
+                "--auto-zero",
+                "300",
+                "-o",
+                "json",
             ])
             .args(args)
             .output()
@@ -432,7 +509,9 @@ mod density_altitude_on_zero_surfaces {
             String::from_utf8_lossy(&output.stderr)
         );
         let doc: Value = serde_json::from_slice(&output.stdout).expect("json");
-        doc["zero_angle_degrees"].as_f64().expect("zero_angle_degrees")
+        doc["zero_angle_degrees"]
+            .as_f64()
+            .expect("zero_angle_degrees")
     }
 
     /// A density altitude equal to a real altitude must give the same answer under the standard
@@ -479,7 +558,12 @@ mod density_altitude_on_zero_surfaces {
     #[test]
     fn zero_day_density_altitude_supersedes_an_explicit_zero_pressure() {
         assert_eq!(
-            auto_zero_angle(&["--zero-density-altitude", "5000", "--zero-pressure", "29.92"]),
+            auto_zero_angle(&[
+                "--zero-density-altitude",
+                "5000",
+                "--zero-pressure",
+                "29.92"
+            ]),
             auto_zero_angle(&["--zero-density-altitude", "5000"]),
         );
     }
@@ -497,8 +581,22 @@ mod density_altitude_on_zero_surfaces {
         let impact = |args: &[&str]| -> f64 {
             let output = Command::new(get_cli_binary())
                 .args([
-                    "trajectory", "--velocity", "2700", "--bc", "0.243", "--drag-model", "g7",
-                    "-m", "175", "-d", "0.308", "--max-range", "500", "--auto-zero", "300", "-o",
+                    "trajectory",
+                    "--velocity",
+                    "2700",
+                    "--bc",
+                    "0.243",
+                    "--drag-model",
+                    "g7",
+                    "-m",
+                    "175",
+                    "-d",
+                    "0.308",
+                    "--max-range",
+                    "500",
+                    "--auto-zero",
+                    "300",
+                    "-o",
                     "json",
                 ])
                 .args(args)
@@ -537,9 +635,27 @@ mod density_altitude_on_zero_surfaces {
     fn a_zero_pressure_type_is_refused_and_reported_when_a_zero_day_da_supplies_the_pressure() {
         let output = Command::new(get_cli_binary())
             .args([
-                "trajectory", "--velocity", "2700", "--bc", "0.243", "--drag-model", "g7", "-m",
-                "175", "-d", "0.308", "--max-range", "500", "--auto-zero", "300", "-o", "json",
-                "--zero-density-altitude", "5000", "--zero-pressure-type", "qnh",
+                "trajectory",
+                "--velocity",
+                "2700",
+                "--bc",
+                "0.243",
+                "--drag-model",
+                "g7",
+                "-m",
+                "175",
+                "-d",
+                "0.308",
+                "--max-range",
+                "500",
+                "--auto-zero",
+                "300",
+                "-o",
+                "json",
+                "--zero-density-altitude",
+                "5000",
+                "--zero-pressure-type",
+                "qnh",
             ])
             .output()
             .expect("trajectory");

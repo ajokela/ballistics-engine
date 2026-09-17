@@ -7,9 +7,7 @@
 //! (the upstream a7p project is LGPL-3.0; nothing from it is copied here).
 
 use super::md5::md5_hex;
-use super::wire::{
-    collect_repeated_i32, parse_message, varint_to_i32, WireError, WireValue,
-};
+use super::wire::{collect_repeated_i32, parse_message, varint_to_i32, WireError, WireValue};
 
 // Fixed-point scale factors (raw integer -> physical value = raw / SCALE).
 const SCALE_TWIST: f64 = 100.0; // r_twist -> inches/turn
@@ -20,9 +18,9 @@ const SCALE_PRESSURE: f64 = 10.0; // c_zero_air_pressure -> hPa
 const SCALE_COEF: f64 = 10_000.0; // coef bc_cd -> BC or Cd
 const SCALE_TCOEFF: f64 = 1000.0; // c_t_coeff -> % per 15 C
 const SCALE_DISTANCE: f64 = 100.0; // distances -> meters
-// CUSTOM coef rows reuse the `bc_cd` field for Cd (same SCALE_COEF as BC/Cd) but the `mv`
-// field means Mach number, not m/s, and uses its own scale (empirically confirmed, same
-// footing as the other scale factors above — see the module doc).
+                                   // CUSTOM coef rows reuse the `bc_cd` field for Cd (same SCALE_COEF as BC/Cd) but the `mv`
+                                   // field means Mach number, not m/s, and uses its own scale (empirically confirmed, same
+                                   // footing as the other scale factors above — see the module doc).
 const SCALE_MACH: f64 = 10_000.0; // coef mv (CUSTOM only) -> Mach number
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,7 +153,10 @@ pub enum A7pError {
 impl std::fmt::Display for A7pError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            A7pError::TooShort => write!(f, "file too short to be a .a7p (needs 32-byte checksum prefix)"),
+            A7pError::TooShort => write!(
+                f,
+                "file too short to be a .a7p (needs 32-byte checksum prefix)"
+            ),
             A7pError::BadPrefix => write!(f, "checksum prefix is not ASCII hex — not a .a7p file"),
             A7pError::MissingProfile => write!(f, "payload contains no profile message"),
             A7pError::Wire(e) => write!(f, "malformed protobuf payload: {e}"),
@@ -367,7 +368,7 @@ mod tests {
         enc_i32(22, 1800, &mut p); // 1.800 in
         enc_i32(23, 1, &mut p); // LEFT twist (non-default on purpose)
         enc_i32(24, 1, &mut p); // G7 (non-default on purpose)
-        // distances, packed: 100.00 m and 200.00 m
+                                // distances, packed: 100.00 m and 200.00 m
         let mut packed = Vec::new();
         enc_varint(10_000, &mut packed);
         enc_varint(20_000, &mut packed);

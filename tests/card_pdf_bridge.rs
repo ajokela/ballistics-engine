@@ -85,7 +85,10 @@ mod pdf_absent {
     fn the_stored_request_still_drives_the_on_screen_card() {
         let out = call("card.range_table", fixture_request());
         assert_eq!(out["ok"], true, "{out}");
-        assert!(!out["result"]["rows"].as_array().unwrap().is_empty(), "{out}");
+        assert!(
+            !out["result"]["rows"].as_array().unwrap().is_empty(),
+            "{out}"
+        );
     }
 }
 
@@ -99,7 +102,9 @@ mod pdf_present {
     fn pdf_bytes(result: &Value) -> Vec<u8> {
         const ALPHABET: &[u8; 64] =
             b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let text = result["pdf_base64"].as_str().expect("pdf_base64 must be a string");
+        let text = result["pdf_base64"]
+            .as_str()
+            .expect("pdf_base64 must be a string");
         let mut acc: u32 = 0;
         let mut bits: u32 = 0;
         let mut out = Vec::with_capacity(text.len() / 4 * 3);
@@ -120,7 +125,9 @@ mod pdf_present {
             }
         }
         assert_eq!(
-            result["byte_length"].as_u64().expect("byte_length must be a number"),
+            result["byte_length"]
+                .as_u64()
+                .expect("byte_length must be a number"),
             out.len() as u64,
             "byte_length must describe the DECODED document, not the base64 text"
         );
@@ -136,14 +143,25 @@ mod pdf_present {
     }
 
     fn assert_is_a_pdf(bytes: &[u8], label: &str) {
-        assert!(bytes.len() > 10_000, "{label}: PDF suspiciously small ({} bytes)", bytes.len());
-        assert_eq!(&bytes[..5], b"%PDF-", "{label}: does not start with a PDF header");
+        assert!(
+            bytes.len() > 10_000,
+            "{label}: PDF suspiciously small ({} bytes)",
+            bytes.len()
+        );
+        assert_eq!(
+            &bytes[..5],
+            b"%PDF-",
+            "{label}: does not start with a PDF header"
+        );
     }
 
     /// Count non-overlapping-enough occurrences of `needle` (windows is fine here: the
     /// needles are PDF dictionary keys, which cannot overlap themselves).
     fn count_bytes(haystack: &[u8], needle: &[u8]) -> usize {
-        haystack.windows(needle.len()).filter(|w| *w == needle).count()
+        haystack
+            .windows(needle.len())
+            .filter(|w| *w == needle)
+            .count()
     }
 
     /// Page objects in the document. `/Type/Pages` (the page TREE, one per document) shares
@@ -190,8 +208,14 @@ mod pdf_present {
     /// `the_printed_adjustments_are_the_stored_rows_at_the_apps_precision`). They are
     /// physically ordered so the card still reads like a card.
     fn stored_range_table() -> Value {
-        let row = |range: f64, drop_linear: f64, drop_adj: f64, wind_linear: f64, wind_adj: f64,
-                   velocity: f64, energy: f64, time: f64| {
+        let row = |range: f64,
+                   drop_linear: f64,
+                   drop_adj: f64,
+                   wind_linear: f64,
+                   wind_adj: f64,
+                   velocity: f64,
+                   energy: f64,
+                   time: f64| {
             json!({
                 "range": range, "drop_linear": drop_linear, "drop_adj": drop_adj,
                 "wind_linear": wind_linear, "wind_adj": wind_adj,
@@ -348,25 +372,46 @@ mod pdf_present {
     fn the_card_matches_the_cli_dope_card_for_the_same_load() {
         use std::process::Command;
 
-        let out_path = std::env::temp_dir().join(format!("bx_card_pdf_golden_{}.pdf", std::process::id()));
+        let out_path =
+            std::env::temp_dir().join(format!("bx_card_pdf_golden_{}.pdf", std::process::id()));
         let status = Command::new(env!("CARGO_BIN_EXE_ballistics"))
             .args([
                 "trajectory",
-                "-v", "2600", "-b", "0.243", "-m", "175", "-d", "0.308",
-                "--drag-model", "g7",
-                "--sight-height", "1.5",
-                "--auto-zero", "100",
-                "--max-range", "600",
+                "-v",
+                "2600",
+                "-b",
+                "0.243",
+                "-m",
+                "175",
+                "-d",
+                "0.308",
+                "--drag-model",
+                "g7",
+                "--sight-height",
+                "1.5",
+                "--auto-zero",
+                "100",
+                "--max-range",
+                "600",
                 "--ignore-ground-impact",
-                "--wind-speed", "10", "--wind-direction", "90",
-                "--adjustment-unit", "mil",
-                "--target-speed", "10",
+                "--wind-speed",
+                "10",
+                "--wind-direction",
+                "90",
+                "--adjustment-unit",
+                "mil",
+                "--target-speed",
+                "10",
                 // Metres, always — `--sample-interval` does not follow `--units`. 91.44 m is
                 // exactly 100 yd, which puts the CLI's samples on the bridge card's 100 yd
                 // grid so the two cards describe the same ranges.
-                "--sample-trajectory", "--sample-interval", "91.44",
-                "-o", "pdf",
-                "--output-file", out_path.to_str().unwrap(),
+                "--sample-trajectory",
+                "--sample-interval",
+                "91.44",
+                "-o",
+                "pdf",
+                "--output-file",
+                out_path.to_str().unwrap(),
             ])
             .output()
             .expect("run the ballistics CLI");
@@ -420,7 +465,9 @@ mod pdf_present {
     fn both_extractors_agree_on_the_same_card() {
         let (bytes, _pages) = generate(fixture_request());
         let Some(real) = pdftotext(&bytes) else {
-            eprintln!("pdftotext not installed; the glyph-scan fallback is what ran everywhere else");
+            eprintln!(
+                "pdftotext not installed; the glyph-scan fallback is what ran everywhere else"
+            );
             return;
         };
         let mut real: Vec<String> = real.split_whitespace().map(str::to_string).collect();
@@ -466,8 +513,14 @@ mod pdf_present {
             "pdf": {"title": "Metric Card", "target_speed": 4.4704}
         }));
         let printed = tokens(&bytes, "metric card");
-        assert!(printed.iter().any(|t| t == "M"), "Range sub-header must be M: {printed:?}");
-        assert!(!printed.iter().any(|t| t == "Yd"), "no yards on a metric card: {printed:?}");
+        assert!(
+            printed.iter().any(|t| t == "M"),
+            "Range sub-header must be M: {printed:?}"
+        );
+        assert!(
+            !printed.iter().any(|t| t == "Yd"),
+            "no yards on a metric card: {printed:?}"
+        );
         // Header/footer stay imperial on both CLI PDF call sites; the bridge matches.
         assert!(
             printed.iter().any(|t| t == "Weight:175gr"),
@@ -528,13 +581,20 @@ mod pdf_present {
         // top of the ~815 KiB of embedded fonts every card carries.
         request["pdf"] = json!({"powder": "P".repeat(900_000)});
         let out = call("card.pdf", request);
-        assert_eq!(out["ok"], false, "an over-cap card must not be returned: {}", out["ok"]);
+        assert_eq!(
+            out["ok"], false,
+            "an over-cap card must not be returned: {}",
+            out["ok"]
+        );
         assert_eq!(out["error"]["code"], "resource_limit", "{}", out["error"]);
         let message = out["error"]["message"].as_str().unwrap();
         assert!(message.contains("the limit is"), "{message}");
         // The refusal describes the document — six rows on one page, made huge by a label —
         // and names no control a saved card does not have.
-        assert!(message.contains("6 rows") && message.contains("1 pages"), "{message}");
+        assert!(
+            message.contains("6 rows") && message.contains("1 pages"),
+            "{message}"
+        );
         for absent in ["coarsen", "shorten"] {
             assert!(!message.contains(absent), "{message}");
         }
@@ -546,7 +606,10 @@ mod pdf_present {
     #[test]
     fn contradictory_or_out_of_band_presentation_options_are_refused() {
         for (label, pdf_block) in [
-            ("both scale and preset", json!({"font_scale": 1.2, "font_preset": "large"})),
+            (
+                "both scale and preset",
+                json!({"font_scale": 1.2, "font_preset": "large"}),
+            ),
             ("scale above the band", json!({"font_scale": 9.0})),
             ("scale below the band", json!({"font_scale": 0.1})),
             ("non-finite scale", json!({"font_scale": f64::MAX})),
@@ -599,7 +662,10 @@ mod pdf_present {
         let mut reprinting = solving;
         reprinting["stored_card"] = stored_card_block();
         let out = call("card.pdf", reprinting);
-        assert_eq!(out["ok"], true, "printing stored rows must not open the table: {out}");
+        assert_eq!(
+            out["ok"], true,
+            "printing stored rows must not open the table: {out}"
+        );
         assert_eq!(out["result"]["source"], "stored_rows", "{out}");
         assert_eq!(out["result"]["row_count"], 8, "{out}");
 
@@ -663,12 +729,18 @@ mod pdf_present {
             request["wind_speed"] = json!(0.0);
             request[field] = json!([5.0, 10.0, 15.0, 20.0]);
             let out = call("card.pdf", request);
-            assert_eq!(out["ok"], false, "{field} must be refused, not ignored: {out}");
+            assert_eq!(
+                out["ok"], false,
+                "{field} must be refused, not ignored: {out}"
+            );
             // The service's own typed rejections ride as `command_failed`, exactly like the
             // sibling card commands; `invalid_request` is the bridge's own decode failure.
             assert_eq!(out["error"]["code"], "command_failed", "{field}: {out}");
             let message = out["error"]["message"].as_str().unwrap();
-            assert!(message.contains(field), "the refusal must name {field}: {message}");
+            assert!(
+                message.contains(field),
+                "the refusal must name {field}: {message}"
+            );
             assert!(
                 message.contains("range_table"),
                 "the refusal must say which card card.pdf prints: {message}"
@@ -753,7 +825,10 @@ mod pdf_present {
         }
 
         let out = call("card.pdf", request.clone());
-        assert_eq!(out["ok"], true, "the reachable rows must still print: {out}");
+        assert_eq!(
+            out["ok"], true,
+            "the reachable rows must still print: {out}"
+        );
         let result = &out["result"];
         let truncation = &result["truncation"];
         assert_eq!(truncation["requested_end"], 1200.0, "{result}");
@@ -780,7 +855,9 @@ mod pdf_present {
             "an untruncated card must be byte-identical to before: {out}"
         );
         assert!(
-            !tokens(&pdf_bytes(&out["result"]), "whole card").iter().any(|t| t == "TRUNCATED"),
+            !tokens(&pdf_bytes(&out["result"]), "whole card")
+                .iter()
+                .any(|t| t == "TRUNCATED"),
             "an untruncated card must print no notice"
         );
     }
@@ -809,12 +886,18 @@ mod pdf_present {
         assert_eq!(out["ok"], false, "{out}");
         assert_eq!(out["error"]["code"], "command_failed", "{out}");
         let message = out["error"]["message"].as_str().unwrap();
-        assert!(message.contains("MOA") && message.contains("MIL"), "{message}");
+        assert!(
+            message.contains("MOA") && message.contains("MIL"),
+            "{message}"
+        );
 
         let mut request = stored_request();
         request["units"] = json!("metric");
         let out = call("card.pdf", request);
-        assert_eq!(out["ok"], false, "a metric request cannot own yard rows: {out}");
+        assert_eq!(
+            out["ok"], false,
+            "a metric request cannot own yard rows: {out}"
+        );
         assert_eq!(out["error"]["code"], "command_failed", "{out}");
     }
 
@@ -835,8 +918,14 @@ mod pdf_present {
         assert_eq!(out["ok"], false, "{}", out["result"]["page_count"]);
         assert_eq!(out["error"]["code"], "resource_limit", "{}", out["error"]);
         let message = out["error"]["message"].as_str().unwrap();
-        assert!(message.contains("6000 rows"), "the refusal must state the rows: {message}");
-        assert!(message.contains("pages"), "the refusal must state the pages: {message}");
+        assert!(
+            message.contains("6000 rows"),
+            "the refusal must state the rows: {message}"
+        );
+        assert!(
+            message.contains("pages"),
+            "the refusal must state the pages: {message}"
+        );
         for absent in ["coarsen", "shorten"] {
             assert!(
                 !message.contains(absent),
@@ -871,7 +960,10 @@ mod pdf_present {
         assert_eq!(out["ok"], false, "{out}");
         assert_eq!(out["error"]["code"], "invalid_request", "{out}");
         assert!(
-            out["error"]["message"].as_str().unwrap().contains("stored_card"),
+            out["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("stored_card"),
             "{out}"
         );
     }
@@ -913,7 +1005,10 @@ mod pdf_present {
         request["stored_card"]["card"]["rows"][3]["bc_segments_used"] = json!(2);
 
         let out = call("card.pdf", request);
-        assert_eq!(out["ok"], true, "a newer engine's stored card must still print: {out}");
+        assert_eq!(
+            out["ok"], true,
+            "a newer engine's stored card must still print: {out}"
+        );
         assert_eq!(out["result"]["source"], "stored_rows", "{out}");
         assert_eq!(out["result"]["row_count"], 8, "{out}");
 
@@ -942,7 +1037,10 @@ mod pdf_present {
             assert_eq!(out["ok"], false, "stored {field} must be refused: {out}");
             assert_eq!(out["error"]["code"], "command_failed", "{field}: {out}");
             let message = out["error"]["message"].as_str().unwrap();
-            assert!(message.contains(field), "the refusal must name {field}: {message}");
+            assert!(
+                message.contains(field),
+                "the refusal must name {field}: {message}"
+            );
         }
     }
 

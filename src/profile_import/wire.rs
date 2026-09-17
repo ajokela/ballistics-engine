@@ -236,7 +236,10 @@ mod tests {
         buf.extend_from_slice(&[5, 6, 7, 8, 9, 10, 11, 12]);
         let fields = parse_message(&buf).unwrap();
         assert_eq!(fields[0].value, WireValue::Fixed32([1, 2, 3, 4]));
-        assert_eq!(fields[1].value, WireValue::Fixed64([5, 6, 7, 8, 9, 10, 11, 12]));
+        assert_eq!(
+            fields[1].value,
+            WireValue::Fixed64([5, 6, 7, 8, 9, 10, 11, 12])
+        );
     }
 
     #[test]
@@ -265,10 +268,7 @@ mod tests {
         // collide with a legitimate small field number instead of erroring.
         let mut buf = Vec::new();
         enc_varint((u64::from(u32::MAX) + 1) << 3, &mut buf);
-        assert_eq!(
-            parse_message(&buf).unwrap_err(),
-            WireError::VarintOverflow
-        );
+        assert_eq!(parse_message(&buf).unwrap_err(), WireError::VarintOverflow);
     }
 
     #[test]

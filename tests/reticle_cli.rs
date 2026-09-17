@@ -71,7 +71,10 @@ fn native_output_is_the_shared_formatter_verbatim() {
     let reticle = sfp_fixture();
     let path = write_fixture(&dir, &reticle);
 
-    for (flag, format) in [("table", ReticleFormat::Table), ("json", ReticleFormat::Json)] {
+    for (flag, format) in [
+        ("table", ReticleFormat::Table),
+        ("json", ReticleFormat::Json),
+    ] {
         let (stdout, stderr, ok) = run(&[
             "reticle",
             "hold",
@@ -93,10 +96,16 @@ fn native_output_is_the_shared_formatter_verbatim() {
             5.0,
             format,
         );
-        assert_eq!(stdout, expected, "hold -o {flag} must be the shared formatter");
+        assert_eq!(
+            stdout, expected,
+            "hold -o {flag} must be the shared formatter"
+        );
     }
 
-    for (flag, format) in [("table", ReticleFormat::Table), ("json", ReticleFormat::Json)] {
+    for (flag, format) in [
+        ("table", ReticleFormat::Table),
+        ("json", ReticleFormat::Json),
+    ] {
         let (stdout, stderr, ok) = run(&[
             "reticle",
             "generate",
@@ -158,7 +167,10 @@ fn generate_json_round_trips_into_hold() {
     ]);
     assert!(ok, "hold failed: {stderr}");
     // Row 3 (down 3.0) carries dots at +/-0.5, 1.0, 1.5 — the hold lands exactly on one.
-    assert!(hold_out.contains("distance from hold: 0.000 mil"), "{hold_out}");
+    assert!(
+        hold_out.contains("distance from hold: 0.000 mil"),
+        "{hold_out}"
+    );
 }
 
 /// SFP subtension rescaling is visible through the CLI, not just the library: the same
@@ -304,7 +316,14 @@ fn rejects_ambiguous_and_incomplete_invocations() {
 
     // Both hold sources at once.
     let (_, stderr, ok) = run(&[
-        "reticle", "hold", "--reticle-json", p, "--drop-mil", "1", "--range", "500",
+        "reticle",
+        "hold",
+        "--reticle-json",
+        p,
+        "--drop-mil",
+        "1",
+        "--range",
+        "500",
     ]);
     assert!(!ok);
     assert!(stderr.contains("mutually exclusive"), "{stderr}");
@@ -321,10 +340,20 @@ fn rejects_ambiguous_and_incomplete_invocations() {
 
     // --wind-mil is meaningless with --range (the wind comes from the wind flags there).
     let (_, stderr, ok) = run(&[
-        "reticle", "hold", "--reticle-json", p, "--range", "500", "--wind-mil", "1",
+        "reticle",
+        "hold",
+        "--reticle-json",
+        p,
+        "--range",
+        "500",
+        "--wind-mil",
+        "1",
     ]);
     assert!(!ok);
-    assert!(stderr.contains("--wind-mil applies to --drop-mil only"), "{stderr}");
+    assert!(
+        stderr.contains("--wind-mil applies to --drop-mil only"),
+        "{stderr}"
+    );
 
     // --range without a load.
     let (_, stderr, ok) = run(&["reticle", "hold", "--reticle-json", p, "--range", "500"]);
@@ -333,14 +362,28 @@ fn rejects_ambiguous_and_incomplete_invocations() {
 
     // Non-physical magnification (rejected on both planes).
     let (_, stderr, ok) = run(&[
-        "reticle", "hold", "--reticle-json", p, "--drop-mil", "1", "--mag", "0",
+        "reticle",
+        "hold",
+        "--reticle-json",
+        p,
+        "--drop-mil",
+        "1",
+        "--mag",
+        "0",
     ]);
     assert!(!ok, "{stderr}");
 
     // CSV/PDF have no reticle form.
     for format in ["csv", "pdf"] {
         let (_, stderr, ok) = run(&[
-            "reticle", "hold", "--reticle-json", p, "--drop-mil", "1", "-o", format,
+            "reticle",
+            "hold",
+            "--reticle-json",
+            p,
+            "--drop-mil",
+            "1",
+            "-o",
+            format,
         ]);
         assert!(!ok);
         assert!(stderr.contains("no "), "{stderr}");
@@ -388,7 +431,9 @@ fn profile_attachment_round_trips_and_carries_forward() {
     let stored = || -> serde_json::Value {
         serde_json::from_str(
             &std::fs::read_to_string(
-                home.join(".ballistics").join("profiles").join("scoped.json"),
+                home.join(".ballistics")
+                    .join("profiles")
+                    .join("scoped.json"),
             )
             .unwrap(),
         )
@@ -400,8 +445,7 @@ fn profile_attachment_round_trips_and_carries_forward() {
     assert!(stored().get("reticle").is_none(), "{}", stored());
 
     save(&["--reticle-json", path.to_str().unwrap()]);
-    let attached: ReticleDescription =
-        serde_json::from_value(stored()["reticle"].clone()).unwrap();
+    let attached: ReticleDescription = serde_json::from_value(stored()["reticle"].clone()).unwrap();
     assert_eq!(attached, reticle);
 
     // An unrelated re-save carries it forward.
@@ -414,7 +458,18 @@ fn profile_attachment_round_trips_and_carries_forward() {
     // `reticle hold --profile` finds it.
     let output = Command::new(BIN)
         .env("HOME", &home)
-        .args(["reticle", "hold", "--profile", "scoped", "--drop-mil", "4", "--mag", "5", "-o", "json"])
+        .args([
+            "reticle",
+            "hold",
+            "--profile",
+            "scoped",
+            "--drop-mil",
+            "4",
+            "--mag",
+            "5",
+            "-o",
+            "json",
+        ])
         .output()
         .expect("hold --profile");
     assert!(
@@ -448,8 +503,20 @@ fn profile_attachment_round_trips_and_carries_forward() {
     let output = Command::new(BIN)
         .env("HOME", &home)
         .args([
-            "profile", "save", "scoped", "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308",
-            "--reticle-json", path.to_str().unwrap(), "--clear-reticle",
+            "profile",
+            "save",
+            "scoped",
+            "-v",
+            "2700",
+            "-b",
+            "0.475",
+            "-m",
+            "168",
+            "-d",
+            "0.308",
+            "--reticle-json",
+            path.to_str().unwrap(),
+            "--clear-reticle",
         ])
         .output()
         .expect("profile save");
@@ -549,7 +616,10 @@ fn solve_json_reticle_block_is_purely_additive() {
     let mut plain_padded = plain.clone();
     plain_padded["reticle_hold"] = serde_json::Value::Null;
     plain_padded["resolved_request"]["reticle"] = serde_json::Value::Null;
-    assert_eq!(held, plain_padded, "the reticle block must not move the solve");
+    assert_eq!(
+        held, plain_padded,
+        "the reticle block must not move the solve"
+    );
 }
 
 /// A hold requested beyond the sampled trajectory is a structured error, never an
@@ -607,7 +677,10 @@ fn import_output_is_the_shared_formatter_verbatim() {
     std::fs::write(&path, VENTUM_MBR).unwrap();
 
     let expected_desc = import_ventum_reticle(VENTUM_MBR).unwrap();
-    for (flag, format) in [("table", ReticleFormat::Table), ("json", ReticleFormat::Json)] {
+    for (flag, format) in [
+        ("table", ReticleFormat::Table),
+        ("json", ReticleFormat::Json),
+    ] {
         let (stdout, stderr, ok) = run(&["reticle", "import", path.to_str().unwrap(), "-o", flag]);
         assert!(ok, "import -o {flag} failed: {stderr}");
         assert_eq!(
@@ -650,7 +723,10 @@ fn import_json_round_trips_into_hold() {
         "10",
     ]);
     assert!(ok, "hold failed: {stderr}");
-    assert!(hold_out.contains("distance from hold: 0.000 mil"), "{hold_out}");
+    assert!(
+        hold_out.contains("distance from hold: 0.000 mil"),
+        "{hold_out}"
+    );
 }
 
 /// Import rejects file-level failures the way the rest of the surface does: a missing file,
@@ -707,8 +783,14 @@ fn import_reports_what_it_could_not_represent() {
         stderr.contains("2 element(s) carry no hold point"),
         "missing drop tally: {stderr}"
     );
-    assert!(stderr.contains("arc x1"), "arc not named in the tally: {stderr}");
-    assert!(stderr.contains("line x1"), "line not named in the tally: {stderr}");
+    assert!(
+        stderr.contains("arc x1"),
+        "arc not named in the tally: {stderr}"
+    );
+    assert!(
+        stderr.contains("line x1"),
+        "line not named in the tally: {stderr}"
+    );
     // The horseshoe's apex is printed in shooter terms: 2 mil UP (270 degrees is the top).
     assert!(
         stderr.contains("apex 0.00 / 2.00 up mil"),
@@ -761,13 +843,19 @@ fn import_reports_a_circle_it_could_only_partly_read() {
 
     let (stdout, stderr, ok) = run(&["reticle", "import", path.to_str().unwrap(), "-o", "json"]);
     // It imports at all: neither circle may refuse the document its dot belongs to.
-    assert!(ok, "a partly-readable circle must not fail the import: {stderr}");
+    assert!(
+        ok,
+        "a partly-readable circle must not fail the import: {stderr}"
+    );
     let parsed: ReticleDescription = serde_json::from_str(&stdout).unwrap();
     assert_eq!(parsed.marks.len(), 1, "the dot survives both circles");
 
     // The unreadable sweep keeps the ARC tag -- it is not quietly demoted to `circle` -- and
     // is reported under the same line an unreadable radius is.
-    assert!(stderr.contains("arc x1"), "the declared arc lost its tag: {stderr}");
+    assert!(
+        stderr.contains("arc x1"),
+        "the declared arc lost its tag: {stderr}"
+    );
     assert!(
         stderr.contains("1 further arc(s) declared geometry this importer could not read"),
         "an unreadable sweep must be reported like an unreadable radius: {stderr}"
@@ -779,7 +867,10 @@ fn import_reports_a_circle_it_could_only_partly_read() {
     );
 
     // The unreadable repeat is counted once AND declared as a count that may be low.
-    assert!(stderr.contains("circle x1"), "the repeated ring is not counted: {stderr}");
+    assert!(
+        stderr.contains("circle x1"),
+        "the repeated ring is not counted: {stderr}"
+    );
     assert!(
         stderr.contains("1 circle element(s) declared a `repeat` this importer could not read"),
         "an unreadable repeat must be declared, not swallowed: {stderr}"
@@ -822,7 +913,10 @@ fn a_mirrored_arcs_printed_angles_read_as_a_range() {
     );
     // The shape of the defect, independent of the numbers above: no arc line may contain a
     // double dash, which is what a negative second bearing produced.
-    for line in stderr.lines().filter(|l| l.trim_start().starts_with("arc ")) {
+    for line in stderr
+        .lines()
+        .filter(|l| l.trim_start().starts_with("arc "))
+    {
         assert!(
             !line.contains("--"),
             "an arc line must read as a range, not a double dash: {line}"

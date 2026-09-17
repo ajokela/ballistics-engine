@@ -122,10 +122,8 @@ fn vertical_offset_shifts_impact_high_and_scales_downrange() {
     biased_args.extend(["--zero-poi-up", "0.1", "--full", "-o", "json"]);
     let biased: Value = serde_json::from_slice(&run_ok(&biased_args).stdout).expect("json");
 
-    let dy_100 =
-        interpolate_at(&biased, "y", 100.0) - interpolate_at(&baseline, "y", 100.0);
-    let dy_200 =
-        interpolate_at(&biased, "y", 200.0) - interpolate_at(&baseline, "y", 200.0);
+    let dy_100 = interpolate_at(&biased, "y", 100.0) - interpolate_at(&baseline, "y", 100.0);
+    let dy_200 = interpolate_at(&biased, "y", 200.0) - interpolate_at(&baseline, "y", 200.0);
     let expected_100_yd = OFFSET_IN / 36.0; // 0.1 in in yards
     assert!(
         (dy_100 - expected_100_yd).abs() < expected_100_yd * 0.05,
@@ -152,8 +150,7 @@ fn right_offset_shifts_windage_right_at_zero_range() {
     biased_args.extend(["--zero-poi-right", "0.5", "--full", "-o", "json"]);
     let biased: Value = serde_json::from_slice(&run_ok(&biased_args).stdout).expect("json");
 
-    let dx_100 =
-        interpolate_at(&biased, "x", 100.0) - interpolate_at(&baseline, "x", 100.0);
+    let dx_100 = interpolate_at(&biased, "x", 100.0) - interpolate_at(&baseline, "x", 100.0);
     let expected_yd = 0.5 / 36.0; // 0.5 in in yards, positive = right
     assert!(
         (dx_100 - expected_yd).abs() < expected_yd * 0.05,
@@ -261,7 +258,10 @@ fn solve_json_wire_fields_decode_and_apply() {
     assert!(baseline.resolved_request.shot.zero_poi_up_m.is_none());
     assert!(baseline.resolved_request.shot.zero_poi_right_m.is_none());
     assert_eq!(explicit_zero.resolved_request.shot.zero_poi_up_m, Some(0.0));
-    assert_eq!(explicit_zero.resolved_request.shot.zero_poi_right_m, Some(0.0));
+    assert_eq!(
+        explicit_zero.resolved_request.shot.zero_poi_right_m,
+        Some(0.0)
+    );
     explicit_zero.resolved_request.shot.zero_poi_up_m = None;
     explicit_zero.resolved_request.shot.zero_poi_right_m = None;
     assert_eq!(
@@ -288,13 +288,27 @@ fn profile_fields_round_trip_and_cli_overrides() {
     let save = Command::new(BIN)
         .env("HOME", &home)
         .args([
-            "profile", "save", "poi-test", "--velocity", "2700", "--bc", "0.475",
-            "--drag-model", "g1", "--mass", "168", "--diameter", "0.308",
+            "profile",
+            "save",
+            "poi-test",
+            "--velocity",
+            "2700",
+            "--bc",
+            "0.475",
+            "--drag-model",
+            "g1",
+            "--mass",
+            "168",
+            "--diameter",
+            "0.308",
         ])
         .output()
         .expect("profile save");
     assert!(save.status.success());
-    let path = home.join(".ballistics").join("profiles").join("poi-test.json");
+    let path = home
+        .join(".ballistics")
+        .join("profiles")
+        .join("poi-test.json");
     let mut profile: Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     profile["zero_poi_up_m"] = Value::from(0.00254); // 0.1 in high

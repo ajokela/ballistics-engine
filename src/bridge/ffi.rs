@@ -67,10 +67,7 @@ pub unsafe extern "C" fn ballistics_bridge_call(request_json: *const c_char) -> 
 /// `request` must be NULL or point to at least `len` readable bytes. The returned
 /// pointer must be freed with [`ballistics_bridge_free`] exactly once.
 #[no_mangle]
-pub unsafe extern "C" fn ballistics_bridge_call_n(
-    request: *const u8,
-    len: usize,
-) -> *mut c_char {
+pub unsafe extern "C" fn ballistics_bridge_call_n(request: *const u8, len: usize) -> *mut c_char {
     if request.is_null() {
         return respond(error_envelope(
             BridgeErrorCode::InvalidJson,
@@ -216,7 +213,10 @@ mod tests {
 
         let out = decoded(&modified);
         assert_eq!(out["error"]["code"], "invalid_json", "{out}");
-        assert_eq!(out["error"]["message"], "request is not valid UTF-8", "{out}");
+        assert_eq!(
+            out["error"]["message"], "request is not valid UTF-8",
+            "{out}"
+        );
     }
 
     /// The scope of that refusal, so the docs do not overstate it: the two encodings agree on

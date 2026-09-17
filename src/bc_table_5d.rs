@@ -95,14 +95,20 @@ pub enum Bc5dError {
     IoError(std::io::Error),
     InvalidMagic,
     UnsupportedVersion(u32),
-    ChecksumMismatch { expected: u32, actual: u32 },
+    ChecksumMismatch {
+        expected: u32,
+        actual: u32,
+    },
     InvalidDimensions,
     TableNotFound(f64),
     NoTableDirectory,
     /// The table's own header caliber is not the caliber of the shot it was handed to.
     /// See [`Bc5dTable::ensure_caliber_matches`] for why this is refused rather than
     /// applied or silently ignored. Both calibers are in inches.
-    CaliberMismatch { table_caliber: f64, shot_caliber: f64 },
+    CaliberMismatch {
+        table_caliber: f64,
+        shot_caliber: f64,
+    },
 }
 
 impl std::fmt::Display for Bc5dError {
@@ -112,10 +118,16 @@ impl std::fmt::Display for Bc5dError {
             Bc5dError::InvalidMagic => write!(f, "Invalid file magic (expected 'BC5D')"),
             Bc5dError::UnsupportedVersion(v) => write!(f, "Unsupported table version: {}", v),
             Bc5dError::ChecksumMismatch { expected, actual } => {
-                write!(f, "Checksum mismatch: expected {:08x}, got {:08x}", expected, actual)
+                write!(
+                    f,
+                    "Checksum mismatch: expected {:08x}, got {:08x}",
+                    expected, actual
+                )
             }
             Bc5dError::InvalidDimensions => write!(f, "Invalid table dimensions"),
-            Bc5dError::TableNotFound(cal) => write!(f, "No BC5D table found for caliber {:.3}", cal),
+            Bc5dError::TableNotFound(cal) => {
+                write!(f, "No BC5D table found for caliber {:.3}", cal)
+            }
             Bc5dError::NoTableDirectory => write!(f, "No BC table directory configured"),
             Bc5dError::CaliberMismatch {
                 table_caliber,
@@ -197,7 +209,12 @@ impl Bc5dTable {
         reader.read_exact(&mut reserved)?;
 
         // Validate dimensions
-        if dim_weight == 0 || dim_bc == 0 || dim_muzzle_vel == 0 || dim_current_vel == 0 || dim_drag_types == 0 {
+        if dim_weight == 0
+            || dim_bc == 0
+            || dim_muzzle_vel == 0
+            || dim_current_vel == 0
+            || dim_drag_types == 0
+        {
             return Err(Bc5dError::InvalidDimensions);
         }
 
@@ -281,7 +298,11 @@ impl Bc5dTable {
         drag_type: &str,
     ) -> f64 {
         // Get drag type index (0 = G1, 1 = G7)
-        let drag_idx = if drag_type.eq_ignore_ascii_case("G7") { 1 } else { 0 };
+        let drag_idx = if drag_type.eq_ignore_ascii_case("G7") {
+            1
+        } else {
+            0
+        };
 
         // Clamp drag_idx to valid range
         let drag_idx = drag_idx.min(self.num_drag_types - 1);
@@ -290,7 +311,8 @@ impl Bc5dTable {
         let (weight_idx, weight_w) = self.interp_idx(weight_grains as f32, &self.weight_bins);
         let (bc_idx, bc_w) = self.interp_idx(base_bc as f32, &self.bc_bins);
         let (muzzle_idx, muzzle_w) = self.interp_idx(muzzle_velocity as f32, &self.muzzle_vel_bins);
-        let (current_idx, current_w) = self.interp_idx(current_velocity as f32, &self.current_vel_bins);
+        let (current_idx, current_w) =
+            self.interp_idx(current_velocity as f32, &self.current_vel_bins);
 
         // 4D linear interpolation (16 corners of a hypercube)
         let mut result = 0.0f64;
@@ -339,7 +361,13 @@ impl Bc5dTable {
         current_velocity: f64,
         drag_type: &str,
     ) -> f64 {
-        let correction = self.lookup(weight_grains, base_bc, muzzle_velocity, current_velocity, drag_type);
+        let correction = self.lookup(
+            weight_grains,
+            base_bc,
+            muzzle_velocity,
+            current_velocity,
+            drag_type,
+        );
         base_bc * correction
     }
 
@@ -391,8 +419,7 @@ impl Bc5dTable {
             let vel_min = velocities[i + 1];
             let vel_mid = (vel_max + vel_min) / 2.0;
 
-            let correction =
-                self.lookup(weight_grains, base_bc, reference_mv, vel_mid, drag_type);
+            let correction = self.lookup(weight_grains, base_bc, reference_mv, vel_mid, drag_type);
             if (correction - 1.0).abs() > 1e-6 {
                 any_correction = true;
             }
@@ -473,7 +500,14 @@ impl Bc5dTable {
     }
 
     /// Calculate flat array index from 5D indices
-    fn flat_index(&self, drag_idx: usize, weight_idx: usize, bc_idx: usize, muzzle_idx: usize, current_idx: usize) -> usize {
+    fn flat_index(
+        &self,
+        drag_idx: usize,
+        weight_idx: usize,
+        bc_idx: usize,
+        muzzle_idx: usize,
+        current_idx: usize,
+    ) -> usize {
         let n_weight = self.weight_bins.len();
         let n_bc = self.bc_bins.len();
         let n_muzzle = self.muzzle_vel_bins.len();
@@ -591,12 +625,18 @@ impl Bc5dTable {
 
     /// Get weight range
     pub fn weight_range(&self) -> (f32, f32) {
-        (*self.weight_bins.first().unwrap_or(&0.0), *self.weight_bins.last().unwrap_or(&0.0))
+        (
+            *self.weight_bins.first().unwrap_or(&0.0),
+            *self.weight_bins.last().unwrap_or(&0.0),
+        )
     }
 
     /// Get velocity range
     pub fn velocity_range(&self) -> (f32, f32) {
-        (*self.current_vel_bins.first().unwrap_or(&0.0), *self.current_vel_bins.last().unwrap_or(&0.0))
+        (
+            *self.current_vel_bins.first().unwrap_or(&0.0),
+            *self.current_vel_bins.last().unwrap_or(&0.0),
+        )
     }
 }
 
@@ -654,7 +694,13 @@ impl Bc5dTableManager {
         drag_type: &str,
     ) -> Result<f64, Bc5dError> {
         let table = self.get_table(caliber)?;
-        Ok(table.lookup(weight_grains, base_bc, muzzle_velocity, current_velocity, drag_type))
+        Ok(table.lookup(
+            weight_grains,
+            base_bc,
+            muzzle_velocity,
+            current_velocity,
+            drag_type,
+        ))
     }
 
     /// Get effective BC with correction applied
@@ -668,7 +714,13 @@ impl Bc5dTableManager {
         drag_type: &str,
     ) -> Result<f64, Bc5dError> {
         let table = self.get_table(caliber)?;
-        Ok(table.get_effective_bc(weight_grains, base_bc, muzzle_velocity, current_velocity, drag_type))
+        Ok(table.get_effective_bc(
+            weight_grains,
+            base_bc,
+            muzzle_velocity,
+            current_velocity,
+            drag_type,
+        ))
     }
 
     /// Check if a table is available for a caliber
@@ -959,7 +1011,11 @@ mod tests {
         let num_drag_types = 2;
 
         // Total cells: 2 * 3 * 3 * 2 * 3 = 108
-        let total = num_drag_types * weight_bins.len() * bc_bins.len() * muzzle_vel_bins.len() * current_vel_bins.len();
+        let total = num_drag_types
+            * weight_bins.len()
+            * bc_bins.len()
+            * muzzle_vel_bins.len()
+            * current_vel_bins.len();
         let mut data = vec![1.0f32; total];
 
         // Set some non-uniform values for testing interpolation
@@ -1024,7 +1080,11 @@ mod tests {
         let last = replacement.data.len() - 1;
         replacement.data[last] = 0.5; // different content, identical dimensions => identical size
         let replaced = serialize_test_table(&replacement);
-        assert_eq!(replaced.len(), good.len(), "test requires an identical size");
+        assert_eq!(
+            replaced.len(),
+            good.len(),
+            "test requires an identical size"
+        );
         std::fs::write(&path, &replaced).unwrap();
         pin(&path);
         assert_eq!(
@@ -1098,8 +1158,14 @@ mod tests {
 
         // Checksum is CRC32 of bins + data, in declaration order.
         let mut checksum_data = Vec::new();
-        for v in t.weight_bins.iter().chain(&t.bc_bins).chain(&t.muzzle_vel_bins)
-            .chain(&t.current_vel_bins).chain(&t.data) {
+        for v in t
+            .weight_bins
+            .iter()
+            .chain(&t.bc_bins)
+            .chain(&t.muzzle_vel_bins)
+            .chain(&t.current_vel_bins)
+            .chain(&t.data)
+        {
             checksum_data.extend_from_slice(&v.to_le_bytes());
         }
         out.extend_from_slice(&crc32_ieee(&checksum_data).to_le_bytes());
@@ -1110,8 +1176,14 @@ mod tests {
         out.extend_from_slice(&api);
         out.extend_from_slice(&[0u8; 12]); // reserved
 
-        for v in t.weight_bins.iter().chain(&t.bc_bins).chain(&t.muzzle_vel_bins)
-            .chain(&t.current_vel_bins).chain(&t.data) {
+        for v in t
+            .weight_bins
+            .iter()
+            .chain(&t.bc_bins)
+            .chain(&t.muzzle_vel_bins)
+            .chain(&t.current_vel_bins)
+            .chain(&t.data)
+        {
             out.extend_from_slice(&v.to_le_bytes());
         }
         out
@@ -1386,7 +1458,8 @@ mod tests {
             .expect_err("a .243 shot must be refused a .308 table");
         assert!(matches!(err, Bc5dError::CaliberMismatch { .. }), "{err}");
         assert!(
-            err.to_string().contains("table is for 0.308, shot is 0.243"),
+            err.to_string()
+                .contains("table is for 0.308, shot is 0.243"),
             "{err}"
         );
 
@@ -1457,7 +1530,11 @@ mod tests {
         std::fs::write(&path, serialize_test_table(&replacement)).unwrap();
         let third = path_cache::load_verified(&path).expect("replacement loads");
         assert!(!std::sync::Arc::ptr_eq(&first, &third));
-        assert_eq!(third.bin_counts().0, 4, "replacement content must be parsed");
+        assert_eq!(
+            third.bin_counts().0,
+            4,
+            "replacement content must be parsed"
+        );
 
         // Corruption is a clean error, not a cached table.
         let mut corrupt = serialize_test_table(&table);

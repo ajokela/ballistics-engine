@@ -199,7 +199,11 @@ pub fn central_difference(
     step: Option<f64>,
 ) -> Result<Vec<Derivative>, KernelError> {
     let (rel, min_abs) = match axis_meta(axis).kind {
-        AxisKind::Continuous { default_rel_step, min_abs_step, .. } => (default_rel_step, min_abs_step),
+        AxisKind::Continuous {
+            default_rel_step,
+            min_abs_step,
+            ..
+        } => (default_rel_step, min_abs_step),
         AxisKind::Categorical => return Err(KernelError::CategoricalAxis(axis)),
     };
     let x = match read_axis(base, axis) {
@@ -350,7 +354,8 @@ mod tests {
             "atmosphere": {},
             "wind": {"speed_mps": 3.0, "direction_from_rad": std::f64::consts::FRAC_PI_2},
             "solver": {}, "effects": {}, "sampling": {"interval_m": 25.0}
-        }).to_string();
+        })
+        .to_string();
         let req = crate::solve_json::decode_solve_request_v1(&json).unwrap();
         crate::solve_v1::solve_v1(req).unwrap().resolved_request
     }
@@ -361,7 +366,11 @@ mod tests {
         let r = resolved(823.0);
         let d = central_difference(&r, InputAxis::MuzzleVelocityMps, &[600.0], None).unwrap();
         assert_eq!(d.len(), 1);
-        assert!(d[0].d_drop_d_x < 0.0, "expected negative, got {}", d[0].d_drop_d_x);
+        assert!(
+            d[0].d_drop_d_x < 0.0,
+            "expected negative, got {}",
+            d[0].d_drop_d_x
+        );
         assert!(d[0].step_used > 0.0);
         // Review fix (post-I4): the common both-sides-valid path must still report Central, not
         // default or drift to a one-sided scheme when nothing forced one.
@@ -383,8 +392,15 @@ mod tests {
         let base = central_difference(&r, InputAxis::MuzzleVelocityMps, &[600.0], None).unwrap();
         let _ = base;
         let target_drop = 2.0_f64;
-        let found = bisect_axis(&r, InputAxis::MuzzleVelocityMps, 600.0, (600.0, 1100.0),
-                                &|o: &Observation| o.drop_m < target_drop, 0.05).unwrap();
+        let found = bisect_axis(
+            &r,
+            InputAxis::MuzzleVelocityMps,
+            600.0,
+            (600.0, 1100.0),
+            &|o: &Observation| o.drop_m < target_drop,
+            0.05,
+        )
+        .unwrap();
         let mv = found.expect("a crossing exists in this domain");
         assert!(mv > 600.0 && mv < 1100.0);
     }
@@ -402,7 +418,8 @@ mod tests {
             "shot": {"max_range_m": 500.0, "muzzle_angle_rad": 0.0},
             "atmosphere": {}, "wind": {}, "solver": {}, "effects": {},
             "sampling": {"interval_m": 5.0}
-        }).to_string();
+        })
+        .to_string();
         let req = crate::solve_json::decode_solve_request_v1(&json).unwrap();
         let r = crate::solve_v1::solve_v1(req).unwrap().resolved_request;
         let x = 400.0_f64;
@@ -413,7 +430,11 @@ mod tests {
         let expected = -9.80665 * x * x / (v * v * v);
         let d = central_difference(&r, InputAxis::MuzzleVelocityMps, &[x], None).unwrap();
         let rel = ((d[0].d_drop_d_x - expected) / expected).abs();
-        assert!(rel < 0.02, "expected ~{expected}, got {} (rel {rel})", d[0].d_drop_d_x);
+        assert!(
+            rel < 0.02,
+            "expected ~{expected}, got {} (rel {rel})",
+            d[0].d_drop_d_x
+        );
         assert_eq!(d[0].scheme, DifferenceScheme::Central);
     }
 
@@ -435,7 +456,8 @@ mod tests {
             "shot": {"max_range_m": 500.0, "muzzle_angle_rad": 0.0},
             "atmosphere": {}, "wind": {}, "solver": {}, "effects": {},
             "sampling": {"interval_m": 5.0}
-        }).to_string();
+        })
+        .to_string();
         let req = crate::solve_json::decode_solve_request_v1(&json).unwrap();
         let r = crate::solve_v1::solve_v1(req).unwrap().resolved_request;
         // Read back off the RESOLVED request rather than hardcoding 800.0 a second time here
@@ -517,9 +539,11 @@ mod tests {
             other => panic!("WindSpeed must read back as a scalar, got {other:?}"),
         };
         let (rel, min_abs) = match axis_meta(InputAxis::WindSpeed).kind {
-            AxisKind::Continuous { default_rel_step, min_abs_step, .. } => {
-                (default_rel_step, min_abs_step)
-            }
+            AxisKind::Continuous {
+                default_rel_step,
+                min_abs_step,
+                ..
+            } => (default_rel_step, min_abs_step),
             AxisKind::Categorical => panic!("WindSpeed must be continuous"),
         };
         let expected_h = (x.abs() * rel).max(min_abs);
@@ -595,7 +619,10 @@ mod tests {
             &|o: &Observation| o.drop_m < 1.0,
             0.1,
         );
-        assert!(matches!(e, Err(KernelError::CategoricalAxis(InputAxis::CoriolisEnabled))));
+        assert!(matches!(
+            e,
+            Err(KernelError::CategoricalAxis(InputAxis::CoriolisEnabled))
+        ));
     }
 
     /// Independent closed-form check for `bisect_axis` itself (not just `central_difference`):
@@ -678,8 +705,14 @@ mod tests {
 
         let e = central_difference(&r, InputAxis::Altitude, &[300.0], None);
         match e {
-            Err(KernelError::AxisUnsupportedForRequest { axis: InputAxis::Altitude, reason }) => {
-                assert!(reason.to_lowercase().contains("qnh"), "reason should name QNH: {reason}");
+            Err(KernelError::AxisUnsupportedForRequest {
+                axis: InputAxis::Altitude,
+                reason,
+            }) => {
+                assert!(
+                    reason.to_lowercase().contains("qnh"),
+                    "reason should name QNH: {reason}"
+                );
             }
             other => panic!("expected AxisUnsupportedForRequest, got {other:?}"),
         }
@@ -712,8 +745,14 @@ mod tests {
             0.5,
         );
         match e {
-            Err(KernelError::AxisUnsupportedForRequest { axis: InputAxis::Altitude, reason }) => {
-                assert!(reason.to_lowercase().contains("qnh"), "reason should name QNH: {reason}");
+            Err(KernelError::AxisUnsupportedForRequest {
+                axis: InputAxis::Altitude,
+                reason,
+            }) => {
+                assert!(
+                    reason.to_lowercase().contains("qnh"),
+                    "reason should name QNH: {reason}"
+                );
             }
             other => panic!("expected AxisUnsupportedForRequest, got {other:?}"),
         }
@@ -741,7 +780,10 @@ mod tests {
         let r = crate::solve_v1::solve_v1(req).unwrap().resolved_request;
 
         let e = central_difference(&r, InputAxis::WindSpeed, &[300.0], None);
-        assert!(matches!(e, Err(KernelError::AxisAbsent(InputAxis::WindSpeed))));
+        assert!(matches!(
+            e,
+            Err(KernelError::AxisAbsent(InputAxis::WindSpeed))
+        ));
     }
 
     /// Same guarantee via `bisect_axis`, which never calls `read_axis` at all -- its
@@ -772,7 +814,10 @@ mod tests {
             &|o: &Observation| o.windage_m < 0.0,
             0.5,
         );
-        assert!(matches!(e, Err(KernelError::AxisAbsent(InputAxis::WindSpeed))));
+        assert!(matches!(
+            e,
+            Err(KernelError::AxisAbsent(InputAxis::WindSpeed))
+        ));
     }
 
     /// I2 review fix: no test anywhere in this file ever passes `Some(...)` for the explicit
@@ -799,15 +844,19 @@ mod tests {
         let v = r.rifle.muzzle_velocity_mps;
         let x = 400.0_f64;
         let custom_step = 2.0_f64;
-        let d = central_difference(&r, InputAxis::MuzzleVelocityMps, &[x], Some(custom_step))
-            .unwrap();
+        let d =
+            central_difference(&r, InputAxis::MuzzleVelocityMps, &[x], Some(custom_step)).unwrap();
         assert_eq!(
             d[0].step_used, custom_step,
             "an explicit step must override the default formula, not just be ignored"
         );
         let expected = -9.80665 * x * x / (v * v * v);
         let rel = ((d[0].d_drop_d_x - expected) / expected).abs();
-        assert!(rel < 0.02, "expected ~{expected}, got {} (rel {rel})", d[0].d_drop_d_x);
+        assert!(
+            rel < 0.02,
+            "expected ~{expected}, got {} (rel {rel})",
+            d[0].d_drop_d_x
+        );
         assert_eq!(d[0].scheme, DifferenceScheme::Central);
     }
 
@@ -818,11 +867,20 @@ mod tests {
     fn non_finite_or_non_positive_explicit_step_is_rejected() {
         let r = resolved(823.0);
         let nan = central_difference(&r, InputAxis::MuzzleVelocityMps, &[600.0], Some(f64::NAN));
-        assert!(matches!(nan, Err(KernelError::NonFinite(InputAxis::MuzzleVelocityMps))));
+        assert!(matches!(
+            nan,
+            Err(KernelError::NonFinite(InputAxis::MuzzleVelocityMps))
+        ));
         let zero = central_difference(&r, InputAxis::MuzzleVelocityMps, &[600.0], Some(0.0));
-        assert!(matches!(zero, Err(KernelError::NonFinite(InputAxis::MuzzleVelocityMps))));
+        assert!(matches!(
+            zero,
+            Err(KernelError::NonFinite(InputAxis::MuzzleVelocityMps))
+        ));
         let negative = central_difference(&r, InputAxis::MuzzleVelocityMps, &[600.0], Some(-1.0));
-        assert!(matches!(negative, Err(KernelError::NonFinite(InputAxis::MuzzleVelocityMps))));
+        assert!(matches!(
+            negative,
+            Err(KernelError::NonFinite(InputAxis::MuzzleVelocityMps))
+        ));
     }
 
     /// I4 review fix: `WindSpeed` at 0.0 (still air, the default absent any `wind` block at
@@ -903,7 +961,9 @@ mod tests {
         );
 
         let d = central_difference(&r, InputAxis::RelativeHumidity, &[600.0], None);
-        let d = d.unwrap_or_else(|e| panic!("the dry-air boundary must fall back, not error, got {e:?}"));
+        let d = d.unwrap_or_else(|e| {
+            panic!("the dry-air boundary must fall back, not error, got {e:?}")
+        });
         assert_eq!(d.len(), 1);
         assert_eq!(
             d[0].scheme,
@@ -981,7 +1041,10 @@ mod tests {
 
         let e = central_difference(&r, InputAxis::RelativeHumidity, &[600.0], Some(2.0));
         match e {
-            Err(KernelError::StepOutOfDomain { axis: InputAxis::RelativeHumidity, attempted }) => {
+            Err(KernelError::StepOutOfDomain {
+                axis: InputAxis::RelativeHumidity,
+                attempted,
+            }) => {
                 assert_eq!(attempted, 2.0);
             }
             other => panic!("expected StepOutOfDomain, got {other:?}"),

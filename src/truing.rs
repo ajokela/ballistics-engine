@@ -1462,8 +1462,7 @@ pub(crate) fn fit_truing_joint(
             let nbc = (bc + dbc).clamp(TRUING_BC_MIN, TRUING_BC_MAX);
             let nc = model.cost(nmv, nbc, obs)?;
             if nc < cur_cost {
-                let rel_change =
-                    (nmv - mv).abs() / mv.max(1.0) + (nbc - bc).abs() / bc.max(1e-3);
+                let rel_change = (nmv - mv).abs() / mv.max(1.0) + (nbc - bc).abs() / bc.max(1e-3);
                 mv = nmv;
                 bc = nbc;
                 cur_cost = nc;
@@ -1606,8 +1605,7 @@ pub fn run_multi_observation_truing_core(
     let mut reason = String::new();
 
     if bc_identifiable {
-        let (mv_j, bc_j, iters_j, conv_j) =
-            fit_truing_joint(&model, &observations, mv0, bc_input)?;
+        let (mv_j, bc_j, iters_j, conv_j) = fit_truing_joint(&model, &observations, mv0, bc_input)?;
         let rms_joint = rms_at(&model, &observations, mv_j, bc_j)?;
         let bc_at_bound = bc_j <= TRUING_BC_MIN * 1.001 || bc_j >= TRUING_BC_MAX * 0.999;
         if !bc_at_bound && rms_joint <= rms_mv_only + 1e-9 {
@@ -1620,9 +1618,7 @@ pub fn run_multi_observation_truing_core(
             // Joint fit did not help (or ran to a bound): keep the honest
             // MV-only answer rather than a false-precision BC.
             reason = if bc_at_bound {
-                format!(
-                    "joint fit drove BC to a bound ({bc_j:.3}); BC held at input {bc_input:.3}"
-                )
+                format!("joint fit drove BC to a bound ({bc_j:.3}); BC held at input {bc_input:.3}")
             } else {
                 format!(
                     "joint fit did not improve on the MV-only solution; BC held at input {bc_input:.3}"
@@ -1804,7 +1800,11 @@ pub(crate) fn truing_quality_line(
     } else {
         "poor (observations may be inconsistent)"
     };
-    let nonconv = if converged { "" } else { " (did not fully converge)" };
+    let nonconv = if converged {
+        ""
+    } else {
+        " (did not fully converge)"
+    };
     if bc_fitted {
         let cond = if condition_number.is_finite() {
             format!("{condition_number:.0}")
@@ -1907,7 +1907,10 @@ mod window_helper_tests {
         };
         // Under-tracking scope (CF < 1): scope-unit dial values are LARGER than true.
         let scaled = scale_report_dial_values(&report, 0.95);
-        assert_eq!(scaled.observations[0].drop.to_bits(), (10.0_f64 / 0.95).to_bits());
+        assert_eq!(
+            scaled.observations[0].drop.to_bits(),
+            (10.0_f64 / 0.95).to_bits()
+        );
         assert_eq!(scaled.predicted[0].to_bits(), (9.8_f64 / 0.95).to_bits());
         assert_eq!(scaled.residuals[0].to_bits(), (0.2_f64 / 0.95).to_bits());
         assert_eq!(scaled.rms.to_bits(), (0.2_f64 / 0.95).to_bits());
@@ -1918,14 +1921,20 @@ mod window_helper_tests {
         assert_eq!(scaled.window_solved_range_m, report.window_solved_range_m);
         // and ×1.0 is a bit-exact no-op
         let unscaled = scale_report_dial_values(&report, 1.0);
-        assert_eq!(unscaled.observations[0].drop.to_bits(), report.observations[0].drop.to_bits());
+        assert_eq!(
+            unscaled.observations[0].drop.to_bits(),
+            report.observations[0].drop.to_bits()
+        );
         assert_eq!(unscaled.rms.to_bits(), report.rms.to_bits());
     }
 
     #[test]
     fn mv_calibration_window_is_90_to_100_percent_of_the_1_2_crossing() {
         assert_eq!(mv_calibration_window(Some(1000.0)), Some((900.0, 1000.0)));
-        assert_eq!(mv_calibration_window(Some(671.7257336844475)), Some((0.9 * 671.7257336844475, 671.7257336844475)));
+        assert_eq!(
+            mv_calibration_window(Some(671.7257336844475)),
+            Some((0.9 * 671.7257336844475, 671.7257336844475))
+        );
     }
 
     #[test]
@@ -1936,7 +1945,10 @@ mod window_helper_tests {
     #[test]
     fn dsf_window_start_is_90_percent_of_the_0_9_crossing() {
         assert_eq!(dsf_window_start(Some(1000.0)), Some(900.0));
-        assert_eq!(dsf_window_start(Some(806.5709746782849)), Some(0.9 * 806.5709746782849));
+        assert_eq!(
+            dsf_window_start(Some(806.5709746782849)),
+            Some(0.9 * 806.5709746782849)
+        );
     }
 
     #[test]
@@ -2005,12 +2017,12 @@ mod chrono_correction_tests {
             15.0 * 0.3048, // 15 ft screen distance, in meters
             0.475,         // BC
             DragModelArg::G7,
-            168.0,               // mass, grains
-            0.308,               // diameter, inches
-            59.0,                // temperature, F (== 15 C exactly)
-            1013.25 / 33.8639,   // pressure, inHg (== 1013.25 hPa exactly)
-            0.0,                 // humidity, % (dry air keeps the arithmetic exact)
-            0.0,                 // altitude, ft
+            168.0,             // mass, grains
+            0.308,             // diameter, inches
+            59.0,              // temperature, F (== 15 C exactly)
+            1013.25 / 33.8639, // pressure, inHg (== 1013.25 hPa exactly)
+            0.0,               // humidity, % (dry air keeps the arithmetic exact)
+            0.0,               // altitude, ft
             &None,
         )
         .expect("hand-computed case must converge");
@@ -2105,7 +2117,17 @@ mod chrono_correction_tests {
     #[test]
     fn zero_distance_is_rejected_by_the_low_level_solver() {
         let err = correct_chrono_velocity_fps(
-            2680.0, 0.0, 0.475, DragModelArg::G7, 168.0, 0.308, 59.0, 29.92, 50.0, 0.0, &None,
+            2680.0,
+            0.0,
+            0.475,
+            DragModelArg::G7,
+            168.0,
+            0.308,
+            59.0,
+            29.92,
+            50.0,
+            0.0,
+            &None,
         )
         .unwrap_err();
         assert!(err.to_string().contains("out of range"), "{err}");
@@ -2142,10 +2164,23 @@ mod chrono_correction_tests {
     fn invalid_measured_velocity_is_rejected() {
         for bad_v in [0.0, -100.0, f64::NAN, f64::INFINITY] {
             let err = correct_chrono_velocity_fps(
-                bad_v, 4.572, 0.475, DragModelArg::G7, 168.0, 0.308, 59.0, 29.92, 50.0, 0.0, &None,
+                bad_v,
+                4.572,
+                0.475,
+                DragModelArg::G7,
+                168.0,
+                0.308,
+                59.0,
+                29.92,
+                50.0,
+                0.0,
+                &None,
             )
             .unwrap_err();
-            assert!(err.to_string().contains("must be positive and finite"), "{err}");
+            assert!(
+                err.to_string().contains("must be positive and finite"),
+                "{err}"
+            );
         }
     }
 

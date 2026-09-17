@@ -19,8 +19,21 @@ const BIN: &str = env!("CARGO_BIN_EXE_ballistics");
 
 fn base_args() -> Vec<&'static str> {
     vec![
-        "trajectory", "-b", "0.243", "--drag-model", "g7", "-v", "2700", "-m", "175", "-d",
-        "0.308", "--max-range", "300", "-o", "json",
+        "trajectory",
+        "-b",
+        "0.243",
+        "--drag-model",
+        "g7",
+        "-v",
+        "2700",
+        "-m",
+        "175",
+        "-d",
+        "0.308",
+        "--max-range",
+        "300",
+        "-o",
+        "json",
     ]
 }
 
@@ -133,7 +146,11 @@ fn the_valid_pair_still_loads_and_reaches_the_atmosphere() {
         .args(["--location", csv.to_str().unwrap(), "--site", "TestSite"])
         .output()
         .unwrap();
-    assert!(with.status.success(), "{}", String::from_utf8_lossy(&with.stderr));
+    assert!(
+        with.status.success(),
+        "{}",
+        String::from_utf8_lossy(&with.stderr)
+    );
     let without = Command::new(BIN).args(base_args()).output().unwrap();
 
     let iv = |o: &std::process::Output| -> f64 {

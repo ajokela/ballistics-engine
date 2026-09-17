@@ -406,7 +406,8 @@ fn draw_separator_line(ops: &mut Vec<Op>, y: f32) {
 ///
 /// `font_scale` is clamped to [`FONT_SCALE_RANGE`] exactly as the generator clamps it.
 pub fn dope_card_rows_per_page(font_scale: f32) -> usize {
-    let row_height = ROW_HEIGHT * font_scale.clamp(*FONT_SCALE_RANGE.start(), *FONT_SCALE_RANGE.end());
+    let row_height =
+        ROW_HEIGHT * font_scale.clamp(*FONT_SCALE_RANGE.start(), *FONT_SCALE_RANGE.end());
     // Leave space for header/footer + separators
     let usable_height = PAGE_HEIGHT - (2.0 * MARGIN) - 36.0;
     // The clamp above bounds row_height to 2.25..=13.5 mm against a ~223 mm usable
@@ -595,8 +596,16 @@ fn render_page(
 
         // Draw left side data
         draw_data_row(
-            ops, data_font, table_x, y, left, true, table_size, font_scale,
-            &config.elevation_unit_label, &config.windage_unit_label,
+            ops,
+            data_font,
+            table_x,
+            y,
+            left,
+            true,
+            table_size,
+            font_scale,
+            &config.elevation_unit_label,
+            &config.windage_unit_label,
         );
 
         // Draw right side data
@@ -842,9 +851,18 @@ fn draw_data_row(
 ) {
     let values = [
         (format_range(row.range), COLOR_BLACK),
-        (format_adjustment_cell(row.drop_adj, elevation_unit), COLOR_RED),
-        (format_adjustment_cell(row.wind_adj, windage_unit), COLOR_GREEN),
-        (format_adjustment_cell(row.lead_adj, windage_unit), COLOR_BLUE),
+        (
+            format_adjustment_cell(row.drop_adj, elevation_unit),
+            COLOR_RED,
+        ),
+        (
+            format_adjustment_cell(row.wind_adj, windage_unit),
+            COLOR_GREEN,
+        ),
+        (
+            format_adjustment_cell(row.lead_adj, windage_unit),
+            COLOR_BLUE,
+        ),
     ];
 
     for (i, (value, color)) in values.iter().enumerate() {

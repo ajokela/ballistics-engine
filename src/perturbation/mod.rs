@@ -139,7 +139,10 @@ pub fn evaluate(req: &SolveRequestV1, ranges_m: &[f64]) -> Result<Vec<Observatio
 /// the same reasoning Task 6 already applied to widen `prepare_request`/`build_zeroed_solver`
 /// above, a structural share rather than a second hand-rolled copy.
 pub(crate) fn kernel_solve_error(e: SolveErrorEnvelopeV1) -> KernelError {
-    KernelError::Solve { code: e.error.code, message: e.error.message }
+    KernelError::Solve {
+        code: e.error.code,
+        message: e.error.message,
+    }
 }
 
 // 0.33.0 decision-support Task 7: derived numerics over the kernel -- central-difference
@@ -148,7 +151,7 @@ pub(crate) fn kernel_solve_error(e: SolveErrorEnvelopeV1) -> KernelError {
 // (same unconditional dependency chain as Task 6).
 pub mod derive;
 pub use derive::{
-    bisect_axis, central_difference, DifferenceScheme, Derivative, BISECTION_MAX_ITERATIONS,
+    bisect_axis, central_difference, Derivative, DifferenceScheme, BISECTION_MAX_ITERATIONS,
 };
 
 #[cfg(test)]

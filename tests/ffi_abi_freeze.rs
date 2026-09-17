@@ -216,30 +216,32 @@ const FROZEN_CALCULATE_TRAJECTORY: unsafe extern "C" fn(
     c_double,
 ) -> *mut FFITrajectoryResult = ballistics_engine::ffi::ballistics_calculate_trajectory;
 
-const FROZEN_CALCULATE_TRAJECTORY_WITH_DRAG_TABLE: unsafe extern "C" fn(
-    *const FFIBallisticInputs,
-    *const FFIWindConditions,
-    *const FFIAtmosphericConditions,
-    c_double,
-    c_double,
-    *const c_double,
-    *const c_double,
-    c_int,
-) -> *mut FFITrajectoryResult =
+const FROZEN_CALCULATE_TRAJECTORY_WITH_DRAG_TABLE:
+    unsafe extern "C" fn(
+        *const FFIBallisticInputs,
+        *const FFIWindConditions,
+        *const FFIAtmosphericConditions,
+        c_double,
+        c_double,
+        *const c_double,
+        *const c_double,
+        c_int,
+    ) -> *mut FFITrajectoryResult =
     ballistics_engine::ffi::ballistics_calculate_trajectory_with_drag_table;
 
 #[allow(clippy::type_complexity)]
-const FROZEN_CALCULATE_TRAJECTORY_WITH_DRAG_TABLE_SCALED: unsafe extern "C" fn(
-    *const FFIBallisticInputs,
-    *const FFIWindConditions,
-    *const FFIAtmosphericConditions,
-    c_double,
-    c_double,
-    *const c_double,
-    *const c_double,
-    c_int,
-    c_double,
-) -> *mut FFITrajectoryResult =
+const FROZEN_CALCULATE_TRAJECTORY_WITH_DRAG_TABLE_SCALED:
+    unsafe extern "C" fn(
+        *const FFIBallisticInputs,
+        *const FFIWindConditions,
+        *const FFIAtmosphericConditions,
+        c_double,
+        c_double,
+        *const c_double,
+        *const c_double,
+        c_int,
+        c_double,
+    ) -> *mut FFITrajectoryResult =
     ballistics_engine::ffi::ballistics_calculate_trajectory_with_drag_table_scaled;
 
 const FROZEN_FREE_TRAJECTORY_RESULT: unsafe extern "C" fn(*mut FFITrajectoryResult) =
@@ -297,7 +299,8 @@ const FROZEN_MONTE_CARLO_WITH_DIRECTION_STD_DEV: unsafe extern "C" fn(
     *const FFIAtmosphericConditions,
     *const FFIMonteCarloParams,
     c_double,
-) -> *mut FFIMonteCarloResults =
+)
+    -> *mut FFIMonteCarloResults =
     ballistics_engine::ffi::ballistics_monte_carlo_with_direction_std_dev;
 
 const FROZEN_FREE_MONTE_CARLO_RESULTS: unsafe extern "C" fn(*mut FFIMonteCarloResults) =

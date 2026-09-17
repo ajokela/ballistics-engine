@@ -131,7 +131,13 @@ pub fn calculate_precession_frequency(
     transverse_inertia: f64,
     stability_factor: f64,
 ) -> f64 {
-    epicyclic_frequencies(spin_inertia, transverse_inertia, spin_rate_rad_s, stability_factor).1
+    epicyclic_frequencies(
+        spin_inertia,
+        transverse_inertia,
+        spin_rate_rad_s,
+        stability_factor,
+    )
+    .1
 }
 
 /// Fast-mode (nutation) angular frequency in rad/s:
@@ -142,7 +148,13 @@ pub fn calculate_nutation_frequency(
     transverse_inertia: f64,
     stability_factor: f64,
 ) -> f64 {
-    epicyclic_frequencies(spin_inertia, transverse_inertia, spin_rate_rad_s, stability_factor).0
+    epicyclic_frequencies(
+        spin_inertia,
+        transverse_inertia,
+        spin_rate_rad_s,
+        stability_factor,
+    )
+    .0
 }
 
 /// Calculate nutation amplitude with exponential damping
@@ -462,7 +474,10 @@ mod tests {
         // High stability: slow precession -> 0, fast nutation -> Ix p / Iy = 2*arm.
         let (f2, s2) = epicyclic_frequencies(ix, iy, p, 1.0e6);
         assert!(s2 < 1e-3 * arm, "slow precession should vanish at high Sg");
-        assert!((f2 - 2.0 * arm).abs() < 1e-3 * arm, "fast -> Ix p / Iy at high Sg");
+        assert!(
+            (f2 - 2.0 * arm).abs() < 1e-3 * arm,
+            "fast -> Ix p / Iy at high Sg"
+        );
         // Not gyroscopically stable -> no epicyclic motion.
         assert_eq!(epicyclic_frequencies(ix, iy, p, 0.9), (0.0, 0.0));
     }
@@ -797,12 +812,7 @@ mod tests {
         let mass_gr = params.mass_kg / crate::constants::GRAINS_TO_KG;
         let spin_rps = spin_rate_rad_s / (2.0 * std::f64::consts::PI);
         let twist_in = velocity_mps * 3.28084 * 12.0 / spin_rps;
-        let bare_sg = crate::spin_drift::miller_stability(
-            caliber_in,
-            mass_gr,
-            twist_in,
-            length_in,
-        );
+        let bare_sg = crate::spin_drift::miller_stability(caliber_in, mass_gr, twist_in, length_in);
         let velocity_correction = (velocity_mps * 3.28084 / 2800.0).powf(1.0 / 3.0);
         let density_correction = 1.225 / params.air_density_kg_m3;
         let corrected_sg = crate::spin_drift::calculate_dynamic_stability(

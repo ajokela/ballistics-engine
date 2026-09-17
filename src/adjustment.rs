@@ -67,7 +67,9 @@ pub fn parse_click_value(s: &str) -> Result<ClickValue, String> {
         .parse()
         .map_err(|_| format!("click value '{s}' has an invalid number '{num}'"))?;
     if !size.is_finite() || size <= 0.0 {
-        return Err(format!("click value '{s}' must be a positive, finite graduation"));
+        return Err(format!(
+            "click value '{s}' must be a positive, finite graduation"
+        ));
     }
     Ok(ClickValue { size, base })
 }
@@ -123,7 +125,10 @@ pub struct Quantized {
 /// Rounding is nearest, ties away from zero — identical to `clicks_for`, which delegates here.
 pub fn quantize_angle(angle: f64, click: &ClickValue) -> Quantized {
     let clicks_f = (angle / click.size).round();
-    Quantized { clicks: clicks_f as i64, residual: angle - clicks_f * click.size }
+    Quantized {
+        clicks: clicks_f as i64,
+        residual: angle - clicks_f * click.size,
+    }
 }
 
 /// This click's size in milliradians, the crate's true-angular unit. `adjustment_factor`
@@ -200,9 +205,18 @@ mod tests {
         let c = parse_click_value("0.25moa").unwrap();
         assert!((c.size - 0.25).abs() < 1e-12);
         assert!(matches!(c.base, ClickBase::Moa));
-        assert!(matches!(parse_click_value("0.1mil").unwrap().base, ClickBase::Mil));
-        assert!(matches!(parse_click_value("0.125smoa").unwrap().base, ClickBase::Smoa));
-        assert!(matches!(parse_click_value("0.125iphy").unwrap().base, ClickBase::Smoa));
+        assert!(matches!(
+            parse_click_value("0.1mil").unwrap().base,
+            ClickBase::Mil
+        ));
+        assert!(matches!(
+            parse_click_value("0.125smoa").unwrap().base,
+            ClickBase::Smoa
+        ));
+        assert!(matches!(
+            parse_click_value("0.125iphy").unwrap().base,
+            ClickBase::Smoa
+        ));
         for bad in ["0.25", "moa", "-0.1mil", "0mil", "0.1mils", ""] {
             assert!(parse_click_value(bad).is_err(), "{bad:?} must be rejected");
         }
@@ -227,17 +241,38 @@ mod tests {
     #[test]
     fn quantize_reconstruction_identity_is_bit_exact() {
         // residual is DEFINED as angle - clicks*size, so reconstruction is exact by construction.
-        let c = ClickValue { size: 0.25, base: ClickBase::Moa };
-        for angle in [0.0, 0.24, 0.25, 0.26, -std::f64::consts::PI, 7.4499999, 1234.567] {
+        let c = ClickValue {
+            size: 0.25,
+            base: ClickBase::Moa,
+        };
+        for angle in [
+            0.0,
+            0.24,
+            0.25,
+            0.26,
+            -std::f64::consts::PI,
+            7.4499999,
+            1234.567,
+        ] {
             let q = quantize_angle(angle, &c);
-            assert_eq!(q.clicks as f64 * c.size + q.residual, angle, "identity broke at {angle}");
-            assert!(q.residual.abs() <= c.size / 2.0 + f64::EPSILON, "residual beyond half-click");
+            assert_eq!(
+                q.clicks as f64 * c.size + q.residual,
+                angle,
+                "identity broke at {angle}"
+            );
+            assert!(
+                q.residual.abs() <= c.size / 2.0 + f64::EPSILON,
+                "residual beyond half-click"
+            );
         }
     }
 
     #[test]
     fn quantize_exact_multiples_have_residual_exactly_zero() {
-        let c = ClickValue { size: 0.1, base: ClickBase::Mil };
+        let c = ClickValue {
+            size: 0.1,
+            base: ClickBase::Mil,
+        };
         let q = quantize_angle(0.1 * 27.0, &c);
         assert_eq!(q.clicks, 27);
         assert_eq!(q.residual, 0.0); // bit-exact, not approx
@@ -245,26 +280,41 @@ mod tests {
 
     #[test]
     fn quantize_ties_round_away_from_zero_matching_clicks_for() {
-        let c = ClickValue { size: 0.5, base: ClickBase::Mil };
-        assert_eq!(quantize_angle(0.25, &c).clicks, 1);   // f64::round: ties away from zero
+        let c = ClickValue {
+            size: 0.5,
+            base: ClickBase::Mil,
+        };
+        assert_eq!(quantize_angle(0.25, &c).clicks, 1); // f64::round: ties away from zero
         assert_eq!(quantize_angle(-0.25, &c).clicks, -1);
     }
 
     #[test]
     fn clicks_for_is_unchanged_and_delegates() {
         // Historical behavior pinned: sub-1yd guard + rounding. Values chosen off any tie.
-        let c = ClickValue { size: 0.25, base: ClickBase::Moa };
-        assert_eq!(clicks_for(10.0, 0.5, &c), 0);                       // range_yd < 1.0 guard
+        let c = ClickValue {
+            size: 0.25,
+            base: ClickBase::Moa,
+        };
+        assert_eq!(clicks_for(10.0, 0.5, &c), 0); // range_yd < 1.0 guard
         let angle = (7.2 / 300.0) * adjustment_factor(ClickBase::Moa);
-        assert_eq!(clicks_for(7.2, 300.0, &c), (angle / 0.25_f64).round() as i64);
+        assert_eq!(
+            clicks_for(7.2, 300.0, &c),
+            (angle / 0.25_f64).round() as i64
+        );
     }
 
     #[test]
     fn click_size_mil_converts_via_the_locked_factor_table() {
-        let moa = ClickValue { size: 0.25, base: ClickBase::Moa };
+        let moa = ClickValue {
+            size: 0.25,
+            base: ClickBase::Moa,
+        };
         // 0.25 MOA in mil via the LOCKED 3438 constant (MBA-724), not 3437.7467.
         assert_eq!(click_size_mil(&moa), 0.25 * 1000.0 / 3438.0);
-        let mil = ClickValue { size: 0.1, base: ClickBase::Mil };
+        let mil = ClickValue {
+            size: 0.1,
+            base: ClickBase::Mil,
+        };
         assert_eq!(click_size_mil(&mil), 0.1);
     }
 
@@ -272,24 +322,45 @@ mod tests {
     // `parse_click_value` already parses, not a structural `{size, base}` object.
     #[test]
     fn click_value_json_is_pinned_to_the_suffixed_string() {
-        let quarter_moa = ClickValue { size: 0.25, base: ClickBase::Moa };
+        let quarter_moa = ClickValue {
+            size: 0.25,
+            base: ClickBase::Moa,
+        };
         assert_eq!(serde_json::to_string(&quarter_moa).unwrap(), "\"0.25moa\"");
 
-        let tenth_mil = ClickValue { size: 0.1, base: ClickBase::Mil };
+        let tenth_mil = ClickValue {
+            size: 0.1,
+            base: ClickBase::Mil,
+        };
         assert_eq!(serde_json::to_string(&tenth_mil).unwrap(), "\"0.1mil\"");
 
         // A whole-number size prints without a trailing ".0" -- `f64`'s shortest Display.
-        let one_smoa = ClickValue { size: 1.0, base: ClickBase::Smoa };
+        let one_smoa = ClickValue {
+            size: 1.0,
+            base: ClickBase::Smoa,
+        };
         assert_eq!(serde_json::to_string(&one_smoa).unwrap(), "\"1smoa\"");
     }
 
     #[test]
     fn click_value_round_trips_through_json_including_smoa() {
         let cases = [
-            ClickValue { size: 0.1, base: ClickBase::Mil },
-            ClickValue { size: 0.25, base: ClickBase::Moa },
-            ClickValue { size: 1.0, base: ClickBase::Smoa },
-            ClickValue { size: 0.125, base: ClickBase::Smoa },
+            ClickValue {
+                size: 0.1,
+                base: ClickBase::Mil,
+            },
+            ClickValue {
+                size: 0.25,
+                base: ClickBase::Moa,
+            },
+            ClickValue {
+                size: 1.0,
+                base: ClickBase::Smoa,
+            },
+            ClickValue {
+                size: 0.125,
+                base: ClickBase::Smoa,
+            },
         ];
         for click in cases {
             let json = serde_json::to_string(&click).unwrap();
@@ -440,12 +511,18 @@ pub fn adjustment_display(
             if range_yd < 1.0 {
                 AdjustmentDisplay {
                     value: 0.0,
-                    quantized: Some(Quantized { clicks: 0, residual: 0.0 }),
+                    quantized: Some(Quantized {
+                        clicks: 0,
+                        residual: 0.0,
+                    }),
                 }
             } else {
                 let angle = (drop_for_clicks / range_yd) * adjustment_factor(c.base);
                 let q = quantize_angle(angle, &c);
-                AdjustmentDisplay { value: q.clicks as f64, quantized: Some(q) }
+                AdjustmentDisplay {
+                    value: q.clicks as f64,
+                    quantized: Some(q),
+                }
             }
         }
         None => {
@@ -459,7 +536,10 @@ pub fn adjustment_display(
             } else {
                 true_need
             };
-            AdjustmentDisplay { value: biased / cf, quantized: None }
+            AdjustmentDisplay {
+                value: biased / cf,
+                quantized: None,
+            }
         }
     }
 }
@@ -482,7 +562,14 @@ pub fn windage_adjustment_display(
     } else {
         None
     };
-    adjustment_display(drift_yd, range_yd, windage_unit, click, windage_bias_mil, windage_cf)
+    adjustment_display(
+        drift_yd,
+        range_yd,
+        windage_unit,
+        click,
+        windage_bias_mil,
+        windage_cf,
+    )
 }
 
 /// Display label for an [`AdjustmentUnit`] header/column name (MBA-1355/MBA-1410):

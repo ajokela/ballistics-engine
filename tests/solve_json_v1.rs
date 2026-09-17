@@ -4,8 +4,8 @@ use ballistics_engine::solve_json::{
     ResolvedSolveRequestV1, ResolvedSolverV1, ResolvedWindSegmentV1, ResolvedWindV1, SampleFlagV1,
     SchemaVersionV1, SolveErrorCodeV1, SolveErrorEnvelopeV1, SolveErrorLocationErrorV1,
     SolveErrorV1, SolveNoticeV1, SolveRequestV1, SolveSuccessV1, SolveSummaryV1, SuccessStatusV1,
-    TerminationReasonV1, TrajectorySampleV1, DRAG_MODEL_WIRE_NAMES_V1,
-    MAX_SOLVE_JSON_SAMPLES_V1, SOLVE_JSON_SCHEMA_VERSION_V1,
+    TerminationReasonV1, TrajectorySampleV1, DRAG_MODEL_WIRE_NAMES_V1, MAX_SOLVE_JSON_SAMPLES_V1,
+    SOLVE_JSON_SCHEMA_VERSION_V1,
 };
 use serde_json::{json, Value};
 

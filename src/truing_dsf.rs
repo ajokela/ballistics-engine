@@ -773,7 +773,7 @@ pub fn solve_for_dsf(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli_api::{TrajectoryPoint};
+    use crate::cli_api::TrajectoryPoint;
     use crate::trajectory_observation::TrajectoryTermination;
     use crate::trajectory_sampling::{TrajectoryFlag, TrajectorySample};
     use nalgebra::Vector3;
@@ -914,10 +914,9 @@ mod tests {
 
     #[test]
     fn upsert_errors_at_seventh_distinct_point_naming_the_cap() {
-        let mut table = DsfTable::from_points(
-            (0..6).map(|i| pt(0.1 + i as f64 * 0.15, 1.1)).collect(),
-        )
-        .unwrap();
+        let mut table =
+            DsfTable::from_points((0..6).map(|i| pt(0.1 + i as f64 * 0.15, 1.1)).collect())
+                .unwrap();
         assert_eq!(table.points().len(), 6);
         // Far from every existing point (nearest is 0.85, 0.15 away — outside the 0.05 tolerance).
         let err = table.upsert(pt(1.0, 1.3)).unwrap_err();
@@ -933,12 +932,22 @@ mod tests {
         let mut table = DsfTable::from_points(vec![pt(0.5, 1.1)]).unwrap();
         assert!(table.upsert(pt(1.2, 1.1)).is_err());
         assert!(table.upsert(pt(0.6, 3.0)).is_err());
-        assert_eq!(table.points().len(), 1, "invalid upsert must not mutate the table");
+        assert_eq!(
+            table.points().len(),
+            1,
+            "invalid upsert must not mutate the table"
+        );
     }
 
     // ---- apply_dsf drop-only invariant ----
 
-    fn trajectory_point(time: f64, x: f64, y: f64, z: f64, velocity_magnitude: f64) -> TrajectoryPoint {
+    fn trajectory_point(
+        time: f64,
+        x: f64,
+        y: f64,
+        z: f64,
+        velocity_magnitude: f64,
+    ) -> TrajectoryPoint {
         TrajectoryPoint {
             time,
             position: Vector3::new(x, y, z),
@@ -1011,7 +1020,14 @@ mod tests {
             // drop_m values chosen to match the drop_before values the points loop below
             // derives (los - y): 0.0, 0.03, 1.05 — so the same expected_factors apply.
             trajectory_sample(0.0, 0.0, 0.0, 1.3 * sos, 0.0, vec![]),
-            trajectory_sample(250.0, 0.03, 1.0, 0.9 * sos, 0.5, vec![TrajectoryFlag::MachTransition]),
+            trajectory_sample(
+                250.0,
+                0.03,
+                1.0,
+                0.9 * sos,
+                0.5,
+                vec![TrajectoryFlag::MachTransition],
+            ),
             trajectory_sample(500.0, 1.05, 2.0, 0.5 * sos, 1.0, vec![TrajectoryFlag::Apex]),
         ]);
         let table = DsfTable::from_points(vec![pt(0.8, 1.2), pt(1.0, 1.05)]).unwrap();
@@ -1029,8 +1045,14 @@ mod tests {
                 orig.kinetic_energy, new.kinetic_energy,
                 "energy must be byte-identical"
             );
-            assert_eq!(orig.position.x, new.position.x, "downrange must be byte-identical");
-            assert_eq!(orig.position.z, new.position.z, "windage must be byte-identical");
+            assert_eq!(
+                orig.position.x, new.position.x,
+                "downrange must be byte-identical"
+            );
+            assert_eq!(
+                orig.position.z, new.position.z,
+                "windage must be byte-identical"
+            );
         }
         // Top-level fields are untouched too — every one of them.
         assert_eq!(original.max_range, scaled.max_range);
@@ -1039,7 +1061,10 @@ mod tests {
         assert_eq!(original.impact_velocity, scaled.impact_velocity);
         assert_eq!(original.impact_energy, scaled.impact_energy);
         assert_eq!(original.projectile_mass_kg, scaled.projectile_mass_kg);
-        assert_eq!(original.line_of_sight_height_m, scaled.line_of_sight_height_m);
+        assert_eq!(
+            original.line_of_sight_height_m,
+            scaled.line_of_sight_height_m
+        );
         assert_eq!(
             original.station_speed_of_sound_mps,
             scaled.station_speed_of_sound_mps
@@ -1055,7 +1080,11 @@ mod tests {
 
         let los = original.line_of_sight_height_m;
         let mach_09_factor = 1.2 + (1.05 - 1.2) * 0.5; // mach 0.9: halfway between the two keys
-        let expected_factors = [1.0, mach_09_factor, 1.2 /* flat clamp below lowest key */];
+        let expected_factors = [
+            1.0,
+            mach_09_factor,
+            1.2, /* flat clamp below lowest key */
+        ];
         for (i, (orig, new)) in original.points.iter().zip(scaled.points.iter()).enumerate() {
             let drop_before = los - orig.position.y;
             let drop_after = los - new.position.y;
@@ -1074,7 +1103,10 @@ mod tests {
         let scaled_samples = scaled.sampled_points.as_ref().unwrap();
         assert_eq!(orig_samples.len(), scaled_samples.len());
         for (i, (orig, new)) in orig_samples.iter().zip(scaled_samples.iter()).enumerate() {
-            assert_eq!(orig.distance_m, new.distance_m, "sample {i}: distance_m must be byte-identical");
+            assert_eq!(
+                orig.distance_m, new.distance_m,
+                "sample {i}: distance_m must be byte-identical"
+            );
             assert_eq!(
                 orig.wind_drift_m, new.wind_drift_m,
                 "sample {i}: wind_drift_m must be byte-identical"
@@ -1083,9 +1115,18 @@ mod tests {
                 orig.velocity_mps, new.velocity_mps,
                 "sample {i}: velocity_mps must be byte-identical"
             );
-            assert_eq!(orig.energy_j, new.energy_j, "sample {i}: energy_j must be byte-identical");
-            assert_eq!(orig.time_s, new.time_s, "sample {i}: time_s must be byte-identical");
-            assert_eq!(orig.flags, new.flags, "sample {i}: flags must be byte-identical");
+            assert_eq!(
+                orig.energy_j, new.energy_j,
+                "sample {i}: energy_j must be byte-identical"
+            );
+            assert_eq!(
+                orig.time_s, new.time_s,
+                "sample {i}: time_s must be byte-identical"
+            );
+            assert_eq!(
+                orig.flags, new.flags,
+                "sample {i}: flags must be byte-identical"
+            );
 
             let expected_drop = orig.drop_m * expected_factors[i];
             assert!(

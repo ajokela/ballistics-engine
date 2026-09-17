@@ -323,13 +323,9 @@ impl WindShearWindSock {
     }
 }
 
-fn profile_boundary_layer_speed_ratio(
-    profile: &WindShearProfile,
-    height_rel_launch_m: f64,
-) -> f64 {
+fn profile_boundary_layer_speed_ratio(profile: &WindShearProfile, height_rel_launch_m: f64) -> f64 {
     let minimum_height_m = profile.roughness_length.max(0.0) * 1.000_1;
-    let height_agl_m =
-        (height_rel_launch_m + APPROX_MUZZLE_HEIGHT_AGL_M).max(minimum_height_m);
+    let height_agl_m = (height_rel_launch_m + APPROX_MUZZLE_HEIGHT_AGL_M).max(minimum_height_m);
     let sampled_speed_mps = profile.get_wind_at_altitude(height_agl_m).norm();
     let reference_speed_mps = profile.surface_wind.speed_mps.abs().max(1e-9);
 
@@ -356,8 +352,7 @@ pub fn boundary_layer_speed_ratio(height_rel_launch_m: f64, model: WindShearMode
     const Z0: f64 = 0.03; // surface roughness length (short grass)
     const H_REF: f64 = 10.0; // standard meteorological reference height of the input wind
 
-    let height_agl =
-        (height_rel_launch_m + APPROX_MUZZLE_HEIGHT_AGL_M).max(Z0 * 1.000_1);
+    let height_agl = (height_rel_launch_m + APPROX_MUZZLE_HEIGHT_AGL_M).max(Z0 * 1.000_1);
     let ratio = match model {
         WindShearModel::PowerLaw => (height_agl / H_REF).powf(1.0 / 7.0),
         WindShearModel::Logarithmic => (height_agl / Z0).ln() / (H_REF / Z0).ln(),
@@ -699,17 +694,10 @@ mod tests {
                 },
                 ..Default::default()
             };
-            let sock = WindShearWindSock::new(
-                vec![(10.0, 90.0, 1_000.0)],
-                Some(profile),
-            );
+            let sock = WindShearWindSock::new(vec![(10.0, 90.0, 1_000.0)], Some(profile));
 
             for height_rel_launch_m in [-1.0, 0.0, 1.0, 5.0] {
-                let wind = sock.vector_for_position(Vector3::new(
-                    100.0,
-                    height_rel_launch_m,
-                    0.0,
-                ));
+                let wind = sock.vector_for_position(Vector3::new(100.0, height_rel_launch_m, 0.0));
                 assert!(
                     (wind.norm() - 10.0).abs() < 1e-12,
                     "{model:?} flat-fire wind at relative height {height_rel_launch_m} m must retain the operative 10 m/s input, got {wind:?}"

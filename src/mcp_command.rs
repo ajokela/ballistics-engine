@@ -210,7 +210,10 @@ fn write_message<W: Write>(writer: &mut W, value: &Value) -> bool {
             .to_vec()
     });
     payload.push(b'\n');
-    writer.write_all(&payload).and_then(|()| writer.flush()).is_ok()
+    writer
+        .write_all(&payload)
+        .and_then(|()| writer.flush())
+        .is_ok()
 }
 
 /// A JSON-RPC protocol-level error: an unknown method, malformed params, or a contained panic.
@@ -289,13 +292,17 @@ fn dispatch_line(line: &str, initialized: &mut bool) -> Option<Value> {
         Value::Number(n) => {
             n.is_i64()
                 || n.is_u64()
-                || n.as_f64().is_some_and(|f| f.is_finite() && f.fract() == 0.0)
+                || n.as_f64()
+                    .is_some_and(|f| f.is_finite() && f.fract() == 0.0)
         }
         _ => false,
     };
 
     let jsonrpc_ok = object.get("jsonrpc").and_then(Value::as_str) == Some("2.0");
-    let method = object.get("method").and_then(Value::as_str).map(str::to_string);
+    let method = object
+        .get("method")
+        .and_then(Value::as_str)
+        .map(str::to_string);
 
     if !jsonrpc_ok || method.is_none() || !id_type_ok {
         let response_id = if id_type_ok { id_value } else { Value::Null };
@@ -349,7 +356,9 @@ where
 {
     match catch_unwind(AssertUnwindSafe(call)) {
         Ok(Ok(result)) => success_response(id, result),
-        Ok(Err(rpc_error)) => error_response(id, rpc_error.code, &rpc_error.message, rpc_error.data),
+        Ok(Err(rpc_error)) => {
+            error_response(id, rpc_error.code, &rpc_error.message, rpc_error.data)
+        }
         Err(_) => error_response(id, JSON_RPC_INTERNAL_ERROR, "internal error", None),
     }
 }
@@ -577,12 +586,12 @@ fn solve_input_schema() -> Value {
 fn handle_tools_call(params: Option<&Value>) -> Result<Value, RpcError> {
     let params = params
         .ok_or_else(|| RpcError::new(JSON_RPC_INVALID_PARAMS, "tools/call requires params"))?;
-    let name = params
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            RpcError::new(JSON_RPC_INVALID_PARAMS, "tools/call params.name must be a string")
-        })?;
+    let name = params.get("name").and_then(Value::as_str).ok_or_else(|| {
+        RpcError::new(
+            JSON_RPC_INVALID_PARAMS,
+            "tools/call params.name must be a string",
+        )
+    })?;
     let arguments = params
         .get("arguments")
         .cloned()
@@ -834,7 +843,10 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"engine_info","arguments":{"foo":1}}}"#,
         );
         assert_eq!(response["error"]["code"], JSON_RPC_INVALID_PARAMS);
-        assert!(response["error"]["message"].as_str().unwrap().contains("foo"));
+        assert!(response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("foo"));
     }
 
     #[test]
@@ -900,7 +912,10 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2099-01-01"}}"#,
         );
         assert_eq!(response["result"]["protocolVersion"], "2099-01-01");
-        assert_eq!(response["result"]["serverInfo"]["name"], "ballistics-engine");
+        assert_eq!(
+            response["result"]["serverInfo"]["name"],
+            "ballistics-engine"
+        );
         assert_eq!(
             response["result"]["serverInfo"]["version"],
             env!("CARGO_PKG_VERSION")
@@ -930,17 +945,15 @@ mod tests {
             assert_eq!(tool["inputSchema"]["type"], "object");
         }
         assert_eq!(
-            tools[0]["inputSchema"]["properties"]["projectile"]["properties"]["drag_model"]
-                ["enum"],
+            tools[0]["inputSchema"]["properties"]["projectile"]["properties"]["drag_model"]["enum"],
             json!(DRAG_MODEL_WIRE_NAMES_V1)
         );
     }
 
     #[test]
     fn tools_call_unknown_tool_is_invalid_params() {
-        let response = dispatch(
-            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nope"}}"#,
-        );
+        let response =
+            dispatch(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nope"}}"#);
         assert_eq!(response["error"]["code"], JSON_RPC_INVALID_PARAMS);
     }
 

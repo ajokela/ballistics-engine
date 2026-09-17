@@ -183,7 +183,10 @@ fn the_jump_moves_the_drop_and_only_the_drop() {
 #[test]
 fn a_headwind_gives_a_present_zero_rather_than_an_absent_jump() {
     let headwind = request_json(r#""aerodynamic_jump": true"#, STATED_TWIST, STATED_LENGTH)
-        .replace("\"direction_from_rad\": 1.5707963267948966", "\"direction_from_rad\": 0.0");
+        .replace(
+            "\"direction_from_rad\": 1.5707963267948966",
+            "\"direction_from_rad\": 0.0",
+        );
     let response = solve(&headwind);
 
     let reported = response
@@ -226,7 +229,10 @@ fn enabling_it_without_twist_warns_that_the_barrel_was_assumed() {
              got {:?}",
             response.warnings
         );
-        assert_eq!(assumed[0].path.as_deref(), Some("$.effects.aerodynamic_jump"));
+        assert_eq!(
+            assumed[0].path.as_deref(),
+            Some("$.effects.aerodynamic_jump")
+        );
 
         // The point of the warning: the effect is NOT disabled by the omission. It produces a
         // confident number for a barrel the request never described.

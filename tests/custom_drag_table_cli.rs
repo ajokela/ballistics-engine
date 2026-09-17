@@ -301,7 +301,9 @@ fn cli_cd_scale_out_of_range_warns_once_but_still_solves() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    let occurrences = stderr.matches("far outside the typical truing range").count();
+    let occurrences = stderr
+        .matches("far outside the typical truing range")
+        .count();
     assert_eq!(
         occurrences, 1,
         "expected exactly one out-of-range warning, got {occurrences} in stderr:\n{stderr}"

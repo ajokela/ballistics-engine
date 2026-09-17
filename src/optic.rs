@@ -344,7 +344,11 @@ impl OpticProfile {
         }
 
         if let Some(travel) = &self.elevation_travel {
-            validate_travel("elevation_travel.down_mil", "elevation_travel.up_mil", travel)?;
+            validate_travel(
+                "elevation_travel.down_mil",
+                "elevation_travel.up_mil",
+                travel,
+            )?;
         }
         if let Some(travel) = &self.windage_travel {
             validate_travel("windage_travel.down_mil", "windage_travel.up_mil", travel)?;
@@ -713,7 +717,10 @@ fn quantize_and_clamp(
     travel: Option<&TravelLimits>,
 ) -> (i64, f64, Option<LimitViolation>) {
     let corr_dial = corr_true / cf;
-    let synthetic = ClickValue { size: click_mil, base: ClickBase::Mil };
+    let synthetic = ClickValue {
+        size: click_mil,
+        base: ClickBase::Mil,
+    };
     let target = quantize_angle(corr_dial, &synthetic).clicks;
     let violation = match travel {
         None if target == 0 => None,
@@ -770,7 +777,11 @@ fn check_hold_bounds(
     if hold_true_mil == 0.0 {
         return None;
     }
-    let directional_bound = if hold_true_mil > 0.0 { bound_positive } else { bound_negative };
+    let directional_bound = if hold_true_mil > 0.0 {
+        bound_positive
+    } else {
+        bound_negative
+    };
     let effective_bound = match (directional_bound, max_hold_mil) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (Some(a), None) => Some(a),
@@ -855,7 +866,14 @@ fn compute_axis(
     let (target_clicks, _corr_dial, travel_violation) =
         quantize_and_clamp(axis, corr_true, click_mil, cf, travel);
     let state_clicks = state_mil.map_or(0, |mil| {
-        quantize_angle(mil, &ClickValue { size: click_mil, base: ClickBase::Mil }).clicks
+        quantize_angle(
+            mil,
+            &ClickValue {
+                size: click_mil,
+                base: ClickBase::Mil,
+            },
+        )
+        .clicks
     });
     AxisComputation {
         axis,
@@ -1002,7 +1020,11 @@ fn preference_rank(strategy: Strategy, prefer_hold: bool) -> u8 {
         Strategy::Hybrid => 1,
         Strategy::HoldAll => 2,
     };
-    if prefer_hold { 2 - dial_first } else { dial_first }
+    if prefer_hold {
+        2 - dial_first
+    } else {
+        dial_first
+    }
 }
 
 /// `Strategy`'s own declaration order (`DialAll, HoldAll, Hybrid`), the final ranking
@@ -1062,7 +1084,12 @@ pub fn plan_corrections(
     }
 
     let (hold_up, hold_down, hold_left, hold_right) = match &optic.reticle_hold_bounds {
-        Some(b) => (Some(b.up_mil), Some(b.down_mil), Some(b.left_mil), Some(b.right_mil)),
+        Some(b) => (
+            Some(b.up_mil),
+            Some(b.down_mil),
+            Some(b.left_mil),
+            Some(b.right_mil),
+        ),
         None => (None, None, None, None),
     };
 
@@ -1108,7 +1135,10 @@ pub fn plan_corrections(
     plans.sort_by(|a, b| {
         (!a.feasible)
             .cmp(&!b.feasible)
-            .then_with(|| a.residual_linear_at_range_m.total_cmp(&b.residual_linear_at_range_m))
+            .then_with(|| {
+                a.residual_linear_at_range_m
+                    .total_cmp(&b.residual_linear_at_range_m)
+            })
             .then_with(|| {
                 preference_rank(a.strategy, prefs.prefer_hold)
                     .cmp(&preference_rank(b.strategy, prefs.prefer_hold))
@@ -1151,13 +1181,28 @@ mod tests {
     /// dialed to zero on both axes, and modest hold bounds beyond the turrets' own range.
     fn baseline_profile() -> OpticProfile {
         OpticProfile {
-            elevation_click: ClickValue { size: 0.1, base: ClickBase::Mil },
-            windage_click: ClickValue { size: 0.1, base: ClickBase::Mil },
+            elevation_click: ClickValue {
+                size: 0.1,
+                base: ClickBase::Mil,
+            },
+            windage_click: ClickValue {
+                size: 0.1,
+                base: ClickBase::Mil,
+            },
             clicks_per_revolution: Some(10),
             zero_stop: true,
-            elevation_travel: Some(TravelLimits { down_mil: 0.4, up_mil: 28.0 }),
-            windage_travel: Some(TravelLimits { down_mil: 6.0, up_mil: 6.0 }),
-            turret_state: Some(TurretState { elevation_mil: 0.0, windage_mil: 0.0 }),
+            elevation_travel: Some(TravelLimits {
+                down_mil: 0.4,
+                up_mil: 28.0,
+            }),
+            windage_travel: Some(TravelLimits {
+                down_mil: 6.0,
+                up_mil: 6.0,
+            }),
+            turret_state: Some(TurretState {
+                elevation_mil: 0.0,
+                windage_mil: 0.0,
+            }),
             reticle_hold_bounds: Some(HoldBounds {
                 up_mil: 5.0,
                 down_mil: 10.0,
@@ -1175,7 +1220,10 @@ mod tests {
     #[test]
     fn validate_rejects_negative_travel() {
         let mut down_negative = baseline_profile();
-        down_negative.elevation_travel = Some(TravelLimits { down_mil: -0.4, up_mil: 28.0 });
+        down_negative.elevation_travel = Some(TravelLimits {
+            down_mil: -0.4,
+            up_mil: 28.0,
+        });
         assert!(
             matches!(
                 down_negative.validate(),
@@ -1187,7 +1235,10 @@ mod tests {
         );
 
         let mut up_negative = baseline_profile();
-        up_negative.windage_travel = Some(TravelLimits { down_mil: 6.0, up_mil: -6.0 });
+        up_negative.windage_travel = Some(TravelLimits {
+            down_mil: 6.0,
+            up_mil: -6.0,
+        });
         assert!(
             matches!(
                 up_negative.validate(),
@@ -1208,7 +1259,10 @@ mod tests {
         assert!(
             matches!(
                 hold_negative.validate(),
-                Err(OpticError::NegativeLimit { field: "reticle_hold_bounds.up_mil", .. })
+                Err(OpticError::NegativeLimit {
+                    field: "reticle_hold_bounds.up_mil",
+                    ..
+                })
             ),
             "{:?}",
             hold_negative.validate()
@@ -1275,8 +1329,12 @@ mod tests {
     fn validate_rejects_non_finite_fields() {
         type Mutator = fn(&mut OpticProfile);
         let cases: &[(&str, Mutator)] = &[
-            ("elevation_click.size", |p| p.elevation_click.size = f64::NAN),
-            ("windage_click.size", |p| p.windage_click.size = f64::INFINITY),
+            ("elevation_click.size", |p| {
+                p.elevation_click.size = f64::NAN
+            }),
+            ("windage_click.size", |p| {
+                p.windage_click.size = f64::INFINITY
+            }),
             ("elevation_travel.down_mil", |p| {
                 p.elevation_travel.as_mut().unwrap().down_mil = f64::NAN
             }),
@@ -1323,7 +1381,10 @@ mod tests {
     #[test]
     fn validate_rejects_turret_state_outside_travel() {
         let mut above_up = baseline_profile();
-        above_up.turret_state = Some(TurretState { elevation_mil: 28.1, windage_mil: 0.0 });
+        above_up.turret_state = Some(TurretState {
+            elevation_mil: 28.1,
+            windage_mil: 0.0,
+        });
         assert!(
             matches!(
                 above_up.validate(),
@@ -1339,28 +1400,46 @@ mod tests {
         );
 
         let mut below_down = baseline_profile();
-        below_down.turret_state = Some(TurretState { elevation_mil: -0.5, windage_mil: 0.0 });
+        below_down.turret_state = Some(TurretState {
+            elevation_mil: -0.5,
+            windage_mil: 0.0,
+        });
         assert!(matches!(
             below_down.validate(),
-            Err(OpticError::StateOutsideTravel { axis: "elevation", .. })
+            Err(OpticError::StateOutsideTravel {
+                axis: "elevation",
+                ..
+            })
         ));
 
         let mut windage_out = baseline_profile();
-        windage_out.turret_state = Some(TurretState { elevation_mil: 0.0, windage_mil: 6.1 });
+        windage_out.turret_state = Some(TurretState {
+            elevation_mil: 0.0,
+            windage_mil: 6.1,
+        });
         assert!(matches!(
             windage_out.validate(),
-            Err(OpticError::StateOutsideTravel { axis: "windage", .. })
+            Err(OpticError::StateOutsideTravel {
+                axis: "windage",
+                ..
+            })
         ));
 
         // Exactly at either boundary is accepted -- a closed interval.
         let mut at_boundary = baseline_profile();
-        at_boundary.turret_state = Some(TurretState { elevation_mil: 28.0, windage_mil: -6.0 });
+        at_boundary.turret_state = Some(TurretState {
+            elevation_mil: 28.0,
+            windage_mil: -6.0,
+        });
         assert_eq!(at_boundary.validate(), Ok(()));
 
         // No declared travel on an axis means nothing to be "outside" on that axis.
         let mut untethered = baseline_profile();
         untethered.elevation_travel = None;
-        untethered.turret_state = Some(TurretState { elevation_mil: 999.0, windage_mil: 0.0 });
+        untethered.turret_state = Some(TurretState {
+            elevation_mil: 999.0,
+            windage_mil: 0.0,
+        });
         assert_eq!(untethered.validate(), Ok(()));
     }
 
@@ -1494,13 +1573,28 @@ mod plan_corrections_tests {
     /// so this module doesn't depend on `tests`' private helper visibility.
     fn baseline_profile() -> OpticProfile {
         OpticProfile {
-            elevation_click: ClickValue { size: 0.1, base: ClickBase::Mil },
-            windage_click: ClickValue { size: 0.1, base: ClickBase::Mil },
+            elevation_click: ClickValue {
+                size: 0.1,
+                base: ClickBase::Mil,
+            },
+            windage_click: ClickValue {
+                size: 0.1,
+                base: ClickBase::Mil,
+            },
             clicks_per_revolution: Some(10),
             zero_stop: true,
-            elevation_travel: Some(TravelLimits { down_mil: 0.4, up_mil: 28.0 }),
-            windage_travel: Some(TravelLimits { down_mil: 6.0, up_mil: 6.0 }),
-            turret_state: Some(TurretState { elevation_mil: 0.0, windage_mil: 0.0 }),
+            elevation_travel: Some(TravelLimits {
+                down_mil: 0.4,
+                up_mil: 28.0,
+            }),
+            windage_travel: Some(TravelLimits {
+                down_mil: 6.0,
+                up_mil: 6.0,
+            }),
+            turret_state: Some(TurretState {
+                elevation_mil: 0.0,
+                windage_mil: 0.0,
+            }),
             reticle_hold_bounds: Some(HoldBounds {
                 up_mil: 5.0,
                 down_mil: 10.0,
@@ -1532,14 +1626,23 @@ mod plan_corrections_tests {
     // only achievable this way.
     #[test]
     fn exact_click_dope_has_residual_exactly_zero() {
-        let corr = AngularCorrection { elevation_mil: 23.0 * 0.1, windage_mil: 0.0 };
+        let corr = AngularCorrection {
+            elevation_mil: 23.0 * 0.1,
+            windage_mil: 0.0,
+        };
         let optic = baseline_profile();
         let report =
             plan_corrections(corr, &optic, 600.0, 1.0, 1.0, &Preferences::default()).unwrap();
         let dial_all = plan_for(Strategy::DialAll, &report);
         assert_eq!(dial_all.instructions[0].target_clicks_from_zero, 23);
-        assert_eq!(dial_all.instructions[0].residual_mil, 0.0, "must be bit-exact zero");
-        assert_eq!(dial_all.instructions[0].residual_mil.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(
+            dial_all.instructions[0].residual_mil, 0.0,
+            "must be bit-exact zero"
+        );
+        assert_eq!(
+            dial_all.instructions[0].residual_mil.to_bits(),
+            0.0_f64.to_bits()
+        );
         assert!(dial_all.feasible, "{dial_all:?}");
         assert!(dial_all.limits_hit.is_empty(), "{dial_all:?}");
     }
@@ -1553,7 +1656,10 @@ mod plan_corrections_tests {
     // = |residual| / 1000 * 600 = 0.023999999999999754 (~0.024, within 1e-9).
     #[test]
     fn fractional_click_reports_rounding_and_linear_error() {
-        let corr = AngularCorrection { elevation_mil: 2.34, windage_mil: 0.0 };
+        let corr = AngularCorrection {
+            elevation_mil: 2.34,
+            windage_mil: 0.0,
+        };
         let optic = baseline_profile();
         let report =
             plan_corrections(corr, &optic, 600.0, 1.0, 1.0, &Preferences::default()).unwrap();
@@ -1588,14 +1694,20 @@ mod plan_corrections_tests {
     // Spec §7: "MIL and MOA produce physically equivalent results."
     #[test]
     fn mil_and_moa_optics_are_physically_equivalent() {
-        let corr = AngularCorrection { elevation_mil: 2.34, windage_mil: 0.0 };
+        let corr = AngularCorrection {
+            elevation_mil: 2.34,
+            windage_mil: 0.0,
+        };
         let prefs = Preferences::default();
 
         let mil_optic = baseline_profile();
         let mil_report = plan_corrections(corr, &mil_optic, 100.0, 1.0, 1.0, &prefs).unwrap();
 
         let mut moa_optic = baseline_profile();
-        moa_optic.elevation_click = ClickValue { size: 0.25, base: ClickBase::Moa };
+        moa_optic.elevation_click = ClickValue {
+            size: 0.25,
+            base: ClickBase::Moa,
+        };
         let moa_report = plan_corrections(corr, &moa_optic, 100.0, 1.0, 1.0, &prefs).unwrap();
 
         for (label, report, click) in [
@@ -1611,7 +1723,10 @@ mod plan_corrections_tests {
                 e.hold_mil,
                 corr.elevation_mil
             );
-            assert_eq!(e.residual_mil, 0.0, "{label}: Hybrid residual must be bit-exact zero");
+            assert_eq!(
+                e.residual_mil, 0.0,
+                "{label}: Hybrid residual must be bit-exact zero"
+            );
 
             let dial_all = plan_for(Strategy::DialAll, report);
             let click_mil = click_size_mil(click);
@@ -1635,14 +1750,20 @@ mod plan_corrections_tests {
     // -- see this task's required fault-injection verification.
     #[test]
     fn cf_dial_space_worked_example() {
-        let corr = AngularCorrection { elevation_mil: 5.0, windage_mil: 0.0 };
+        let corr = AngularCorrection {
+            elevation_mil: 5.0,
+            windage_mil: 0.0,
+        };
         let optic = baseline_profile();
         let report =
             plan_corrections(corr, &optic, 100.0, 0.98, 1.0, &Preferences::default()).unwrap();
 
         let dial_all = plan_for(Strategy::DialAll, &report);
         let e = &dial_all.instructions[0];
-        assert_eq!(e.target_clicks_from_zero, 51, "51 clicks: 5.0/0.98 = 5.10204... -> round");
+        assert_eq!(
+            e.target_clicks_from_zero, 51,
+            "51 clicks: 5.0/0.98 = 5.10204... -> round"
+        );
         assert!(
             (e.dial_mil_true - 4.998).abs() < 1e-12,
             "dial_mil_true = {} (expected 51*0.1*0.98 = 4.998)",
@@ -1657,7 +1778,10 @@ mod plan_corrections_tests {
             "hybrid hold_mil = {} (expected 5.0 - 4.998 = 0.002)",
             eh.hold_mil
         );
-        assert_eq!(eh.residual_mil, 0.0, "Hybrid residual must be bit-exact zero");
+        assert_eq!(
+            eh.residual_mil, 0.0,
+            "Hybrid residual must be bit-exact zero"
+        );
         assert!(hybrid.feasible, "{hybrid:?}");
     }
 
@@ -1671,7 +1795,10 @@ mod plan_corrections_tests {
         // --- 27 clicks: end_revolution == Some((2, 7)) ---
         // corr constructed as 27.0 * 0.1 for the same bit-exactness reason as the
         // exact-click test above.
-        let up_corr = AngularCorrection { elevation_mil: 27.0 * 0.1, windage_mil: 0.0 };
+        let up_corr = AngularCorrection {
+            elevation_mil: 27.0 * 0.1,
+            windage_mil: 0.0,
+        };
         let up_report = plan_corrections(up_corr, &optic, 100.0, 1.0, 1.0, &prefs).unwrap();
         let dial_all = plan_for(Strategy::DialAll, &up_report);
         assert_eq!(dial_all.instructions[0].target_clicks_from_zero, 27);
@@ -1679,36 +1806,58 @@ mod plan_corrections_tests {
         assert!(dial_all.feasible, "{dial_all:?}");
 
         // --- down 1.0 mil needs -10 clicks; only 0.4 mil (4 clicks) of down travel ---
-        let down_corr = AngularCorrection { elevation_mil: -1.0, windage_mil: 0.0 };
+        let down_corr = AngularCorrection {
+            elevation_mil: -1.0,
+            windage_mil: 0.0,
+        };
         let down_report = plan_corrections(down_corr, &optic, 100.0, 1.0, 1.0, &prefs).unwrap();
 
         let dial_all = plan_for(Strategy::DialAll, &down_report);
         let e = &dial_all.instructions[0];
-        assert_eq!(e.target_clicks_from_zero, -4, "clamped to the 0.4 mil / 0.1 mil = 4 clicks available");
-        assert!(!dial_all.feasible, "DialAll must be infeasible when travel-clamped");
+        assert_eq!(
+            e.target_clicks_from_zero, -4,
+            "clamped to the 0.4 mil / 0.1 mil = 4 clicks available"
+        );
+        assert!(
+            !dial_all.feasible,
+            "DialAll must be infeasible when travel-clamped"
+        );
         assert_eq!(dial_all.limits_hit.len(), 1);
-        assert!(matches!(
-            dial_all.limits_hit[0],
-            LimitViolation {
-                axis: Axis::Elevation,
-                kind: LimitKind::TravelExceeded,
-                needed_mil,
-                available_mil: Some(available_mil),
-            } if (needed_mil - (-1.0)).abs() < 1e-12 && available_mil == 0.4
-        ), "{:?}", dial_all.limits_hit[0]);
+        assert!(
+            matches!(
+                dial_all.limits_hit[0],
+                LimitViolation {
+                    axis: Axis::Elevation,
+                    kind: LimitKind::TravelExceeded,
+                    needed_mil,
+                    available_mil: Some(available_mil),
+                } if (needed_mil - (-1.0)).abs() < 1e-12 && available_mil == 0.4
+            ),
+            "{:?}",
+            dial_all.limits_hit[0]
+        );
 
         let hybrid = plan_for(Strategy::Hybrid, &down_report);
         let eh = &hybrid.instructions[0];
-        assert_eq!(eh.target_clicks_from_zero, -4, "Hybrid dials the same clamped -4 clicks");
+        assert_eq!(
+            eh.target_clicks_from_zero, -4,
+            "Hybrid dials the same clamped -4 clicks"
+        );
         assert!(
             eh.hold_mil.is_sign_negative() && (eh.hold_mil - (-0.6)).abs() < 1e-9,
             "Hybrid holds the rest: hold_mil = {} (expected -0.6)",
             eh.hold_mil
         );
-        assert_eq!(eh.residual_mil, 0.0, "Hybrid residual must be bit-exact zero even when clamped");
+        assert_eq!(
+            eh.residual_mil, 0.0,
+            "Hybrid residual must be bit-exact zero even when clamped"
+        );
         // The travel violation is still recorded on Hybrid (disclosure)...
         assert!(
-            hybrid.limits_hit.iter().any(|v| matches!(v.kind, LimitKind::TravelExceeded)),
+            hybrid
+                .limits_hit
+                .iter()
+                .any(|v| matches!(v.kind, LimitKind::TravelExceeded)),
             "{:?}",
             hybrid.limits_hit
         );
@@ -1729,7 +1878,10 @@ mod plan_corrections_tests {
     #[test]
     fn infeasible_is_reported_never_silently_clamped() {
         let optic = baseline_profile(); // down travel 0.4 mil
-        let corr = AngularCorrection { elevation_mil: -1.0, windage_mil: 0.0 };
+        let corr = AngularCorrection {
+            elevation_mil: -1.0,
+            windage_mil: 0.0,
+        };
         let report =
             plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &Preferences::default()).unwrap();
 
@@ -1789,11 +1941,16 @@ mod plan_corrections_tests {
         // 0.0 by construction regardless of the correction. This isolates the preference
         // tiebreak completely: nothing here is decided by the primary residual key.
         let optic = baseline_profile();
-        let corr = AngularCorrection { elevation_mil: 23.0 * 0.1, windage_mil: 0.0 };
+        let corr = AngularCorrection {
+            elevation_mil: 23.0 * 0.1,
+            windage_mil: 0.0,
+        };
 
-        let prefer_dial = Preferences { prefer_hold: false, max_hold_mil: None };
-        let report_dial =
-            plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &prefer_dial).unwrap();
+        let prefer_dial = Preferences {
+            prefer_hold: false,
+            max_hold_mil: None,
+        };
+        let report_dial = plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &prefer_dial).unwrap();
         let strategies: Vec<Strategy> = report_dial.plans.iter().map(|p| p.strategy).collect();
         assert_eq!(
             strategies,
@@ -1801,9 +1958,11 @@ mod plan_corrections_tests {
             "prefer_hold=false must rank DialAll < Hybrid < HoldAll when fully tied"
         );
 
-        let prefer_hold = Preferences { prefer_hold: true, max_hold_mil: None };
-        let report_hold =
-            plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &prefer_hold).unwrap();
+        let prefer_hold = Preferences {
+            prefer_hold: true,
+            max_hold_mil: None,
+        };
+        let report_hold = plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &prefer_hold).unwrap();
         let strategies: Vec<Strategy> = report_hold.plans.iter().map(|p| p.strategy).collect();
         assert_eq!(
             strategies,
@@ -1815,10 +1974,12 @@ mod plan_corrections_tests {
         // HoldAll/Hybrid's (always exactly 0.0), so the PRIMARY ascending-residual key must
         // place DialAll last regardless of preference -- preference only ever breaks ties,
         // it never overrides a genuine residual difference.
-        let frac_corr = AngularCorrection { elevation_mil: 2.34, windage_mil: 0.0 };
+        let frac_corr = AngularCorrection {
+            elevation_mil: 2.34,
+            windage_mil: 0.0,
+        };
         for prefs in [prefer_dial, prefer_hold] {
-            let report =
-                plan_corrections(frac_corr, &optic, 100.0, 1.0, 1.0, &prefs).unwrap();
+            let report = plan_corrections(frac_corr, &optic, 100.0, 1.0, 1.0, &prefs).unwrap();
             assert_eq!(
                 report.plans.last().unwrap().strategy,
                 Strategy::DialAll,
@@ -1845,7 +2006,10 @@ mod plan_corrections_tests {
     #[test]
     fn report_carries_method_and_all_five_assumptions() {
         let optic = baseline_profile();
-        let corr = AngularCorrection { elevation_mil: 2.3, windage_mil: 0.0 };
+        let corr = AngularCorrection {
+            elevation_mil: 2.3,
+            windage_mil: 0.0,
+        };
         let report =
             plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &Preferences::default()).unwrap();
 
@@ -1878,7 +2042,10 @@ mod plan_corrections_tests {
     // target_clicks_from_zero.
     #[test]
     fn turret_state_shifts_delta_but_not_target() {
-        let corr = AngularCorrection { elevation_mil: 23.0 * 0.1, windage_mil: 0.0 };
+        let corr = AngularCorrection {
+            elevation_mil: 23.0 * 0.1,
+            windage_mil: 0.0,
+        };
         let prefs = Preferences::default();
 
         let zeroed = baseline_profile(); // turret_state elevation_mil: 0.0
@@ -1886,13 +2053,18 @@ mod plan_corrections_tests {
         let dial_zeroed = plan_for(Strategy::DialAll, &report_zeroed);
 
         let mut dialed = baseline_profile();
-        dialed.turret_state = Some(TurretState { elevation_mil: 1.0, windage_mil: 0.0 });
+        dialed.turret_state = Some(TurretState {
+            elevation_mil: 1.0,
+            windage_mil: 0.0,
+        });
         let report_dialed = plan_corrections(corr, &dialed, 100.0, 1.0, 1.0, &prefs).unwrap();
         let dial_dialed = plan_for(Strategy::DialAll, &report_dialed);
 
         assert_eq!(dial_zeroed.instructions[0].target_clicks_from_zero, 23);
-        assert_eq!(dial_dialed.instructions[0].target_clicks_from_zero, 23,
-            "target_clicks_from_zero must NOT move just because turret_state changed");
+        assert_eq!(
+            dial_dialed.instructions[0].target_clicks_from_zero, 23,
+            "target_clicks_from_zero must NOT move just because turret_state changed"
+        );
         assert_eq!(dial_zeroed.instructions[0].delta_clicks, 23);
         assert_eq!(
             dial_dialed.instructions[0].delta_clicks, 13,
@@ -1926,7 +2098,10 @@ mod plan_corrections_tests {
     fn missing_travel_data_is_disclosed_and_gates_dial_all_but_not_hybrid() {
         let mut optic = baseline_profile();
         optic.elevation_travel = None; // no travel data at all on this axis
-        let corr = AngularCorrection { elevation_mil: 2.34, windage_mil: 0.0 };
+        let corr = AngularCorrection {
+            elevation_mil: 2.34,
+            windage_mil: 0.0,
+        };
         let report =
             plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &Preferences::default()).unwrap();
 
@@ -1934,16 +2109,27 @@ mod plan_corrections_tests {
         assert!(
             dial_all.limits_hit.iter().any(|v| matches!(
                 v,
-                LimitViolation { axis: Axis::Elevation, kind: LimitKind::NoTravelData, available_mil: None, .. }
+                LimitViolation {
+                    axis: Axis::Elevation,
+                    kind: LimitKind::NoTravelData,
+                    available_mil: None,
+                    ..
+                }
             )),
             "{:?}",
             dial_all.limits_hit
         );
-        assert!(!dial_all.feasible, "DialAll cannot affirm feasibility without travel data");
+        assert!(
+            !dial_all.feasible,
+            "DialAll cannot affirm feasibility without travel data"
+        );
 
         let hybrid = plan_for(Strategy::Hybrid, &report);
         assert!(
-            hybrid.limits_hit.iter().any(|v| matches!(v.kind, LimitKind::NoTravelData)),
+            hybrid
+                .limits_hit
+                .iter()
+                .any(|v| matches!(v.kind, LimitKind::NoTravelData)),
             "Hybrid still discloses the missing data: {:?}",
             hybrid.limits_hit
         );
@@ -1954,12 +2140,18 @@ mod plan_corrections_tests {
         );
 
         // A trivial (zero) correction needs no travel data at all, so nothing is disclosed.
-        let zero_corr = AngularCorrection { elevation_mil: 0.0, windage_mil: 0.0 };
+        let zero_corr = AngularCorrection {
+            elevation_mil: 0.0,
+            windage_mil: 0.0,
+        };
         let zero_report =
-            plan_corrections(zero_corr, &optic, 100.0, 1.0, 1.0, &Preferences::default())
-                .unwrap();
+            plan_corrections(zero_corr, &optic, 100.0, 1.0, 1.0, &Preferences::default()).unwrap();
         let zero_dial_all = plan_for(Strategy::DialAll, &zero_report);
-        assert!(zero_dial_all.limits_hit.is_empty(), "{:?}", zero_dial_all.limits_hit);
+        assert!(
+            zero_dial_all.limits_hit.is_empty(),
+            "{:?}",
+            zero_dial_all.limits_hit
+        );
         assert!(zero_dial_all.feasible);
     }
 
@@ -1967,7 +2159,10 @@ mod plan_corrections_tests {
     fn missing_hold_bound_data_is_disclosed_and_gates_hold_all_and_hybrid() {
         let mut optic = baseline_profile();
         optic.reticle_hold_bounds = None; // no hold bound data at all
-        let corr = AngularCorrection { elevation_mil: 2.34, windage_mil: 0.0 };
+        let corr = AngularCorrection {
+            elevation_mil: 2.34,
+            windage_mil: 0.0,
+        };
         let prefs = Preferences::default(); // max_hold_mil also None
         let report = plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &prefs).unwrap();
 
@@ -1975,7 +2170,12 @@ mod plan_corrections_tests {
         assert!(
             hold_all.limits_hit.iter().any(|v| matches!(
                 v,
-                LimitViolation { axis: Axis::Elevation, kind: LimitKind::NoHoldBoundData, available_mil: None, .. }
+                LimitViolation {
+                    axis: Axis::Elevation,
+                    kind: LimitKind::NoHoldBoundData,
+                    available_mil: None,
+                    ..
+                }
             )),
             "{:?}",
             hold_all.limits_hit
@@ -1984,16 +2184,25 @@ mod plan_corrections_tests {
 
         let hybrid = plan_for(Strategy::Hybrid, &report);
         assert!(
-            hybrid.limits_hit.iter().any(|v| matches!(v.kind, LimitKind::NoHoldBoundData)),
+            hybrid
+                .limits_hit
+                .iter()
+                .any(|v| matches!(v.kind, LimitKind::NoHoldBoundData)),
             "{:?}",
             hybrid.limits_hit
         );
-        assert!(!hybrid.feasible, "Hybrid's hold ALSO cannot be verified here: {hybrid:?}");
+        assert!(
+            !hybrid.feasible,
+            "Hybrid's hold ALSO cannot be verified here: {hybrid:?}"
+        );
 
         // But `max_hold_mil` alone is enough to make the hold checkable again -- 3.0 is
         // comfortably above the 2.34 mil hold actually needed, so this must fit, not merely
         // become checkable-and-still-exceeded.
-        let capped = Preferences { prefer_hold: false, max_hold_mil: Some(3.0) };
+        let capped = Preferences {
+            prefer_hold: false,
+            max_hold_mil: Some(3.0),
+        };
         let capped_report = plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &capped).unwrap();
         let capped_hold_all = plan_for(Strategy::HoldAll, &capped_report);
         assert!(
@@ -2026,9 +2235,15 @@ mod plan_corrections_tests {
     fn plan_corrections_rejects_an_invalid_profile() {
         let mut optic = baseline_profile();
         optic.elevation_click.size = 0.0; // rejected by OpticProfile::validate
-        let corr = AngularCorrection { elevation_mil: 1.0, windage_mil: 0.0 };
+        let corr = AngularCorrection {
+            elevation_mil: 1.0,
+            windage_mil: 0.0,
+        };
         let result = plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &Preferences::default());
-        assert!(matches!(result, Err(OpticError::NonPositiveClickSize { .. })), "{result:?}");
+        assert!(
+            matches!(result, Err(OpticError::NonPositiveClickSize { .. })),
+            "{result:?}"
+        );
     }
 
     // ==== 2026-08 review fixes ====
@@ -2064,7 +2279,10 @@ mod plan_corrections_tests {
         let prefs = Preferences::default();
 
         let up_report = plan_corrections(
-            AngularCorrection { elevation_mil: 7.0, windage_mil: 0.0 },
+            AngularCorrection {
+                elevation_mil: 7.0,
+                windage_mil: 0.0,
+            },
             &optic,
             100.0,
             1.0,
@@ -2077,10 +2295,17 @@ mod plan_corrections_tests {
             up_hold_all.feasible,
             "+7.0 mil (up) consumes down_mil=10.0 (available) and must fit: {up_hold_all:?}"
         );
-        assert!(up_hold_all.limits_hit.is_empty(), "{:?}", up_hold_all.limits_hit);
+        assert!(
+            up_hold_all.limits_hit.is_empty(),
+            "{:?}",
+            up_hold_all.limits_hit
+        );
 
         let down_report = plan_corrections(
-            AngularCorrection { elevation_mil: -7.0, windage_mil: 0.0 },
+            AngularCorrection {
+                elevation_mil: -7.0,
+                windage_mil: 0.0,
+            },
             &optic,
             100.0,
             1.0,
@@ -2110,7 +2335,10 @@ mod plan_corrections_tests {
         }
 
         let right_report = plan_corrections(
-            AngularCorrection { elevation_mil: 0.0, windage_mil: 7.0 },
+            AngularCorrection {
+                elevation_mil: 0.0,
+                windage_mil: 7.0,
+            },
             &windage_optic,
             100.0,
             1.0,
@@ -2125,7 +2353,10 @@ mod plan_corrections_tests {
         );
 
         let left_report = plan_corrections(
-            AngularCorrection { elevation_mil: 0.0, windage_mil: -7.0 },
+            AngularCorrection {
+                elevation_mil: 0.0,
+                windage_mil: -7.0,
+            },
             &windage_optic,
             100.0,
             1.0,
@@ -2153,17 +2384,20 @@ mod plan_corrections_tests {
     #[test]
     fn travel_clamped_hybrid_with_an_unsupportable_hold_is_infeasible() {
         let optic = baseline_profile(); // down travel 0.4 mil; hold bounds up 5.0 / down 10.0
-        // -7.4 mil needs -74 clicks; only 4 clicks (0.4 mil) of down travel exist, so
-        // Hybrid clamps to -4 clicks (-0.4 true mil) and must hold the remaining exactly
-        // -7.0 (hand-verified: -4.0*0.1 == -0.4 exactly, -7.4-(-0.4) == -7.0 exactly).
-        // This magnitude is chosen to land BETWEEN the two candidate bounds and so
-        // genuinely discriminate them: the CORRECT mapping checks a down-hold against
-        // up_mil=5.0 (7.0 > 5.0 -> infeasible, correctly, since the glass cannot show 7.0
-        // mil of upward hold), while the OLD, inverted mapping checked it against
-        // down_mil=10.0 (7.0 <= 10.0 -> would have wrongly certified this feasible). See
-        // the fault-injection transcript in the task report: re-inverting the mapping
-        // makes this test fail, exactly as this comment predicts.
-        let corr = AngularCorrection { elevation_mil: -7.4, windage_mil: 0.0 };
+                                        // -7.4 mil needs -74 clicks; only 4 clicks (0.4 mil) of down travel exist, so
+                                        // Hybrid clamps to -4 clicks (-0.4 true mil) and must hold the remaining exactly
+                                        // -7.0 (hand-verified: -4.0*0.1 == -0.4 exactly, -7.4-(-0.4) == -7.0 exactly).
+                                        // This magnitude is chosen to land BETWEEN the two candidate bounds and so
+                                        // genuinely discriminate them: the CORRECT mapping checks a down-hold against
+                                        // up_mil=5.0 (7.0 > 5.0 -> infeasible, correctly, since the glass cannot show 7.0
+                                        // mil of upward hold), while the OLD, inverted mapping checked it against
+                                        // down_mil=10.0 (7.0 <= 10.0 -> would have wrongly certified this feasible). See
+                                        // the fault-injection transcript in the task report: re-inverting the mapping
+                                        // makes this test fail, exactly as this comment predicts.
+        let corr = AngularCorrection {
+            elevation_mil: -7.4,
+            windage_mil: 0.0,
+        };
         let report =
             plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &Preferences::default()).unwrap();
         let hybrid = plan_for(Strategy::Hybrid, &report);
@@ -2202,10 +2436,16 @@ mod plan_corrections_tests {
     #[test]
     fn windage_arm_uses_its_own_click_cf_and_contributes_to_the_rss() {
         let mut optic = baseline_profile();
-        optic.windage_click = ClickValue { size: 0.25, base: ClickBase::Moa };
-        let corr = AngularCorrection { elevation_mil: 2.34, windage_mil: -1.3 };
-        let report = plan_corrections(corr, &optic, 400.0, 0.98, 1.05, &Preferences::default())
-            .unwrap();
+        optic.windage_click = ClickValue {
+            size: 0.25,
+            base: ClickBase::Moa,
+        };
+        let corr = AngularCorrection {
+            elevation_mil: 2.34,
+            windage_mil: -1.3,
+        };
+        let report =
+            plan_corrections(corr, &optic, 400.0, 0.98, 1.05, &Preferences::default()).unwrap();
 
         let dial_all = plan_for(Strategy::DialAll, &report);
         let e = &dial_all.instructions[0];
@@ -2222,7 +2462,11 @@ mod plan_corrections_tests {
             w.dial_mil_true
         );
         assert_eq!(w.hold_mil, 0.0, "DialAll never holds");
-        assert_eq!(w.direction, Direction::Left, "-17 clicks must read as Left, not Up/Down");
+        assert_eq!(
+            w.direction,
+            Direction::Left,
+            "-17 clicks must read as Left, not Up/Down"
+        );
 
         assert!(
             (dial_all.residual_linear_at_range_m - 0.004866669858419206).abs() < 1e-9,
@@ -2251,12 +2495,16 @@ mod plan_corrections_tests {
     #[test]
     fn hold_all_hold_is_never_cf_scaled() {
         let optic = baseline_profile();
-        let corr = AngularCorrection { elevation_mil: 5.0, windage_mil: 0.0 };
-        let report = plan_corrections(corr, &optic, 100.0, 0.98, 1.0, &Preferences::default())
-            .unwrap();
+        let corr = AngularCorrection {
+            elevation_mil: 5.0,
+            windage_mil: 0.0,
+        };
+        let report =
+            plan_corrections(corr, &optic, 100.0, 0.98, 1.0, &Preferences::default()).unwrap();
         let hold_all = plan_for(Strategy::HoldAll, &report);
         assert_eq!(
-            hold_all.instructions[0].hold_mil, 5.0,
+            hold_all.instructions[0].hold_mil,
+            5.0,
             "must equal corr_true exactly (bit-exact copy, no arithmetic at all) -- NOT \
              corr_true / cf = {}",
             5.0_f64 / 0.98
@@ -2273,11 +2521,17 @@ mod plan_corrections_tests {
         let optic = baseline_profile();
         // 2.34 (not an exact click multiple) so Hybrid's hold is nonzero, and DialAll's
         // residual is nonzero -- both meaningfully exercised, not vacuously all-zero.
-        let corr = AngularCorrection { elevation_mil: 2.34, windage_mil: 0.0 };
+        let corr = AngularCorrection {
+            elevation_mil: 2.34,
+            windage_mil: 0.0,
+        };
         // max_hold_mil: Some(0.0) makes ANY nonzero hold infeasible on HoldAll and Hybrid.
         // DialAll never touches hold at all, so its feasibility depends only on travel,
         // which comfortably fits (23 clicks * 0.1 mil = 2.3 <= 28.0 mil up travel).
-        let prefs = Preferences { prefer_hold: false, max_hold_mil: Some(0.0) };
+        let prefs = Preferences {
+            prefer_hold: false,
+            max_hold_mil: Some(0.0),
+        };
         let report = plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &prefs).unwrap();
 
         let dial_all = plan_for(Strategy::DialAll, &report);
@@ -2306,14 +2560,20 @@ mod plan_corrections_tests {
     #[test]
     fn non_positive_or_non_finite_tracking_factor_is_rejected() {
         let optic = baseline_profile();
-        let corr = AngularCorrection { elevation_mil: 1.0, windage_mil: 0.0 };
+        let corr = AngularCorrection {
+            elevation_mil: 1.0,
+            windage_mil: 0.0,
+        };
         for bad_cf in [0.0, -1.0, -0.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let elevation_result =
                 plan_corrections(corr, &optic, 100.0, bad_cf, 1.0, &Preferences::default());
             assert!(
                 matches!(
                     elevation_result,
-                    Err(OpticError::NonPositiveTrackingFactor { field: "elevation_cf", .. })
+                    Err(OpticError::NonPositiveTrackingFactor {
+                        field: "elevation_cf",
+                        ..
+                    })
                 ),
                 "cf={bad_cf}: {elevation_result:?}"
             );
@@ -2322,7 +2582,10 @@ mod plan_corrections_tests {
             assert!(
                 matches!(
                     windage_result,
-                    Err(OpticError::NonPositiveTrackingFactor { field: "windage_cf", .. })
+                    Err(OpticError::NonPositiveTrackingFactor {
+                        field: "windage_cf",
+                        ..
+                    })
                 ),
                 "cf={bad_cf}: {windage_result:?}"
             );
@@ -2342,8 +2605,14 @@ mod plan_corrections_tests {
     #[test]
     fn travel_violation_needed_mil_is_dial_space_not_true_space_at_nonunit_cf() {
         let mut optic = baseline_profile();
-        optic.elevation_travel = Some(TravelLimits { down_mil: 0.1, up_mil: 0.1 });
-        let corr = AngularCorrection { elevation_mil: 1.0, windage_mil: 0.0 }; // TRUE mil
+        optic.elevation_travel = Some(TravelLimits {
+            down_mil: 0.1,
+            up_mil: 0.1,
+        });
+        let corr = AngularCorrection {
+            elevation_mil: 1.0,
+            windage_mil: 0.0,
+        }; // TRUE mil
         let cf = 0.5;
         let report =
             plan_corrections(corr, &optic, 100.0, cf, 1.0, &Preferences::default()).unwrap();
@@ -2379,9 +2648,12 @@ mod plan_corrections_tests {
         }
 
         let optic = baseline_profile();
-        let corr = AngularCorrection { elevation_mil: 2.34, windage_mil: -1.3 };
-        let report = plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &Preferences::default())
-            .unwrap();
+        let corr = AngularCorrection {
+            elevation_mil: 2.34,
+            windage_mil: -1.3,
+        };
+        let report =
+            plan_corrections(corr, &optic, 100.0, 1.0, 1.0, &Preferences::default()).unwrap();
         let json = serde_json::to_string(&report).unwrap();
         let parsed: DialPlanReportV1 = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, report);

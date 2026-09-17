@@ -778,9 +778,7 @@ pub fn compute_wez(
             wind_direction_std_rad,
             seed,
         ) {
-            Ok(results) => {
-                wez_p_hit(&results, &baseline, line_of_sight_height_m, target_size)
-            }
+            Ok(results) => wez_p_hit(&results, &baseline, line_of_sight_height_m, target_size),
             // The baseline never reached this range plane at all -> every sample is a definite
             // miss for it.
             Err(_) => 0.0,
@@ -857,7 +855,7 @@ mod wez_tests {
             muzzle_velocity: 823.0, // ~2700 fps
             muzzle_angle: 0.001274, // ~0.073 degrees: a 300 m zero for this load
             bc_value: 0.475,
-            bullet_mass: 0.010_886, // 168 gr
+            bullet_mass: 0.010_886,    // 168 gr
             bullet_diameter: 0.007_82, // .308 in
             muzzle_height: 1.5,
             ground_threshold: 0.0,
@@ -1100,15 +1098,10 @@ mod wez_tests {
             .expect("test_base_inputs's default G1 drag model is always kernel-representable");
 
         let shares = wez_variance_shares(
-            &resolved,
-            range_m,
-            /* velocity_std_dev */ 1.0,
-            /* angle_std_dev_rad */ 0.001,
-            /* bc_std_dev */ 0.01,
-            /* azimuth_std_dev_rad */ 0.0005,
-            /* wind_speed_std_dev */ 0.4,
-            /* wind_call_error_std_dev */ 1.2,
-            /* wind_direction_std_dev_rad */ 0.02,
+            &resolved, range_m, /* velocity_std_dev */ 1.0,
+            /* angle_std_dev_rad */ 0.001, /* bc_std_dev */ 0.01,
+            /* azimuth_std_dev_rad */ 0.0005, /* wind_speed_std_dev */ 0.4,
+            /* wind_call_error_std_dev */ 1.2, /* wind_direction_std_dev_rad */ 0.02,
         )
         .expect("valid test attribution solve")
         .expect("attribution must be available for this fixture");
@@ -1133,11 +1126,9 @@ mod wez_tests {
         let resolved = wez_resolved_request(&inputs, &wind, solver_max_range)
             .expect("test_base_inputs's default G1 drag model is always kernel-representable");
 
-        let shares = wez_variance_shares(
-            &resolved, range_m, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        )
-        .expect("valid test attribution solve")
-        .expect("attribution must be available for this fixture");
+        let shares = wez_variance_shares(&resolved, range_m, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            .expect("valid test attribution solve")
+            .expect("attribution must be available for this fixture");
 
         assert_eq!(shares.wind_call, 0.0);
         assert_eq!(shares.mv_sd, 0.0);
@@ -1155,14 +1146,7 @@ mod wez_tests {
             .expect("test_base_inputs's default G1 drag model is always kernel-representable");
 
         let shares = wez_variance_shares(
-            &resolved,
-            range_m,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            /* wind_call_error_std_dev */ 3.0,
+            &resolved, range_m, 0.0, 0.0, 0.0, 0.0, 0.0, /* wind_call_error_std_dev */ 3.0,
             0.0,
         )
         .expect("valid test attribution solve")
@@ -1209,7 +1193,10 @@ mod wez_tests {
         .expect("valid test attribution solve")
         .expect("attribution must be available for this fixture");
 
-        assert!(shares.other > 0.0, "fixture must produce a nonzero ballistic-wind share");
+        assert!(
+            shares.other > 0.0,
+            "fixture must produce a nonzero ballistic-wind share"
+        );
         let expected_ratio = (wind_call_error_std_dev / wind_speed_std_dev).powi(2);
         let actual_ratio = shares.wind_call / shares.other;
         assert!(
@@ -1314,7 +1301,10 @@ mod wez_tests {
             90.0,
             0.0,
             1.5,
-            TargetSizeMetric::Rect { width_m: 0.5, height_m: 0.75 },
+            TargetSizeMetric::Rect {
+                width_m: 0.5,
+                height_m: 0.75,
+            },
             300.0,
             300.0,
             100.0,
@@ -1330,7 +1320,10 @@ mod wez_tests {
             !row.attribution_unavailable,
             "{model} has a solve-json v1 counterpart; attribution must run"
         );
-        assert!(row.p_hit.is_finite(), "p_hit comes from the real Monte Carlo run, unaffected");
+        assert!(
+            row.p_hit.is_finite(),
+            "p_hit comes from the real Monte Carlo run, unaffected"
+        );
         for (name, share) in [
             ("wind_call", row.wind_call_share),
             ("mv_sd", row.mv_sd_share),
@@ -1402,7 +1395,10 @@ mod wez_tests {
             90.0,
             0.0,
             1.5,
-            TargetSizeMetric::Rect { width_m: 0.5, height_m: 0.75 },
+            TargetSizeMetric::Rect {
+                width_m: 0.5,
+                height_m: 0.75,
+            },
             300.0,
             300.0,
             100.0,
@@ -1418,7 +1414,10 @@ mod wez_tests {
             row.attribution_unavailable,
             "a custom drag table has no solve-json v1 representation; attribution cannot run"
         );
-        assert!(row.p_hit.is_finite(), "p_hit comes from the real Monte Carlo run, unaffected");
+        assert!(
+            row.p_hit.is_finite(),
+            "p_hit comes from the real Monte Carlo run, unaffected"
+        );
     }
 
     /// Characterization: pins the attribution shares for one fixed configuration.
@@ -1440,36 +1439,45 @@ mod wez_tests {
     #[test]
     fn attribution_shares_for_a_fixed_configuration() {
         let result = compute_wez(
-            823.0,      // velocity
-            0.0,        // angle
-            0.243,      // bc
-            0.0113,     // mass
-            0.00782,    // diameter
-            20,         // num_sims
-            5.0,        // velocity_std
-            0.0001,     // angle_std
-            0.005,      // bc_std
-            1.0,        // wind_std
-            0.05,       // wind_direction_std
-            3.0,        // wind_speed
-            90.0,       // wind_direction
-            0.0,        // wind_vertical
-            1.5,        // wind_call_error
-            TargetSizeMetric::Rect { width_m: 0.5, height_m: 0.75 },
-            300.0,      // wez_start (brief specifies 600.0; unreachable at angle=0, see above)
-            300.0,      // wez_end
-            100.0,      // wez_step
+            823.0,   // velocity
+            0.0,     // angle
+            0.243,   // bc
+            0.0113,  // mass
+            0.00782, // diameter
+            20,      // num_sims
+            5.0,     // velocity_std
+            0.0001,  // angle_std
+            0.005,   // bc_std
+            1.0,     // wind_std
+            0.05,    // wind_direction_std
+            3.0,     // wind_speed
+            90.0,    // wind_direction
+            0.0,     // wind_vertical
+            1.5,     // wind_call_error
+            TargetSizeMetric::Rect {
+                width_m: 0.5,
+                height_m: 0.75,
+            },
+            300.0, // wez_start (brief specifies 600.0; unreachable at angle=0, see above)
+            300.0, // wez_end
+            100.0, // wez_step
             DragModel::G7,
-            None,       // custom_drag_table
-            1.0,        // cd_scale
-            0.0,        // cant
-            0.0,        // sight_offset_lateral_m
-        ).expect("compute_wez");
+            None, // custom_drag_table
+            1.0,  // cd_scale
+            0.0,  // cant
+            0.0,  // sight_offset_lateral_m
+        )
+        .expect("compute_wez");
 
         let row = result.rows.first().expect("one row");
-        assert!(!row.attribution_unavailable, "attribution must be available here");
-        eprintln!("CHARACTERIZATION wind_call={} mv_sd={} other={}",
-                  row.wind_call_share, row.mv_sd_share, row.other_share);
+        assert!(
+            !row.attribution_unavailable,
+            "attribution must be available here"
+        );
+        eprintln!(
+            "CHARACTERIZATION wind_call={} mv_sd={} other={}",
+            row.wind_call_share, row.mv_sd_share, row.other_share
+        );
         assert!((row.wind_call_share + row.mv_sd_share + row.other_share - 1.0).abs() < 1e-9);
 
         // AFTER (central differences, D2). BEFORE (one-sided, pre-D2) was:
@@ -1479,11 +1487,17 @@ mod wez_tests {
         // is ~20x tighter than that smallest gap, so reverting the central-difference calls in
         // wez_variance_shares back to one-sided solves fails this test on EVERY bucket, not
         // just the two with a larger gap.
-        assert!((row.wind_call_share - 0.681_529_624_943_378).abs() < 1e-6,
-                 "update the characterization constant");
-        assert!((row.mv_sd_share - 0.012_968_843_319_743_649).abs() < 1e-6,
-                 "update the characterization constant");
-        assert!((row.other_share - 0.305_501_531_736_878_2).abs() < 1e-6,
-                 "update the characterization constant");
+        assert!(
+            (row.wind_call_share - 0.681_529_624_943_378).abs() < 1e-6,
+            "update the characterization constant"
+        );
+        assert!(
+            (row.mv_sd_share - 0.012_968_843_319_743_649).abs() < 1e-6,
+            "update the characterization constant"
+        );
+        assert!(
+            (row.other_share - 0.305_501_531_736_878_2).abs() < 1e-6,
+            "update the characterization constant"
+        );
     }
 }

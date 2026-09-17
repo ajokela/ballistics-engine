@@ -27,9 +27,13 @@ fn baseline_solve_is_finite() {
         ..Default::default()
     };
 
-    let r = TrajectorySolver::new(b, WindConditions::default(), AtmosphericConditions::default())
-        .solve()
-        .expect("baseline solve should succeed");
+    let r = TrajectorySolver::new(
+        b,
+        WindConditions::default(),
+        AtmosphericConditions::default(),
+    )
+    .solve()
+    .expect("baseline solve should succeed");
     assert!(r.time_of_flight.is_finite() && r.time_of_flight > 0.0);
     assert!(r.impact_velocity.is_finite() && r.impact_velocity >= 0.0);
     for p in &r.points {
@@ -170,9 +174,9 @@ fn mba1293_stiff_drag_explosion_is_an_error_not_a_negative_range() {
     ] {
         let inputs = BallisticInputs {
             bc_value: 6.821210274138984e-2,
-            bullet_mass: 3.320973714192708e8,      // kg
-            bullet_diameter: 3.333333333333333e8,  // m
-            muzzle_velocity: 3.333435058584939e8,  // m/s
+            bullet_mass: 3.320973714192708e8,     // kg
+            bullet_diameter: 3.333333333333333e8, // m
+            muzzle_velocity: 3.333435058584939e8, // m/s
             muzzle_angle: 0.0,
             target_distance: 10.0,
             use_rk4,
@@ -399,8 +403,8 @@ fn mba1292_maximum_finite_wind_angle_does_not_overflow_conversion() {
             100.0,
         )]);
 
-        solver.solve().unwrap_or_else(|error| {
-            panic!("finite maximum wind angle failed in {mode}: {error}")
-        });
+        solver
+            .solve()
+            .unwrap_or_else(|error| panic!("finite maximum wind angle failed in {mode}: {error}"));
     }
 }

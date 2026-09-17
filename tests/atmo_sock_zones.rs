@@ -199,7 +199,7 @@ fn atmo_sock_level_shot_x_gradient_is_measurable() {
     // Strong downrange temperature gradient: a hot (thin) near half and a cold (dense) far half,
     // both at the station pressure/humidity so ONLY temperature (hence density) varies with X.
     let gradient = vec![
-        (45.0, 1000.0, 50.0, TARGET_M * 0.5), // hot near
+        (45.0, 1000.0, 50.0, TARGET_M * 0.5),  // hot near
         (-20.0, 1000.0, 50.0, TARGET_M * 5.0), // cold far
     ];
     let with_gradient = solve_with(&inputs, &atmo, Some(gradient), TARGET_M);
@@ -289,7 +289,12 @@ fn fast_endpoint(
         t_span: (0.0, 30.0),
         horiz: TARGET_M,
         vert: 0.0,
-        atmo_params: (atmo.altitude, resolved_temp_c, resolved_pressure_hpa, base_ratio),
+        atmo_params: (
+            atmo.altitude,
+            resolved_temp_c,
+            resolved_pressure_hpa,
+            base_ratio,
+        ),
         atmo_sock: segments.map(AtmoSock::new),
     };
     let sol = fast_integrate(inputs, &WindSock::new(vec![]), params);
@@ -371,7 +376,7 @@ fn reference_shot_drop_table() {
         &inputs,
         &atmo,
         Some(vec![
-            (45.0, 1000.0, 50.0, TARGET_M * 0.5), // hot near
+            (45.0, 1000.0, 50.0, TARGET_M * 0.5),  // hot near
             (-20.0, 1000.0, 50.0, TARGET_M * 5.0), // cold far
         ]),
         TARGET_M,

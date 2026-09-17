@@ -31,9 +31,30 @@ fn get_cli_binary() -> PathBuf {
 fn generate_card(unit: Option<&str>, out: &Path) {
     let out_str = out.to_str().unwrap();
     let mut args: Vec<&str> = vec![
-        "trajectory", "-v", "2700", "-b", "0.5", "-m", "175", "-d", "0.308", "--drag-model", "g7",
-        "--max-range", "800", "--temperature", "59", "--pressure", "29.92", "--auto-zero", "100",
-        "--sample-trajectory", "-o", "pdf", "--output-file", out_str,
+        "trajectory",
+        "-v",
+        "2700",
+        "-b",
+        "0.5",
+        "-m",
+        "175",
+        "-d",
+        "0.308",
+        "--drag-model",
+        "g7",
+        "--max-range",
+        "800",
+        "--temperature",
+        "59",
+        "--pressure",
+        "29.92",
+        "--auto-zero",
+        "100",
+        "--sample-trajectory",
+        "-o",
+        "pdf",
+        "--output-file",
+        out_str,
     ];
     if let Some(u) = unit {
         args.push("--adjustment-unit");
@@ -87,10 +108,34 @@ fn mixed_axis_units_dope_card_generates() {
     let out_str = out.to_str().unwrap();
     let output = std::process::Command::new(get_cli_binary())
         .args([
-            "trajectory", "-v", "2700", "-b", "0.5", "-m", "175", "-d", "0.308", "--drag-model", "g7",
-            "--max-range", "800", "--temperature", "59", "--pressure", "29.92", "--auto-zero", "100",
-            "--sample-trajectory", "-o", "pdf", "--output-file", out_str,
-            "--adjustment-unit", "mil", "--windage-unit", "moa",
+            "trajectory",
+            "-v",
+            "2700",
+            "-b",
+            "0.5",
+            "-m",
+            "175",
+            "-d",
+            "0.308",
+            "--drag-model",
+            "g7",
+            "--max-range",
+            "800",
+            "--temperature",
+            "59",
+            "--pressure",
+            "29.92",
+            "--auto-zero",
+            "100",
+            "--sample-trajectory",
+            "-o",
+            "pdf",
+            "--output-file",
+            out_str,
+            "--adjustment-unit",
+            "mil",
+            "--windage-unit",
+            "moa",
         ])
         .output()
         .expect("run");
@@ -112,11 +157,36 @@ fn elevation_clicks_with_windage_moa_override_generates() {
     let out_str = out.to_str().unwrap();
     let output = std::process::Command::new(get_cli_binary())
         .args([
-            "trajectory", "-v", "2700", "-b", "0.5", "-m", "175", "-d", "0.308", "--drag-model", "g7",
-            "--max-range", "800", "--temperature", "59", "--pressure", "29.92", "--auto-zero", "100",
-            "--sample-trajectory", "-o", "pdf", "--output-file", out_str,
-            "--adjustment-unit", "clicks", "--elevation-click-value", "0.25moa",
-            "--windage-unit", "moa",
+            "trajectory",
+            "-v",
+            "2700",
+            "-b",
+            "0.5",
+            "-m",
+            "175",
+            "-d",
+            "0.308",
+            "--drag-model",
+            "g7",
+            "--max-range",
+            "800",
+            "--temperature",
+            "59",
+            "--pressure",
+            "29.92",
+            "--auto-zero",
+            "100",
+            "--sample-trajectory",
+            "-o",
+            "pdf",
+            "--output-file",
+            out_str,
+            "--adjustment-unit",
+            "clicks",
+            "--elevation-click-value",
+            "0.25moa",
+            "--windage-unit",
+            "moa",
         ])
         .output()
         .expect("run");
@@ -135,8 +205,21 @@ fn elevation_clicks_with_windage_moa_override_generates() {
 fn windage_unit_clicks_without_elevation_clicks_is_rejected() {
     let output = std::process::Command::new(get_cli_binary())
         .args([
-            "trajectory", "-v", "2700", "-b", "0.5", "-m", "175", "-d", "0.308",
-            "--max-range", "800", "--adjustment-unit", "mil", "--windage-unit", "clicks",
+            "trajectory",
+            "-v",
+            "2700",
+            "-b",
+            "0.5",
+            "-m",
+            "175",
+            "-d",
+            "0.308",
+            "--max-range",
+            "800",
+            "--adjustment-unit",
+            "mil",
+            "--windage-unit",
+            "clicks",
         ])
         .output()
         .expect("run");

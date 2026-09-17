@@ -163,7 +163,12 @@ impl ReticleMark {
     }
 
     /// A mark at `(down_mil, right_mil)` carrying `label`.
-    pub fn labeled(down_mil: f64, right_mil: f64, kind: MarkKind, label: impl Into<String>) -> Self {
+    pub fn labeled(
+        down_mil: f64,
+        right_mil: f64,
+        kind: MarkKind,
+        label: impl Into<String>,
+    ) -> Self {
         Self {
             down_mil,
             right_mil,
@@ -584,8 +589,8 @@ pub fn hold_point_in_reticle(
     let mut nearest_index = 0usize;
     let mut nearest_distance = f64::INFINITY;
     for (index, mark) in scaled.iter().enumerate() {
-        let distance = ((drop_mil - mark.down_mil).powi(2) + (wind_mil - mark.right_mil).powi(2))
-            .sqrt();
+        let distance =
+            ((drop_mil - mark.down_mil).powi(2) + (wind_mil - mark.right_mil).powi(2)).sqrt();
         if distance < nearest_distance {
             nearest_distance = distance;
             nearest_index = index;
@@ -757,10 +762,7 @@ pub fn format_reticle_description(reticle: &ReticleDescription, format: ReticleF
         ReticleFormat::Table => {
             let mut out = String::new();
             out.push_str(&format!("Reticle: {}\n", reticle.name));
-            out.push_str(&format!(
-                "Focal plane: {}",
-                reticle.focal_plane.label()
-            ));
+            out.push_str(&format!("Focal plane: {}", reticle.focal_plane.label()));
             if reticle.focal_plane.is_magnification_dependent() {
                 out.push_str(&format!(
                     "  Reference magnification: {:.2}x",
@@ -875,7 +877,10 @@ mod tests {
         let reticle = ffp_ladder();
         // down span 0..4 => margin 0.8; right span -1..1 => margin 0.4.
         let inside = hold_point_in_reticle(4.8, 0.0, 10.0, &reticle).unwrap();
-        assert!(!inside.off_reticle, "exactly on the margin counts as on-reticle");
+        assert!(
+            !inside.off_reticle,
+            "exactly on the margin counts as on-reticle"
+        );
         let outside = hold_point_in_reticle(4.80001, 0.0, 10.0, &reticle).unwrap();
         assert!(outside.off_reticle);
 
@@ -885,16 +890,28 @@ mod tests {
         assert!(outside.off_reticle);
 
         // Above center is off the ladder too (span starts at 0.0).
-        assert!(hold_point_in_reticle(-0.9, 0.0, 10.0, &reticle).unwrap().off_reticle);
+        assert!(
+            hold_point_in_reticle(-0.9, 0.0, 10.0, &reticle)
+                .unwrap()
+                .off_reticle
+        );
     }
 
     #[test]
     fn sfp_off_reticle_uses_the_scaled_bounding_box() {
         let reticle = sfp_two_mil_at_ten();
         // At 5x the ladder reaches 8 mil TRUE (margin 1.6), so a 9 mil hold is still on.
-        assert!(!hold_point_in_reticle(9.0, 0.0, 5.0, &reticle).unwrap().off_reticle);
+        assert!(
+            !hold_point_in_reticle(9.0, 0.0, 5.0, &reticle)
+                .unwrap()
+                .off_reticle
+        );
         // At 20x it reaches only 2 mil TRUE (margin 0.4), so the same hold is far off.
-        assert!(hold_point_in_reticle(9.0, 0.0, 20.0, &reticle).unwrap().off_reticle);
+        assert!(
+            hold_point_in_reticle(9.0, 0.0, 20.0, &reticle)
+                .unwrap()
+                .off_reticle
+        );
     }
 
     #[test]
@@ -993,7 +1010,8 @@ mod tests {
     #[test]
     fn bdc_from_drops_is_pure_data_assembly() {
         let reticle =
-            ReticleDescription::bdc_from_drops(&[(300.0, 1.2), (400.0, 2.4), (500.0, 4.1)]).unwrap();
+            ReticleDescription::bdc_from_drops(&[(300.0, 1.2), (400.0, 2.4), (500.0, 4.1)])
+                .unwrap();
         assert_eq!(reticle.marks.len(), 4);
         assert_eq!(reticle.marks[0].kind, MarkKind::Center);
         assert_eq!(reticle.marks[1].down_mil, 1.2);
@@ -1055,7 +1073,10 @@ mod tests {
             ],
         };
         let json = serde_json::to_string(&reticle).unwrap();
-        assert!(json.contains("\"sfp\""), "focal plane serializes as sfp: {json}");
+        assert!(
+            json.contains("\"sfp\""),
+            "focal plane serializes as sfp: {json}"
+        );
         assert!(json.contains("\"center\""));
         let back: ReticleDescription = serde_json::from_str(&json).unwrap();
         assert_eq!(back, reticle);
@@ -1077,7 +1098,8 @@ mod tests {
     fn hold_round_trips_through_serde() {
         let reticle = ffp_ladder();
         let hold = hold_point_in_reticle(3.1, 0.6, 10.0, &reticle).unwrap();
-        let back: ReticleHold = serde_json::from_str(&serde_json::to_string(&hold).unwrap()).unwrap();
+        let back: ReticleHold =
+            serde_json::from_str(&serde_json::to_string(&hold).unwrap()).unwrap();
         assert_eq!(back, hold);
     }
 
@@ -1093,7 +1115,10 @@ mod tests {
         let table = format_reticle_hold(&hold, &reticle, 10.0, ReticleFormat::Table);
         assert!(table.contains("Hold down:"));
         assert!(table.contains("300 m"));
-        assert!(!table.contains("Subtension scale"), "FFP hides SFP-only rows");
+        assert!(
+            !table.contains("Subtension scale"),
+            "FFP hides SFP-only rows"
+        );
 
         let sfp = sfp_two_mil_at_ten();
         let hold = hold_point_in_reticle(4.0, 0.0, 5.0, &sfp).unwrap();

@@ -527,12 +527,7 @@ mod tests {
         );
         assert_ne!(expected_default.to_bits(), 12.0_f64.to_bits());
 
-        let metric_default = resolve_twist_inches(
-            None,
-            5.6896 * 0.001,
-            4.98951607 * 0.001,
-            838.2,
-        );
+        let metric_default = resolve_twist_inches(None, 5.6896 * 0.001, 4.98951607 * 0.001, 838.2);
         assert!((metric_default - expected_default).abs() < 1e-12);
     }
 
@@ -541,7 +536,10 @@ mod tests {
         // Same caliber + velocity: the heavier (longer) bullet must get a faster (smaller) twist.
         let light = twist_in(0.224, 55.0, 2900.0);
         let heavy = twist_in(0.224, 77.0, 2900.0);
-        assert!(heavy < light, "77gr twist {heavy} should be faster than 55gr {light}");
+        assert!(
+            heavy < light,
+            "77gr twist {heavy} should be faster than 55gr {light}"
+        );
     }
 
     #[test]

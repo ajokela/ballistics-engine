@@ -396,8 +396,14 @@ mod tests {
         let wasm = WasmBallistics::new();
         for (args, format) in [
             ("drag-curve", crate::drag::ReferenceDragCurveFormat::Table),
-            ("drag-curve -o csv", crate::drag::ReferenceDragCurveFormat::Csv),
-            ("drag-curve -o json", crate::drag::ReferenceDragCurveFormat::Json),
+            (
+                "drag-curve -o csv",
+                crate::drag::ReferenceDragCurveFormat::Csv,
+            ),
+            (
+                "drag-curve -o json",
+                crate::drag::ReferenceDragCurveFormat::Json,
+            ),
             (
                 "drag-curve --drag-model gs -o csv",
                 crate::drag::ReferenceDragCurveFormat::Csv,
@@ -499,10 +505,15 @@ mod tests {
         let high = wasm
             .run_command(&format!("{base} --altitude 5000"))
             .unwrap();
-        assert_ne!(sea, high, "--altitude parsed but never reached the zero solve");
+        assert_ne!(
+            sea, high,
+            "--altitude parsed but never reached the zero solve"
+        );
 
         let qnh = wasm
-            .run_command(&format!("{base} --pressure 24.90 --altitude 5000 --pressure-type qnh"))
+            .run_command(&format!(
+                "{base} --pressure 24.90 --altitude 5000 --pressure-type qnh"
+            ))
             .unwrap();
         let abs = wasm
             .run_command(&format!(
@@ -1196,7 +1207,10 @@ mod tests {
         let without = wasm
             .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --full --max-range 500")
             .unwrap();
-        assert!(!without.contains("Ring"), "Ring column must not appear without --target-speed");
+        assert!(
+            !without.contains("Ring"),
+            "Ring column must not appear without --target-speed"
+        );
 
         let with_ring = wasm
             .run_command(
@@ -1204,8 +1218,14 @@ mod tests {
                  --target-speed 5",
             )
             .unwrap();
-        assert!(with_ring.contains("Ring"), "table should carry a Ring column:\n{with_ring}");
-        assert!(with_ring.contains("mil"), "ring values should be labeled mil");
+        assert!(
+            with_ring.contains("Ring"),
+            "table should carry a Ring column:\n{with_ring}"
+        );
+        assert!(
+            with_ring.contains("mil"),
+            "ring values should be labeled mil"
+        );
     }
 
     #[wasm_bindgen_test]
@@ -1275,7 +1295,9 @@ mod tests {
             )
             .unwrap();
         let resolved_json: serde_json::Value = serde_json::from_str(&resolved_json).unwrap();
-        let resolved_velocity = resolved_json["trajectory"][0]["velocity_fps"].as_f64().unwrap();
+        let resolved_velocity = resolved_json["trajectory"][0]["velocity_fps"]
+            .as_f64()
+            .unwrap();
         assert!(
             (resolved_velocity - 2660.0).abs() < 0.5,
             "sanity: 55F should interpolate to ~2660 fps, got {resolved_velocity}"
@@ -1305,8 +1327,12 @@ mod tests {
         // bit. Compare numerically with a tolerance instead of assert_eq! on the raw
         // JSON values (iterations is an integer count, compared exactly).
         for field in ["lead_mil", "lead_moa", "lead", "tof_s", "intercept_range"] {
-            let a = with_curve[field].as_f64().unwrap_or_else(|| panic!("{field} missing"));
-            let b = manual[field].as_f64().unwrap_or_else(|| panic!("{field} missing"));
+            let a = with_curve[field]
+                .as_f64()
+                .unwrap_or_else(|| panic!("{field} missing"));
+            let b = manual[field]
+                .as_f64()
+                .unwrap_or_else(|| panic!("{field} missing"));
             assert!(
                 (a - b).abs() < 1e-5,
                 "field '{field}' differs between curve-corrected and manually-resolved lead runs: {a} vs {b}"
@@ -1376,18 +1402,27 @@ Iterations: 0\n";
                 "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 400 -o json",
             )
             .unwrap();
-        assert_eq!(g1, GOLDEN_IMPERIAL_JSON, "imperial JSON drifted from pre-env-flags build");
+        assert_eq!(
+            g1, GOLDEN_IMPERIAL_JSON,
+            "imperial JSON drifted from pre-env-flags build"
+        );
         let g2 = wasm
             .run_command(
                 "--units metric lead -v 823 -b 0.475 -m 10.9 -d 7.82 --target-speed 3 \
                  --range 350 -o json",
             )
             .unwrap();
-        assert_eq!(g2, GOLDEN_METRIC_JSON, "metric JSON drifted from pre-env-flags build");
+        assert_eq!(
+            g2, GOLDEN_METRIC_JSON,
+            "metric JSON drifted from pre-env-flags build"
+        );
         let g3 = wasm
             .run_command("lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 400")
             .unwrap();
-        assert_eq!(g3, GOLDEN_IMPERIAL_TABLE, "imperial table drifted from pre-env-flags build");
+        assert_eq!(
+            g3, GOLDEN_IMPERIAL_TABLE,
+            "imperial table drifted from pre-env-flags build"
+        );
     }
 
     /// Hot air (100F) vs the standard default (59F) must change the lead solution —
@@ -1478,7 +1513,9 @@ Iterations: 0\n";
             .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 301")
             .unwrap_err();
         assert!(
-            err.as_string().unwrap_or_default().contains("--target-speed must be between 0 and 300"),
+            err.as_string()
+                .unwrap_or_default()
+                .contains("--target-speed must be between 0 and 300"),
             "trajectory should reject 301: {err:?}"
         );
         let err = wasm
@@ -1487,12 +1524,16 @@ Iterations: 0\n";
             )
             .unwrap_err();
         assert!(
-            err.as_string().unwrap_or_default().contains("--target-speed must be between 0 and 300"),
+            err.as_string()
+                .unwrap_or_default()
+                .contains("--target-speed must be between 0 and 300"),
             "lead should reject 1e9 mph: {err:?}"
         );
         // Boundary values stay legal (300 is lead's documented cap).
         assert!(wasm
-            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 300 --max-range 200")
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 300 --max-range 200"
+            )
             .is_ok());
     }
 
@@ -1540,7 +1581,10 @@ Iterations: 0\n";
             .expect("last point")["mover_ring_mil"]
             .as_f64()
             .expect("mover_ring_mil");
-        assert!(mil > 160.0, "sensitivity precondition: ring_mil > 160, got {mil}");
+        assert!(
+            mil > 160.0,
+            "sensitivity precondition: ring_mil > 160, got {mil}"
+        );
 
         // Last ring cell of a table, as the printed numeric string before " <unit>".
         let last_ring_cell = |table: &str, unit: &str| -> String {
@@ -1558,8 +1602,14 @@ Iterations: 0\n";
         let moa_table = wasm
             .run_command(&format!("{base} --adjustment-unit moa"))
             .unwrap();
-        assert!(moa_table.contains(" moa"), "moa run must label ring cells moa");
-        assert!(!moa_table.contains(" mil"), "moa run must not label ring cells mil");
+        assert!(
+            moa_table.contains(" moa"),
+            "moa run must label ring cells moa"
+        );
+        assert!(
+            !moa_table.contains(" mil"),
+            "moa run must not label ring cells mil"
+        );
         assert_eq!(
             last_ring_cell(&moa_table, "moa"),
             format!("{:.2}", mil * 3.438),
@@ -1608,10 +1658,15 @@ Iterations: 0\n";
         let iphy_json = WasmBallistics::new()
             .run_command(&format!("{base} --adjustment-unit iphy -o json"))
             .unwrap();
-        assert_eq!(smoa_json, iphy_json, "smoa/iphy JSON is unit-in-name-only (mil-based fields)");
+        assert_eq!(
+            smoa_json, iphy_json,
+            "smoa/iphy JSON is unit-in-name-only (mil-based fields)"
+        );
 
         let clicks = WasmBallistics::new()
-            .run_command(&format!("{base} --adjustment-unit clicks --elevation-click-value 0.25moa"))
+            .run_command(&format!(
+                "{base} --adjustment-unit clicks --elevation-click-value 0.25moa"
+            ))
             .unwrap();
         assert!(clicks.contains("Ring(clicks)"), "{clicks}");
         // Clicks cells are whole integers with no per-cell unit suffix (native's
@@ -1703,10 +1758,14 @@ Iterations: 0\n";
         let base = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --target-speed 3 \
                     --adjustment-unit clicks --elevation-click-value 0.25moa";
 
-        let csv = WasmBallistics::new().run_command(&format!("{base} -o csv")).unwrap();
+        let csv = WasmBallistics::new()
+            .run_command(&format!("{base} -o csv"))
+            .unwrap();
         assert!(csv.contains("Ring(mil)"), "{csv}");
 
-        let json = WasmBallistics::new().run_command(&format!("{base} -o json")).unwrap();
+        let json = WasmBallistics::new()
+            .run_command(&format!("{base} -o json"))
+            .unwrap();
         let json: serde_json::Value = serde_json::from_str(&json).unwrap();
         let points = json["trajectory"].as_array().expect("trajectory array");
         assert!(points.iter().any(|p| p.get("mover_ring_mil").is_some()));
@@ -1985,9 +2044,7 @@ Impact Velocity: 2510 fps\n";
     fn load_drag_table_rejects_invalid_utf8_cleanly() {
         let wasm = WasmBallistics::new();
         // 0xFF is never a valid UTF-8 lead byte.
-        let err = wasm
-            .load_drag_table(&[0xFF, 0xFE, 0x00, 0x00])
-            .unwrap_err();
+        let err = wasm.load_drag_table(&[0xFF, 0xFE, 0x00, 0x00]).unwrap_err();
         let msg = err.as_string().unwrap_or_default();
         assert!(
             msg.contains("UTF-8"),
@@ -2049,8 +2106,7 @@ Impact Velocity: 2510 fps\n";
             let err = WasmBallistics::new().run_command(command).unwrap_err();
             let msg = err.as_string().unwrap_or_default();
             assert_eq!(
-                msg,
-                "--cd-scale requires --drag-table",
+                msg, "--cd-scale requires --drag-table",
                 "command: {command}"
             );
         }
@@ -2147,10 +2203,13 @@ Impact Velocity: 2510 fps\n";
         wasm.load_drag_table(FLAT_CD_CSV.as_bytes()).unwrap();
 
         let table_output = wasm
-            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 100 --cd-scale 3.0")
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 100 --cd-scale 3.0",
+            )
             .unwrap();
         assert!(
-            table_output.contains("--cd-scale 3 is far outside the typical truing range (0.90-1.10)"),
+            table_output
+                .contains("--cd-scale 3 is far outside the typical truing range (0.90-1.10)"),
             "got: {table_output}"
         );
 
@@ -2413,18 +2472,20 @@ Impact Velocity: 2510 fps\n";
             assert!(row.ends_with(",yd"), "imperial distance unit is yd: {row}");
         }
         assert!(
-            imperial.lines().any(|l| l.starts_with("impact_velocity,") && l.ends_with(",fps")),
+            imperial
+                .lines()
+                .any(|l| l.starts_with("impact_velocity,") && l.ends_with(",fps")),
             "imperial velocity unit is fps: {imperial}"
         );
         assert!(
-            imperial.lines().any(|l| l.starts_with("impact_energy,") && l.ends_with(",ft-lb")),
+            imperial
+                .lines()
+                .any(|l| l.starts_with("impact_energy,") && l.ends_with(",ft-lb")),
             "imperial energy unit is ft-lb: {imperial}"
         );
 
         let metric = WasmBallistics::new()
-            .run_command(
-                "trajectory -u metric -v 800 -b 0.475 -m 11 -d 7.82 -o csv --csv-summary",
-            )
+            .run_command("trajectory -u metric -v 800 -b 0.475 -m 11 -d 7.82 -o csv --csv-summary")
             .unwrap();
         for expected in ["max_range,", "max_height,"] {
             let row = metric
@@ -2434,11 +2495,15 @@ Impact Velocity: 2510 fps\n";
             assert!(row.ends_with(",m"), "metric distance unit is m: {row}");
         }
         assert!(
-            metric.lines().any(|l| l.starts_with("impact_velocity,") && l.ends_with(",m/s")),
+            metric
+                .lines()
+                .any(|l| l.starts_with("impact_velocity,") && l.ends_with(",m/s")),
             "metric velocity unit is m/s: {metric}"
         );
         assert!(
-            metric.lines().any(|l| l.starts_with("impact_energy,") && l.ends_with(",J")),
+            metric
+                .lines()
+                .any(|l| l.starts_with("impact_energy,") && l.ends_with(",J")),
             "metric energy unit is J: {metric}"
         );
     }
@@ -2575,8 +2640,11 @@ Impact Velocity: 2510 fps\n";
         let flat = cmd(0);
         let incline = cmd(5);
         assert!(!incline.contains("Error calculating zero"), "{}", incline);
-        let zero_line =
-            |s: &str| s.lines().find(|l| l.contains("Rifle zeroed")).map(str::to_string);
+        let zero_line = |s: &str| {
+            s.lines()
+                .find(|l| l.contains("Rifle zeroed"))
+                .map(str::to_string)
+        };
         assert_eq!(
             zero_line(&flat),
             zero_line(&incline),
@@ -2600,8 +2668,11 @@ Impact Velocity: 2510 fps\n";
         };
         let plain = cmd("");
         let coriolis = cmd("--enable-coriolis --latitude 45 --shot-direction 90");
-        let zero_line =
-            |s: &str| s.lines().find(|l| l.contains("Rifle zeroed")).map(str::to_string);
+        let zero_line = |s: &str| {
+            s.lines()
+                .find(|l| l.contains("Rifle zeroed"))
+                .map(str::to_string)
+        };
         assert_eq!(
             zero_line(&plain),
             zero_line(&coriolis),
@@ -2624,9 +2695,7 @@ Impact Velocity: 2510 fps\n";
         assert!(out.contains("velocity (fps)"), "{}", out);
         assert!(out.contains("energy (ft-lb)"), "{}", out);
         let ascii = WasmBallistics::new()
-            .run_command(
-                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --plot ascii",
-            )
+            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --plot ascii")
             .unwrap();
         assert!(ascii.contains("Drop vs Range:"), "{}", ascii);
         assert!(ascii.contains("Velocity vs Range:"), "{}", ascii);
@@ -2751,11 +2820,13 @@ Impact Velocity: 2510 fps\n";
     fn test_recoil_metric_round_trip_matches_native() {
         // Same load as above, expressed in metric display units.
         let out = WasmBallistics::new()
-            .run_command(
-                "--units metric recoil -b 10.89 -c 2.79 -v 823.0 -f 3.86",
-            )
+            .run_command("--units metric recoil -b 10.89 -c 2.79 -v 823.0 -f 3.86")
             .unwrap();
-        assert!(out.contains("1440.2 m/s") || out.contains("1440.3 m/s"), "{}", out);
+        assert!(
+            out.contains("1440.2 m/s") || out.contains("1440.3 m/s"),
+            "{}",
+            out
+        );
         assert!(out.contains("3.36 m/s"), "{}", out);
         assert!(out.contains("21.8"), "{}", out); // ~21.82-21.83 J
         assert!(out.contains("12.98"), "{}", out); // ~12.97-12.98 N-s
@@ -2772,7 +2843,11 @@ Impact Velocity: 2510 fps\n";
         let shotgun_long = WasmBallistics::new()
             .run_command("recoil -b 490 -c 30 -v 1300 -f 7.5 --firearm-type shotgun-long")
             .unwrap();
-        assert!(shotgun_long.contains("saami-shotgun-long"), "{}", shotgun_long);
+        assert!(
+            shotgun_long.contains("saami-shotgun-long"),
+            "{}",
+            shotgun_long
+        );
         assert!(shotgun_long.contains("1625.0 fps"), "{}", shotgun_long); // 1.25 * 1300
     }
 
@@ -2810,7 +2885,11 @@ Impact Velocity: 2510 fps\n";
             .run_command("recoil -b 168 -c 43 -v 2700 -f 8.5 -o json")
             .unwrap();
         assert!(out.contains("\"command\": \"recoil\""), "{}", out);
-        assert!(out.contains("\"gas_velocity_model\": \"saami-rifle\""), "{}", out);
+        assert!(
+            out.contains("\"gas_velocity_model\": \"saami-rifle\""),
+            "{}",
+            out
+        );
     }
 
     #[wasm_bindgen_test]
@@ -2853,9 +2932,21 @@ Impact Velocity: 2510 fps\n";
             .unwrap();
         assert!(out.contains("132.30"), "{}", out);
         assert!(out.contains("Power factor (scored): 132"), "{}", out);
-        assert!(out.contains("USPSA     Minor                            125    PASS"), "{}", out);
-        assert!(out.contains("USPSA     Major                            165    FAIL"), "{}", out);
-        assert!(out.contains("IDPA      PCC                              135    FAIL"), "{}", out);
+        assert!(
+            out.contains("USPSA     Minor                            125    PASS"),
+            "{}",
+            out
+        );
+        assert!(
+            out.contains("USPSA     Major                            165    FAIL"),
+            "{}",
+            out
+        );
+        assert!(
+            out.contains("IDPA      PCC                              135    FAIL"),
+            "{}",
+            out
+        );
     }
 
     #[wasm_bindgen_test]
@@ -2864,11 +2955,19 @@ Impact Velocity: 2510 fps\n";
         let at = WasmBallistics::new()
             .run_command("power-factor -w 1000 -v 125 --organization uspsa")
             .unwrap();
-        assert!(at.contains("Minor                            125    PASS"), "{}", at);
+        assert!(
+            at.contains("Minor                            125    PASS"),
+            "{}",
+            at
+        );
         let below = WasmBallistics::new()
             .run_command("power-factor -w 1000 -v 124 --organization uspsa")
             .unwrap();
-        assert!(below.contains("Minor                            125    FAIL"), "{}", below);
+        assert!(
+            below.contains("Minor                            125    FAIL"),
+            "{}",
+            below
+        );
 
         // SASS floor (60) and minimum velocity (400 fps) boundary, isolated from each
         // other with a 200gr bullet (PF stays >= 60 across 399-400 fps).
@@ -2991,7 +3090,9 @@ Impact Velocity: 2510 fps\n";
             )
             .unwrap();
         assert!(
-            out.contains("MV-calibration window: 656.7-729.7 yd (90-100% of the Mach 1.2 distance)"),
+            out.contains(
+                "MV-calibration window: 656.7-729.7 yd (90-100% of the Mach 1.2 distance)"
+            ),
             "{out}"
         );
         assert!(
@@ -3079,8 +3180,12 @@ Impact Velocity: 2510 fps\n";
             .unwrap();
         assert!(!out.to_lowercase().contains("calibration window"), "{out}");
         let v: serde_json::Value = serde_json::from_str(&out).expect("json");
-        let lo = v["mv_window_start_m"].as_f64().expect("mv_window_start_m present");
-        let hi = v["mv_window_end_m"].as_f64().expect("mv_window_end_m present");
+        let lo = v["mv_window_start_m"]
+            .as_f64()
+            .expect("mv_window_start_m present");
+        let hi = v["mv_window_end_m"]
+            .as_f64()
+            .expect("mv_window_end_m present");
         assert!((lo - 656.7 * 0.9144).abs() < 0.5, "lo={lo}");
         assert!((hi - 729.7 * 0.9144).abs() < 0.5, "hi={hi}");
     }
@@ -3114,7 +3219,9 @@ Impact Velocity: 2510 fps\n";
         assert!(out.contains("WEZ sweep: 300 sims/step"), "{}", out);
         // A full P(hit) table row, byte-identical to the native summary printer.
         assert!(
-            out.contains("│      200.0 │    49.0% │ other         │      0.0% │      0.0% │    100.0% │"),
+            out.contains(
+                "│      200.0 │    49.0% │ other         │      0.0% │      0.0% │    100.0% │"
+            ),
             "{}",
             out
         );
@@ -3236,14 +3343,21 @@ Impact Velocity: 2510 fps\n";
     #[wasm_bindgen_test]
     fn test_g5_solves_with_its_own_real_table() {
         let g5 = WasmBallistics::new()
-            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model g5 --max-range 300")
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model g5 --max-range 300",
+            )
             .unwrap();
         assert!(!g5.contains("using the G1 curve"), "{}", g5);
         let g1 = WasmBallistics::new()
-            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model g1 --max-range 300")
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model g1 --max-range 300",
+            )
             .unwrap();
         assert!(!g1.contains("using the G1 curve"), "{}", g1);
-        assert_ne!(g5, g1, "g5 must apply its own drag table, not silently alias g1");
+        assert_ne!(
+            g5, g1,
+            "g5 must apply its own drag table, not silently alias g1"
+        );
     }
 
     /// MBA-1386: RA4 (McCoy's British RA 1929 reference drag function) is the new
@@ -3253,10 +3367,16 @@ Impact Velocity: 2510 fps\n";
     #[wasm_bindgen_test]
     fn test_ra4_drag_model_accepted_and_solves() {
         let out = WasmBallistics::new()
-            .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model ra4 --max-range 300")
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model ra4 --max-range 300",
+            )
             .unwrap();
         assert!(!out.contains("using the G1 curve"), "{}", out);
-        assert!(out.contains("Range"), "expected a trajectory table, got: {}", out);
+        assert!(
+            out.contains("Range"),
+            "expected a trajectory table, got: {}",
+            out
+        );
     }
 
     // MBA-1386: `test_g1_fallback_note_absent_from_structured_outputs` (formerly here)
@@ -3455,10 +3575,7 @@ Impact Velocity: 2510 fps\n";
             .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --dsf-point 0.5:x")
             .unwrap_err();
         let msg = err.as_string().unwrap_or_default();
-        assert!(
-            msg.contains("--dsf-point: invalid DSF in '0.5:x'"),
-            "{msg}"
-        );
+        assert!(msg.contains("--dsf-point: invalid DSF in '0.5:x'"), "{msg}");
     }
 
     /// A Mach at/above the DSF ceiling (1.2 — MV-truing territory, not DSF's) surfaces
@@ -3629,7 +3746,10 @@ Impact Velocity: 2510 fps\n";
             without_json.as_object().unwrap().keys().collect();
         let with_keys: std::collections::BTreeSet<_> =
             with_json.as_object().unwrap().keys().collect();
-        assert_eq!(without_keys, with_keys, "top-level JSON key set must stay identical");
+        assert_eq!(
+            without_keys, with_keys,
+            "top-level JSON key set must stay identical"
+        );
     }
 
     // -----------------------------------------------------------------------------
@@ -3701,7 +3821,8 @@ Impact Velocity: 2510 fps\n";
             )
             .unwrap();
         assert!(
-            table_output.contains("--cd-scale 3 is far outside the typical truing range (0.90-1.10)"),
+            table_output
+                .contains("--cd-scale 3 is far outside the typical truing range (0.90-1.10)"),
             "{table_output}"
         );
 
@@ -3848,9 +3969,7 @@ Impact Velocity: 2510 fps\n";
         );
 
         // JSON output must stay pure machine output -- no note text.
-        let json_out = wasm
-            .run_command(&format!("{table_base} -o json"))
-            .unwrap();
+        let json_out = wasm.run_command(&format!("{table_base} -o json")).unwrap();
         assert!(
             !json_out.contains("supersedes"),
             "JSON output must never be contaminated with the human-readable note: {json_out}"
@@ -4122,7 +4241,10 @@ mod minimal_surface_tests {
     #[wasm_bindgen_test]
     fn ungated_commands_survive_every_gate() {
         let wasm = WasmBallistics::new();
-        assert!(wasm.run_command("version").unwrap().contains("Ballistics Engine"));
+        assert!(wasm
+            .run_command("version")
+            .unwrap()
+            .contains("Ballistics Engine"));
         let out = wasm
             .run_command("trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300")
             .expect("trajectory runs");
@@ -4135,7 +4257,9 @@ mod minimal_surface_tests {
     #[wasm_bindgen_test]
     fn a_gated_out_command_is_reported_unknown() {
         let wasm = WasmBallistics::new();
-        let out = wasm.run_command("recoil -b 168 -c 43 -v 2700 -f 8.5").unwrap();
+        let out = wasm
+            .run_command("recoil -b 168 -c 43 -v 2700 -f 8.5")
+            .unwrap();
         assert!(out.contains("Unknown command"), "got: {out}");
         assert!(
             !out.contains("Recoil Command:"),

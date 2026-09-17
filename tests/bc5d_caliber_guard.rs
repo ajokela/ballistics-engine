@@ -438,7 +438,10 @@ fn bc5d_info_reports_the_key_the_guard_compares() {
         "the pre-check key must be the guard's integer: {result}"
     );
     // The raw f32 header value stays as it was (0.224 is not exact in f32).
-    assert!((result["caliber"].as_f64().unwrap() - 0.224).abs() < 1e-4, "{result}");
+    assert!(
+        (result["caliber"].as_f64().unwrap() - 0.224).abs() < 1e-4,
+        "{result}"
+    );
 
     // What an app's pre-check looks like: same rule, same verdict as the guard.
     let shot_key = (0.308_f64 * 1000.0).round() as i64;
@@ -455,8 +458,21 @@ fn cli_refuses_a_mislabeled_table_file() {
     let (dir, _file) = write_fixture("cli-mislabeled", "bc5d_308.bin", &bc5d_fixture(0.224));
     let output = Command::new(env!("CARGO_BIN_EXE_ballistics"))
         .args([
-            "trajectory", "-v", "2800", "-b", "0.4", "-m", "168", "-d", "0.308", "--drag-model",
-            "g1", "--max-range", "300", "-o", "json",
+            "trajectory",
+            "-v",
+            "2800",
+            "-b",
+            "0.4",
+            "-m",
+            "168",
+            "-d",
+            "0.308",
+            "--drag-model",
+            "g1",
+            "--max-range",
+            "300",
+            "-o",
+            "json",
         ])
         .arg("--bc-table-dir")
         .arg(&dir)
@@ -483,8 +499,21 @@ fn cli_still_applies_a_correctly_labeled_table() {
     let (dir, _file) = write_fixture("cli-ok", "bc5d_308.bin", &bc5d_fixture(0.308));
     let output = Command::new(env!("CARGO_BIN_EXE_ballistics"))
         .args([
-            "trajectory", "-v", "2800", "-b", "0.4", "-m", "168", "-d", "0.308", "--drag-model",
-            "g1", "--max-range", "300", "-o", "json",
+            "trajectory",
+            "-v",
+            "2800",
+            "-b",
+            "0.4",
+            "-m",
+            "168",
+            "-d",
+            "0.308",
+            "--drag-model",
+            "g1",
+            "--max-range",
+            "300",
+            "-o",
+            "json",
         ])
         .arg("--bc-table-dir")
         .arg(&dir)

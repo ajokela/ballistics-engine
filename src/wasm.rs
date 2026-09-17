@@ -4,6 +4,12 @@ use wasm_bindgen::prelude::*;
 
 use crate::atmosphere::{resolve_station_conditions_with_pressure_mode, PressureReferenceMode};
 use crate::bc_table_5d::Bc5dTable;
+#[cfg(feature = "wasm-estimate-bc")]
+use crate::cli_api::estimate_bc_fit;
+#[cfg(feature = "wasm-monte-carlo")]
+use crate::cli_api::run_monte_carlo_with_direction_std_dev;
+#[cfg(feature = "wasm-estimate-bc")]
+use crate::cli_api::BcFitMode;
 use crate::cli_api::{
     calculate_zero_angle_with_conditions, calculate_zero_angle_with_resolved_conditions,
     AtmosphericConditions, BallisticInputs as InternalBallisticInputs, BcReferenceStandard,
@@ -14,14 +20,8 @@ use crate::cli_api::{
     calculate_zero_range_from_angle_with_conditions,
     calculate_zero_range_from_angle_with_resolved_conditions,
 };
-#[cfg(feature = "wasm-estimate-bc")]
-use crate::cli_api::BcFitMode;
 #[cfg(feature = "wasm-monte-carlo")]
 use crate::cli_api::{MonteCarloParams, BC_REFERENCE_STANDARD_INERT_WARNING};
-#[cfg(feature = "wasm-estimate-bc")]
-use crate::cli_api::estimate_bc_fit;
-#[cfg(feature = "wasm-monte-carlo")]
-use crate::cli_api::run_monte_carlo_with_direction_std_dev;
 use crate::constants::GRAINS_PER_GRAM;
 use crate::drag_model::DragModel;
 #[cfg(feature = "wasm-lead")]
@@ -433,15 +433,11 @@ fn format_wez_summary(result: &crate::wez::WezResult, units: UnitSystem) -> Stri
         wind_from_metric(result.wind_speed_std_mps, units),
         wind_from_metric(result.combined_wind_speed_std_mps, units),
     ));
-    out.push_str(
-        "┌────────────┬──────────┬───────────────┬───────────┬───────────┬───────────┐\n",
-    );
+    out.push_str("┌────────────┬──────────┬───────────────┬───────────┬───────────┬───────────┐\n");
     out.push_str(&format!(
         "│ Range ({dist_unit:>3}) │  P(hit)  │ Dominant      │ Wind call │  MV SD    │ Other/grp │\n"
     ));
-    out.push_str(
-        "├────────────┼──────────┼───────────────┼───────────┼───────────┼───────────┤\n",
-    );
+    out.push_str("├────────────┼──────────┼───────────────┼───────────┼───────────┼───────────┤\n");
     for row in &result.rows {
         out.push_str(&format!(
             "│ {:>10.1} │ {:>7.1}% │ {:<13} │ {:>8.1}% │ {:>8.1}% │ {:>8.1}% │\n",
@@ -453,9 +449,7 @@ fn format_wez_summary(result: &crate::wez::WezResult, units: UnitSystem) -> Stri
             row.other_share * 100.0,
         ));
     }
-    out.push_str(
-        "└────────────┴──────────┴───────────────┴───────────┴───────────┴───────────┘\n",
-    );
+    out.push_str("└────────────┴──────────┴───────────────┴───────────┴───────────┴───────────┘\n");
     out
 }
 
@@ -2025,9 +2019,10 @@ impl WasmBallistics {
             let vmax: f64 = parts[1].trim().parse().map_err(|_| {
                 JsValue::from_str(&format!("--bc-segment: invalid VMAX in '{}'", s))
             })?;
-            let bcv: f64 = parts[2].trim().parse().map_err(|_| {
-                JsValue::from_str(&format!("--bc-segment: invalid BC in '{}'", s))
-            })?;
+            let bcv: f64 = parts[2]
+                .trim()
+                .parse()
+                .map_err(|_| JsValue::from_str(&format!("--bc-segment: invalid BC in '{}'", s)))?;
             if !(vmin < vmax) {
                 return Err(JsValue::from_str(&format!(
                     "--bc-segment: VMIN must be < VMAX in '{}'",
@@ -2195,10 +2190,7 @@ impl WasmBallistics {
             };
             let explicit_temp_c = temperature_supplied.then_some(atmosphere.temperature);
             let (da_altitude_m, da_temp_c, da_pressure_hpa) =
-                crate::atmosphere::resolve_atmosphere_for_density_altitude(
-                    da_m,
-                    explicit_temp_c,
-                );
+                crate::atmosphere::resolve_atmosphere_for_density_altitude(da_m, explicit_temp_c);
             atmosphere.temperature = da_temp_c;
             atmosphere.pressure = da_pressure_hpa;
             atmosphere.altitude = da_altitude_m;
@@ -2387,8 +2379,7 @@ impl WasmBallistics {
                 (Some(mode), _, _) => mode,
                 (None, _, _) => pressure_type,
             };
-            let zero_target_height =
-                zero_inputs.muzzle_height + zero_inputs.sight_height; // Zero crosses the line of sight (matches CLI)
+            let zero_target_height = zero_inputs.muzzle_height + zero_inputs.sight_height; // Zero crosses the line of sight (matches CLI)
             let zero_solve_result = match zero_pressure_type_resolved {
                 PressureReferenceMode::Absolute => calculate_zero_angle_with_conditions(
                     zero_inputs.clone(),
@@ -2781,11 +2772,10 @@ impl WasmBallistics {
                         // "energy_ftlb" JSON field and the CSV "Energy(ft-lb)"
                         // column elsewhere in this file) so labels always follow
                         // --units the same way the rest of this command does.
-                        let (vel_mul, vel_unit_label, energy_mul, energy_unit_label) =
-                            match units {
-                                UnitSystem::Imperial => (3.28084, "fps", 0.737562149, "ft-lb"),
-                                UnitSystem::Metric => (1.0, "m/s", 1.0, "J"),
-                            };
+                        let (vel_mul, vel_unit_label, energy_mul, energy_unit_label) = match units {
+                            UnitSystem::Imperial => (3.28084, "fps", 0.737562149, "ft-lb"),
+                            UnitSystem::Metric => (1.0, "m/s", 1.0, "J"),
+                        };
 
                         let velocity_label = format!("velocity ({})", vel_unit_label);
                         let velocity_points: Vec<(f64, f64)> = result
@@ -2862,10 +2852,8 @@ impl WasmBallistics {
                 };
                 let mut block = String::from("\nBC Segments (active)\n=====================\n");
                 for seg in segments {
-                    let mach_min =
-                        seg.velocity_min * 0.3048 / crate::constants::SPEED_OF_SOUND_MPS;
-                    let mach_max =
-                        seg.velocity_max * 0.3048 / crate::constants::SPEED_OF_SOUND_MPS;
+                    let mach_min = seg.velocity_min * 0.3048 / crate::constants::SPEED_OF_SOUND_MPS;
+                    let mach_max = seg.velocity_max * 0.3048 / crate::constants::SPEED_OF_SOUND_MPS;
                     block.push_str(&format!(
                         "  {:.1}-{:.1} {} (Mach {:.2}-{:.2}): BC {:.5}\n",
                         seg.velocity_min * fps_to_display,
@@ -3309,11 +3297,19 @@ impl WasmBallistics {
                             elevation_cf,
                         );
                     let near_line = match crossings.near_m {
-                        Some(m) => format!("Near Zero (ascending): {:.1} {}\n", to_display(m), dist_label),
+                        Some(m) => format!(
+                            "Near Zero (ascending): {:.1} {}\n",
+                            to_display(m),
+                            dist_label
+                        ),
                         None => "Near Zero: not within the solved range\n".to_string(),
                     };
                     let far_line = match crossings.far_m {
-                        Some(m) => format!("Far Zero (descending): {:.1} {}\n", to_display(m), dist_label),
+                        Some(m) => format!(
+                            "Far Zero (descending): {:.1} {}\n",
+                            to_display(m),
+                            dist_label
+                        ),
                         None => "Far Zero: not within the solved range\n".to_string(),
                     };
                     // MBA-1426 item 5 / MBA-1419: name which root the single zero-range value
@@ -3747,8 +3743,8 @@ impl WasmBallistics {
             i += 1;
         }
 
-        let target_speed = target_speed
-            .ok_or_else(|| JsValue::from_str("--target-speed is required"))?;
+        let target_speed =
+            target_speed.ok_or_else(|| JsValue::from_str("--target-speed is required"))?;
 
         // MBA-1355: smoa/iphy join mil/moa as real display units (mirrors native
         // handle_lead's Smoa|Iphy match arm — sol.lead_mil * smoa_per_mil()). MBA-1410:
@@ -3757,7 +3753,8 @@ impl WasmBallistics {
         // hold), same axis native resolves it against. WASM has no --profile, so there is
         // no elevation_click/profile fallback here, only the explicit flag.
         let adjustment_unit_lower = adjustment_unit.to_lowercase();
-        let windage_click: Option<crate::adjustment::ClickValue> = match adjustment_unit_lower.as_str()
+        let windage_click: Option<crate::adjustment::ClickValue> = match adjustment_unit_lower
+            .as_str()
         {
             "mil" | "moa" | "smoa" | "iphy" => None,
             "clicks" => {
@@ -3767,9 +3764,7 @@ impl WasmBallistics {
                          --windage-click-value <SIZE><UNIT> (e.g. 0.25moa or 0.1mil)",
                     )
                 })?;
-                Some(
-                    crate::adjustment::parse_click_value(w).map_err(|e| JsValue::from_str(&e))?,
-                )
+                Some(crate::adjustment::parse_click_value(w).map_err(|e| JsValue::from_str(&e))?)
             }
             _ => {
                 return Err(JsValue::from_str(&format!(
@@ -4649,8 +4644,10 @@ impl WasmBallistics {
         // MBA-1365: table-only, same rationale as handle_trajectory_command. `compute_wez`
         // has no `BallisticInputs` to ask, so check the same two primitives directly.
         let bc_reference_warning = if custom_drag_table.is_some()
-            && matches!(bc_reference_standard, BcReferenceStandard::ArmyStandardMetro)
-        {
+            && matches!(
+                bc_reference_standard,
+                BcReferenceStandard::ArmyStandardMetro
+            ) {
             Some(format!("{BC_REFERENCE_STANDARD_INERT_WARNING}\n\n"))
         } else {
             None
@@ -5022,7 +5019,6 @@ impl WasmBallistics {
             }
         };
 
-
         // Convert to the truing core's internal imperial units — factor-for-factor the
         // native Commands::TrueVelocity dispatch.
         let range_yd = match units {
@@ -5155,10 +5151,13 @@ impl WasmBallistics {
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
             // MBA-1358: dial-unit report values are shown back in scope units (÷CF) via
             // the same shared helper the native CLI uses (/1.0 exact without a CF).
-            let display_report =
-                crate::truing::scale_report_dial_values(&report, observation_cf);
+            let display_report = crate::truing::scale_report_dial_values(&report, observation_cf);
             Ok(format_multi_truing_result(
-                &display_report, drop_unit, units, chrono_fps, output,
+                &display_report,
+                drop_unit,
+                units,
+                chrono_fps,
+                output,
             ))
         } else {
             // Classic single-observation velocity truing (drop is always MIL here).
@@ -5624,8 +5623,7 @@ impl WasmBallistics {
             earth,
             called_crosswind_mph: called_mph,
         };
-        let report =
-            solve_wind_truing(&request).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let report = solve_wind_truing(&request).map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(format_wind_truing_report(
             &report,
             engine_units(units),
@@ -5675,14 +5673,12 @@ impl WasmBallistics {
                         pair
                     )));
                 }
-                let d: f64 = parts[0]
-                    .trim()
-                    .parse()
-                    .map_err(|_| JsValue::from_str(&format!("Invalid distance '{}'", parts[0].trim())))?;
-                let v: f64 = parts[1]
-                    .trim()
-                    .parse()
-                    .map_err(|_| JsValue::from_str(&format!("Invalid value '{}'", parts[1].trim())))?;
+                let d: f64 = parts[0].trim().parse().map_err(|_| {
+                    JsValue::from_str(&format!("Invalid distance '{}'", parts[0].trim()))
+                })?;
+                let v: f64 = parts[1].trim().parse().map_err(|_| {
+                    JsValue::from_str(&format!("Invalid value '{}'", parts[1].trim()))
+                })?;
                 out.push((d, v));
             }
             Ok(out)
@@ -5738,31 +5734,49 @@ impl WasmBallistics {
                 }
                 "--zero-range" => {
                     if i + 1 < args.len() {
-                        zero_range = Some(args[i + 1].parse().map_err(|_| JsValue::from_str("Invalid zero-range"))?);
+                        zero_range = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid zero-range"))?,
+                        );
                         i += 1;
                     }
                 }
                 "--sight-height" => {
                     if i + 1 < args.len() {
-                        sight_height = Some(args[i + 1].parse().map_err(|_| JsValue::from_str("Invalid sight-height"))?);
+                        sight_height = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid sight-height"))?,
+                        );
                         i += 1;
                     }
                 }
                 "--temperature" => {
                     if i + 1 < args.len() {
-                        temperature = Some(args[i + 1].parse().map_err(|_| JsValue::from_str("Invalid temperature"))?);
+                        temperature = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid temperature"))?,
+                        );
                         i += 1;
                     }
                 }
                 "--pressure" => {
                     if i + 1 < args.len() {
-                        pressure = Some(args[i + 1].parse().map_err(|_| JsValue::from_str("Invalid pressure"))?);
+                        pressure = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid pressure"))?,
+                        );
                         i += 1;
                     }
                 }
                 "--humidity" => {
                     if i + 1 < args.len() {
-                        humidity = args[i + 1].parse().map_err(|_| JsValue::from_str("Invalid humidity"))?;
+                        humidity = args[i + 1]
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid humidity"))?;
                         i += 1;
                     }
                 }
@@ -5774,7 +5788,9 @@ impl WasmBallistics {
                 }
                 "--altitude" => {
                     if i + 1 < args.len() {
-                        altitude = args[i + 1].parse().map_err(|_| JsValue::from_str("Invalid altitude"))?;
+                        altitude = args[i + 1]
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid altitude"))?;
                         i += 1;
                     }
                 }
@@ -5936,13 +5952,23 @@ impl WasmBallistics {
                     UnitSystem::Metric => *d,
                 })
                 .unwrap_or(0.0);
-            let du2 = if units == UnitSystem::Imperial { "yd" } else { "m" };
-            lines.insert(0, format!(
+            let du2 = if units == UnitSystem::Imperial {
+                "yd"
+            } else {
+                "m"
+            };
+            lines.insert(
+                0,
+                format!(
                 "⚠ Data looks zeroed near {zd:.0} {du2} but --zero-range not given; drop is being"
-            ));
-            lines.insert(1, format!(
-                "  treated as bore-referenced. For a dope card, pass --zero-range {zd:.0}."
-            ));
+            ),
+            );
+            lines.insert(
+                1,
+                format!(
+                    "  treated as bore-referenced. For a dope card, pass --zero-range {zd:.0}."
+                ),
+            );
             lines.insert(2, String::new());
         }
 
@@ -5955,8 +5981,15 @@ impl WasmBallistics {
                     BcFitMode::Velocity => None,
                 };
                 let est = estimate_bc_fit(
-                    velocity_mps, mass_kg, diameter_m, pts, model, mode,
-                    atmosphere.clone(), zr, sight_m,
+                    velocity_mps,
+                    mass_kg,
+                    diameter_m,
+                    pts,
+                    model,
+                    mode,
+                    atmosphere.clone(),
+                    zr,
+                    sight_m,
                 )
                 .map_err(|e| JsValue::from_str(&format!("Error estimating BC: {}", e)))?;
                 if est.at_bound {
@@ -5986,14 +6019,24 @@ impl WasmBallistics {
                     est.bc,
                     rms_user,
                     unit,
-                    if est.at_bound { " ⚠ UNRELIABLE (hit BC limit)" } else { "" }
+                    if est.at_bound {
+                        " ⚠ UNRELIABLE (hit BC limit)"
+                    } else {
+                        ""
+                    }
                 ));
             }
         }
         if any_unreliable {
             lines.push(String::new());
-            lines.push("⚠ A fit ran to the BC search limit — the data did not determine a real".to_string());
-            lines.push("  value. Add more/longer-range points and check --zero-range / --temperature.".to_string());
+            lines.push(
+                "⚠ A fit ran to the BC search limit — the data did not determine a real"
+                    .to_string(),
+            );
+            lines.push(
+                "  value. Add more/longer-range points and check --zero-range / --temperature."
+                    .to_string(),
+            );
         }
         Ok(lines.join("\n"))
     }
@@ -6098,8 +6141,7 @@ impl WasmBallistics {
             if should_show {
                 // MBA-1403: /1.0 in LOS mode is bit-exact, so the default stays
                 // byte-identical; target mode divides by cos(shooting angle).
-                let drop =
-                    (los_height - point.position.y) / target_drops_cos.unwrap_or(1.0);
+                let drop = (los_height - point.position.y) / target_drops_cos.unwrap_or(1.0);
                 let drift = point.position.z; // Z is lateral (windage, McCoy)
                 let velocity = point.velocity_magnitude;
 
@@ -6128,13 +6170,14 @@ impl WasmBallistics {
                 };
 
                 if ring_enabled {
-                    let (_, ring_mil) =
-                        mover_ring(target_speed_mps, point.time, point.position.x);
+                    let (_, ring_mil) = mover_ring(target_speed_mps, point.time, point.position.x);
                     // MBA-1358: divide the mil angle by the windage CF BEFORE
                     // unit/click conversion, mirroring native run_trajectory's Ring cell.
                     let ring_str = match ring_mil.map(|mil| mil / ring_windage_cf) {
                         Some(mil) => match ring_unit {
-                            RingDisplayUnit::Factor(f, label) => format!("{:.2} {}", mil * f, label),
+                            RingDisplayUnit::Factor(f, label) => {
+                                format!("{:.2} {}", mil * f, label)
+                            }
                             // clicks_for(drop_yd, range_yd, click) only needs the
                             // drop_yd/range_yd RATIO — passing (mil, 1000.0) reuses it
                             // directly on an already-computed mil angle (ring_mil is
@@ -6148,7 +6191,13 @@ impl WasmBallistics {
                     };
                     output.push_str(&format!(
                         "{:6} | {:6} | {:7} | {:10} | {:8} | {:.3} s | {}\n",
-                        range_str, drop_str, drift_str, velocity_str, energy_str, point.time, ring_str
+                        range_str,
+                        drop_str,
+                        drift_str,
+                        velocity_str,
+                        energy_str,
+                        point.time,
+                        ring_str
                     ));
                 } else {
                     output.push_str(&format!(
@@ -6564,7 +6613,10 @@ impl WasmBallistics {
             }
         };
 
-        Ok(crate::drag::format_reference_drag_curve(&drag_model, format))
+        Ok(crate::drag::format_reference_drag_curve(
+            &drag_model,
+            format,
+        ))
     }
 
     /// `reticle` in the browser terminal (MBA-1361).
@@ -6675,16 +6727,16 @@ impl WasmBallistics {
                             i += 1;
                         }
                         "--focal-plane" => {
-                            focal_plane = match require_value(layout_args, i)?.to_lowercase().as_str()
-                            {
-                                "ffp" => FocalPlane::First,
-                                "sfp" => FocalPlane::Second,
-                                other => {
-                                    return Err(JsValue::from_str(&format!(
-                                        "invalid --focal-plane '{other}' (expected ffp or sfp)"
-                                    )))
-                                }
-                            };
+                            focal_plane =
+                                match require_value(layout_args, i)?.to_lowercase().as_str() {
+                                    "ffp" => FocalPlane::First,
+                                    "sfp" => FocalPlane::Second,
+                                    other => {
+                                        return Err(JsValue::from_str(&format!(
+                                            "invalid --focal-plane '{other}' (expected ffp or sfp)"
+                                        )))
+                                    }
+                                };
                             i += 1;
                         }
                         "--reference-mag" => {
@@ -6863,8 +6915,7 @@ impl WasmBallistics {
                     }
                 };
                 if ring_enabled {
-                    let (ring_m, ring_mil) =
-                        mover_ring(target_speed_mps, p.time, p.position.x);
+                    let (ring_m, ring_mil) = mover_ring(target_speed_mps, p.time, p.position.x);
                     if let Some(obj) = point.as_object_mut() {
                         obj.insert("mover_ring_m".to_string(), serde_json::json!(ring_m));
                         // MBA-1358: dialed quantity — divided by the windage CF
@@ -7097,8 +7148,7 @@ impl WasmBallistics {
 
             if range_display >= current_range || is_last_point {
                 // MBA-1403: /1.0 in LOS mode is bit-exact — default stays byte-identical.
-                let drop =
-                    (los_height - point.position.y) / target_drops_cos.unwrap_or(1.0);
+                let drop = (los_height - point.position.y) / target_drops_cos.unwrap_or(1.0);
 
                 let row = match units {
                     UnitSystem::Imperial => {
@@ -7126,11 +7176,7 @@ impl WasmBallistics {
                 if ring_enabled {
                     // Downrange is position.x (McCoy frame) regardless of the CSV's
                     // lateral/downrange column swap above.
-                    let (_, ring_mil) = mover_ring(
-                        target_speed_mps,
-                        point.time,
-                        point.position.x,
-                    );
+                    let (_, ring_mil) = mover_ring(target_speed_mps, point.time, point.position.x);
                     match ring_mil {
                         // MBA-1358: dialed quantity — divided by the windage CF
                         // (/1.0 exact).
@@ -7197,9 +7243,10 @@ impl WasmBallistics {
                 }
                 "--powder-temp-sensitivity" => {
                     if i + 1 < args.len() {
-                        powder_temp_sensitivity = Some(args[i + 1].parse().map_err(|_| {
-                            JsValue::from_str("Invalid powder temp sensitivity")
-                        })?);
+                        powder_temp_sensitivity =
+                            Some(args[i + 1].parse().map_err(|_| {
+                                JsValue::from_str("Invalid powder temp sensitivity")
+                            })?);
                         i += 1;
                     }
                 }
@@ -7263,8 +7310,7 @@ impl WasmBallistics {
         }
 
         // SI conversions — identical factors to the native handler.
-        let powder_temp_curve_si: Option<Vec<(f64, f64)>> = match powder_temp_curve_str.as_deref()
-        {
+        let powder_temp_curve_si: Option<Vec<(f64, f64)>> = match powder_temp_curve_str.as_deref() {
             Some(s) => Some(parse_powder_temp_curve_str(s, units)?),
             None => None,
         };
@@ -7433,8 +7479,7 @@ impl WasmBallistics {
                     result["sensitivity"] = serde_json::json!(sens_display);
                     result["reference_temp"] = serde_json::json!(round1(from_temp_c(ref_temp_c)));
                 } else {
-                    result["curve_points"] =
-                        serde_json::json!(curve_ref.expect("has_curve").len());
+                    result["curve_points"] = serde_json::json!(curve_ref.expect("has_curve").len());
                 }
                 if let Some(v) = velocity {
                     result["nominal_velocity"] = serde_json::json!(v);
@@ -7499,7 +7544,11 @@ impl WasmBallistics {
                 out.push('\n');
                 if rows.len() == 1 {
                     let r = &rows[0];
-                    let temp_label = if has_curve { "Powder temp:" } else { "Shot temp:" };
+                    let temp_label = if has_curve {
+                        "Powder temp:"
+                    } else {
+                        "Shot temp:"
+                    };
                     out.push_str(&format!(
                         "  {:<20}{:.1} {}\n",
                         temp_label, r.temp_display, temp_unit
@@ -7617,9 +7666,11 @@ impl WasmBallistics {
                 }
                 "--gas-velocity-factor" => {
                     if i + 1 < args.len() {
-                        gas_velocity_factor = Some(args[i + 1].parse().map_err(|_| {
-                            JsValue::from_str("Invalid gas velocity factor")
-                        })?);
+                        gas_velocity_factor = Some(
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid gas velocity factor"))?,
+                        );
                         i += 1;
                     }
                 }
@@ -7659,25 +7710,35 @@ impl WasmBallistics {
 
         // Same numeric ranges the native clap definition enforces (f64_range).
         if !(0.1..=2000.0).contains(&bullet_weight) {
-            return Err(JsValue::from_str("Bullet weight must be between 0.1 and 2000"));
+            return Err(JsValue::from_str(
+                "Bullet weight must be between 0.1 and 2000",
+            ));
         }
         if !(0.0..=1000.0).contains(&charge_weight) {
-            return Err(JsValue::from_str("Charge weight must be between 0 and 1000"));
+            return Err(JsValue::from_str(
+                "Charge weight must be between 0 and 1000",
+            ));
         }
         if !(1.0..=6000.0).contains(&velocity) {
             return Err(JsValue::from_str("Velocity must be between 1 and 6000"));
         }
         if !(0.1..=500.0).contains(&firearm_weight) {
-            return Err(JsValue::from_str("Firearm weight must be between 0.1 and 500"));
+            return Err(JsValue::from_str(
+                "Firearm weight must be between 0.1 and 500",
+            ));
         }
         if let Some(f) = gas_velocity_factor {
             if !(0.0..=20.0).contains(&f) {
-                return Err(JsValue::from_str("Gas velocity factor must be between 0 and 20"));
+                return Err(JsValue::from_str(
+                    "Gas velocity factor must be between 0 and 20",
+                ));
             }
         }
         if let Some(v) = gas_velocity {
             if !(0.0..=20000.0).contains(&v) {
-                return Err(JsValue::from_str("Gas velocity must be between 0 and 20000"));
+                return Err(JsValue::from_str(
+                    "Gas velocity must be between 0 and 20000",
+                ));
             }
         }
 
@@ -7829,9 +7890,18 @@ impl WasmBallistics {
                     "  Firearm weight:      {:.2} {}\n",
                     firearm_weight, firearm_weight_unit
                 ));
-                out.push_str(&format!("  Bullet weight:       {:.1} {}\n", bullet_weight, weight_unit));
-                out.push_str(&format!("  Charge weight:       {:.1} {}\n", charge_weight, weight_unit));
-                out.push_str(&format!("  Muzzle velocity:     {:.1} {}\n", velocity, vel_unit));
+                out.push_str(&format!(
+                    "  Bullet weight:       {:.1} {}\n",
+                    bullet_weight, weight_unit
+                ));
+                out.push_str(&format!(
+                    "  Charge weight:       {:.1} {}\n",
+                    charge_weight, weight_unit
+                ));
+                out.push_str(&format!(
+                    "  Muzzle velocity:     {:.1} {}\n",
+                    velocity, vel_unit
+                ));
                 out.push_str(&format!(
                     "  Gas velocity model:  {}  ({:.1} {})\n",
                     gas_model_desc, gas_velocity_display, vel_unit
@@ -7997,8 +8067,12 @@ impl WasmBallistics {
                         r.class,
                         r.min_pf,
                         r.pf_pass,
-                        r.min_velocity_fps.map(|v| format!("{v:.0}")).unwrap_or_default(),
-                        r.max_velocity_fps.map(|v| format!("{v:.0}")).unwrap_or_default(),
+                        r.min_velocity_fps
+                            .map(|v| format!("{v:.0}"))
+                            .unwrap_or_default(),
+                        r.max_velocity_fps
+                            .map(|v| format!("{v:.0}"))
+                            .unwrap_or_default(),
                         r.velocity_pass.map(|b| b.to_string()).unwrap_or_default(),
                         r.pass,
                     ));
@@ -8007,8 +8081,14 @@ impl WasmBallistics {
             _ => {
                 out.push_str("Power Factor\n");
                 out.push_str("============\n");
-                out.push_str(&format!("  Weight:              {:.1} {}\n", weight, weight_unit));
-                out.push_str(&format!("  Velocity:            {:.1} {}\n", velocity, vel_unit));
+                out.push_str(&format!(
+                    "  Weight:              {:.1} {}\n",
+                    weight, weight_unit
+                ));
+                out.push_str(&format!(
+                    "  Velocity:            {:.1} {}\n",
+                    velocity, vel_unit
+                ));
                 out.push_str(&format!("  Power factor (raw):  {:.2}\n", raw_pf));
                 out.push_str(&format!("  Power factor (scored): {:.0}\n", scored_pf));
                 out.push('\n');
@@ -8041,49 +8121,76 @@ impl WasmBallistics {
         // Split per command so a gated-out command's help text (and its examples) leave
         // the binary with it. The chunks concatenate back to the original text exactly.
         let mut help = String::new();
-        help.push_str(r#"Ballistics Engine - WebAssembly Version
+        help.push_str(
+            r#"Ballistics Engine - WebAssembly Version
 
 Usage: ballistics [OPTIONS] <COMMAND>
 
 Commands:
-  trajectory      Calculate ballistic trajectory"#);
+  trajectory      Calculate ballistic trajectory"#,
+        );
         #[cfg(feature = "wasm-zero")]
-        help.push_str(r#"
-  zero           Calculate sight adjustment for zero"#);
+        help.push_str(
+            r#"
+  zero           Calculate sight adjustment for zero"#,
+        );
         #[cfg(feature = "wasm-monte-carlo")]
-        help.push_str(r#"
-  monte-carlo    Run Monte Carlo simulation"#);
+        help.push_str(
+            r#"
+  monte-carlo    Run Monte Carlo simulation"#,
+        );
         #[cfg(feature = "wasm-truing")]
-        help.push_str(r#"
-  true-velocity  Calculate effective muzzle velocity from observed drop"#);
+        help.push_str(
+            r#"
+  true-velocity  Calculate effective muzzle velocity from observed drop"#,
+        );
         #[cfg(feature = "wasm-truing")]
-        help.push_str(r#"
-  true-wind      Back-solve effective crosswind from an observed horizontal miss"#);
+        help.push_str(
+            r#"
+  true-wind      Back-solve effective crosswind from an observed horizontal miss"#,
+        );
         #[cfg(feature = "wasm-bc-convert")]
-        help.push_str(r#"
-  bc-convert     Convert published BC values between G1 and G7"#);
+        help.push_str(
+            r#"
+  bc-convert     Convert published BC values between G1 and G7"#,
+        );
         #[cfg(feature = "wasm-estimate-bc")]
-        help.push_str(r#"
-  estimate-bc    Estimate BC from trajectory data"#);
+        help.push_str(
+            r#"
+  estimate-bc    Estimate BC from trajectory data"#,
+        );
         #[cfg(feature = "wasm-lead")]
-        help.push_str(r#"
-  lead           Calculate moving-target lead (hold)"#);
+        help.push_str(
+            r#"
+  lead           Calculate moving-target lead (hold)"#,
+        );
         #[cfg(feature = "wasm-powder")]
-        help.push_str(r#"
-  powder         Resolve powder-temperature velocity shift (no trajectory)"#);
+        help.push_str(
+            r#"
+  powder         Resolve powder-temperature velocity shift (no trajectory)"#,
+        );
         #[cfg(feature = "wasm-recoil")]
-        help.push_str(r#"
-  recoil         Free recoil energy/velocity/impulse (SAAMI momentum balance)"#);
+        help.push_str(
+            r#"
+  recoil         Free recoil energy/velocity/impulse (SAAMI momentum balance)"#,
+        );
         #[cfg(feature = "wasm-power-factor")]
-        help.push_str(r#"
-  power-factor   Power factor + USPSA/IDPA/SASS rulebook pass/fail"#);
+        help.push_str(
+            r#"
+  power-factor   Power factor + USPSA/IDPA/SASS rulebook pass/fail"#,
+        );
         #[cfg(feature = "wasm-drag-curve")]
-        help.push_str(r#"
-  drag-curve     Print a built-in reference drag function as (Mach, Cd) data"#);
+        help.push_str(
+            r#"
+  drag-curve     Print a built-in reference drag function as (Mach, Cd) data"#,
+        );
         #[cfg(feature = "wasm-reticle")]
-        help.push_str(r#"
-  reticle        Reticle hold points and parametric reticle generation"#);
-        help.push_str(r#"
+        help.push_str(
+            r#"
+  reticle        Reticle hold points and parametric reticle generation"#,
+        );
+        help.push_str(
+            r#"
   help           Show this help message
 
 Global Options:
@@ -8228,9 +8335,11 @@ Trajectory Command:
                                  defeat ground truncation
     --target-height <HEIGHT>     Target height above ground (inches/mm)
     --powder-temp <TEMP>         Powder temperature
-    --powder-temp-sensitivity <SENS>  Velocity change per degree"#);
+    --powder-temp-sensitivity <SENS>  Velocity change per degree"#,
+        );
         #[cfg(feature = "wasm-zero")]
-        help.push_str(r#"
+        help.push_str(
+            r#"
 
 Zero Command:
   ballistics zero [OPTIONS]
@@ -8262,9 +8371,11 @@ Zero Command:
     --humidity <H>               Relative humidity percent
     --altitude <ALT>             Zero-day altitude (ft/m)
     --density-altitude <DA>      Single-value atmosphere entry (ft/m); supersedes
-                                 --altitude and --pressure/--pressure-type"#);
+                                 --altitude and --pressure/--pressure-type"#,
+        );
         #[cfg(feature = "wasm-drag-curve")]
-        help.push_str(r#"
+        help.push_str(
+            r#"
 
 Drag Curve Command:
   ballistics drag-curve [OPTIONS]
@@ -8279,9 +8390,11 @@ Drag Curve Command:
   Options:
     --drag-model <MODEL>         Model to print (G1/G2/G5/G6/G7/G8/GI/GS/RA4)
                                  [default: g7]
-    -o, --output <FORMAT>        table (default), csv, or json"#);
+    -o, --output <FORMAT>        table (default), csv, or json"#,
+        );
         #[cfg(feature = "wasm-reticle")]
-        help.push_str(r#"
+        help.push_str(
+            r#"
 
 Reticle Command:
   ballistics reticle generate <mil-grid|tree|bdc> [OPTIONS]
@@ -8325,9 +8438,11 @@ Reticle Command:
     -o, --output <FORMAT>        table (default) or json
 
   Native-only: `reticle hold --range` (solve the drop here first with
-  `trajectory` and pass it as --drop-mil) and `--profile`."#);
+  `trajectory` and pass it as --drop-mil) and `--profile`."#,
+        );
         #[cfg(feature = "wasm-monte-carlo")]
-        help.push_str(r#"
+        help.push_str(
+            r#"
 
 Monte Carlo Command:
   ballistics monte-carlo [OPTIONS]
@@ -8369,9 +8484,11 @@ Monte Carlo Command:
                                  [default: summary]
 
   Browser note: a WEZ sweep runs num-sims full trajectory solves per range step
-  (deterministic but heavy) — prefer -n 300 or fewer for interactive use."#);
+  (deterministic but heavy) — prefer -n 300 or fewer for interactive use."#,
+        );
         #[cfg(feature = "wasm-truing")]
-        help.push_str(r#"
+        help.push_str(
+            r#"
 
 True Velocity Command:
   ballistics true-velocity --range <DIST> --measured-drop <DROP> [OPTIONS]
@@ -8419,9 +8536,11 @@ True Velocity Command:
     --altitude <A>               Altitude (ft/m) [default: 0]
     --offline                    Accepted for native-command parity (the WASM
                                  terminal always calculates locally)
-    -o, --output <FORMAT>        Output format (table/json/csv) [default: table]"#);
+    -o, --output <FORMAT>        Output format (table/json/csv) [default: table]"#,
+        );
         #[cfg(feature = "wasm-truing")]
-        help.push_str(r#"
+        help.push_str(
+            r#"
 
 True Wind Command:
   ballistics true-wind --miss <RANGE:RIGHT> --twist-rate <TWIST> [OPTIONS]
@@ -8468,9 +8587,11 @@ True Wind Command:
     --altitude <A>               Altitude (ft/m) [default: 0]
     --offline                    Accepted for native-command parity (this command
                                  is local on both surfaces)
-    -o, --output <FORMAT>        Output format (table/json/csv) [default: table]"#);
+    -o, --output <FORMAT>        Output format (table/json/csv) [default: table]"#,
+        );
         #[cfg(feature = "wasm-bc-convert")]
-        help.push_str(r#"
+        help.push_str(
+            r#"
 
 BC Convert Command:
   ballistics bc-convert --source-model <g1|g7> --target-model <g1|g7> [OPTIONS]
@@ -8491,7 +8612,8 @@ BC Convert Command:
                                 Conflicts with --bc, --mach, and --velocity
     --speed-of-sound <VEL>      Speed of sound in the current velocity units; valid with
                                 --velocity or banded mode [default: 1116.437 fps / 340.29 m/s]
-    -o, --output <FORMAT>       Output format (table/json/csv) [default: table]"#);
+    -o, --output <FORMAT>       Output format (table/json/csv) [default: table]"#,
+        );
         #[cfg(feature = "wasm-estimate-bc")]
         help.push_str(r#"
 
@@ -8520,7 +8642,8 @@ Estimate BC Command:
   gives a velocity-retention fit (immune to zero/angle). A fit that can't be pinned
   down is flagged UNRELIABLE."#);
         #[cfg(feature = "wasm-lead")]
-        help.push_str(r#"
+        help.push_str(
+            r#"
 
 Lead Command:
   ballistics lead --target-speed <SPEED> [OPTIONS]
@@ -8567,9 +8690,11 @@ Lead Command:
     -o, --output <FORMAT>         Output format (table/json) [default: table]
 
   Time of flight is solved under the supplied wind/atmosphere (wind-aware lead);
-  the lead figure itself is pure target motion — wind hold stays separate."#);
+  the lead figure itself is pure target motion — wind hold stays separate."#,
+        );
         #[cfg(feature = "wasm-powder")]
-        help.push_str(r#"
+        help.push_str(
+            r#"
 
 Powder Command:
   ballistics powder [OPTIONS]
@@ -8592,9 +8717,11 @@ Powder Command:
                                   --powder-temp-sensitivity; clamped at endpoints)
     --sweep <START:END:STEP>      Velocity table across temperatures (°F/°C)
     -m, --mass <MASS>             Bullet mass (grains/grams): adds muzzle energy
-    -o, --output <FORMAT>         Output format (table/json/csv) [default: table]"#);
+    -o, --output <FORMAT>         Output format (table/json/csv) [default: table]"#,
+        );
         #[cfg(feature = "wasm-recoil")]
-        help.push_str(r#"
+        help.push_str(
+            r#"
 
 Recoil Command:
   ballistics recoil [OPTIONS]
@@ -8615,9 +8742,11 @@ Recoil Command:
                                   [default: rifle]
     --gas-velocity-factor <F>     Override: gas velocity = F * muzzle velocity
     --gas-velocity <VEL>          Override: absolute gas velocity (fps/m/s)
-    -o, --output <FORMAT>         Output format (table/json/csv) [default: table]"#);
+    -o, --output <FORMAT>         Output format (table/json/csv) [default: table]"#,
+        );
         #[cfg(feature = "wasm-power-factor")]
-        help.push_str(r#"
+        help.push_str(
+            r#"
 
 Power Factor Command:
   ballistics power-factor [OPTIONS]
@@ -8632,51 +8761,70 @@ Power Factor Command:
     -v, --velocity <VEL>          Velocity (fps/m/s) [required]
     --organization <ORG>          Filter to one organization: uspsa/idpa/sass
                                   [default: all]
-    -o, --output <FORMAT>         Output format (table/json/csv) [default: table]"#);
-        help.push_str(r#"
+    -o, --output <FORMAT>         Output format (table/json/csv) [default: table]"#,
+        );
+        help.push_str(
+            r#"
 
 Examples:
   ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308
   ballistics trajectory --auto-zero 200 --enable-spin-drift
-  ballistics --units metric trajectory -v 823 -b 0.475 -m 10.9"#);
+  ballistics --units metric trajectory -v 823 -b 0.475 -m 10.9"#,
+        );
         #[cfg(feature = "wasm-zero")]
-        help.push_str(r#"
-  ballistics zero --target-distance 300"#);
+        help.push_str(
+            r#"
+  ballistics zero --target-distance 300"#,
+        );
         #[cfg(feature = "wasm-bc-convert")]
-        help.push_str(r#"
+        help.push_str(
+            r#"
   ballistics bc-convert --source-model g1 --target-model g7 -b 0.475 --velocity 2700
   ballistics bc-convert --source-model g1 --target-model g7 \
-    --bc-segment 2500:3000:0.475 --bc-segment 1500:2500:0.465 -o json"#);
+    --bc-segment 2500:3000:0.475 --bc-segment 1500:2500:0.465 -o json"#,
+        );
         #[cfg(feature = "wasm-estimate-bc")]
-        help.push_str(r#"
+        help.push_str(
+            r#"
   ballistics estimate-bc -v 2700 -m 168 -d 0.308 --data "100,2.1;200,9.4;300,22.8"
   ballistics estimate-bc -v 2650 -m 77 -d 0.224 --data "300,29;500,89.9" \
-    --velocity-data "300,1980;500,1560" --drag-model both"#);
+    --velocity-data "300,1980;500,1560" --drag-model both"#,
+        );
         #[cfg(feature = "wasm-monte-carlo")]
-        help.push_str(r#"
+        help.push_str(
+            r#"
   ballistics monte-carlo -n 1000 --velocity-std 10
   ballistics monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 --wez \
-    --target-size 18x30 -n 300 --wez-start 200 --wez-end 500 --wez-step 100"#);
+    --target-size 18x30 -n 300 --wez-start 200 --wez-end 500 --wez-step 100"#,
+        );
         #[cfg(feature = "wasm-truing")]
-        help.push_str(r#"
+        help.push_str(
+            r#"
   ballistics true-velocity --range 300 --measured-drop 1.8 -b 0.475 -m 168 -d 0.308
   ballistics true-velocity --range 300 --measured-drop 1.8 --observed 600:5.1 \
     --observed 900:10.9 -b 0.475 -m 168 -d 0.308 --chrono-velocity 2700
   ballistics true-wind --miss 500:12.4 --miss 700:26.8 -v 2700 -b 0.475 -m 168 \
-    -d 0.308 --drag-model g7 --twist-rate 11 --called-wind 6"#);
+    -d 0.308 --drag-model g7 --twist-rate 11 --called-wind 6"#,
+        );
         #[cfg(feature = "wasm-reticle")]
-        help.push_str(r#"
+        help.push_str(
+            r#"
   ballistics reticle generate tree --rows 6 --row-spacing 1 --spread-step 0.5 -o json
   ballistics reticle hold --mag 6 --drop-mil 4.2 --wind-mil 1.1 --reticle-json \
     '{"name":"demo","focal_plane":"sfp","reference_magnification":12,
       "marks":[{"down_mil":0,"right_mil":0,"kind":"center"},
-               {"down_mil":2,"right_mil":0,"kind":"hash"}]}'"#);
+               {"down_mil":2,"right_mil":0,"kind":"hash"}]}'"#,
+        );
         #[cfg(feature = "wasm-recoil")]
-        help.push_str(r#"
-  ballistics recoil -b 168 -c 43 -v 2700 -f 8.5"#);
+        help.push_str(
+            r#"
+  ballistics recoil -b 168 -c 43 -v 2700 -f 8.5"#,
+        );
         #[cfg(feature = "wasm-power-factor")]
-        help.push_str(r#"
-  ballistics power-factor -w 147 -v 900 --organization uspsa"#);
+        help.push_str(
+            r#"
+  ballistics power-factor -w 147 -v 900 --organization uspsa"#,
+        );
         help
     }
 }

@@ -1,18 +1,15 @@
 // CLI API module - provides simplified interfaces for command-line tool
 use crate::cluster_bc::ClusterBCDegradation;
-use crate::mc_stats::{
-    wilson_interval, BernoulliConfidenceSequence, ConfidenceLevel, Welford,
-};
+use crate::mc_stats::{wilson_interval, BernoulliConfidenceSequence, ConfidenceLevel, Welford};
 use crate::pitch_damping::{calculate_pitch_damping_coefficient, PitchDampingCoefficients};
 use crate::precession_nutation::{
     calculate_combined_angular_motion, projectile_moments_of_inertia, AngularState,
     PrecessionNutationParams,
 };
-use crate::trajectory_sampling::{
-    projected_sample_count, sample_trajectory, TrajectoryData, TrajectoryOutputs,
-    TrajectorySample,
-};
 use crate::trajectory_observation::{bracket_param, Bracket, TrajectoryTermination};
+use crate::trajectory_sampling::{
+    projected_sample_count, sample_trajectory, TrajectoryData, TrajectoryOutputs, TrajectorySample,
+};
 use crate::wind_shear::WindShearModel;
 use crate::DragModel;
 use nalgebra::{Vector3, Vector6};
@@ -134,8 +131,8 @@ pub enum DropsReference {
 #[derive(Debug, Clone)]
 pub struct BallisticInputs {
     // Core ballistics parameters (using intuitive names)
-    pub bc_value: f64,        // Ballistic coefficient (G1, G7, etc.)
-    pub bc_type: DragModel,   // Drag model (G1, G7, G8, etc.)
+    pub bc_value: f64,      // Ballistic coefficient (G1, G7, etc.)
+    pub bc_type: DragModel, // Drag model (G1, G7, G8, etc.)
     /// Which standard atmosphere `bc_value`/`bc_segments`/`bc_segments_data` are
     /// referenced to (MBA-1365). `Icao` (the default) is a no-op; `ArmyStandardMetro`
     /// is converted to the ICAO reference exactly once, in `TrajectorySolver::new`,
@@ -155,7 +152,7 @@ pub struct BallisticInputs {
     /// points relative to true North). Distinct from `azimuth_angle`, which is the
     /// small horizontal *aiming* offset and rotates the launch velocity.
     pub shot_azimuth: f64,
-    pub shooting_angle: f64,   // uphill/downhill angle in radians
+    pub shooting_angle: f64, // uphill/downhill angle in radians
     /// Rifle cant angle in radians about the line of sight — positive = clockwise from the
     /// shooter's view (top of the scope tips right). Rotates the sight-frame aim offsets
     /// (`muzzle_angle`, `azimuth_angle`) about the LOS and swings the bore's sight-height
@@ -165,7 +162,7 @@ pub struct BallisticInputs {
     /// zero-then-fire usage; a raw gravity-frame launch angle would not rotate physically.
     /// 0.0 = level rifle (bit-identical to pre-cant behavior). (MBA-1286)
     pub cant_angle: f64,
-    pub sight_height: f64,     // meters above bore
+    pub sight_height: f64, // meters above bore
     /// Lateral offset between the sight axis and the bore axis, meters (MBA-1396;
     /// offset-mounted optics): positive = the sight sits RIGHT of the bore, so the bore
     /// starts LEFT of the line of sight (initial lateral position `z -= offset`). When a
@@ -177,8 +174,8 @@ pub struct BallisticInputs {
     /// which is an angular ZERO-STATE bias, not mount geometry. 0.0 (the default) is
     /// byte-identical to pre-MBA-1396 behavior.
     pub sight_offset_lateral_m: f64,
-    pub muzzle_height: f64,    // meters above ground
-    pub target_height: f64,    // meters above ground for zeroing
+    pub muzzle_height: f64, // meters above ground
+    pub target_height: f64, // meters above ground for zeroing
     /// Deliberate vertical point-of-impact offset AT THE ZERO RANGE, meters (MBA-1359;
     /// Kestrel "zero height" semantics): positive = the rifle is deliberately zeroed to
     /// impact HIGH by this much at the zero distance. Applied POST-solve by
@@ -231,7 +228,7 @@ pub struct BallisticInputs {
     pub enable_coriolis: bool, // Coriolis deflection (requires latitude)
     pub use_powder_sensitivity: bool,
     pub powder_temp_sensitivity: f64, // m/s per degree Celsius
-    pub powder_temp: f64,           // Celsius
+    pub powder_temp: f64,             // Celsius
     /// Optional measured powder-temperature -> muzzle-velocity curve, as
     /// (temperature_celsius, muzzle_velocity_m_s) points sorted ascending by
     /// temperature. When present it supersedes the linear `powder_temp_sensitivity`
@@ -388,7 +385,10 @@ impl BallisticInputs {
     /// into its table-output text instead.
     pub fn bc_reference_standard_inert_warning(&self) -> Option<&'static str> {
         if self.custom_drag_table.is_some()
-            && matches!(self.bc_reference_standard, BcReferenceStandard::ArmyStandardMetro)
+            && matches!(
+                self.bc_reference_standard,
+                BcReferenceStandard::ArmyStandardMetro
+            )
         {
             Some(BC_REFERENCE_STANDARD_INERT_WARNING)
         } else {
@@ -504,9 +504,9 @@ impl Default for BallisticInputs {
             cant_angle: 0.0,
             sight_height: 0.05,
             sight_offset_lateral_m: 0.0, // Sight directly above the bore (MBA-1396)
-            muzzle_height: 0.0,       // Default 0 - height is in sight_height
-            target_height: 0.0,       // Target at ground level by default
-            zero_poi_vertical_m: 0.0, // No deliberate POI offset at the zero range (MBA-1359)
+            muzzle_height: 0.0,          // Default 0 - height is in sight_height
+            target_height: 0.0,          // Target at ground level by default
+            zero_poi_vertical_m: 0.0,    // No deliberate POI offset at the zero range (MBA-1359)
             zero_poi_horizontal_m: 0.0,
             ground_threshold: -100.0, // Effectively disable ground detection (allow bullet to drop 100m below start)
 
@@ -555,7 +555,7 @@ impl Default for BallisticInputs {
             enable_wind_shear: false,
             wind_shear_model: "none".to_string(),
             enable_trajectory_sampling: false,
-            sample_interval: 10.0, // Default 10 meter intervals
+            sample_interval: 10.0,                // Default 10 meter intervals
             drops_reference: DropsReference::Los, // historical LOS-perpendicular drops
             enable_pitch_damping: false,
             enable_precession_nutation: false,
@@ -1489,8 +1489,7 @@ impl TrajectorySolver {
                 Bracket::Inside { lo, t } => {
                     let hi = lo + 1;
                     Some(
-                        points[lo].position.y
-                            + t * (points[hi].position.y - points[lo].position.y),
+                        points[lo].position.y + t * (points[hi].position.y - points[lo].position.y),
                     )
                 }
             }
@@ -1621,10 +1620,7 @@ impl TrajectorySolver {
         // MBA-1396: a lateral sight-mount offset is physically bounded by rail/mount
         // geometry (an inch or two). |0.5 m| is almost certainly a unit error
         // (inches/mm passed as meters).
-        require_finite(
-            "sight_offset_lateral_m",
-            self.inputs.sight_offset_lateral_m,
-        )?;
+        require_finite("sight_offset_lateral_m", self.inputs.sight_offset_lateral_m)?;
         if self.inputs.sight_offset_lateral_m.abs() >= 0.5 {
             return Err(BallisticsError::from(
                 "sight_offset_lateral_m must be smaller than 0.5 m in magnitude (it is \
@@ -1727,16 +1723,18 @@ impl TrajectorySolver {
                 )))
             }
         };
-        let require_indexed_non_negative =
-            |collection: &str, index: usize, field: &str, value: f64| {
-                if value >= 0.0 {
-                    Ok(())
-                } else {
-                    Err(BallisticsError::from(format!(
+        let require_indexed_non_negative = |collection: &str,
+                                            index: usize,
+                                            field: &str,
+                                            value: f64| {
+            if value >= 0.0 {
+                Ok(())
+            } else {
+                Err(BallisticsError::from(format!(
                         "trajectory result contains non-physical negative {collection}[{index}].{field} ({value})"
                     )))
-                }
-            };
+            }
+        };
 
         require_finite("max_range", result.max_range)?;
         require_finite("max_height", result.max_height)?;
@@ -1744,10 +1742,7 @@ impl TrajectorySolver {
         require_finite("impact_velocity", result.impact_velocity)?;
         require_finite("impact_energy", result.impact_energy)?;
         require_finite("projectile_mass_kg", result.projectile_mass_kg)?;
-        require_finite(
-            "line_of_sight_height_m",
-            result.line_of_sight_height_m,
-        )?;
+        require_finite("line_of_sight_height_m", result.line_of_sight_height_m)?;
         require_finite(
             "station_speed_of_sound_mps",
             result.station_speed_of_sound_mps,
@@ -2530,8 +2525,11 @@ impl TrajectorySolver {
         // WindSock); wind enters drag via velocity - wind. Used when no segmented wind.
         // MBA-728: no shear/no segments here, so vertical_speed passes straight through
         // (there is no horizontal-only scaling step on this path).
-        let wind_vector =
-            crate::wind::wind_vector(self.wind.speed, self.wind.direction, self.wind.vertical_speed);
+        let wind_vector = crate::wind::wind_vector(
+            self.wind.speed,
+            self.wind.direction,
+            self.wind.vertical_speed,
+        );
 
         // Pitch-damping coefficients depend only on the (constant) bullet_model; compute once
         // instead of re-deriving them (with a to_lowercase alloc) every integration step.
@@ -2659,12 +2657,8 @@ impl TrajectorySolver {
         let last_point = points.last().ok_or("No trajectory points generated")?;
 
         // Create trajectory sampling data if enabled (shared helper, MBA-1403)
-        let sampled_points = self.build_sampled_points(
-            &points,
-            max_height,
-            transonic_distances,
-            &mach_transitions,
-        )?;
+        let sampled_points =
+            self.build_sampled_points(&points, max_height, transonic_distances, &mach_transitions)?;
 
         Ok(TrajectoryResult {
             max_range: last_point.position.x, // X is downrange
@@ -2765,8 +2759,11 @@ impl TrajectorySolver {
         // WindSock); wind enters drag via velocity - wind. Used when no segmented wind.
         // MBA-728: no shear/no segments here, so vertical_speed passes straight through
         // (there is no horizontal-only scaling step on this path).
-        let wind_vector =
-            crate::wind::wind_vector(self.wind.speed, self.wind.direction, self.wind.vertical_speed);
+        let wind_vector = crate::wind::wind_vector(
+            self.wind.speed,
+            self.wind.direction,
+            self.wind.vertical_speed,
+        );
 
         // Pitch-damping coefficients depend only on the (constant) bullet_model; compute once
         // instead of re-deriving them (with a to_lowercase alloc) every integration step.
@@ -2921,12 +2918,8 @@ impl TrajectorySolver {
         let last_point = points.last().ok_or("No trajectory points generated")?;
 
         // Create trajectory sampling data if enabled (shared helper, MBA-1403)
-        let sampled_points = self.build_sampled_points(
-            &points,
-            max_height,
-            transonic_distances,
-            &mach_transitions,
-        )?;
+        let sampled_points =
+            self.build_sampled_points(&points, max_height, transonic_distances, &mach_transitions)?;
 
         Ok(TrajectoryResult {
             max_range: last_point.position.x, // X is downrange
@@ -3003,8 +2996,11 @@ impl TrajectorySolver {
         // WindSock); wind enters drag via velocity - wind. Used when no segmented wind.
         // MBA-728: no shear/no segments here, so vertical_speed passes straight through
         // (there is no horizontal-only scaling step on this path).
-        let wind_vector =
-            crate::wind::wind_vector(self.wind.speed, self.wind.direction, self.wind.vertical_speed);
+        let wind_vector = crate::wind::wind_vector(
+            self.wind.speed,
+            self.wind.direction,
+            self.wind.vertical_speed,
+        );
 
         // Mach-transition distances for the sampled-output flags (see solve_euler/solve_rk4).
         let mut transonic_distances: Vec<f64> = Vec::new();
@@ -3150,12 +3146,8 @@ impl TrajectorySolver {
         let last_point = points.last().unwrap();
 
         // Generate sampled trajectory points if enabled (shared helper, MBA-1403)
-        let sampled_points = self.build_sampled_points(
-            &points,
-            max_height,
-            transonic_distances,
-            &mach_transitions,
-        )?;
+        let sampled_points =
+            self.build_sampled_points(&points, max_height, transonic_distances, &mach_transitions)?;
 
         Ok(TrajectoryResult {
             max_range: last_point.position.x, // X is downrange
@@ -3937,10 +3929,8 @@ impl MonteCarloResults {
     ///
     /// [`hit_probability`]: Self::hit_probability
     pub fn rect_hit_probability(&self, width_m: f64, height_m: f64) -> f64 {
-        let dimensions_invalid = width_m.is_nan()
-            || width_m <= 0.0
-            || height_m.is_nan()
-            || height_m <= 0.0;
+        let dimensions_invalid =
+            width_m.is_nan() || width_m <= 0.0 || height_m.is_nan() || height_m <= 0.0;
         if self.impact_positions.is_empty() || dimensions_invalid {
             return 0.0;
         }
@@ -4006,7 +3996,11 @@ impl MonteCarloWindSampler {
             .map_err(|e| format!("Invalid wind speed distribution: {e}"))?;
         let direction = Normal::new(base_wind.direction, wind_direction_std_dev)
             .map_err(|e| format!("Invalid wind direction distribution: {e}"))?;
-        Ok(Self { speed, direction, vertical_speed: base_wind.vertical_speed })
+        Ok(Self {
+            speed,
+            direction,
+            vertical_speed: base_wind.vertical_speed,
+        })
     }
 
     fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> WindConditions {
@@ -4298,12 +4292,8 @@ fn run_monte_carlo_with_wind_and_direction_std_dev_using_rng<R: rand::Rng + ?Siz
     let mut impact_velocities = Vec::new();
     let mut impact_positions = Vec::new();
 
-    let sampler = MonteCarloTrialSampler::new(
-        base_inputs,
-        &base_wind,
-        &params,
-        wind_direction_std_dev,
-    )?;
+    let sampler =
+        MonteCarloTrialSampler::new(base_inputs, &base_wind, &params, wind_direction_std_dev)?;
 
     for _ in 0..params.num_simulations {
         // A dropped trial pushes nothing at all, exactly as the original `continue` arms did,
@@ -4625,7 +4615,9 @@ pub fn run_monte_carlo_adaptive_seeded(
     while attempts < convergence.max_samples {
         // Truncate the final batch so `max_samples` is a ceiling on attempts, not a threshold
         // the last batch may overshoot.
-        let batch = convergence.batch_size.min(convergence.max_samples - attempts);
+        let batch = convergence
+            .batch_size
+            .min(convergence.max_samples - attempts);
         let mut batch_hits: u64 = 0;
         let mut batch_trials: u64 = 0;
 
@@ -4731,7 +4723,8 @@ pub fn calculate_zero_angle_with_resolved_conditions(
     wind: WindConditions,
     atmosphere: AtmosphericConditions,
 ) -> Result<f64, BallisticsError> {
-    let mut solver = TrajectorySolver::new_with_resolved_station_atmosphere(inputs, wind, atmosphere);
+    let mut solver =
+        TrajectorySolver::new_with_resolved_station_atmosphere(inputs, wind, atmosphere);
     solver.calculate_and_set_zero_angle(target_distance, target_height, ZeroTargetFrame::SightLine)
 }
 
@@ -4782,7 +4775,8 @@ pub fn calculate_zero_range_from_angle_with_resolved_conditions(
     wind: WindConditions,
     atmosphere: AtmosphericConditions,
 ) -> Result<ZeroCrossings, BallisticsError> {
-    let mut solver = TrajectorySolver::new_with_resolved_station_atmosphere(inputs, wind, atmosphere);
+    let mut solver =
+        TrajectorySolver::new_with_resolved_station_atmosphere(inputs, wind, atmosphere);
     solver.set_max_range(ZERO_RANGE_FROM_ANGLE_MAX_RANGE_M);
     solver.find_zero_range(zero_angle_rad, target_height, ZeroTargetFrame::SightLine)
 }
@@ -4905,7 +4899,11 @@ pub fn estimate_bc_fit(
     let max_dist = points.iter().map(|(d, _)| *d).fold(0.0_f64, f64::max);
     // For a zeroed drop fit, drop is below the horizontal LOS which sits `sight_height`
     // above the bore at the muzzle: drop = sight_height - y. Bore-referenced fits use 0.
-    let drop_offset = if zero_range.is_some() { sight_height } else { 0.0 };
+    let drop_offset = if zero_range.is_some() {
+        sight_height
+    } else {
+        0.0
+    };
 
     // Sum of squared residuals for a trial BC; None unless the solve reaches ALL data points.
     let sse = |bc_value: f64| -> Option<f64> {
@@ -5054,7 +5052,15 @@ mod mba737_powder_resolution_tests {
     fn curve_overrides_linear_and_interpolates_at_powder_temp() {
         let curve = [(4.4, 798.6), (21.1, 823.0), (37.8, 841.2)];
         // Explicit powder temp decouples from ambient: interpolate at 4.4 C, not 30 C.
-        let v = resolve_powder_adjusted_velocity(823.0, 30.0, true, 99.0, 21.1, Some(&curve), Some(4.4));
+        let v = resolve_powder_adjusted_velocity(
+            823.0,
+            30.0,
+            true,
+            99.0,
+            21.1,
+            Some(&curve),
+            Some(4.4),
+        );
         assert!((v - 798.6).abs() < 1e-9);
     }
 
@@ -5064,7 +5070,8 @@ mod mba737_powder_resolution_tests {
         // Ambient far below the coldest measured point: clamp, no extrapolation.
         let v = resolve_powder_adjusted_velocity(823.0, -40.0, true, 1.0, 21.1, Some(&curve), None);
         assert!((v - 798.6).abs() < 1e-9);
-        let v_hot = resolve_powder_adjusted_velocity(823.0, 60.0, true, 1.0, 21.1, Some(&curve), None);
+        let v_hot =
+            resolve_powder_adjusted_velocity(823.0, 60.0, true, 1.0, 21.1, Some(&curve), None);
         assert!((v_hot - 841.2).abs() < 1e-9);
     }
 
@@ -5176,9 +5183,9 @@ mod mba1302_solver_seam_tests {
     #[test]
     fn precomputed_absolute_resolution_via_authoritative_matches_legacy_new() {
         for (temperature, pressure, altitude) in [
-            (15.0, 1013.25, 0.0),   // sea-level default
+            (15.0, 1013.25, 0.0),    // sea-level default
             (15.0, 1013.25, 2000.0), // sentinel: omitted-pressure-at-altitude
-            (-5.0, 850.0, 2000.0),  // explicit non-default station values
+            (-5.0, 850.0, 2000.0),   // explicit non-default station values
             (22.0, 950.0, 500.0),
         ] {
             let atmosphere = AtmosphericConditions {
@@ -5326,7 +5333,11 @@ mod mba1302_solver_seam_tests {
         );
 
         let segmented_angle = segmented
-            .calculate_and_set_zero_angle(TARGET_DISTANCE_M, TARGET_HEIGHT_M, ZeroTargetFrame::SightLine)
+            .calculate_and_set_zero_angle(
+                TARGET_DISTANCE_M,
+                TARGET_HEIGHT_M,
+                ZeroTargetFrame::SightLine,
+            )
             .expect("segmented zero");
         assert_eq!(
             segmented.inputs.muzzle_angle.to_bits(),
@@ -5341,7 +5352,11 @@ mod mba1302_solver_seam_tests {
             StationAtmosphereResolution::Authoritative
         );
         let zero_height = segmented
-            .zero_trial_height_at(segmented_angle, TARGET_DISTANCE_M, ZeroTargetFrame::SightLine)
+            .zero_trial_height_at(
+                segmented_angle,
+                TARGET_DISTANCE_M,
+                ZeroTargetFrame::SightLine,
+            )
             .expect("verify segmented zero")
             .expect("zeroed trial reaches target");
         assert!(
@@ -5351,7 +5366,11 @@ mod mba1302_solver_seam_tests {
 
         let mut calm = configured_euler_zero(0.0, 0.02);
         let calm_angle = calm
-            .calculate_and_set_zero_angle(TARGET_DISTANCE_M, TARGET_HEIGHT_M, ZeroTargetFrame::SightLine)
+            .calculate_and_set_zero_angle(
+                TARGET_DISTANCE_M,
+                TARGET_HEIGHT_M,
+                ZeroTargetFrame::SightLine,
+            )
             .expect("calm zero");
         assert!(
             (segmented_angle - calm_angle).abs() > 1e-5,
@@ -5405,7 +5424,10 @@ mod result_sanity_tests {
             .expect("a sane result must pass");
 
         for (name, mutate) in [
-            ("max_range", (|r| r.max_range = -50.588) as fn(&mut TrajectoryResult)),
+            (
+                "max_range",
+                (|r| r.max_range = -50.588) as fn(&mut TrajectoryResult),
+            ),
             ("time_of_flight", |r| r.time_of_flight = -1.0),
             ("impact_velocity", |r| r.impact_velocity = -700.0),
             ("impact_energy", |r| r.impact_energy = -1.0),
@@ -5604,13 +5626,12 @@ mod trajectory_point_budget_tests {
                 );
             }
             assert_eq!(baseline.points.len(), sampled.points.len());
-            for (index, (left, right)) in baseline
-                .points
-                .iter()
-                .zip(&sampled.points)
-                .enumerate()
-            {
-                assert_eq!(left.time.to_bits(), right.time.to_bits(), "{mode} point {index}");
+            for (index, (left, right)) in baseline.points.iter().zip(&sampled.points).enumerate() {
+                assert_eq!(
+                    left.time.to_bits(),
+                    right.time.to_bits(),
+                    "{mode} point {index}"
+                );
                 assert_eq!(
                     left.position.map(f64::to_bits),
                     right.position.map(f64::to_bits),
@@ -5661,9 +5682,7 @@ mod monte_carlo_result_tests {
         let mut positions: Vec<Vector3<f64>> = (1..=5)
             .map(|radius| Vector3::new(0.0, radius as f64, 0.0))
             .collect();
-        positions.extend(
-            (0..5).map(|_| Vector3::new(0.0, TARGET_NOT_REACHED_SENTINEL_M, 0.0)),
-        );
+        positions.extend((0..5).map(|_| Vector3::new(0.0, TARGET_NOT_REACHED_SENTINEL_M, 0.0)));
         let results = make_results(positions);
 
         assert_eq!(results.target_arrival_count(), 5);
@@ -5835,8 +5854,16 @@ mod monte_carlo_seeded_tests {
         // an extraction that started dropping trials would otherwise shorten the vectors
         // while the first three entries below still matched.
         assert_eq!(results.ranges.len(), 200, "ranges length");
-        assert_eq!(results.impact_velocities.len(), 200, "impact_velocities length");
-        assert_eq!(results.impact_positions.len(), 200, "impact_positions length");
+        assert_eq!(
+            results.impact_velocities.len(),
+            200,
+            "impact_velocities length"
+        );
+        assert_eq!(
+            results.impact_positions.len(),
+            200,
+            "impact_positions length"
+        );
 
         // 28 hits in 200 trials.
         assert_eq!(
@@ -5846,8 +5873,7 @@ mod monte_carlo_seeded_tests {
             results.hit_probability(DEFAULT_HIT_RADIUS_M)
         );
 
-        let expected_ranges: [f64; 3] =
-            [1907.972891143359, 1936.408435469319, 1912.8150447617645];
+        let expected_ranges: [f64; 3] = [1907.972891143359, 1936.408435469319, 1912.8150447617645];
         let expected_velocities: [f64; 3] =
             [238.6187151542299, 239.91923651600106, 243.14112455427164];
         let expected_positions: [(f64, f64, f64); 3] = [
@@ -5874,9 +5900,24 @@ mod monte_carlo_seeded_tests {
         }
         for (i, (x, y, z)) in expected_positions.iter().enumerate() {
             let actual = results.impact_positions[i];
-            assert_eq!(actual.x.to_bits(), x.to_bits(), "impact_positions[{i}].x = {:?}", actual.x);
-            assert_eq!(actual.y.to_bits(), y.to_bits(), "impact_positions[{i}].y = {:?}", actual.y);
-            assert_eq!(actual.z.to_bits(), z.to_bits(), "impact_positions[{i}].z = {:?}", actual.z);
+            assert_eq!(
+                actual.x.to_bits(),
+                x.to_bits(),
+                "impact_positions[{i}].x = {:?}",
+                actual.x
+            );
+            assert_eq!(
+                actual.y.to_bits(),
+                y.to_bits(),
+                "impact_positions[{i}].y = {:?}",
+                actual.y
+            );
+            assert_eq!(
+                actual.z.to_bits(),
+                z.to_bits(),
+                "impact_positions[{i}].z = {:?}",
+                actual.z
+            );
         }
     }
 
@@ -6199,7 +6240,11 @@ mod monte_carlo_seeded_tests {
         );
         // ...and the at-target statistics really are the `arrivals` population: two or more
         // arrivals is what makes a Bessel-corrected standard deviation defined at all.
-        assert!(r.arrivals >= 2, "arrivals {} too few for a sample sd", r.arrivals);
+        assert!(
+            r.arrivals >= 2,
+            "arrivals {} too few for a sample sd",
+            r.arrivals
+        );
         assert!(r.std_drop_at_target_m > 0.0 && r.std_impact_velocity_mps > 0.0);
         // The ordering invariant the doc comments promise.
         assert!(r.attempts >= r.samples && r.samples >= r.arrivals);
@@ -6317,8 +6362,7 @@ mod monte_carlo_seeded_tests {
             ConfidenceLevel::P95,
             ConfidenceLevel::P99,
         ] {
-            let (p_hat, (lo, hi), n) =
-                results.hit_probability_wilson(DEFAULT_HIT_RADIUS_M, level);
+            let (p_hat, (lo, hi), n) = results.hit_probability_wilson(DEFAULT_HIT_RADIUS_M, level);
 
             // The companion is a composition, not a re-derivation: p_hat must be the very
             // number `hit_probability` returns, bit for bit.
@@ -6500,7 +6544,10 @@ mod monte_carlo_wind_sampling_tests {
         // every sampled wind must carry the base vertical un-dispersed. (Before
         // this fix, samples dropped it, biasing the whole MC cloud vs the baseline.)
         use rand::SeedableRng;
-        let base_wind = WindConditions { vertical_speed: 4.2, ..Default::default() };
+        let base_wind = WindConditions {
+            vertical_speed: 4.2,
+            ..Default::default()
+        };
         let sampler = MonteCarloWindSampler::new(&base_wind, 1.0, 0.2).unwrap();
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
         for _ in 0..32 {
@@ -6774,11 +6821,8 @@ mod mach_bc_segment_tests {
             WindConditions::default(),
             atmosphere.clone(),
         );
-        let expected_solver = TrajectorySolver::new(
-            expected_inputs,
-            WindConditions::default(),
-            atmosphere,
-        );
+        let expected_solver =
+            TrajectorySolver::new(expected_inputs, WindConditions::default(), atmosphere);
         let position = Vector3::zeros();
         let (density, _, temp_c, pressure_hpa) = segmented_solver.resolved_atmosphere();
         let (_, local_speed_of_sound) = crate::atmosphere::get_local_atmosphere_humid(
@@ -6831,7 +6875,11 @@ mod custom_drag_table_validation_tests {
             )),
             ..BallisticInputs::default()
         };
-        let solver = TrajectorySolver::new(inputs, WindConditions::default(), AtmosphericConditions::default());
+        let solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
         // Must not error on the bc_value gate.
         assert!(solver.solve().is_ok());
     }
@@ -6845,7 +6893,11 @@ mod custom_drag_table_validation_tests {
             muzzle_velocity: 850.0,
             ..BallisticInputs::default()
         };
-        let solver = TrajectorySolver::new(inputs, WindConditions::default(), AtmosphericConditions::default());
+        let solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
         assert!(solver.solve().is_err());
     }
 }
@@ -6891,10 +6943,16 @@ mod cd_scale_tests {
             ..omitted.clone()
         };
 
-        let solver_omitted =
-            TrajectorySolver::new(omitted, WindConditions::default(), AtmosphericConditions::default());
-        let solver_explicit =
-            TrajectorySolver::new(explicit, WindConditions::default(), AtmosphericConditions::default());
+        let solver_omitted = TrajectorySolver::new(
+            omitted,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        let solver_explicit = TrajectorySolver::new(
+            explicit,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
 
         let cd_omitted = solver_omitted.calculate_drag_coefficient(700.0, 340.0);
         let cd_explicit = solver_explicit.calculate_drag_coefficient(700.0, 340.0);
@@ -6907,7 +6965,10 @@ mod cd_scale_tests {
         // And a full custom-deck solve (the existing pre-MBA-1356 test surface) must still
         // succeed unchanged with the field simply absent from the literal.
         let result = solver_omitted.solve();
-        assert!(result.is_ok(), "existing custom-deck solves must pass unchanged");
+        assert!(
+            result.is_ok(),
+            "existing custom-deck solves must pass unchanged"
+        );
     }
 
     /// The custom-deck interpolation site multiplies the deck's Cd by `cd_scale` exactly.
@@ -7000,7 +7061,10 @@ mod cd_scale_tests {
                 cd_scale: bad,
                 ..BallisticInputs::default()
             };
-            assert!(inputs.custom_drag_table.is_none(), "precondition: no custom deck");
+            assert!(
+                inputs.custom_drag_table.is_none(),
+                "precondition: no custom deck"
+            );
             let solver = TrajectorySolver::new(
                 inputs,
                 WindConditions::default(),
@@ -7104,7 +7168,10 @@ mod cd_scale_tests {
                 atmo_sock: None,
             };
             let solution = crate::fast_trajectory::fast_integrate(&inputs, &wind_sock, params);
-            assert!(solution.success, "fast_integrate must succeed for scale={scale}");
+            assert!(
+                solution.success,
+                "fast_integrate must succeed for scale={scale}"
+            );
             let last = solution.t.len() - 1;
             let (vx, vy, vz) = (
                 solution.y[3][last],
@@ -7679,13 +7746,8 @@ mod rk45_adaptivity_tests {
             rejected_trial.error
         );
 
-        let accepted = solver.adaptive_rk45_step(
-            &position,
-            &velocity,
-            dt,
-            &Vector3::zeros(),
-            resolved_atmo,
-        );
+        let accepted =
+            solver.adaptive_rk45_step(&position, &velocity, dt, &Vector3::zeros(), resolved_atmo);
         assert!(accepted.used_dt < dt, "oversized trial was not retried");
         assert!(
             accepted.error <= RK45_TOLERANCE || accepted.used_dt <= RK45_MIN_DT,
@@ -8230,9 +8292,27 @@ mod coriolis_direction_tests {
     fn labeled_mach_crossings_match_pinned_pre_change_flat_vec_across_solvers() {
         // (solver_name, use_rk4, use_adaptive_rk45, expected mach_1_2, expected mach_1_0)
         let cases = [
-            ("Euler", false, false, 670.9878683238721_f64, 805.5274119916264_f64),
-            ("RK4", true, false, 671.7257336844475_f64, 805.933409072171_f64),
-            ("RK45", true, true, 672.4905711917901_f64, 806.5709746782849_f64),
+            (
+                "Euler",
+                false,
+                false,
+                670.9878683238721_f64,
+                805.5274119916264_f64,
+            ),
+            (
+                "RK4",
+                true,
+                false,
+                671.7257336844475_f64,
+                805.933409072171_f64,
+            ),
+            (
+                "RK45",
+                true,
+                true,
+                672.4905711917901_f64,
+                806.5709746782849_f64,
+            ),
         ];
 
         for (solver_name, use_rk4, use_adaptive_rk45, expected_1_2, expected_1_0) in cases {
@@ -8356,7 +8436,11 @@ mod cant_tests {
             if pts[i].position.x >= x {
                 let (p1, p2) = (&pts[i - 1], &pts[i]);
                 let dx = p2.position.x - p1.position.x;
-                let t = if dx.abs() < 1e-12 { 0.0 } else { (x - p1.position.x) / dx };
+                let t = if dx.abs() < 1e-12 {
+                    0.0
+                } else {
+                    (x - p1.position.x) / dx
+                };
                 return (
                     p1.position.y + t * (p2.position.y - p1.position.y),
                     p1.position.z + t * (p2.position.z - p1.position.z),
@@ -8376,8 +8460,14 @@ mod cant_tests {
 
         let (y0, z0) = yz_at(&solve_with(level, 400.0), 300.0);
         let (y1, z1) = yz_at(&solve_with(canted, 400.0), 300.0);
-        assert!(z1 > z0 + 0.01, "clockwise cant must move POI right: z0={z0} z1={z1}");
-        assert!(y1 < y0 - 0.001, "clockwise cant must move POI low: y0={y0} y1={y1}");
+        assert!(
+            z1 > z0 + 0.01,
+            "clockwise cant must move POI right: z0={z0} z1={z1}"
+        );
+        assert!(
+            y1 < y0 - 0.001,
+            "clockwise cant must move POI low: y0={y0} y1={y1}"
+        );
     }
 
     #[test]
@@ -8405,7 +8495,11 @@ mod cant_tests {
         b.cant_angle = 15f64.to_radians();
         let za = calculate_zero_angle(a.clone(), 100.0, 0.0).expect("zero a");
         let zb = calculate_zero_angle(b.clone(), 100.0, 0.0).expect("zero b");
-        assert_eq!(za.to_bits(), zb.to_bits(), "zeroing must ignore cant: {za} vs {zb}");
+        assert_eq!(
+            za.to_bits(),
+            zb.to_bits(),
+            "zeroing must ignore cant: {za} vs {zb}"
+        );
         // silence unused warnings
         let _ = (a.cant_angle, b.cant_angle);
     }
@@ -8414,7 +8508,11 @@ mod cant_tests {
     fn nonfinite_cant_is_rejected() {
         let mut i = base_inputs();
         i.cant_angle = f64::NAN;
-        let s = TrajectorySolver::new(i, WindConditions::default(), AtmosphericConditions::default());
+        let s = TrajectorySolver::new(
+            i,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
         assert!(s.solve().is_err());
     }
 
@@ -8428,7 +8526,10 @@ mod cant_tests {
         canted.cant_angle = 10f64.to_radians();
         let (_, z_flat) = yz_at(&solve_with(flat, 400.0), 300.0);
         let (_, z_cant) = yz_at(&solve_with(canted, 400.0), 300.0);
-        assert!(z_cant > z_flat, "cant must still deflect right on an incline");
+        assert!(
+            z_cant > z_flat,
+            "cant must still deflect right on an incline"
+        );
     }
 }
 
@@ -8458,14 +8559,22 @@ mod vertical_wind_tests {
             if pts[i].position.x >= x {
                 let (p1, p2) = (&pts[i - 1], &pts[i]);
                 let dx = p2.position.x - p1.position.x;
-                let t = if dx.abs() < 1e-12 { 0.0 } else { (x - p1.position.x) / dx };
+                let t = if dx.abs() < 1e-12 {
+                    0.0
+                } else {
+                    (x - p1.position.x) / dx
+                };
                 return p1.position.y + t * (p2.position.y - p1.position.y);
             }
         }
         panic!("trajectory never reached {x} m");
     }
 
-    fn solve_with(inputs: BallisticInputs, wind: WindConditions, max_range: f64) -> TrajectoryResult {
+    fn solve_with(
+        inputs: BallisticInputs,
+        wind: WindConditions,
+        max_range: f64,
+    ) -> TrajectoryResult {
         let mut s = TrajectorySolver::new(inputs, wind, AtmosphericConditions::default());
         s.set_max_range(max_range);
         s.solve().expect("solve")
@@ -8592,7 +8701,11 @@ mod bc_reference_standard_tests {
             bc_reference_standard: BcReferenceStandard::Icao,
             ..base_inputs()
         };
-        let solver = TrajectorySolver::new(inputs, WindConditions::default(), AtmosphericConditions::default());
+        let solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
         assert_eq!(solver.inputs.bc_value.to_bits(), raw_bc.to_bits());
     }
 
@@ -8601,9 +8714,13 @@ mod bc_reference_standard_tests {
         // A solve built entirely from BallisticInputs::default() (which now carries
         // bc_reference_standard: Icao) must match a solve of an equivalent struct that
         // never mentions the field at all in its literal (relying on ..default()).
-        let a = TrajectorySolver::new(base_inputs(), WindConditions::default(), AtmosphericConditions::default())
-            .solve()
-            .expect("solve a");
+        let a = TrajectorySolver::new(
+            base_inputs(),
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        )
+        .solve()
+        .expect("solve a");
         let b = TrajectorySolver::new(
             BallisticInputs { ..base_inputs() },
             WindConditions::default(),
@@ -8625,7 +8742,11 @@ mod bc_reference_standard_tests {
             bc_reference_standard: BcReferenceStandard::ArmyStandardMetro,
             ..base_inputs()
         };
-        let solver = TrajectorySolver::new(inputs, WindConditions::default(), AtmosphericConditions::default());
+        let solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
         assert_eq!(
             solver.inputs.bc_value,
             raw_bc * crate::constants::ASM_TO_ICAO_BC
@@ -8639,7 +8760,11 @@ mod bc_reference_standard_tests {
             bc_segments: Some(vec![(0.5, 0.40), (1.5, 0.30)]),
             ..base_inputs()
         };
-        let solver = TrajectorySolver::new(inputs, WindConditions::default(), AtmosphericConditions::default());
+        let solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
         let segments = solver.inputs.bc_segments.as_ref().expect("segments");
         assert_eq!(segments[0], (0.5, 0.40 * crate::constants::ASM_TO_ICAO_BC));
         assert_eq!(segments[1], (1.5, 0.30 * crate::constants::ASM_TO_ICAO_BC));
@@ -8663,10 +8788,20 @@ mod bc_reference_standard_tests {
             ]),
             ..base_inputs()
         };
-        let solver = TrajectorySolver::new(inputs, WindConditions::default(), AtmosphericConditions::default());
+        let solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
         let segments = solver.inputs.bc_segments_data.as_ref().expect("segments");
-        assert_eq!(segments[0].bc_value, 0.40 * crate::constants::ASM_TO_ICAO_BC);
-        assert_eq!(segments[1].bc_value, 0.45 * crate::constants::ASM_TO_ICAO_BC);
+        assert_eq!(
+            segments[0].bc_value,
+            0.40 * crate::constants::ASM_TO_ICAO_BC
+        );
+        assert_eq!(
+            segments[1].bc_value,
+            0.45 * crate::constants::ASM_TO_ICAO_BC
+        );
         // Non-BC fields must be untouched.
         assert_eq!(segments[0].velocity_min, 0.0);
         assert_eq!(segments[1].velocity_max, 900.0);
@@ -8684,8 +8819,11 @@ mod bc_reference_standard_tests {
                 bc_reference_standard: standard,
                 ..base_inputs()
             };
-            let mut solver =
-                TrajectorySolver::new(inputs, WindConditions::default(), AtmosphericConditions::default());
+            let mut solver = TrajectorySolver::new(
+                inputs,
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            );
             solver.set_max_range(500.0);
             solver.solve().expect("solve")
         };
@@ -8728,8 +8866,11 @@ mod bc_reference_standard_tests {
         // target_hint = base_inputs.target_distance since MonteCarloParams.target_distance
         // is None below) — otherwise the two solves integrate to different caps and a
         // level, non-ground-impacting shot legitimately reports a different max_range.
-        let mut direct_solver =
-            TrajectorySolver::new(base_inputs_asm.clone(), wind.clone(), AtmosphericConditions::default());
+        let mut direct_solver = TrajectorySolver::new(
+            base_inputs_asm.clone(),
+            wind.clone(),
+            AtmosphericConditions::default(),
+        );
         direct_solver.set_max_range(base_inputs_asm.target_distance.max(1000.0) * 2.0);
         let direct = direct_solver.solve().expect("direct solve");
 
@@ -8794,7 +8935,8 @@ mod bc_reference_standard_tests {
             bc_reference_standard: BcReferenceStandard::Icao,
             ..BallisticInputs::default()
         };
-        let mut solver = TrajectorySolver::new(synth_inputs, WindConditions::default(), atmosphere.clone());
+        let mut solver =
+            TrajectorySolver::new(synth_inputs, WindConditions::default(), atmosphere.clone());
         solver.set_max_range(500.0);
         let trajectory = solver.solve().expect("synthetic solve");
 
@@ -8813,10 +8955,8 @@ mod bc_reference_standard_tests {
                             } else {
                                 (d - p1.position.x) / dx
                             };
-                            found = Some((
-                                p1.position.y + t * (p2.position.y - p1.position.y),
-                                0.0,
-                            ));
+                            found =
+                                Some((p1.position.y + t * (p2.position.y - p1.position.y), 0.0));
                             break;
                         }
                     }
@@ -8850,8 +8990,9 @@ mod bc_reference_standard_tests {
 
     #[test]
     fn custom_drag_table_makes_bc_reference_standard_numerically_inert() {
-        let table = crate::drag::DragTable::try_new(vec![0.5, 1.0, 2.0, 3.0], vec![0.3, 0.4, 0.3, 0.2])
-            .expect("valid table");
+        let table =
+            crate::drag::DragTable::try_new(vec![0.5, 1.0, 2.0, 3.0], vec![0.3, 0.4, 0.3, 0.2])
+                .expect("valid table");
 
         let solve_with = |standard: BcReferenceStandard| {
             let inputs = BallisticInputs {
@@ -8860,8 +9001,11 @@ mod bc_reference_standard_tests {
                 custom_drag_table: Some(table.clone()),
                 ..base_inputs()
             };
-            let mut solver =
-                TrajectorySolver::new(inputs, WindConditions::default(), AtmosphericConditions::default());
+            let mut solver = TrajectorySolver::new(
+                inputs,
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            );
             solver.set_max_range(500.0);
             solver.solve().expect("solve")
         };
@@ -8884,7 +9028,9 @@ mod bc_reference_standard_tests {
 
         // No table: never warns, regardless of the declared standard.
         let no_table_icao = base_inputs();
-        assert!(no_table_icao.bc_reference_standard_inert_warning().is_none());
+        assert!(no_table_icao
+            .bc_reference_standard_inert_warning()
+            .is_none());
         let no_table_asm = BallisticInputs {
             bc_reference_standard: BcReferenceStandard::ArmyStandardMetro,
             ..base_inputs()
@@ -9013,15 +9159,27 @@ mod effective_drag_coefficient_tests {
         let mut inputs = inputs_175gr_g7();
         inputs.use_bc_segments = true;
         inputs.bc_segments_data = Some(vec![
-            crate::BCSegmentData { velocity_min: 2400.0, velocity_max: 4000.0, bc_value: 0.243 },
-            crate::BCSegmentData { velocity_min: 0.0, velocity_max: 2400.0, bc_value: 0.200 },
+            crate::BCSegmentData {
+                velocity_min: 2400.0,
+                velocity_max: 4000.0,
+                bc_value: 0.243,
+            },
+            crate::BCSegmentData {
+                velocity_min: 0.0,
+                velocity_max: 2400.0,
+                bc_value: 0.200,
+            },
         ]);
         let solver = solver(inputs);
 
         let sos = 340.0;
         // Straddle the 2400 fps boundary (fps -> m/s).
-        let above = solver.effective_drag_coefficient(2500.0 / 3.28084, sos).expect("cd");
-        let below = solver.effective_drag_coefficient(2300.0 / 3.28084, sos).expect("cd");
+        let above = solver
+            .effective_drag_coefficient(2500.0 / 3.28084, sos)
+            .expect("cd");
+        let below = solver
+            .effective_drag_coefficient(2300.0 / 3.28084, sos)
+            .expect("cd");
 
         // Lower BC below the boundary means MORE drag for the same reference curve.
         assert!(

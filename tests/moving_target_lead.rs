@@ -1,7 +1,7 @@
 // MBA-1287 acceptance gates for the moving-target lead calculation.
 use ballistics_engine::{
-    calculate_lead, AtmosphericConditions, BallisticInputs, DragModel, LeadError,
-    TrajectorySolver, WindConditions,
+    calculate_lead, AtmosphericConditions, BallisticInputs, DragModel, LeadError, TrajectorySolver,
+    WindConditions,
 };
 
 fn base() -> BallisticInputs {
@@ -27,7 +27,11 @@ fn independent_tof(inputs: BallisticInputs, wind: WindConditions, x: f64, max_ra
     for w in pts.windows(2) {
         if w[1].position.x >= x {
             let dx = w[1].position.x - w[0].position.x;
-            let t = if dx.abs() < 1e-12 { 0.0 } else { (x - w[0].position.x) / dx };
+            let t = if dx.abs() < 1e-12 {
+                0.0
+            } else {
+                (x - w[0].position.x) / dx
+            };
             return w[0].time + t * (w[1].time - w[0].time);
         }
     }
@@ -77,8 +81,12 @@ fn outbound_45_converges_under_10_iterations_with_small_residual() {
     .expect("outbound");
     assert!(sol.iterations < 10, "iterations {}", sol.iterations);
     // Residual: re-applying the fixed-point map moves the range by < 0.1 m.
-    let tof_at_corrected =
-        independent_tof(base(), WindConditions::default(), sol.corrected_range_m, 800.0);
+    let tof_at_corrected = independent_tof(
+        base(),
+        WindConditions::default(),
+        sol.corrected_range_m,
+        800.0,
+    );
     let reapplied = 600.0 + 15.0 * 45f64.to_radians().cos() * tof_at_corrected;
     assert!(
         (reapplied - sol.corrected_range_m).abs() < 0.1,
@@ -130,8 +138,12 @@ fn inbound_target_shortens_corrected_range() {
 
     // The reported solution must be evaluated AT the corrected (shortened) intercept
     // range, not the original 600 m.
-    let tof_at_corrected =
-        independent_tof(base(), WindConditions::default(), sol.corrected_range_m, 700.0);
+    let tof_at_corrected = independent_tof(
+        base(),
+        WindConditions::default(),
+        sol.corrected_range_m,
+        700.0,
+    );
     assert!(
         (sol.time_of_flight_s - tof_at_corrected).abs() < 1e-9,
         "sol.time_of_flight_s {} vs independent TOF at corrected range {tof_at_corrected}",
@@ -220,7 +232,10 @@ fn tof_is_wind_aware_so_lead_follows() {
         windy.time_of_flight_s,
         calm.time_of_flight_s
     );
-    assert!(windy.lead_mil > calm.lead_mil, "longer TOF must increase lead");
+    assert!(
+        windy.lead_mil > calm.lead_mil,
+        "longer TOF must increase lead"
+    );
 }
 
 #[test]
@@ -230,7 +245,8 @@ fn pdf_lead_refactor_is_identical_to_printed_precision() {
     // far inside the card's 2-decimal print.
     for (mph, tof) in [(3.0_f64, 0.4_f64), (10.0, 1.2), (25.0, 0.75)] {
         let old_yd = (mph * 1760.0 / 3600.0) * tof;
-        let new_yd = ballistics_engine::lead_from_tof(mph * 0.44704, 90.0, tof, 500.0).lead_m / 0.9144;
+        let new_yd =
+            ballistics_engine::lead_from_tof(mph * 0.44704, 90.0, tof, 500.0).lead_m / 0.9144;
         assert!(
             (old_yd - new_yd).abs() < 1e-9,
             "PDF lead shifted: {old_yd} vs {new_yd}"

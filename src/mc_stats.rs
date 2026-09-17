@@ -456,7 +456,9 @@ mod tests {
         // naive sum-of-squares gets wrong and Welford exists to protect.
         let xs: Vec<f64> = (0..1000).map(|i| 1.0e9 + (i % 7) as f64 * 0.25).collect();
         let mut w = Welford::new();
-        for &x in &xs { w.push(x); }
+        for &x in &xs {
+            w.push(x);
+        }
         let n = xs.len() as f64;
         let mean = xs.iter().sum::<f64>() / n;
         let m2 = xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>();
@@ -488,9 +490,18 @@ mod tests {
         // `pub(crate)`), so it is not reachable from here; the digits are restated rather than
         // imported. Without this test, z() was previously anchored only indirectly (P95 via
         // the Newcombe reference, P99 only by an inequality, P90 by nothing at all) -- review I3.
-        assert_eq!(ConfidenceLevel::P90.z().to_bits(), 1.644_853_626_951_472_2_f64.to_bits());
-        assert_eq!(ConfidenceLevel::P95.z().to_bits(), 1.959_963_984_540_054_f64.to_bits());
-        assert_eq!(ConfidenceLevel::P99.z().to_bits(), 2.575_829_303_548_900_4_f64.to_bits());
+        assert_eq!(
+            ConfidenceLevel::P90.z().to_bits(),
+            1.644_853_626_951_472_2_f64.to_bits()
+        );
+        assert_eq!(
+            ConfidenceLevel::P95.z().to_bits(),
+            1.959_963_984_540_054_f64.to_bits()
+        );
+        assert_eq!(
+            ConfidenceLevel::P99.z().to_bits(),
+            2.575_829_303_548_900_4_f64.to_bits()
+        );
 
         assert_eq!(ConfidenceLevel::P90.alpha(), 0.10);
         assert_eq!(ConfidenceLevel::P95.alpha(), 0.05);
@@ -517,8 +528,19 @@ mod tests {
         //   p = [ (2*n*p_hat + z^2) +- z * sqrt(z^2 + 4*n*p_hat*(1 - p_hat)) ] / (2*(n + z^2))
         // A mis-transcription of either form fails this cross-check (review I2: the previous
         // version of this test restated the production expression term-for-term and could not).
-        for &(k, n) in &[(0_u64, 10_u64), (10, 10), (1, 10), (8, 10), (500, 1000), (3, 7)] {
-            for level in [ConfidenceLevel::P90, ConfidenceLevel::P95, ConfidenceLevel::P99] {
+        for &(k, n) in &[
+            (0_u64, 10_u64),
+            (10, 10),
+            (1, 10),
+            (8, 10),
+            (500, 1000),
+            (3, 7),
+        ] {
+            for level in [
+                ConfidenceLevel::P90,
+                ConfidenceLevel::P95,
+                ConfidenceLevel::P99,
+            ] {
                 let (lo, hi) = wilson_interval(k, n, level);
                 let z = level.z();
                 let (kf, nf) = (k as f64, n as f64);
@@ -529,8 +551,14 @@ mod tests {
                 let root_term = z * (z2 + 4.0 * nf * p_hat * (1.0 - p_hat)).sqrt();
                 let lo_root = (b - root_term) / (2.0 * a);
                 let hi_root = (b + root_term) / (2.0 * a);
-                assert!((lo - lo_root).abs() < 1e-12, "lo mismatch at k={k} n={n}: {lo} vs {lo_root}");
-                assert!((hi - hi_root).abs() < 1e-12, "hi mismatch at k={k} n={n}: {hi} vs {hi_root}");
+                assert!(
+                    (lo - lo_root).abs() < 1e-12,
+                    "lo mismatch at k={k} n={n}: {lo} vs {lo_root}"
+                );
+                assert!(
+                    (hi - hi_root).abs() < 1e-12,
+                    "hi mismatch at k={k} n={n}: {hi} vs {hi_root}"
+                );
             }
         }
     }
@@ -549,15 +577,28 @@ mod tests {
         // at a single n: n = 20 at P95 happens to round to exactly 0.0 / 1.0 even unclamped,
         // which gave false assurance that the property held in general (review I1).
         for n in 1_u64..=200 {
-            for level in [ConfidenceLevel::P90, ConfidenceLevel::P95, ConfidenceLevel::P99] {
+            for level in [
+                ConfidenceLevel::P90,
+                ConfidenceLevel::P95,
+                ConfidenceLevel::P99,
+            ] {
                 let (lo0, _) = wilson_interval(0, n, level);
-                assert!(lo0 >= 0.0 && lo0 < 1e-9, "k=0 n={n} {level:?}: lo = {lo0:e}, want [0, 1e-9)");
+                assert!(
+                    lo0 >= 0.0 && lo0 < 1e-9,
+                    "k=0 n={n} {level:?}: lo = {lo0:e}, want [0, 1e-9)"
+                );
                 let (_, hi_n) = wilson_interval(n, n, level);
-                assert!(hi_n <= 1.0 && hi_n > 1.0 - 1e-9, "k=n n={n} {level:?}: hi = {hi_n:e}, want (1-1e-9, 1]");
+                assert!(
+                    hi_n <= 1.0 && hi_n > 1.0 - 1e-9,
+                    "k=n n={n} {level:?}: hi = {hi_n:e}, want (1-1e-9, 1]"
+                );
             }
         }
         // Wider at higher confidence, narrower at larger n.
-        let w = |k, n, l| { let (a, b) = wilson_interval(k, n, l); b - a };
+        let w = |k, n, l| {
+            let (a, b) = wilson_interval(k, n, l);
+            b - a
+        };
         assert!(w(40, 100, ConfidenceLevel::P99) > w(40, 100, ConfidenceLevel::P95));
         assert!(w(40, 100, ConfidenceLevel::P95) > w(400, 1000, ConfidenceLevel::P95));
         // Interval always contains the point estimate.
@@ -570,9 +611,19 @@ mod tests {
     fn wilson_interval_saturates_when_successes_exceeds_trials() {
         // successes > trials is not a panic and not a silent NaN: it saturates at trials
         // (p = 1.0), reporting exactly the k=n interval, for every level (review I4).
-        for level in [ConfidenceLevel::P90, ConfidenceLevel::P95, ConfidenceLevel::P99] {
-            assert_eq!(wilson_interval(37, 20, level), wilson_interval(20, 20, level));
-            assert_eq!(wilson_interval(u64::MAX, 20, level), wilson_interval(20, 20, level));
+        for level in [
+            ConfidenceLevel::P90,
+            ConfidenceLevel::P95,
+            ConfidenceLevel::P99,
+        ] {
+            assert_eq!(
+                wilson_interval(37, 20, level),
+                wilson_interval(20, 20, level)
+            );
+            assert_eq!(
+                wilson_interval(u64::MAX, 20, level),
+                wilson_interval(20, 20, level)
+            );
         }
     }
 
@@ -586,7 +637,11 @@ mod tests {
             cs.update(i % 2 == 0);
             if i % 100 == 99 {
                 let hw = cs.half_width();
-                assert!(hw <= prev + 1e-12, "half-width grew at n={}: {hw} > {prev}", i + 1);
+                assert!(
+                    hw <= prev + 1e-12,
+                    "half-width grew at n={}: {hw} > {prev}",
+                    i + 1
+                );
                 prev = hw;
             }
         }
@@ -617,7 +672,10 @@ mod tests {
             cs.update_batch(k, n);
             let (clo, chi) = cs.bounds();
             let (wlo, whi) = wilson_interval(k, n, ConfidenceLevel::P95);
-            assert!(chi - clo > whi - wlo, "CS not wider than Wilson at k={k}, n={n}");
+            assert!(
+                chi - clo > whi - wlo,
+                "CS not wider than Wilson at k={k}, n={n}"
+            );
         }
     }
 
@@ -626,7 +684,9 @@ mod tests {
         let mut a = BernoulliConfidenceSequence::new(ConfidenceLevel::P99);
         let mut b = BernoulliConfidenceSequence::new(ConfidenceLevel::P99);
         a.update_batch(30, 100);
-        for i in 0..100 { b.update(i < 30); }
+        for i in 0..100 {
+            b.update(i < 30);
+        }
         assert_eq!(a.bounds(), b.bounds()); // state is (S, n) only — exact equality
     }
 
@@ -642,15 +702,34 @@ mod tests {
             for s in 0..=n {
                 let p_hat = s as f64 / n as f64;
                 let mut widths = Vec::new();
-                for level in [ConfidenceLevel::P90, ConfidenceLevel::P95, ConfidenceLevel::P99] {
+                for level in [
+                    ConfidenceLevel::P90,
+                    ConfidenceLevel::P95,
+                    ConfidenceLevel::P99,
+                ] {
                     let mut cs = BernoulliConfidenceSequence::new(level);
                     cs.update_batch(s, n);
                     let (lo, hi) = cs.bounds();
-                    assert!(lo.is_finite() && hi.is_finite(), "non-finite bound at s={s} n={n}");
-                    assert!((0.0..=1.0).contains(&lo), "lo={lo} out of [0,1] at s={s} n={n}");
-                    assert!((0.0..=1.0).contains(&hi), "hi={hi} out of [0,1] at s={s} n={n}");
-                    assert!(lo <= p_hat, "lo={lo} above p_hat={p_hat} at s={s} n={n} {level:?}");
-                    assert!(hi >= p_hat, "hi={hi} below p_hat={p_hat} at s={s} n={n} {level:?}");
+                    assert!(
+                        lo.is_finite() && hi.is_finite(),
+                        "non-finite bound at s={s} n={n}"
+                    );
+                    assert!(
+                        (0.0..=1.0).contains(&lo),
+                        "lo={lo} out of [0,1] at s={s} n={n}"
+                    );
+                    assert!(
+                        (0.0..=1.0).contains(&hi),
+                        "hi={hi} out of [0,1] at s={s} n={n}"
+                    );
+                    assert!(
+                        lo <= p_hat,
+                        "lo={lo} above p_hat={p_hat} at s={s} n={n} {level:?}"
+                    );
+                    assert!(
+                        hi >= p_hat,
+                        "hi={hi} below p_hat={p_hat} at s={s} n={n} {level:?}"
+                    );
                     assert!((hi - lo - 2.0 * cs.half_width()).abs() < 1e-15);
                     widths.push(hi - lo);
                 }
@@ -706,10 +785,14 @@ mod tests {
             // a repeated-Wilson check.
             for _ in 0..5000 {
                 cs.update(rng.random::<f64>() < P_TRUE);
-                if cs.trials() >= 50 && cs.half_width() <= 0.08 { break; }
+                if cs.trials() >= 50 && cs.half_width() <= 0.08 {
+                    break;
+                }
             }
             let (lo, hi) = cs.bounds();
-            if lo <= P_TRUE && P_TRUE <= hi { covered += 1; }
+            if lo <= P_TRUE && P_TRUE <= hi {
+                covered += 1;
+            }
             final_half_widths += cs.half_width();
         }
         let mean_hw = final_half_widths / TRIALS as f64;
@@ -763,6 +846,9 @@ mod tests {
             "coverage {covered}/{TRIALS} below the exact-tail floor {COVERAGE_FLOOR}"
         );
         // Anti-width guard: mean final half-width must show real convergence.
-        assert!(mean_hw < 0.12, "mean final half-width {mean_hw} — intervals not converging");
+        assert!(
+            mean_hw < 0.12,
+            "mean final half-width {mean_hw} — intervals not converging"
+        );
     }
 }

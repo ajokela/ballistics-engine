@@ -97,7 +97,7 @@ use crate::hold_curve::{
     card_sample_max_range_m, range_not_sampled_message, run_sampled_flight, sample_at_range,
     CardTruncation, SampledFlight, CARD_SAMPLE_INTERVAL_M,
 };
-use crate::{AtmosphericConditions, BallisticInputs, BCSegmentData, DragModel, WindConditions};
+use crate::{AtmosphericConditions, BCSegmentData, BallisticInputs, DragModel, WindConditions};
 
 /// Schema version of the card request/response contract.
 pub const CARD_SCHEMA_VERSION_V1: u32 = 1;
@@ -791,7 +791,11 @@ impl Units {
     /// the header without repeating the request checks `resolve_inner` performs.
     fn resolve(req: &CardRequestV1) -> Self {
         let imperial = req.units == CardUnits::Imperial;
-        let linear = if imperial { CardLinearUnit::Inches } else { CardLinearUnit::Mm };
+        let linear = if imperial {
+            CardLinearUnit::Inches
+        } else {
+            CardLinearUnit::Mm
+        };
         Self {
             distance: req.distance_unit.unwrap_or(if imperial {
                 CardDistanceUnit::Yards
@@ -1139,7 +1143,10 @@ fn resolve_axes_only(req: &CardRequestV1) -> Result<Resolved, CardServiceError> 
     resolve_inner(req, false)
 }
 
-fn resolve_inner(req: &CardRequestV1, load_bc_schedule: bool) -> Result<Resolved, CardServiceError> {
+fn resolve_inner(
+    req: &CardRequestV1,
+    load_bc_schedule: bool,
+) -> Result<Resolved, CardServiceError> {
     let u = Units::resolve(req);
 
     for (name, v) in [
@@ -1181,15 +1188,15 @@ fn resolve_inner(req: &CardRequestV1, load_bc_schedule: bool) -> Result<Resolved
     let temperature = req.temperature.unwrap_or_else(|| u.default_temperature());
     let pressure = req.pressure.unwrap_or_else(|| u.default_pressure());
 
-    let parse_click = |label: &str, s: &Option<String>| -> Result<Option<ClickValue>, CardServiceError> {
-        s.as_deref()
-            .map(|raw| {
-                parse_click_value(raw).map_err(|e| {
-                    CardServiceError::InvalidRequest(format!("{label}: {e}"))
+    let parse_click =
+        |label: &str, s: &Option<String>| -> Result<Option<ClickValue>, CardServiceError> {
+            s.as_deref()
+                .map(|raw| {
+                    parse_click_value(raw)
+                        .map_err(|e| CardServiceError::InvalidRequest(format!("{label}: {e}")))
                 })
-            })
-            .transpose()
-    };
+                .transpose()
+        };
     let elevation_click = parse_click("elevation_click_value", &req.elevation_click_value)?;
     let windage_click =
         parse_click("windage_click_value", &req.windage_click_value)?.or(elevation_click);
@@ -1310,15 +1317,24 @@ fn resolve_bc_schedule(
         // typed as G1, matching the CLI/WASM coercion.
         let weight_grains = u.mass_to_grains_cli(req.mass);
         let muzzle_fps = u.velocity_to_fps_bc5d(req.muzzle_velocity);
-        let drag_type = if req.drag_model == DragModelV1::G7 { "G7" } else { "G1" };
+        let drag_type = if req.drag_model == DragModelV1::G7 {
+            "G7"
+        } else {
+            "G1"
+        };
         let base_bc = req.ballistic_coefficient;
 
         match table.generate_segments(base_bc, drag_type, weight_grains, Some(muzzle_fps)) {
             Some(segments) => {
                 // CLI parity: the scalar BC becomes the muzzle-corrected fallback for
                 // interior coverage gaps (main.rs: trued_bc = base * muzzle_correction).
-                let fallback_bc =
-                    table.get_effective_bc(weight_grains, base_bc, muzzle_fps, muzzle_fps, drag_type);
+                let fallback_bc = table.get_effective_bc(
+                    weight_grains,
+                    base_bc,
+                    muzzle_fps,
+                    muzzle_fps,
+                    drag_type,
+                );
                 Ok((fallback_bc, Some(segments)))
             }
             // A neutral table (every sampled cell ~= 1.0) carries no correction:
@@ -2058,11 +2074,13 @@ fn resolve_font_scale(opts: &PdfCardOptionsV1) -> Result<f32, CardServiceError> 
             }
             Ok(scale)
         }
-        (None, Some(preset)) => FontSizePreset::from_str(preset).map(|p| p.scale()).ok_or_else(|| {
-            CardServiceError::InvalidRequest(format!(
-                "pdf.font_preset '{preset}' is not one of small, medium, large"
-            ))
-        }),
+        (None, Some(preset)) => FontSizePreset::from_str(preset)
+            .map(|p| p.scale())
+            .ok_or_else(|| {
+                CardServiceError::InvalidRequest(format!(
+                    "pdf.font_preset '{preset}' is not one of small, medium, large"
+                ))
+            }),
         (None, None) => Ok(1.0),
     }
 }
@@ -2120,8 +2138,9 @@ fn stored_rows_to_print(
             time: row.time,
             lead_adj: lead_speed_mps.zip(row.time).map(|(speed_mps, tof_s)| {
                 let range_m = r.u.distance_to_metric(row.range);
-                let lead_display =
-                    r.u.distance_from_metric(crate::lead_from_tof(speed_mps, 90.0, tof_s, range_m).lead_m);
+                let lead_display = r.u.distance_from_metric(
+                    crate::lead_from_tof(speed_mps, 90.0, tof_s, range_m).lead_m,
+                );
                 // Bias-free (it composes on top of the wind dial, which carries the
                 // zero-set bias) but still divided by the windage tracking CF — the exact
                 // treatment `range_table_rows` and the CLI's Lead column give it.
@@ -2311,7 +2330,10 @@ pub fn pdf_card_v1(
             RowsToPrint {
                 rows: stored_rows_to_print(&stored.card, req, &r, opts.target_speed),
                 source: PdfRowSource::StoredRows,
-                bc: stored.card.bc_for_solve.unwrap_or(req.ballistic_coefficient),
+                bc: stored
+                    .card
+                    .bc_for_solve
+                    .unwrap_or(req.ballistic_coefficient),
                 engine_version: stored.engine_version.clone().unwrap_or_default(),
                 table_version: stored.bc5d_table_version.clone().unwrap_or_default(),
                 elevation_unit_label: stored.card.units.elevation_adjustment.clone(),
@@ -2404,7 +2426,10 @@ pub fn pdf_card_v1(
     let altitude_ft = u.altitude_to_feet(req.altitude);
 
     let config = DopeCardConfig {
-        rifle_name: opts.title.clone().unwrap_or_else(|| "Dope Card".to_string()),
+        rifle_name: opts
+            .title
+            .clone()
+            .unwrap_or_else(|| "Dope Card".to_string()),
         location: opts.location.clone().unwrap_or_default(),
         density_altitude_ft: calculate_density_altitude(altitude_ft, pressure_inhg, temperature_f),
         pressure_inhg,
@@ -2418,7 +2443,11 @@ pub fn pdf_card_v1(
             Some(speed) => u.wind_to_mph(speed),
             None => 0.0,
         },
-        solver_mode: if cfg!(feature = "online") { "online".to_string() } else { "offline".to_string() },
+        solver_mode: if cfg!(feature = "online") {
+            "online".to_string()
+        } else {
+            "offline".to_string()
+        },
         powder: opts.powder.clone().unwrap_or_default(),
         bullet: opts.bullet.clone().unwrap_or_default(),
         weight_gr: u.mass_to_grains_cli(req.mass),

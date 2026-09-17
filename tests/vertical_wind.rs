@@ -35,7 +35,11 @@ fn solve_segments(
     segments: Vec<WindSegment>,
     max_range: f64,
 ) -> TrajectoryResult {
-    let mut s = TrajectorySolver::new(inputs, WindConditions::default(), AtmosphericConditions::default());
+    let mut s = TrajectorySolver::new(
+        inputs,
+        WindConditions::default(),
+        AtmosphericConditions::default(),
+    );
     s.set_max_range(max_range);
     s.set_time_step(0.001);
     s.set_wind_segments(segments);
@@ -49,7 +53,11 @@ fn yz_at(r: &TrajectoryResult, x: f64) -> (f64, f64) {
         if pts[i].position.x >= x {
             let (p1, p2) = (&pts[i - 1], &pts[i]);
             let dx = p2.position.x - p1.position.x;
-            let t = if dx.abs() < 1e-12 { 0.0 } else { (x - p1.position.x) / dx };
+            let t = if dx.abs() < 1e-12 {
+                0.0
+            } else {
+                (x - p1.position.x) / dx
+            };
             return (
                 p1.position.y + t * (p2.position.y - p1.position.y),
                 p1.position.z + t * (p2.position.z - p1.position.z),

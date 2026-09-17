@@ -108,10 +108,8 @@ fn assert_close(actual: f64, expected: f64, path: &str) {
 
 fn assert_legend_shape(document: &Value) {
     let legend = &document["legend"];
-    let expected_legend_keys: BTreeSet<String> = ["units", "axes"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
+    let expected_legend_keys: BTreeSet<String> =
+        ["units", "axes"].into_iter().map(str::to_owned).collect();
     assert_eq!(object_keys(legend), expected_legend_keys);
 
     let units = &legend["units"];

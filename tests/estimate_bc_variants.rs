@@ -23,7 +23,15 @@ const ZERO_M: f64 = 100.0 * 0.9144;
 /// Bore-referenced fit at ICAO-standard atmosphere — the default reference frame.
 fn bore(data: &[(f64, f64)], model: DragModel, mode: BcFitMode) -> BcEstimate {
     estimate_bc_fit(
-        V, M, D, data, model, mode, AtmosphericConditions::default(), None, 0.05,
+        V,
+        M,
+        D,
+        data,
+        model,
+        mode,
+        AtmosphericConditions::default(),
+        None,
+        0.05,
     )
     .unwrap()
 }
@@ -65,7 +73,10 @@ fn interp(pts: &[TrajectoryPoint], target: f64, drop: bool) -> f64 {
 
 fn drop_data(bc: f64, model: DragModel) -> Vec<(f64, f64)> {
     let pts = solve_ref(bc, model);
-    RANGES_M.iter().map(|&r| (r, interp(&pts, r, true))).collect()
+    RANGES_M
+        .iter()
+        .map(|&r| (r, interp(&pts, r, true)))
+        .collect()
 }
 
 fn velocity_data(bc: f64, model: DragModel) -> Vec<(f64, f64)> {
@@ -129,7 +140,12 @@ fn g1_and_g7_fits_differ() {
 /// Drop-fit and velocity-fit of the same bullet must agree on the BC.
 #[test]
 fn drop_and_velocity_fits_agree() {
-    let drop = bore(&drop_data(0.22, DragModel::G7), DragModel::G7, BcFitMode::Drop).bc;
+    let drop = bore(
+        &drop_data(0.22, DragModel::G7),
+        DragModel::G7,
+        BcFitMode::Drop,
+    )
+    .bc;
     let vel = bore(
         &velocity_data(0.22, DragModel::G7),
         DragModel::G7,
@@ -344,7 +360,11 @@ fn cli_estimate_bc_names_the_actual_family_not_a_wildcard() {
         );
         let json: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
         let variants = json["variants"].as_array().expect("variants array");
-        assert_eq!(variants.len(), 1, "{model}: a single family should yield one variant");
+        assert_eq!(
+            variants.len(),
+            1,
+            "{model}: a single family should yield one variant"
+        );
         assert_eq!(
             variants[0]["drag_model"], model,
             "{model}: must be labeled by its actual family, not a wildcard: {json}"
@@ -367,9 +387,18 @@ fn cli_estimate_bc_names_the_actual_family_not_a_wildcard() {
             ])
             .output()
             .expect("run estimate-bc (table)");
-        assert!(table_out.status.success(), "{model}: table run should succeed");
+        assert!(
+            table_out.status.success(),
+            "{model}: table run should succeed"
+        );
         let table = String::from_utf8_lossy(&table_out.stdout);
-        assert!(!table.contains("G?"), "{model}: table must not contain the G? wildcard: {table}");
-        assert!(table.contains(model), "{model}: table must name the family: {table}");
+        assert!(
+            !table.contains("G?"),
+            "{model}: table must not contain the G? wildcard: {table}"
+        );
+        assert!(
+            table.contains(model),
+            "{model}: table must name the family: {table}"
+        );
     }
 }

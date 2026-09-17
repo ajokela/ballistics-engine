@@ -193,7 +193,10 @@ pub enum WindScenarioError {
     /// A segment parsed but violated [`crate::wind::validate_wind_segments`].
     InvalidSegment { scenario: String, message: String },
     /// `nominal` named a scenario that is not in the set.
-    UnknownNominal { name: String, available: Vec<String> },
+    UnknownNominal {
+        name: String,
+        available: Vec<String>,
+    },
     /// No ranges were requested.
     NoRanges,
     /// More ranges than [`MAX_CORRIDOR_RANGES`].
@@ -255,10 +258,9 @@ impl fmt::Display for WindScenarioError {
             WindScenarioError::TooManyRanges { count, max } => {
                 write!(f, "{count} ranges exceeds the limit of {max}")
             }
-            WindScenarioError::InvalidRange { value } => write!(
-                f,
-                "range {value} must be finite and greater than zero"
-            ),
+            WindScenarioError::InvalidRange { value } => {
+                write!(f, "range {value} must be finite and greater than zero")
+            }
             WindScenarioError::DuplicateRange { value } => {
                 write!(f, "range {value} was requested more than once")
             }
@@ -1010,9 +1012,8 @@ pub fn format_robust_hold_report(
                     size_display(diameter_m),
                     size_unit
                 )),
-                None => out.push_str(
-                    "Target:         none — the minimax hold uses the per-axis metric\n",
-                ),
+                None => out
+                    .push_str("Target:         none — the minimax hold uses the per-axis metric\n"),
             }
             out.push_str(
                 "\nHolds are milliradians: elevation positive = hold UP, windage positive = \
@@ -1456,10 +1457,7 @@ mod tests {
         let scenarios: Vec<String> = (0..9)
             .map(|i| format!(r#"{{"name":"s{i}","segments":["5:90:1000"]}}"#))
             .collect();
-        let doc = format!(
-            r#"{{"version":1,"scenarios":[{}]}}"#,
-            scenarios.join(",")
-        );
+        let doc = format!(r#"{{"version":1,"scenarios":[{}]}}"#, scenarios.join(","));
         assert_eq!(
             parse_wind_scenario_set(&doc, UnitSystem::Imperial).unwrap_err(),
             WindScenarioError::TooManyScenarios { count: 9, max: 8 }
@@ -1470,7 +1468,10 @@ mod tests {
             UnitSystem::Imperial,
         )
         .unwrap_err();
-        assert!(matches!(err, WindScenarioError::MalformedSegment { .. }), "{err}");
+        assert!(
+            matches!(err, WindScenarioError::MalformedSegment { .. }),
+            "{err}"
+        );
 
         let err = parse_wind_scenario_set(
             r#"{"version":1,"scenarios":[{"name":"  ","segments":["5:90:1000"]}]}"#,
@@ -1511,7 +1512,14 @@ mod tests {
             parse_target_spec("circle:10", UnitSystem::Metric).unwrap(),
             TargetSpec::Circle { diameter_m: 0.1 }
         );
-        for bad in ["rect", "rect:12", "circle:-1", "blob:3", "rect:0x5", "circle:abc"] {
+        for bad in [
+            "rect",
+            "rect:12",
+            "circle:-1",
+            "blob:3",
+            "rect:0x5",
+            "circle:abc",
+        ] {
             assert!(
                 parse_target_spec(bad, UnitSystem::Imperial).is_err(),
                 "'{bad}' should be rejected"
@@ -1522,7 +1530,11 @@ mod tests {
     #[test]
     fn minimum_enclosing_circle_is_exact_and_order_independent() {
         // Three points on a unit circle: the enclosing circle is that circle.
-        let points = vec![(1.0, 0.0), (-0.5, 0.866_025_403_784_438_6), (-0.5, -0.866_025_403_784_438_6)];
+        let points = vec![
+            (1.0, 0.0),
+            (-0.5, 0.866_025_403_784_438_6),
+            (-0.5, -0.866_025_403_784_438_6),
+        ];
         let center = minimum_enclosing_circle_center(&points);
         assert!(center.0.abs() < 1e-9 && center.1.abs() < 1e-9, "{center:?}");
 

@@ -165,9 +165,7 @@ fn every_scenario_row_matches_a_direct_segmented_wind_solve() {
         .map(|h| h.windage_mil)
         .collect();
     assert!(
-        windages
-            .iter()
-            .any(|w| (w - windages[0]).abs() > 0.3),
+        windages.iter().any(|w| (w - windages[0]).abs() > 0.3),
         "{windages:?}"
     );
 }
@@ -191,7 +189,10 @@ fn tempfile_dir() -> std::path::PathBuf {
 }
 
 fn run(args: &[&str]) -> (String, String, bool) {
-    let output = Command::new(BIN).args(args).output().expect("hold-corridor");
+    let output = Command::new(BIN)
+        .args(args)
+        .output()
+        .expect("hold-corridor");
     (
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -212,8 +213,23 @@ fn cli_emits_the_table_and_the_versioned_json() {
     let p = path.to_str().unwrap();
 
     let (table, stderr, ok) = run(&[
-        "hold-corridor", "--scenarios", p, "--ranges", "200,400,600", "--target", "rect:12x18",
-        "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308", "--zero-distance", "100",
+        "hold-corridor",
+        "--scenarios",
+        p,
+        "--ranges",
+        "200,400,600",
+        "--target",
+        "rect:12x18",
+        "-v",
+        "2700",
+        "-b",
+        "0.475",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "--zero-distance",
+        "100",
     ]);
     assert!(ok, "{stderr}");
     assert!(table.contains("Robust Hold Corridor"), "{table}");
@@ -226,9 +242,25 @@ fn cli_emits_the_table_and_the_versioned_json() {
     );
 
     let (json, stderr, ok) = run(&[
-        "hold-corridor", "--scenarios", p, "--ranges", "200,400,600", "--target", "circle:10",
-        "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308", "--zero-distance", "100",
-        "-o", "json",
+        "hold-corridor",
+        "--scenarios",
+        p,
+        "--ranges",
+        "200,400,600",
+        "--target",
+        "circle:10",
+        "-v",
+        "2700",
+        "-b",
+        "0.475",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "--zero-distance",
+        "100",
+        "-o",
+        "json",
     ]);
     assert!(ok, "{stderr}");
     let report: RobustHoldReportV1 = serde_json::from_str(&json).unwrap();
@@ -253,9 +285,23 @@ fn cli_emits_the_table_and_the_versioned_json() {
 
     // No target: no fit verdict, and the metric falls back to per-axis.
     let (json, _, ok) = run(&[
-        "hold-corridor", "--scenarios", p, "--ranges", "400",
-        "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308", "--zero-distance", "100",
-        "-o", "json",
+        "hold-corridor",
+        "--scenarios",
+        p,
+        "--ranges",
+        "400",
+        "-v",
+        "2700",
+        "-b",
+        "0.475",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "--zero-distance",
+        "100",
+        "-o",
+        "json",
     ]);
     assert!(ok);
     let report: RobustHoldReportV1 = serde_json::from_str(&json).unwrap();
@@ -281,9 +327,25 @@ fn reordering_the_scenario_file_changes_no_output_byte() {
 
     let output_for = |path: &std::path::Path| {
         let (stdout, stderr, ok) = run(&[
-            "hold-corridor", "--scenarios", path.to_str().unwrap(), "--ranges", "200,400,600",
-            "--target", "rect:12x18", "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308",
-            "--zero-distance", "100", "-o", "json",
+            "hold-corridor",
+            "--scenarios",
+            path.to_str().unwrap(),
+            "--ranges",
+            "200,400,600",
+            "--target",
+            "rect:12x18",
+            "-v",
+            "2700",
+            "-b",
+            "0.475",
+            "-m",
+            "168",
+            "-d",
+            "0.308",
+            "--zero-distance",
+            "100",
+            "-o",
+            "json",
         ]);
         assert!(ok, "{stderr}");
         stdout
@@ -300,7 +362,16 @@ fn cli_rejects_caps_and_malformed_input() {
         let mut args: Vec<&str> = vec!["hold-corridor", "--scenarios", path];
         args.extend(extra);
         args.extend_from_slice(&[
-            "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308", "--zero-distance", "100",
+            "-v",
+            "2700",
+            "-b",
+            "0.475",
+            "-m",
+            "168",
+            "-d",
+            "0.308",
+            "--zero-distance",
+            "100",
         ]);
         run(&args)
     };
@@ -332,7 +403,10 @@ fn cli_rejects_caps_and_malformed_input() {
     );
     let (_, stderr, ok) = base(vec!["--ranges", "400"], path.to_str().unwrap());
     assert!(!ok);
-    assert!(stderr.contains("unsupported wind scenario set version 2"), "{stderr}");
+    assert!(
+        stderr.contains("unsupported wind scenario set version 2"),
+        "{stderr}"
+    );
 
     // A malformed segment token names the scenario and the segment index.
     let path = write_scenarios(
@@ -400,8 +474,21 @@ fn cap_rejection_does_not_solve_anything() {
     let joined = ranges.join(",");
     let start = std::time::Instant::now();
     let (_, stderr, ok) = run(&[
-        "hold-corridor", "--scenarios", path.to_str().unwrap(), "--ranges", &joined,
-        "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308", "--zero-distance", "100",
+        "hold-corridor",
+        "--scenarios",
+        path.to_str().unwrap(),
+        "--ranges",
+        &joined,
+        "-v",
+        "2700",
+        "-b",
+        "0.475",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "--zero-distance",
+        "100",
     ]);
     let elapsed = start.elapsed();
     assert!(!ok);
@@ -425,10 +512,27 @@ fn metric_units_are_applied_to_the_whole_request() {
   {"name":"gusty","segments":["6:90:1000"]}]}"#,
     );
     let (json, stderr, ok) = run(&[
-        "--units", "metric", "hold-corridor", "--scenarios", path.to_str().unwrap(),
-        "--ranges", "200,400,600", "--target", "circle:30",
-        "-v", "823", "-b", "0.475", "-m", "10.9", "-d", "7.82", "--zero-distance", "100",
-        "-o", "json",
+        "--units",
+        "metric",
+        "hold-corridor",
+        "--scenarios",
+        path.to_str().unwrap(),
+        "--ranges",
+        "200,400,600",
+        "--target",
+        "circle:30",
+        "-v",
+        "823",
+        "-b",
+        "0.475",
+        "-m",
+        "10.9",
+        "-d",
+        "7.82",
+        "--zero-distance",
+        "100",
+        "-o",
+        "json",
     ]);
     assert!(ok, "{stderr}");
     let report: RobustHoldReportV1 = serde_json::from_str(&json).unwrap();

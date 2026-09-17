@@ -66,8 +66,7 @@ fn native_output_is_the_shared_formatter_verbatim_for_every_model_and_form() {
 /// The JSON form parses, self-describes its per-table Mach domain, and its point count matches
 /// the table the solver interpolates.
 #[test]
-fn json_form_is_parseable_and_self_describing()
-{
+fn json_form_is_parseable_and_self_describing() {
     let output = Command::new(BIN)
         .args(["drag-curve", "--drag-model", "gs", "-o", "json"])
         .output()
@@ -77,7 +76,10 @@ fn json_form_is_parseable_and_self_describing()
 
     let table = ballistics_engine::drag::reference_drag_table(&DragModel::GS);
     assert_eq!(doc["drag_model"], "GS");
-    assert_eq!(doc["point_count"].as_u64().unwrap() as usize, table.mach_values.len());
+    assert_eq!(
+        doc["point_count"].as_u64().unwrap() as usize,
+        table.mach_values.len()
+    );
     // GS genuinely stops at Mach 4 — the reason the domain is stated per-table.
     assert_eq!(doc["mach_max"].as_f64().unwrap(), 4.0);
     assert_eq!(

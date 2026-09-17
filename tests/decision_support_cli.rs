@@ -37,7 +37,10 @@ fn write_json(dir: &Path, name: &str, value: &serde_json::Value) -> PathBuf {
 }
 
 fn run(args: &[&str]) -> (String, String, bool) {
-    let output = Command::new(bin()).args(args).output().expect("run ballistics");
+    let output = Command::new(bin())
+        .args(args)
+        .output()
+        .expect("run ballistics");
     (
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -107,8 +110,15 @@ fn explain_emits_a_versioned_report_with_a_remainder() {
     let a = write_json(&dir, "a.json", &small_request(823.0));
     let b = write_json(&dir, "b.json", &small_request(870.0));
     let (stdout, stderr, ok) = run(&[
-        "explain", "--a", a.to_str().unwrap(), "--b", b.to_str().unwrap(),
-        "--ranges", "600", "-o", "json",
+        "explain",
+        "--a",
+        a.to_str().unwrap(),
+        "--b",
+        b.to_str().unwrap(),
+        "--ranges",
+        "600",
+        "-o",
+        "json",
     ]);
     assert!(ok, "stderr: {stderr}");
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
@@ -130,9 +140,19 @@ fn tolerance_emits_a_versioned_report() {
     let dir = tempfile_dir();
     let a = write_json(&dir, "a.json", &small_request(823.0));
     let (stdout, stderr, ok) = run(&[
-        "tolerance", "--request", a.to_str().unwrap(), "--range", "600",
-        "--target", "rect:0.5x0.75", "--axis", "wind-speed", "--domain", "wind-speed=0:20",
-        "-o", "json",
+        "tolerance",
+        "--request",
+        a.to_str().unwrap(),
+        "--range",
+        "600",
+        "--target",
+        "rect:0.5x0.75",
+        "--axis",
+        "wind-speed",
+        "--domain",
+        "wind-speed=0:20",
+        "-o",
+        "json",
     ]);
     assert!(ok, "stderr: {stderr}");
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
@@ -152,8 +172,15 @@ fn tolerance_missing_domain_names_the_axis_and_the_flag() {
     let dir = tempfile_dir();
     let a = write_json(&dir, "a.json", &small_request(823.0));
     let (_, stderr, ok) = run(&[
-        "tolerance", "--request", a.to_str().unwrap(), "--range", "600",
-        "--target", "rect:0.5x0.75", "--axis", "wind-speed",
+        "tolerance",
+        "--request",
+        a.to_str().unwrap(),
+        "--range",
+        "600",
+        "--target",
+        "rect:0.5x0.75",
+        "--axis",
+        "wind-speed",
     ]);
     assert!(!ok, "a missing --domain must be rejected");
     assert!(stderr.contains("wind-speed"), "{stderr}");
@@ -169,11 +196,21 @@ fn tolerance_unknown_axis_lists_valid_names() {
     let dir = tempfile_dir();
     let a = write_json(&dir, "a.json", &small_request(823.0));
     let (_, stderr, ok) = run(&[
-        "tolerance", "--request", a.to_str().unwrap(), "--range", "600",
-        "--target", "rect:0.5x0.75", "--axis", "not-a-real-axis",
+        "tolerance",
+        "--request",
+        a.to_str().unwrap(),
+        "--range",
+        "600",
+        "--target",
+        "rect:0.5x0.75",
+        "--axis",
+        "not-a-real-axis",
     ]);
     assert!(!ok);
-    assert!(stderr.contains("unknown axis 'not-a-real-axis'"), "{stderr}");
+    assert!(
+        stderr.contains("unknown axis 'not-a-real-axis'"),
+        "{stderr}"
+    );
     assert!(stderr.contains("wind-speed"), "{stderr}");
     assert!(stderr.contains("muzzle-velocity-mps"), "{stderr}");
 }
@@ -185,9 +222,19 @@ fn tolerance_rejects_a_repeated_axis() {
     let dir = tempfile_dir();
     let a = write_json(&dir, "a.json", &small_request(823.0));
     let (_, stderr, ok) = run(&[
-        "tolerance", "--request", a.to_str().unwrap(), "--range", "600",
-        "--target", "rect:0.5x0.75",
-        "--axis", "wind-speed", "--axis", "wind-speed", "--domain", "wind-speed=0:20",
+        "tolerance",
+        "--request",
+        a.to_str().unwrap(),
+        "--range",
+        "600",
+        "--target",
+        "rect:0.5x0.75",
+        "--axis",
+        "wind-speed",
+        "--axis",
+        "wind-speed",
+        "--domain",
+        "wind-speed=0:20",
     ]);
     assert!(!ok, "a repeated --axis must be rejected");
     assert!(stderr.contains("wind-speed"), "{stderr}");
@@ -202,9 +249,19 @@ fn tolerance_rejects_a_repeated_domain_for_one_axis() {
     let dir = tempfile_dir();
     let a = write_json(&dir, "a.json", &small_request(823.0));
     let (_, stderr, ok) = run(&[
-        "tolerance", "--request", a.to_str().unwrap(), "--range", "600",
-        "--target", "rect:0.5x0.75", "--axis", "wind-speed",
-        "--domain", "wind-speed=0:20", "--domain", "wind-speed=1:19",
+        "tolerance",
+        "--request",
+        a.to_str().unwrap(),
+        "--range",
+        "600",
+        "--target",
+        "rect:0.5x0.75",
+        "--axis",
+        "wind-speed",
+        "--domain",
+        "wind-speed=0:20",
+        "--domain",
+        "wind-speed=1:19",
     ]);
     assert!(!ok, "a repeated --domain for one axis must be rejected");
     assert!(stderr.contains("wind-speed"), "{stderr}");
@@ -218,11 +275,24 @@ fn tolerance_rejects_a_domain_for_an_axis_not_requested() {
     let dir = tempfile_dir();
     let a = write_json(&dir, "a.json", &small_request(823.0));
     let (_, stderr, ok) = run(&[
-        "tolerance", "--request", a.to_str().unwrap(), "--range", "600",
-        "--target", "rect:0.5x0.75", "--axis", "wind-speed",
-        "--domain", "wind-speed=0:20", "--domain", "temperature=250:310",
+        "tolerance",
+        "--request",
+        a.to_str().unwrap(),
+        "--range",
+        "600",
+        "--target",
+        "rect:0.5x0.75",
+        "--axis",
+        "wind-speed",
+        "--domain",
+        "wind-speed=0:20",
+        "--domain",
+        "temperature=250:310",
     ]);
-    assert!(!ok, "a --domain for an axis outside --axis must be rejected");
+    assert!(
+        !ok,
+        "a --domain for an axis outside --axis must be rejected"
+    );
     assert!(stderr.contains("temperature"), "{stderr}");
     assert!(stderr.contains("not requested"), "{stderr}");
 }
@@ -240,12 +310,18 @@ fn explain_table_labels_the_remainder_and_renders_skipped_axes() {
     let b_path = write_json(&dir, "b.json", &small_request(823.0));
 
     let (table, stderr, ok) = run(&[
-        "explain", "--a", a_path.to_str().unwrap(), "--b", b_path.to_str().unwrap(),
-        "--ranges", "600",
+        "explain",
+        "--a",
+        a_path.to_str().unwrap(),
+        "--b",
+        b_path.to_str().unwrap(),
+        "--ranges",
+        "600",
     ]);
     assert!(ok, "stderr: {stderr}");
     assert!(
-        table.contains("interaction remainder") && table.contains("unexplained by any single group"),
+        table.contains("interaction remainder")
+            && table.contains("unexplained by any single group"),
         "the interaction remainder must be on its own labelled line: {table}"
     );
     assert!(
@@ -256,8 +332,15 @@ fn explain_table_labels_the_remainder_and_renders_skipped_axes() {
 
     // The same fact holds structurally in the JSON form, not just as table prose.
     let (json, stderr, ok) = run(&[
-        "explain", "--a", a_path.to_str().unwrap(), "--b", b_path.to_str().unwrap(),
-        "--ranges", "600", "-o", "json",
+        "explain",
+        "--a",
+        a_path.to_str().unwrap(),
+        "--b",
+        b_path.to_str().unwrap(),
+        "--ranges",
+        "600",
+        "-o",
+        "json",
     ]);
     assert!(ok, "stderr: {stderr}");
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -281,7 +364,9 @@ fn explain_names_which_of_the_two_files_is_broken() {
     let good_path = write_json(&dir, "good.json", &small_request(870.0));
     let (broken_str, good_str) = (broken_path.to_str().unwrap(), good_path.to_str().unwrap());
 
-    let (_, stderr, ok) = run(&["explain", "--a", broken_str, "--b", good_str, "--ranges", "600"]);
+    let (_, stderr, ok) = run(&[
+        "explain", "--a", broken_str, "--b", good_str, "--ranges", "600",
+    ]);
     assert!(!ok, "a broken --a must be rejected");
     assert!(
         stderr.contains(broken_str),
@@ -292,7 +377,9 @@ fn explain_names_which_of_the_two_files_is_broken() {
         "the error must not also name the OTHER, valid file: {stderr}"
     );
 
-    let (_, stderr, ok) = run(&["explain", "--a", good_str, "--b", broken_str, "--ranges", "600"]);
+    let (_, stderr, ok) = run(&[
+        "explain", "--a", good_str, "--b", broken_str, "--ranges", "600",
+    ]);
     assert!(!ok, "a broken --b must be rejected");
     assert!(
         stderr.contains(broken_str),
@@ -316,17 +403,33 @@ fn tolerance_table_distinguishes_a_found_bound_from_no_measurable_effect() {
     let req_str = req.to_str().unwrap();
 
     let args = [
-        "--units", "metric", "tolerance", "--request", req_str,
-        "--range", "400", "--target", "rect:20x20",
-        "--axis", "muzzle-velocity-mps", "--domain", "muzzle-velocity-mps=700:1100",
-        "--axis", "target-distance", "--domain", "target-distance=450:600",
+        "--units",
+        "metric",
+        "tolerance",
+        "--request",
+        req_str,
+        "--range",
+        "400",
+        "--target",
+        "rect:20x20",
+        "--axis",
+        "muzzle-velocity-mps",
+        "--domain",
+        "muzzle-velocity-mps=700:1100",
+        "--axis",
+        "target-distance",
+        "--domain",
+        "target-distance=450:600",
     ];
 
     let (table, stderr, ok) = run(&args);
     assert!(ok, "stderr: {stderr}");
     assert!(table.contains("crosses the Bottom edge"), "{table}");
     assert!(table.contains("crosses the Top edge"), "{table}");
-    assert!(table.contains("no measurable effect on the impact"), "{table}");
+    assert!(
+        table.contains("no measurable effect on the impact"),
+        "{table}"
+    );
     assert!(
         !table.contains("no bound within the configured domain"),
         "neither axis in this fixture is merely unbounded-with-effect, so that phrase must not \
@@ -354,7 +457,10 @@ fn tolerance_table_distinguishes_a_found_bound_from_no_measurable_effect() {
         .iter()
         .find(|a| a["axis"] == "muzzle_velocity_mps")
         .expect("muzzle-velocity-mps axis in report");
-    assert!(mv["near_bound"].is_number() && mv["far_bound"].is_number(), "{mv}");
+    assert!(
+        mv["near_bound"].is_number() && mv["far_bound"].is_number(),
+        "{mv}"
+    );
     assert_eq!(mv["near_limiting_boundary"], "bottom");
     assert_eq!(mv["far_limiting_boundary"], "top");
     assert_eq!(mv["unbounded_in_domain"], false);
@@ -365,7 +471,10 @@ fn tolerance_table_distinguishes_a_found_bound_from_no_measurable_effect() {
         .iter()
         .find(|a| a["axis"] == "target_distance")
         .expect("target-distance axis in report");
-    assert!(td["near_bound"].is_null() && td["far_bound"].is_null(), "{td}");
+    assert!(
+        td["near_bound"].is_null() && td["far_bound"].is_null(),
+        "{td}"
+    );
     assert_eq!(td["unbounded_in_domain"], true);
     assert_eq!(td["near_has_no_effect"], true);
     assert_eq!(td["far_has_no_effect"], true);
@@ -385,15 +494,31 @@ fn tolerance_table_distinguishes_unbounded_from_unavailable() {
     let req_str = req.to_str().unwrap();
 
     let args = [
-        "--units", "metric", "tolerance", "--request", req_str,
-        "--range", "600", "--target", "rect:5000x5000",
-        "--axis", "wind-speed", "--domain", "wind-speed=2.9:3.1",
-        "--axis", "magnus-enabled", "--domain", "magnus-enabled=0:1",
+        "--units",
+        "metric",
+        "tolerance",
+        "--request",
+        req_str,
+        "--range",
+        "600",
+        "--target",
+        "rect:5000x5000",
+        "--axis",
+        "wind-speed",
+        "--domain",
+        "wind-speed=2.9:3.1",
+        "--axis",
+        "magnus-enabled",
+        "--domain",
+        "magnus-enabled=0:1",
     ];
 
     let (table, stderr, ok) = run(&args);
     assert!(ok, "stderr: {stderr}");
-    assert!(table.contains("no bound within the configured domain"), "{table}");
+    assert!(
+        table.contains("no bound within the configured domain"),
+        "{table}"
+    );
     assert!(
         !table.contains("no measurable effect on the impact"),
         "wind-speed does move the impact within this domain, it just never leaves this huge \
@@ -436,7 +561,11 @@ fn tolerance_table_distinguishes_unbounded_from_unavailable() {
     );
     // An unavailable axis never also appears in `axes` -- the two lists are disjoint.
     assert!(
-        v["axes"].as_array().unwrap().iter().all(|a| a["axis"] != "magnus_enabled"),
+        v["axes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a["axis"] != "magnus_enabled"),
         "{v}"
     );
 }
@@ -453,9 +582,19 @@ fn error_budget_ranks_sources_and_states_assumptions() {
     let dir = tempfile_dir();
     let a = write_json(&dir, "a.json", &small_request(823.0));
     let (stdout, stderr, ok) = run(&[
-        "error-budget", "--request", a.to_str().unwrap(), "--ranges", "600",
-        "--sigma", "muzzle-velocity-mps=5.0", "--sigma", "wind-speed=1.5",
-        "--target", "rect:0.5x0.75", "-o", "json",
+        "error-budget",
+        "--request",
+        a.to_str().unwrap(),
+        "--ranges",
+        "600",
+        "--sigma",
+        "muzzle-velocity-mps=5.0",
+        "--sigma",
+        "wind-speed=1.5",
+        "--target",
+        "rect:0.5x0.75",
+        "-o",
+        "json",
     ]);
     assert!(ok, "stderr: {stderr}");
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
@@ -479,7 +618,10 @@ fn error_budget_ranks_sources_and_states_assumptions() {
         "a target was supplied: the per-source gain must be reported, not null: {v}"
     );
     assert!(v["rows"][0]["priority_statement"].as_str().unwrap().len() > 10);
-    assert!(v["assumptions"].as_array().unwrap().iter()
+    assert!(v["assumptions"]
+        .as_array()
+        .unwrap()
+        .iter()
         .any(|s| s.as_str().unwrap().contains("independent")));
 }
 
@@ -495,19 +637,35 @@ fn error_budget_table_shows_p_hit_and_gain_only_with_a_target() {
     let a_str = a.to_str().unwrap();
 
     let (with_target, stderr, ok) = run(&[
-        "error-budget", "--request", a_str, "--ranges", "600",
-        "--sigma", "wind-speed=1.5", "--target", "rect:0.5x0.75",
+        "error-budget",
+        "--request",
+        a_str,
+        "--ranges",
+        "600",
+        "--sigma",
+        "wind-speed=1.5",
+        "--target",
+        "rect:0.5x0.75",
     ]);
     assert!(ok, "stderr: {stderr}");
     assert!(with_target.contains("p_hit:"), "{with_target}");
     assert!(with_target.contains("gain if perfected"), "{with_target}");
 
     let (without_target, stderr, ok) = run(&[
-        "error-budget", "--request", a_str, "--ranges", "600", "--sigma", "wind-speed=1.5",
+        "error-budget",
+        "--request",
+        a_str,
+        "--ranges",
+        "600",
+        "--sigma",
+        "wind-speed=1.5",
     ]);
     assert!(ok, "stderr: {stderr}");
     assert!(!without_target.contains("p_hit:"), "{without_target}");
-    assert!(!without_target.contains("gain if perfected"), "{without_target}");
+    assert!(
+        !without_target.contains("gain if perfected"),
+        "{without_target}"
+    );
 }
 
 /// The unavailable-source path, end to end: `Altitude` is declared alongside a real source
@@ -523,13 +681,23 @@ fn error_budget_names_an_unavailable_source_and_excludes_it_from_the_ranked_list
     let req_str = req.to_str().unwrap();
 
     let (table, stderr, ok) = run(&[
-        "error-budget", "--request", req_str, "--ranges", "300",
-        "--sigma", "altitude=50.0", "--sigma", "muzzle-velocity-mps=5.0",
+        "error-budget",
+        "--request",
+        req_str,
+        "--ranges",
+        "300",
+        "--sigma",
+        "altitude=50.0",
+        "--sigma",
+        "muzzle-velocity-mps=5.0",
     ]);
     assert!(ok, "stderr: {stderr}");
     assert!(table.contains("unavailable sources"), "{table}");
     assert!(table.contains("altitude"), "{table}");
-    assert!(table.contains("QNH"), "the reason should name the mechanism: {table}");
+    assert!(
+        table.contains("QNH"),
+        "the reason should name the mechanism: {table}"
+    );
     let ranked_section = table.split("unavailable sources").next().unwrap();
     assert!(
         !ranked_section.contains("altitude"),
@@ -538,8 +706,17 @@ fn error_budget_names_an_unavailable_source_and_excludes_it_from_the_ranked_list
     assert!(ranked_section.contains("muzzle-velocity-mps"), "{table}");
 
     let (stdout, stderr, ok) = run(&[
-        "error-budget", "--request", req_str, "--ranges", "300",
-        "--sigma", "altitude=50.0", "--sigma", "muzzle-velocity-mps=5.0", "-o", "json",
+        "error-budget",
+        "--request",
+        req_str,
+        "--ranges",
+        "300",
+        "--sigma",
+        "altitude=50.0",
+        "--sigma",
+        "muzzle-velocity-mps=5.0",
+        "-o",
+        "json",
     ]);
     assert!(ok, "stderr: {stderr}");
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
@@ -549,7 +726,11 @@ fn error_budget_names_an_unavailable_source_and_excludes_it_from_the_ranked_list
     assert_eq!(unavailable[0]["code"], "axis_unsupported_for_request");
 
     let sources = v["rows"][0]["sources"].as_array().unwrap();
-    assert_eq!(sources.len(), 1, "only the one evaluable source should be ranked: {v}");
+    assert_eq!(
+        sources.len(),
+        1,
+        "only the one evaluable source should be ranked: {v}"
+    );
     assert_eq!(sources[0]["axis"], "muzzle_velocity_mps");
 }
 
@@ -561,8 +742,15 @@ fn error_budget_rejects_a_duplicate_sigma_axis() {
     let dir = tempfile_dir();
     let a = write_json(&dir, "a.json", &small_request(823.0));
     let (_, stderr, ok) = run(&[
-        "error-budget", "--request", a.to_str().unwrap(), "--ranges", "600",
-        "--sigma", "wind-speed=1.5", "--sigma", "wind-speed=2.0",
+        "error-budget",
+        "--request",
+        a.to_str().unwrap(),
+        "--ranges",
+        "600",
+        "--sigma",
+        "wind-speed=1.5",
+        "--sigma",
+        "wind-speed=2.0",
     ]);
     assert!(!ok, "a duplicate --sigma axis must be rejected");
     assert!(stderr.contains("wind-speed"), "{stderr}");
@@ -578,8 +766,13 @@ fn error_budget_rejects_a_negative_sigma() {
     let dir = tempfile_dir();
     let a = write_json(&dir, "a.json", &small_request(823.0));
     let (_, stderr, ok) = run(&[
-        "error-budget", "--request", a.to_str().unwrap(), "--ranges", "600",
-        "--sigma", "wind-speed=-1.0",
+        "error-budget",
+        "--request",
+        a.to_str().unwrap(),
+        "--ranges",
+        "600",
+        "--sigma",
+        "wind-speed=-1.0",
     ]);
     assert!(!ok, "a negative sigma must be rejected");
     assert!(stderr.contains("wind-speed"), "{stderr}");
@@ -595,23 +788,47 @@ fn csv_and_pdf_are_rejected_for_all_three_subcommands() {
 
     for format in ["csv", "pdf"] {
         let (_, stderr, ok) = run(&[
-            "explain", "--a", a.to_str().unwrap(), "--b", b.to_str().unwrap(),
-            "--ranges", "600", "-o", format,
+            "explain",
+            "--a",
+            a.to_str().unwrap(),
+            "--b",
+            b.to_str().unwrap(),
+            "--ranges",
+            "600",
+            "-o",
+            format,
         ]);
         assert!(!ok, "explain -o {format} was accepted");
         assert!(stderr.contains("no "), "{format}: {stderr}");
 
         let (_, stderr, ok) = run(&[
-            "tolerance", "--request", a.to_str().unwrap(), "--range", "600",
-            "--target", "rect:0.5x0.75", "--axis", "wind-speed", "--domain", "wind-speed=0:20",
-            "-o", format,
+            "tolerance",
+            "--request",
+            a.to_str().unwrap(),
+            "--range",
+            "600",
+            "--target",
+            "rect:0.5x0.75",
+            "--axis",
+            "wind-speed",
+            "--domain",
+            "wind-speed=0:20",
+            "-o",
+            format,
         ]);
         assert!(!ok, "tolerance -o {format} was accepted");
         assert!(stderr.contains("no "), "{format}: {stderr}");
 
         let (_, stderr, ok) = run(&[
-            "error-budget", "--request", a.to_str().unwrap(), "--ranges", "600",
-            "--sigma", "wind-speed=1.5", "-o", format,
+            "error-budget",
+            "--request",
+            a.to_str().unwrap(),
+            "--ranges",
+            "600",
+            "--sigma",
+            "wind-speed=1.5",
+            "-o",
+            format,
         ]);
         assert!(!ok, "error-budget -o {format} was accepted");
         assert!(stderr.contains("no "), "{format}: {stderr}");
@@ -623,21 +840,41 @@ fn csv_and_pdf_are_rejected_for_all_three_subcommands() {
 #[test]
 fn a_missing_request_file_names_the_path() {
     let (_, stderr, ok) = run(&[
-        "explain", "--a", "/nonexistent/a.json", "--b", "/nonexistent/b.json", "--ranges", "600",
+        "explain",
+        "--a",
+        "/nonexistent/a.json",
+        "--b",
+        "/nonexistent/b.json",
+        "--ranges",
+        "600",
     ]);
     assert!(!ok);
     assert!(stderr.contains("/nonexistent/a.json"), "{stderr}");
 
     let (_, stderr, ok) = run(&[
-        "tolerance", "--request", "/nonexistent/req.json", "--range", "600",
-        "--target", "rect:0.5x0.75", "--axis", "wind-speed", "--domain", "wind-speed=0:20",
+        "tolerance",
+        "--request",
+        "/nonexistent/req.json",
+        "--range",
+        "600",
+        "--target",
+        "rect:0.5x0.75",
+        "--axis",
+        "wind-speed",
+        "--domain",
+        "wind-speed=0:20",
     ]);
     assert!(!ok);
     assert!(stderr.contains("/nonexistent/req.json"), "{stderr}");
 
     let (_, stderr, ok) = run(&[
-        "error-budget", "--request", "/nonexistent/req.json", "--ranges", "600",
-        "--sigma", "wind-speed=1.5",
+        "error-budget",
+        "--request",
+        "/nonexistent/req.json",
+        "--ranges",
+        "600",
+        "--sigma",
+        "wind-speed=1.5",
     ]);
     assert!(!ok);
     assert!(stderr.contains("/nonexistent/req.json"), "{stderr}");

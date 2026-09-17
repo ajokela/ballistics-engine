@@ -206,9 +206,7 @@ pub fn parse_drg(text: &str) -> Result<ParsedDragCurve, String> {
         (true, false) => true,
         (false, true) => false,
         (false, false) => {
-            return Err(
-                "neither column is strictly ascending; expected a mach column".to_string(),
-            );
+            return Err("neither column is strictly ascending; expected a mach column".to_string());
         }
         (true, true) => {
             // Both columns ascend (e.g. a (cd, mach) file whose cd happens to be
@@ -217,7 +215,11 @@ pub fn parse_drg(text: &str) -> Result<ParsedDragCurve, String> {
             // the larger maximum is mach — unless the two maxima are too close to call.
             let max0 = col0.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             let max1 = col1.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            let (larger, smaller) = if max0 >= max1 { (max0, max1) } else { (max1, max0) };
+            let (larger, smaller) = if max0 >= max1 {
+                (max0, max1)
+            } else {
+                (max1, max0)
+            };
             if larger > 0.0 && smaller / larger >= 0.8 {
                 return Err(
                     "ambiguous columns: both ascend with similar ranges; cannot determine \
@@ -239,7 +241,9 @@ pub fn parse_drg(text: &str) -> Result<ParsedDragCurve, String> {
             ));
         }
         if !cd.is_finite() || cd <= 0.0 {
-            return Err(format!("line {lineno}: cd must be finite and > 0, got {cd}"));
+            return Err(format!(
+                "line {lineno}: cd must be finite and > 0, got {cd}"
+            ));
         }
         points.push((mach, cd));
     }
@@ -286,7 +290,10 @@ mod tests {
         assert_eq!(c.points.len(), 6);
         assert_eq!(c.points[0], (0.50, 0.230));
         assert_eq!(c.points[5], (2.50, 0.300));
-        assert_eq!(c.name.as_deref(), Some("SYN123, Synthetic Test Bullet 7.62mm 10.00g"));
+        assert_eq!(
+            c.name.as_deref(),
+            Some("SYN123, Synthetic Test Bullet 7.62mm 10.00g")
+        );
     }
 
     #[test]
@@ -301,7 +308,10 @@ mod tests {
         assert!(parse_drg("t\n0.5 0.3\nnot numbers\n1.0 0.3\n").is_err());
         // decimal commas -> clear error mentioning decimal
         let e = parse_drg("t\n0,5 0,3\n1,0 0,31\n").unwrap_err();
-        assert!(e.to_lowercase().contains("decimal") || e.to_lowercase().contains("comma"), "{e}");
+        assert!(
+            e.to_lowercase().contains("decimal") || e.to_lowercase().contains("comma"),
+            "{e}"
+        );
         // empty / header-only
         assert!(parse_drg("").is_err());
         assert!(parse_drg("just a title\n").is_err());
@@ -334,8 +344,7 @@ mod tests {
         // Exercises column-order detection: some files store (cd, mach) rather than
         // (mach, cd). Everything here — header text, field values, separators — is
         // invented for this test; it shares no structure with any vendor file.
-        let synth_cd_mach =
-            "synthetic reversed-column test deck, invented values\r\n\
+        let synth_cd_mach = "synthetic reversed-column test deck, invented values\r\n\
              0.230\t0.000\r\n\
              0.210\t0.400\r\n\
              0.280\t0.900\r\n\

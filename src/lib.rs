@@ -15,26 +15,22 @@
 //! - FFI bindings for iOS and Android development
 
 // Re-export the main types and functions
+pub use atmosphere::{AtmoSegment, AtmoSock};
 pub use cli_api::{
     calculate_zero_angle, calculate_zero_angle_with_conditions,
     calculate_zero_angle_with_resolved_conditions, calculate_zero_range_from_angle_with_conditions,
     calculate_zero_range_from_angle_with_resolved_conditions, estimate_bc_fit,
-    estimate_bc_from_trajectory, interpolate_powder_temp_curve,
-    resolve_powder_adjusted_velocity, run_monte_carlo, run_monte_carlo_adaptive_seeded,
-    run_monte_carlo_with_direction_std_dev,
+    estimate_bc_from_trajectory, interpolate_powder_temp_curve, resolve_powder_adjusted_velocity,
+    run_monte_carlo, run_monte_carlo_adaptive_seeded, run_monte_carlo_with_direction_std_dev,
     run_monte_carlo_with_wind, run_monte_carlo_with_wind_and_direction_std_dev,
     run_monte_carlo_with_wind_and_direction_std_dev_seeded, AdaptiveMcReportV1,
-    AtmosphericConditions,
-    BallisticInputs, BallisticsError, BcEstimate, BcFitMode, BcReferenceStandard,
-    DropsReference, McConvergence, McStopReason, MonteCarloParams, MonteCarloResults,
-    TrajectoryPoint, TrajectoryResult,
-    TrajectorySolver,
-    WindConditions, ZeroCrossings, DEFAULT_HIT_RADIUS_M, MAX_TRAJECTORY_POINTS,
-    MC_ADAPTIVE_ASSUMPTIONS_V1, MC_ADAPTIVE_METHOD_V1, MC_ADAPTIVE_SCHEMA_VERSION_V1,
+    AtmosphericConditions, BallisticInputs, BallisticsError, BcEstimate, BcFitMode,
+    BcReferenceStandard, DropsReference, McConvergence, McStopReason, MonteCarloParams,
+    MonteCarloResults, TrajectoryPoint, TrajectoryResult, TrajectorySolver, WindConditions,
+    ZeroCrossings, DEFAULT_HIT_RADIUS_M, MAX_TRAJECTORY_POINTS, MC_ADAPTIVE_ASSUMPTIONS_V1,
+    MC_ADAPTIVE_METHOD_V1, MC_ADAPTIVE_SCHEMA_VERSION_V1, TARGET_NOT_REACHED_SENTINEL_M,
     ZERO_RANGE_FROM_ANGLE_MAX_RANGE_M,
-    TARGET_NOT_REACHED_SENTINEL_M,
 };
-pub use atmosphere::{AtmoSegment, AtmoSock};
 pub use drag_model::DragModel;
 pub use mc_stats::{wilson_interval, ConfidenceLevel};
 pub use moving_target::{
@@ -56,8 +52,8 @@ pub mod cli_api;
 // MBA-1375: deterministic reference-family BC conversion and banded least-squares family
 // recommendation, shared by native and WASM front ends. Pure table math; no filesystem I/O.
 pub mod bc_conversion;
-pub mod moving_target;
 mod drag_model;
+pub mod moving_target;
 // The C ABI. Gated behind the default-on `ffi` feature so a binary that links two versions of
 // this crate can disable it on one edge and avoid duplicate #[no_mangle] symbols.
 #[cfg(feature = "ffi")]
@@ -209,8 +205,8 @@ pub mod optic;
 // range-card work its own doc comment already nominates can reuse it as a library dependency.
 // No feature gate: must compile for wasm32 (pure math over already-resolved inputs; no fs, no
 // clap -- CLI argument resolution stays in `main.rs`).
-pub mod hold_curve;
 pub mod card_service;
+pub mod hold_curve;
 // 0.33.0 decision-support Task 9: `CardRow`, the shared display-ready row type behind the
 // come-ups/range-table/wind-card/compare CLI surfaces, replacing four function-local row
 // structs that each said the same thing a different way. Pure data; no feature gate: must

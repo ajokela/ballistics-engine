@@ -77,7 +77,11 @@ fn dsf_model() -> Value {
 fn true_fit_is_advertised_in_capabilities() {
     let v = call("meta.capabilities", json!(null));
     let names: Vec<&str> = v["result"]["commands"]
-        .as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap())
+        .collect();
     assert!(names.contains(&"true.fit"), "capabilities were {names:?}");
 }
 
@@ -86,18 +90,21 @@ fn true_fit_returns_estimates_with_their_uncertainty() {
     // Observations derived from the engine's own solve on the model below:
     // .308 caliber, 168 gr, 0.308 in dia, G7 BC 0.243, 2700 fps, 100 yd zero, ICAO conditions.
     // Drops (mil) at range: 400 yd -> 2.6882, 600 yd -> 4.8626, 800 yd -> 7.6598
-    let v = call("true.fit", json!({
-        "model": model(),
-        "drop_unit": "mil",
-        "observations": [
-            {"range_yd": 400.0, "drop": 2.6882, "sigma": 0.1},
-            {"range_yd": 600.0, "drop": 4.8626, "sigma": 0.1},
-            {"range_yd": 800.0, "drop": 7.6598, "sigma": 0.1}
-        ],
-        "priors": {"muzzle_velocity_fps": {"mean": 2700.0, "sigma": 20.0},
-                   "ballistic_coefficient": {"mean": 0.243, "sigma": 0.01}},
-        "predictions": []
-    }));
+    let v = call(
+        "true.fit",
+        json!({
+            "model": model(),
+            "drop_unit": "mil",
+            "observations": [
+                {"range_yd": 400.0, "drop": 2.6882, "sigma": 0.1},
+                {"range_yd": 600.0, "drop": 4.8626, "sigma": 0.1},
+                {"range_yd": 800.0, "drop": 7.6598, "sigma": 0.1}
+            ],
+            "priors": {"muzzle_velocity_fps": {"mean": 2700.0, "sigma": 20.0},
+                       "ballistic_coefficient": {"mean": 0.243, "sigma": 0.01}},
+            "predictions": []
+        }),
+    );
     assert_eq!(v["ok"], true, "response was {v}");
     let r = &v["result"];
     assert!(r["map_muzzle_velocity_fps"].as_f64().unwrap() > 0.0);
@@ -105,22 +112,43 @@ fn true_fit_returns_estimates_with_their_uncertainty() {
 
     // The honesty invariant: a point estimate never travels without its uncertainty.
     // Assert that the approximation is available and carries valid intervals for both parameters.
-    assert_eq!(r["approximation"]["status"], "available",
-        "approximation must be available, got: {}", r["approximation"]["status"]);
+    assert_eq!(
+        r["approximation"]["status"], "available",
+        "approximation must be available, got: {}",
+        r["approximation"]["status"]
+    );
     let details = &r["approximation"]["details"];
 
     // Verify that both parameters have finite intervals.
-    let mv_lower = details["muzzle_velocity_interval_95"]["lower"].as_f64().unwrap();
-    let mv_upper = details["muzzle_velocity_interval_95"]["upper"].as_f64().unwrap();
-    assert!(mv_lower.is_finite() && mv_upper.is_finite(),
-        "muzzle velocity interval bounds must be finite");
-    assert!(mv_lower < mv_upper, "muzzle velocity lower bound must be less than upper");
+    let mv_lower = details["muzzle_velocity_interval_95"]["lower"]
+        .as_f64()
+        .unwrap();
+    let mv_upper = details["muzzle_velocity_interval_95"]["upper"]
+        .as_f64()
+        .unwrap();
+    assert!(
+        mv_lower.is_finite() && mv_upper.is_finite(),
+        "muzzle velocity interval bounds must be finite"
+    );
+    assert!(
+        mv_lower < mv_upper,
+        "muzzle velocity lower bound must be less than upper"
+    );
 
-    let bc_lower = details["ballistic_coefficient_interval_95"]["lower"].as_f64().unwrap();
-    let bc_upper = details["ballistic_coefficient_interval_95"]["upper"].as_f64().unwrap();
-    assert!(bc_lower.is_finite() && bc_upper.is_finite(),
-        "ballistic coefficient interval bounds must be finite");
-    assert!(bc_lower < bc_upper, "ballistic coefficient lower bound must be less than upper");
+    let bc_lower = details["ballistic_coefficient_interval_95"]["lower"]
+        .as_f64()
+        .unwrap();
+    let bc_upper = details["ballistic_coefficient_interval_95"]["upper"]
+        .as_f64()
+        .unwrap();
+    assert!(
+        bc_lower.is_finite() && bc_upper.is_finite(),
+        "ballistic coefficient interval bounds must be finite"
+    );
+    assert!(
+        bc_lower < bc_upper,
+        "ballistic coefficient lower bound must be less than upper"
+    );
 }
 
 #[test]
@@ -128,26 +156,32 @@ fn true_fit_rejects_a_null_payload_and_unknown_fields() {
     let v = call("true.fit", json!(null));
     assert_eq!(v["error"]["code"], "invalid_request");
 
-    let v = call("true.fit", json!({
-        "model": model(), "drop_unit": "mil",
-        "observations": [{"range_yd": 600.0, "drop": 4.3, "sigma": 0.1, "typo": 1}],
-        "priors": {"muzzle_velocity_fps": null, "ballistic_coefficient": null},
-        "predictions": []
-    }));
+    let v = call(
+        "true.fit",
+        json!({
+            "model": model(), "drop_unit": "mil",
+            "observations": [{"range_yd": 600.0, "drop": 4.3, "sigma": 0.1, "typo": 1}],
+            "priors": {"muzzle_velocity_fps": null, "ballistic_coefficient": null},
+            "predictions": []
+        }),
+    );
     assert_eq!(v["error"]["code"], "invalid_request");
 }
 
 #[test]
 fn true_wind_fits_a_crosswind_from_an_observed_miss() {
-    let v = call("true.wind", json!({
-        "observations": [{"range_m": 457.2, "miss_right_m": 0.315, "sigma_m": null}],
-        "muzzle_velocity_fps": 2700.0, "bc": 0.243, "drag_model": "g7",
-        "mass_gr": 168.0, "diameter_in": 0.308, "zero_distance_yd": 100.0,
-        "sight_height_in": 2.0, "temperature_f": 59.0, "pressure_inhg": 29.92,
-        "humidity_pct": 50.0, "altitude_ft": 0.0,
-        "twist": {"rate_in": 11.0, "right_hand": true},
-        "earth": null, "called_crosswind_mph": null
-    }));
+    let v = call(
+        "true.wind",
+        json!({
+            "observations": [{"range_m": 457.2, "miss_right_m": 0.315, "sigma_m": null}],
+            "muzzle_velocity_fps": 2700.0, "bc": 0.243, "drag_model": "g7",
+            "mass_gr": 168.0, "diameter_in": 0.308, "zero_distance_yd": 100.0,
+            "sight_height_in": 2.0, "temperature_f": 59.0, "pressure_inhg": 29.92,
+            "humidity_pct": 50.0, "altitude_ft": 0.0,
+            "twist": {"rate_in": 11.0, "right_hand": true},
+            "earth": null, "called_crosswind_mph": null
+        }),
+    );
     assert_eq!(v["ok"], true, "response was {v}");
     assert_eq!(v["result"]["solutions"].as_array().unwrap().len(), 1);
 
@@ -157,10 +191,16 @@ fn true_wind_fits_a_crosswind_from_an_observed_miss() {
     // A wide band (not an exact float) so this isn't brittle against future solver tuning,
     // but tight enough that a sign flip, unit error, or 10x scale error fails it.
     let mean = v["result"]["mean_crosswind_mph"].as_f64().unwrap();
-    assert!(mean > 4.5 && mean < 5.5, "mean_crosswind_mph out of band: {mean}");
+    assert!(
+        mean > 4.5 && mean < 5.5,
+        "mean_crosswind_mph out of band: {mean}"
+    );
     // Sign check: a rightward miss must solve to a positive crosswind (from the left,
     // pushing right) -- catches a sign flip, which a bare is_number() cannot.
-    assert!(mean > 0.0, "expected a positive (from-the-left) crosswind, got {mean}");
+    assert!(
+        mean > 0.0,
+        "expected a positive (from-the-left) crosswind, got {mean}"
+    );
 
     // Convergence check: the fit must actually reproduce the observation, within the
     // solver's own WIND_SOLVE_TOLERANCE_M (1.0e-5 m), loosened slightly for headroom.
@@ -178,38 +218,52 @@ fn true_wind_fits_a_crosswind_from_an_observed_miss() {
 fn true_wind_is_advertised_in_capabilities() {
     let v = call("meta.capabilities", json!(null));
     let names: Vec<&str> = v["result"]["commands"]
-        .as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap())
+        .collect();
     assert!(names.contains(&"true.wind"), "capabilities were {names:?}");
 }
 
 #[test]
 fn true_tall_target_computes_a_correction_factor() {
-    let v = call("true.tall_target", json!({
-        "dialed": 10.0, "measured": 30.0, "range": 100.0,
-        "unit": "mil", "metric": false
-    }));
+    let v = call(
+        "true.tall_target",
+        json!({
+            "dialed": 10.0, "measured": 30.0, "range": 100.0,
+            "unit": "mil", "metric": false
+        }),
+    );
     assert_eq!(v["ok"], true, "response was {v}");
     // 30 in at 100 yd is 30/36 yd, i.e. 8.333333333333334 mil of ACTUAL travel against 10 mil
     // dialed, so the correction factor is 0.8333333333333334. This is exact rational
     // arithmetic (30/36 * 10), so assert it tightly rather than with slack.
     let actual = v["result"]["actual"].as_f64().unwrap();
     let cf = v["result"]["correction_factor"].as_f64().unwrap();
-    assert!((actual - 8.333333333333334).abs() < 1e-9, "actual travel was {actual}");
+    assert!(
+        (actual - 8.333333333333334).abs() < 1e-9,
+        "actual travel was {actual}"
+    );
     assert!((cf - 0.8333333333333334).abs() < 1e-9, "cf was {cf}");
     assert_eq!(v["result"]["within_accepted_band"], true);
 }
 
 #[test]
 fn true_tall_target_rejects_clicks() {
-    let v = call("true.tall_target", json!({
-        "dialed": 10.0, "measured": 30.0, "range": 100.0,
-        "unit": "clicks", "metric": false
-    }));
+    let v = call(
+        "true.tall_target",
+        json!({
+            "dialed": 10.0, "measured": 30.0, "range": 100.0,
+            "unit": "clicks", "metric": false
+        }),
+    );
     assert_eq!(v["ok"], false);
     assert_eq!(v["error"]["code"], "command_failed");
     assert!(
         v["error"]["message"].as_str().unwrap().contains("clicks"),
-        "expected the clicks guard, got: {}", v["error"]["message"]
+        "expected the clicks guard, got: {}",
+        v["error"]["message"]
     );
 }
 
@@ -219,17 +273,23 @@ fn true_dsf_derives_a_point_without_touching_a_profile() {
     // first run, per this fixture's own doc comment on `dsf_model`), so 1.0 mil observed
     // sits close to it without being an exact, untestable match — dsf lands at ~1.056,
     // comfortably inside the sane band below rather than hugging either edge of it.
-    let v = call("true.dsf", json!({
-        "model": dsf_model(), "range_yd": 950.0,
-        "observed_drop": 1.0, "drop_unit": "mil"
-    }));
+    let v = call(
+        "true.dsf",
+        json!({
+            "model": dsf_model(), "range_yd": 950.0,
+            "observed_drop": 1.0, "drop_unit": "mil"
+        }),
+    );
     assert_eq!(v["ok"], true, "response was {v}");
     let mach = v["result"]["mach"].as_f64().unwrap();
     let dsf = v["result"]["dsf"].as_f64().unwrap();
     // The observation must land in the transonic band DSF exists for: at or below the
     // DSF_MACH_CEILING of 1.2, and still moving. `> 0.0` would pass on a supersonic or
     // nonsense Mach, which is the case the service is supposed to REFUSE.
-    assert!(mach > 0.5 && mach <= 1.2, "mach was {mach}, outside the DSF band");
+    assert!(
+        mach > 0.5 && mach <= 1.2,
+        "mach was {mach}, outside the DSF band"
+    );
     // dsf is observed/predicted drop. A sane correction is near unity; 0.5..2.0 still
     // catches a unit error or an inverted ratio, which `> 0.0` would not.
     assert!(dsf > 0.5 && dsf < 2.0, "dsf was {dsf}");
@@ -240,9 +300,18 @@ fn true_dsf_derives_a_point_without_touching_a_profile() {
 fn all_six_true_commands_are_advertised() {
     let v = call("meta.capabilities", json!(null));
     let names: Vec<&str> = v["result"]["commands"]
-        .as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap())
+        .collect();
     for c in [
-        "true.fit", "true.wind", "true.tall_target", "true.dsf", "true.plan", "true.dial_plan",
+        "true.fit",
+        "true.wind",
+        "true.tall_target",
+        "true.dsf",
+        "true.plan",
+        "true.dial_plan",
     ] {
         assert!(names.contains(&c), "{c} missing from {names:?}");
     }
@@ -261,14 +330,17 @@ fn all_six_true_commands_are_advertised() {
 /// real solver output rather than hand-deriving it).
 #[test]
 fn true_plan_selects_the_farthest_stations_for_a_joint_mv_bc_design() {
-    let v = call("true.plan", json!({
-        "model": model(),
-        "candidate_ranges_yd": [200.0, 400.0, 600.0, 800.0, 1000.0],
-        "observation_count": 3,
-        "minimum_separation_yd": 100.0,
-        "measurement_sigma_1sd": 0.1,
-        "drop_unit": "mil"
-    }));
+    let v = call(
+        "true.plan",
+        json!({
+            "model": model(),
+            "candidate_ranges_yd": [200.0, 400.0, 600.0, 800.0, 1000.0],
+            "observation_count": 3,
+            "minimum_separation_yd": 100.0,
+            "measurement_sigma_1sd": 0.1,
+            "drop_unit": "mil"
+        }),
+    );
     assert_eq!(v["ok"], true, "response was {v}");
     let r = &v["result"];
 
@@ -276,18 +348,27 @@ fn true_plan_selects_the_farthest_stations_for_a_joint_mv_bc_design() {
     assert_eq!(r["search_strategy"], "exhaustive", "{r}");
     // All 5 candidates are unique and reachable at this load -- none rejected.
     assert_eq!(r["eligible_candidate_count"], 5, "{r}");
-    assert!(r["rejected_candidates"].as_array().unwrap().is_empty(), "{r}");
+    assert!(
+        r["rejected_candidates"].as_array().unwrap().is_empty(),
+        "{r}"
+    );
 
     // The optimizer picks the three FARTHEST candidates, not the three closest or a
     // scattered set -- this is the substantive claim a broken sensitivity calculation
     // would falsify first.
     let selected_ranges: Vec<f64> = r["selected_stations"]
-        .as_array().unwrap().iter()
+        .as_array()
+        .unwrap()
+        .iter()
         .map(|s| s["range_yd"].as_f64().unwrap())
         .collect();
     assert_eq!(selected_ranges, vec![600.0, 800.0, 1000.0], "{r}");
     let unselected: Vec<f64> = r["unselected_candidate_ranges_yd"]
-        .as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
     assert_eq!(unselected, vec![200.0, 400.0], "{r}");
 
     // BC sensitivity ratio and the weak-axis singular value are real physics-derived
@@ -327,25 +408,33 @@ fn true_plan_rejects_unknown_fields_on_an_otherwise_valid_request() {
 fn true_plan_reports_insufficient_candidates_with_rejection_diagnostics() {
     // 200 yd duplicated (rejected as duplicate_range) and -50 yd invalid (rejected as
     // invalid_range) leave only ONE unique reachable candidate for a 3-station request.
-    let v = call("true.plan", json!({
-        "model": model(),
-        "candidate_ranges_yd": [200.0, 200.0, -50.0],
-        "observation_count": 3,
-        "minimum_separation_yd": 100.0,
-        "measurement_sigma_1sd": 0.1,
-        "drop_unit": "mil"
-    }));
+    let v = call(
+        "true.plan",
+        json!({
+            "model": model(),
+            "candidate_ranges_yd": [200.0, 200.0, -50.0],
+            "observation_count": 3,
+            "minimum_separation_yd": 100.0,
+            "measurement_sigma_1sd": 0.1,
+            "drop_unit": "mil"
+        }),
+    );
     assert_eq!(v["ok"], false, "{v}");
     assert_eq!(v["error"]["code"], "command_failed", "{v}");
     assert_eq!(
         v["error"]["details"]["reason"], "insufficient_reachable_candidates",
         "{v}"
     );
-    let rejected = v["error"]["details"]["rejected_candidates"].as_array().unwrap();
+    let rejected = v["error"]["details"]["rejected_candidates"]
+        .as_array()
+        .unwrap();
     let by_index = |index: i64| {
-        rejected.iter().find(|c| c["input_index"] == index).unwrap_or_else(|| {
-            panic!("no rejected candidate at input_index {index} in {rejected:?}")
-        })
+        rejected
+            .iter()
+            .find(|c| c["input_index"] == index)
+            .unwrap_or_else(|| {
+                panic!("no rejected candidate at input_index {index} in {rejected:?}")
+            })
     };
     assert_eq!(by_index(1)["reason"], "duplicate_range", "{rejected:?}");
     assert_eq!(by_index(2)["reason"], "invalid_range", "{rejected:?}");
@@ -566,7 +655,10 @@ fn true_dial_plan_non_finite_and_non_positive_click_size_are_unreachable() {
     assert_eq!(v["ok"], false, "{v}");
     assert_eq!(v["error"]["code"], "invalid_request", "{v}");
     assert!(
-        v["error"]["message"].as_str().unwrap().contains("positive, finite graduation"),
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("positive, finite graduation"),
         "{v}"
     );
 }
@@ -585,9 +677,15 @@ fn parse_tall_target_stdout(stdout: &str) -> (f64, f64) {
     for line in stdout.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("Actual travel:") {
-            actual = rest.split_whitespace().next().and_then(|s| s.parse::<f64>().ok());
+            actual = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<f64>().ok());
         } else if let Some(rest) = line.strip_prefix("Correction factor (actual / dialed):") {
-            correction_factor = rest.split_whitespace().next().and_then(|s| s.parse::<f64>().ok());
+            correction_factor = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<f64>().ok());
         }
     }
     (
@@ -605,8 +703,15 @@ fn true_tall_target_matches_cli() {
     // close one.
     let out = cli()
         .args([
-            "tall-target", "--dialed", "10", "--measured", "45", "--range", "100",
-            "--unit", "mil",
+            "tall-target",
+            "--dialed",
+            "10",
+            "--measured",
+            "45",
+            "--range",
+            "100",
+            "--unit",
+            "mil",
         ])
         .output()
         .expect("run tall-target");
@@ -658,15 +763,31 @@ fn true_dsf_matches_cli() {
     let save_out = cli()
         .env("HOME", &home)
         .args([
-            "profile", "save", name,
-            "-v", "2700", "-b", "0.243", "-m", "168", "-d", "0.308",
-            "--drag-model", "g7",
-            "--zero-distance", "900",
-            "--sight-height", "2.0",
-            "--temperature", "59",
-            "--pressure", "29.92",
-            "--humidity", "50",
-            "--altitude", "0",
+            "profile",
+            "save",
+            name,
+            "-v",
+            "2700",
+            "-b",
+            "0.243",
+            "-m",
+            "168",
+            "-d",
+            "0.308",
+            "--drag-model",
+            "g7",
+            "--zero-distance",
+            "900",
+            "--sight-height",
+            "2.0",
+            "--temperature",
+            "59",
+            "--pressure",
+            "29.92",
+            "--humidity",
+            "50",
+            "--altitude",
+            "0",
         ])
         .output()
         .expect("spawn profile save");
@@ -688,11 +809,16 @@ fn true_dsf_matches_cli() {
         String::from_utf8_lossy(&dsf_out.stderr)
     );
 
-    let profile_path = home.join(".ballistics").join("profiles").join(format!("{name}.json"));
+    let profile_path = home
+        .join(".ballistics")
+        .join("profiles")
+        .join(format!("{name}.json"));
     let profile: Value =
         serde_json::from_str(&std::fs::read_to_string(&profile_path).expect("read saved profile"))
             .expect("saved profile is valid JSON");
-    let points = profile["dsf_points"].as_array().expect("saved profile has dsf_points");
+    let points = profile["dsf_points"]
+        .as_array()
+        .expect("saved profile has dsf_points");
     let point = points.last().expect("dsf wrote at least one point");
     let cli_mach = point["mach"].as_f64().unwrap();
     let cli_dsf = point["dsf"].as_f64().unwrap();
@@ -722,19 +848,40 @@ fn true_plan_matches_cli() {
     let out = cli()
         .args([
             "plan-truing",
-            "-v", "2700", "-b", "0.243", "--drag-model", "g7", "-m", "168", "-d", "0.308",
-            "--candidate-ranges", "200,400,600,800,1000",
-            "--observation-count", "3",
-            "--minimum-separation", "100",
-            "--measurement-resolution", "0.1",
-            "--drop-unit", "mil",
-            "--zero-distance", "100",
-            "--sight-height", "2.0",
-            "--temperature", "59",
-            "--pressure", "29.92",
-            "--humidity", "50",
-            "--altitude", "0",
-            "-o", "json",
+            "-v",
+            "2700",
+            "-b",
+            "0.243",
+            "--drag-model",
+            "g7",
+            "-m",
+            "168",
+            "-d",
+            "0.308",
+            "--candidate-ranges",
+            "200,400,600,800,1000",
+            "--observation-count",
+            "3",
+            "--minimum-separation",
+            "100",
+            "--measurement-resolution",
+            "0.1",
+            "--drop-unit",
+            "mil",
+            "--zero-distance",
+            "100",
+            "--sight-height",
+            "2.0",
+            "--temperature",
+            "59",
+            "--pressure",
+            "29.92",
+            "--humidity",
+            "50",
+            "--altitude",
+            "0",
+            "-o",
+            "json",
         ])
         .output()
         .expect("run plan-truing");
@@ -746,18 +893,24 @@ fn true_plan_matches_cli() {
     let cli_json: Value =
         serde_json::from_slice(&out.stdout).expect("plan-truing -o json printed valid JSON");
 
-    let v = call("true.plan", json!({
-        "model": model(),
-        "candidate_ranges_yd": [200.0, 400.0, 600.0, 800.0, 1000.0],
-        "observation_count": 3,
-        "minimum_separation_yd": 100.0,
-        "measurement_sigma_1sd": 0.1,
-        "drop_unit": "mil"
-    }));
+    let v = call(
+        "true.plan",
+        json!({
+            "model": model(),
+            "candidate_ranges_yd": [200.0, 400.0, 600.0, 800.0, 1000.0],
+            "observation_count": 3,
+            "minimum_separation_yd": 100.0,
+            "measurement_sigma_1sd": 0.1,
+            "drop_unit": "mil"
+        }),
+    );
     assert_eq!(v["ok"], true, "bridge true.plan failed: {v}");
     let r = &v["result"];
 
-    assert_eq!(cli_json["mode"], r["mode"], "mode: cli {cli_json} vs bridge {r}");
+    assert_eq!(
+        cli_json["mode"], r["mode"],
+        "mode: cli {cli_json} vs bridge {r}"
+    );
     assert_eq!(
         cli_json["requested_observation_count"], r["requested_observation_count"],
         "requested_observation_count"
@@ -772,18 +925,26 @@ fn true_plan_matches_cli() {
     );
     assert_close_f64(
         "sensitivity_ratio",
-        cli_json["information"]["bc_sensitivity_ratio"].as_f64().unwrap(),
+        cli_json["information"]["bc_sensitivity_ratio"]
+            .as_f64()
+            .unwrap(),
         r["information"]["sensitivity_ratio"].as_f64().unwrap(),
     );
     assert_close_f64(
         "minimum_singular_value",
-        cli_json["information"]["minimum_singular_value"].as_f64().unwrap(),
+        cli_json["information"]["minimum_singular_value"]
+            .as_f64()
+            .unwrap(),
         r["information"]["minimum_singular_value"].as_f64().unwrap(),
     );
 
     let cli_stations = cli_json["selected_stations"].as_array().unwrap();
     let bridge_stations = r["selected_stations"].as_array().unwrap();
-    assert_eq!(cli_stations.len(), bridge_stations.len(), "selected station count");
+    assert_eq!(
+        cli_stations.len(),
+        bridge_stations.len(),
+        "selected station count"
+    );
     for (cli_station, bridge_station) in cli_stations.iter().zip(bridge_stations) {
         assert_eq!(
             cli_station["input_index"], bridge_station["input_index"],
@@ -816,12 +977,18 @@ fn true_dial_plan_matches_cli() {
     let out = cli()
         .args([
             "dial-plan",
-            "--elevation", "2.3mil",
-            "--range", "600",
-            "--elevation-click", "0.1mil",
-            "--travel-up", "30mil",
-            "--travel-down", "5mil",
-            "-o", "json",
+            "--elevation",
+            "2.3mil",
+            "--range",
+            "600",
+            "--elevation-click",
+            "0.1mil",
+            "--travel-up",
+            "30mil",
+            "--travel-down",
+            "5mil",
+            "-o",
+            "json",
         ])
         .output()
         .expect("run dial-plan");

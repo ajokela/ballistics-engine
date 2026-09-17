@@ -117,7 +117,10 @@ fn trajectory_omitted_pressure_type_is_byte_identical_to_explicit_absolute() {
 #[test]
 fn zero_omitted_pressure_type_is_byte_identical_to_explicit_absolute() {
     let omitted = run(BASE_ZERO_ARGS);
-    let explicit = run(&with_extra(BASE_ZERO_ARGS, &["--pressure-type", "absolute"]));
+    let explicit = run(&with_extra(
+        BASE_ZERO_ARGS,
+        &["--pressure-type", "absolute"],
+    ));
     assert!(omitted.status.success());
     assert!(explicit.status.success());
     assert_eq!(
@@ -174,7 +177,10 @@ fn trajectory_auto_zero_omitted_zero_pressure_type_is_byte_identical_to_explicit
 #[test]
 fn trajectory_qnh_mode_yields_a_higher_impact_velocity_than_absolute_at_the_same_reading() {
     let absolute = run_json(BASE_TRAJECTORY_ARGS);
-    let qnh = run_json(&with_extra(BASE_TRAJECTORY_ARGS, &["--pressure-type", "qnh"]));
+    let qnh = run_json(&with_extra(
+        BASE_TRAJECTORY_ARGS,
+        &["--pressure-type", "qnh"],
+    ));
 
     let v_absolute = absolute["impact_velocity"].as_f64().unwrap();
     let v_qnh = qnh["impact_velocity"].as_f64().unwrap();
@@ -448,7 +454,15 @@ mod pressure_mode_on_calculator_subcommands {
     fn cases() -> Vec<(&'static str, Vec<&'static str>)> {
         let atmo = ["--pressure", "24.90", "--altitude", "5000"];
         let bullet = [
-            "--bc", "0.243", "--drag-model", "g7", "--velocity", "2700", "-m", "175", "-d",
+            "--bc",
+            "0.243",
+            "--drag-model",
+            "g7",
+            "--velocity",
+            "2700",
+            "-m",
+            "175",
+            "-d",
             "0.308",
         ];
         let mut out: Vec<(&'static str, Vec<&'static str>)> = Vec::new();
@@ -469,16 +483,32 @@ mod pressure_mode_on_calculator_subcommands {
         push(
             "stability",
             vec![
-                "--twist-rate", "10", "--length", "1.24", "--mass", "175", "--diameter", "0.308",
-                "--velocity", "2700",
+                "--twist-rate",
+                "10",
+                "--length",
+                "1.24",
+                "--mass",
+                "175",
+                "--diameter",
+                "0.308",
+                "--velocity",
+                "2700",
             ],
             false,
         );
         push(
             "true-velocity",
             vec![
-                "--measured-drop", "30", "--range", "500", "--bc", "0.243", "--mass", "175",
-                "--diameter", "0.308",
+                "--measured-drop",
+                "30",
+                "--range",
+                "500",
+                "--bc",
+                "0.243",
+                "--mass",
+                "175",
+                "--diameter",
+                "0.308",
                 // --offline: without it this command calls a live API by DEFAULT, which made
                 // this suite network-dependent — it went green four CI runs in a row and then
                 // failed on an API timeout. A hermetic test may depend on neither $HOME (the
@@ -491,8 +521,18 @@ mod pressure_mode_on_calculator_subcommands {
         push(
             "plan-truing",
             vec![
-                "--measurement-resolution", "0.25", "--candidate-ranges", "300,500,700",
-                "--velocity", "2700", "--bc", "0.243", "--mass", "175", "--diameter", "0.308",
+                "--measurement-resolution",
+                "0.25",
+                "--candidate-ranges",
+                "300,500,700",
+                "--velocity",
+                "2700",
+                "--bc",
+                "0.243",
+                "--mass",
+                "175",
+                "--diameter",
+                "0.308",
             ],
             false,
         );
@@ -505,7 +545,11 @@ mod pressure_mode_on_calculator_subcommands {
                 // 400 and 500 yd rows from the 300 yd sample and the test passed on
                 // fabricated rows. Interpolation refuses those rows outright, which is how
                 // the transposition surfaced.
-                "--zero-distance", "100", "--load", "A:g7:0.243:175:2700:0.308", "--load",
+                "--zero-distance",
+                "100",
+                "--load",
+                "A:g7:0.243:175:2700:0.308",
+                "--load",
                 "B:g7:0.250:180:2750:0.308",
             ],
             false,
@@ -513,7 +557,13 @@ mod pressure_mode_on_calculator_subcommands {
         push(
             "estimate-bc",
             vec![
-                "--velocity", "2700", "--mass", "175", "--diameter", "0.308", "--data",
+                "--velocity",
+                "2700",
+                "--mass",
+                "175",
+                "--diameter",
+                "0.308",
+                "--data",
                 "300,10;500,30",
             ],
             false,

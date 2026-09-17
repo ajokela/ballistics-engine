@@ -397,8 +397,7 @@ pub fn compute_derivatives(
 
         // Calculate drag acceleration
         let standard_factor = drag_factor * CD_TO_RETARD;
-        let mut a_drag_ft_s2 =
-            (v_rel_fps.powi(2) * standard_factor * density_scale) / retard_denom;
+        let mut a_drag_ft_s2 = (v_rel_fps.powi(2) * standard_factor * density_scale) / retard_denom;
         // MBA-1227 additive yaw-drag term (see comment above). Skipped entirely when
         // tip-off yaw is zero (the default), leaving baseline trajectories bit-identical.
         // When sectional density is unavailable (degenerate SI-less inputs) the term is
@@ -646,10 +645,13 @@ pub(crate) fn estimate_bc_segments_for(
     };
     // Prefer the legacy explicit string when present, but otherwise preserve the
     // typed drag model carried by every current BallisticInputs constructor.
-    let bc_type_str = inputs.bc_type_str.as_deref().unwrap_or(match inputs.bc_type {
-        crate::DragModel::G7 => "G7",
-        _ => "G1",
-    });
+    let bc_type_str = inputs
+        .bc_type_str
+        .as_deref()
+        .unwrap_or(match inputs.bc_type {
+            crate::DragModel::G7 => "G7",
+            _ => "G1",
+        });
     Some(BCSegmentEstimator::estimate_bc_segments(
         bc_used,
         inputs.caliber_inches,
@@ -764,8 +766,8 @@ mod tests {
             muzzle_velocity: 800.0, // m/s
             bc_value: 0.5,
             bullet_mass: 168.0 * crate::constants::GRAINS_TO_KG, // kg (168 gr)
-            bullet_diameter: 0.308 * 0.0254,    // meters (.308 in)
-            bullet_length: 1.215 * 0.0254,      // meters
+            bullet_diameter: 0.308 * 0.0254,                     // meters (.308 in)
+            bullet_length: 1.215 * 0.0254,                       // meters
             caliber_inches: 0.308,
             weight_grains: 168.0,
             altitude: 1000.0,
@@ -998,8 +1000,14 @@ mod tests {
 
         assert_eq!(actual.len(), expected.len());
         for (actual, expected) in actual.iter().zip(&expected) {
-            assert_eq!(actual.velocity_min.to_bits(), expected.velocity_min.to_bits());
-            assert_eq!(actual.velocity_max.to_bits(), expected.velocity_max.to_bits());
+            assert_eq!(
+                actual.velocity_min.to_bits(),
+                expected.velocity_min.to_bits()
+            );
+            assert_eq!(
+                actual.velocity_max.to_bits(),
+                expected.velocity_max.to_bits()
+            );
             assert_eq!(actual.bc_value.to_bits(), expected.bc_value.to_bits());
         }
 

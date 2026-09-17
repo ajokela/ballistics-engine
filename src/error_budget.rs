@@ -180,7 +180,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::perturbation::access::KernelError;
-use crate::perturbation::derive::{central_difference, DifferenceScheme, Derivative};
+use crate::perturbation::derive::{central_difference, Derivative, DifferenceScheme};
 use crate::perturbation::evaluate;
 use crate::perturbation::taxonomy::InputAxis;
 use crate::solve_json::ResolvedSolveRequestV1;
@@ -217,8 +217,13 @@ pub struct Ellipse95V1 {
 pub enum TargetGeometryV1 {
     /// Drop extent `height_m`, windage extent `width_m` -- matching this module's
     /// (drop, windage) axis order, not (x, y) or (width, height) screen convention.
-    Rect { width_m: f64, height_m: f64 },
-    Circle { radius_m: f64 },
+    Rect {
+        width_m: f64,
+        height_m: f64,
+    },
+    Circle {
+        radius_m: f64,
+    },
 }
 
 /// One declared source's contribution to impact variance at one range.
@@ -413,9 +418,10 @@ struct Entry {
 /// forking it.
 pub(crate) fn unavailable_reason(e: &KernelError) -> Option<(UnavailableReasonCodeV1, String)> {
     match e {
-        KernelError::AxisUnsupportedForRequest { reason, .. } => {
-            Some((UnavailableReasonCodeV1::AxisUnsupportedForRequest, reason.to_string()))
-        }
+        KernelError::AxisUnsupportedForRequest { reason, .. } => Some((
+            UnavailableReasonCodeV1::AxisUnsupportedForRequest,
+            reason.to_string(),
+        )),
         KernelError::AxisAbsent(_) => Some((
             UnavailableReasonCodeV1::AxisAbsent,
             "this axis has no single scalar value on this request (for the three wind axes, \
@@ -631,16 +637,30 @@ fn top_by_gain(sources: &[SourceContributionV1]) -> Option<&SourceContributionV1
 /// [`ErrorBudgetReportV1::method`] whenever a target is supplied (the
 /// `"_gl20_panelled_pm6sigma"` suffix).
 const GL20_X: [f64; 10] = [
-    0.0765265211334973, 0.2277858511416451, 0.3737060887154195, 0.5108670019508271,
-    0.636_053_680_726_515, 0.7463319064601508, 0.8391169718222188, 0.912_234_428_251_326,
-    0.9639719272779138, 0.9931285991850949,
+    0.0765265211334973,
+    0.2277858511416451,
+    0.3737060887154195,
+    0.5108670019508271,
+    0.636_053_680_726_515,
+    0.7463319064601508,
+    0.8391169718222188,
+    0.912_234_428_251_326,
+    0.9639719272779138,
+    0.9931285991850949,
 ];
 
 /// Weights matching [`GL20_X`], same order.
 const GL20_W: [f64; 10] = [
-    0.1527533871307258, 0.1491729864726037, 0.142_096_109_318_382, 0.1316886384491766,
-    0.1181945319615184, 0.1019301198172404, 0.0832767415767048, 0.0626720483341091,
-    0.0406014298003869, 0.0176140071391521,
+    0.1527533871307258,
+    0.1491729864726037,
+    0.142_096_109_318_382,
+    0.1316886384491766,
+    0.1181945319615184,
+    0.1019301198172404,
+    0.0832767415767048,
+    0.0626720483341091,
+    0.0406014298003869,
+    0.0176140071391521,
 ];
 
 /// Integrate `f` over `[lo, hi]` with the fixed 20-node Gauss-Legendre rule above.
@@ -851,7 +871,11 @@ pub fn p_hit_bivariate(var_drop: f64, var_wind: f64, cov: f64, target: TargetGeo
         return (normal_cdf(b / sw) - normal_cdf(a / sw)).clamp(0.0, 1.0);
     }
 
-    let rho = if sw > 0.0 { (cov / (sd * sw)).clamp(-0.999_999, 0.999_999) } else { 0.0 };
+    let rho = if sw > 0.0 {
+        (cov / (sd * sw)).clamp(-0.999_999, 0.999_999)
+    } else {
+        0.0
+    };
     let cond_sw = sw * (1.0 - rho * rho).max(0.0).sqrt();
 
     // Restrict the domain to the target's own drop extent intersected with the +/-6 sigma
@@ -997,16 +1021,20 @@ pub fn error_budget_with_target(
     // same way `evaluate`'s own `observation_at_range_checked` would once a solve actually ran.
     for &range_m in ranges_m {
         if !range_m.is_finite() {
-            return Err(KernelError::Observation(TrajectoryObservationError::NonFiniteQuery {
-                distance_m: range_m,
-            }));
+            return Err(KernelError::Observation(
+                TrajectoryObservationError::NonFiniteQuery {
+                    distance_m: range_m,
+                },
+            ));
         }
         if range_m < 0.0 || range_m > base.shot.max_range_m {
-            return Err(KernelError::Observation(TrajectoryObservationError::OutOfRange {
-                requested_m: range_m,
-                minimum_m: 0.0,
-                maximum_m: base.shot.max_range_m,
-            }));
+            return Err(KernelError::Observation(
+                TrajectoryObservationError::OutOfRange {
+                    requested_m: range_m,
+                    minimum_m: 0.0,
+                    maximum_m: base.shot.max_range_m,
+                },
+            ));
         }
     }
 
@@ -1035,7 +1063,10 @@ pub fn error_budget_with_target(
         if !(sigma.is_finite() && sigma >= 0.0) {
             return Err(KernelError::NonFinite(axis));
         }
-        if sources[..i].iter().any(|&(earlier_axis, _)| earlier_axis == axis) {
+        if sources[..i]
+            .iter()
+            .any(|&(earlier_axis, _)| earlier_axis == axis)
+        {
             return Err(KernelError::DuplicateAxis(axis));
         }
     }
@@ -1047,11 +1078,18 @@ pub fn error_budget_with_target(
         // One central_difference call per DECLARED source, covering every range in ranges_m at
         // once -- never re-derived per range. See this module's "Cost" doc section.
         match central_difference(base, axis, ranges_m, None) {
-            Ok(derivatives) => jac.push(AxisJacobian { axis, sigma, derivatives }),
+            Ok(derivatives) => jac.push(AxisJacobian {
+                axis,
+                sigma,
+                derivatives,
+            }),
             Err(e) => match unavailable_reason(&e) {
-                Some((code, reason)) => {
-                    unavailable.push(UnavailableSourceV1 { axis, sigma, code, reason })
-                }
+                Some((code, reason)) => unavailable.push(UnavailableSourceV1 {
+                    axis,
+                    sigma,
+                    code,
+                    reason,
+                }),
                 None => return Err(e),
             },
         }
@@ -1087,14 +1125,16 @@ pub fn error_budget_with_target(
             .iter()
             .map(|e| {
                 let s2 = e.sigma * e.sigma;
-                let this_var = e.d_drop_d_x * e.d_drop_d_x * s2 + e.d_windage_d_x * e.d_windage_d_x * s2;
+                let this_var =
+                    e.d_drop_d_x * e.d_drop_d_x * s2 + e.d_windage_d_x * e.d_windage_d_x * s2;
                 let reduced = accumulate(&entries, Some(e.axis));
                 let reduced_ellipse = ellipse_95(reduced);
                 // `target.zip(p_hit)` is `Some` exactly when `target` is (`p_hit` is computed
                 // from `target` a few lines up), so this never diverges from `p_hit`'s own
                 // Some-ness.
                 let p_hit_gain_if_perfect = target.zip(p_hit).map(|(t, base_p_hit)| {
-                    let raw = p_hit_bivariate(reduced.a00, reduced.a11, reduced.a01, t) - base_p_hit;
+                    let raw =
+                        p_hit_bivariate(reduced.a00, reduced.a11, reduced.a01, t) - base_p_hit;
                     debug_assert!(
                         raw > -2e-3,
                         "perfecting {:?} at range {range_m} produced a meaningfully negative raw \
@@ -1119,7 +1159,11 @@ pub fn error_budget_with_target(
                     d_drop_d_x: e.d_drop_d_x,
                     d_windage_d_x: e.d_windage_d_x,
                     scheme: e.scheme,
-                    variance_share: if total_var > 0.0 { this_var / total_var } else { 0.0 },
+                    variance_share: if total_var > 0.0 {
+                        this_var / total_var
+                    } else {
+                        0.0
+                    },
                     ellipse_area_reduction_m2: (full_ellipse.area_m2 - reduced_ellipse.area_m2)
                         .max(0.0),
                     p_hit_gain_if_perfect,
@@ -1236,16 +1280,29 @@ mod tests {
     #[test]
     fn a_zero_sigma_source_contributes_exactly_zero() {
         let r = resolved();
-        let rep = error_budget(&r, &[(InputAxis::MuzzleVelocityMps, 0.0),
-                                     (InputAxis::WindSpeed, 1.0)], &[600.0]).unwrap();
-        let mv = rep.rows[0].sources.iter()
-            .find(|s| s.axis == InputAxis::MuzzleVelocityMps).unwrap();
+        let rep = error_budget(
+            &r,
+            &[
+                (InputAxis::MuzzleVelocityMps, 0.0),
+                (InputAxis::WindSpeed, 1.0),
+            ],
+            &[600.0],
+        )
+        .unwrap();
+        let mv = rep.rows[0]
+            .sources
+            .iter()
+            .find(|s| s.axis == InputAxis::MuzzleVelocityMps)
+            .unwrap();
         assert_eq!(mv.variance_share, 0.0);
         assert_eq!(mv.sigma, 0.0);
         // Beyond the brief: a zero-sigma source must not fabricate a zero derivative either, and
         // its ellipse-area reduction (a second, independently-computed quantity derived from the
         // SAME sigma=0) must also be exactly zero, not merely small.
-        assert!(mv.d_drop_d_x != 0.0, "the real derivative must still be reported");
+        assert!(
+            mv.d_drop_d_x != 0.0,
+            "the real derivative must still be reported"
+        );
         assert_eq!(mv.ellipse_area_reduction_m2, 0.0);
     }
 
@@ -1253,12 +1310,18 @@ mod tests {
     #[test]
     fn every_declared_source_appears_individually() {
         let r = resolved();
-        let declared = [(InputAxis::MuzzleVelocityMps, 5.0), (InputAxis::WindSpeed, 1.0),
-                        (InputAxis::BallisticCoefficient, 0.005)];
+        let declared = [
+            (InputAxis::MuzzleVelocityMps, 5.0),
+            (InputAxis::WindSpeed, 1.0),
+            (InputAxis::BallisticCoefficient, 0.005),
+        ];
         let rep = error_budget(&r, &declared, &[600.0]).unwrap();
         assert_eq!(rep.rows[0].sources.len(), declared.len());
         for (axis, _) in declared {
-            assert!(rep.rows[0].sources.iter().any(|s| s.axis == axis), "{axis:?} missing");
+            assert!(
+                rep.rows[0].sources.iter().any(|s| s.axis == axis),
+                "{axis:?} missing"
+            );
         }
     }
 
@@ -1266,10 +1329,24 @@ mod tests {
     #[test]
     fn ranking_is_invariant_to_declaration_order() {
         let r = resolved();
-        let a = error_budget(&r, &[(InputAxis::MuzzleVelocityMps, 5.0),
-                                   (InputAxis::WindSpeed, 1.0)], &[600.0]).unwrap();
-        let b = error_budget(&r, &[(InputAxis::WindSpeed, 1.0),
-                                   (InputAxis::MuzzleVelocityMps, 5.0)], &[600.0]).unwrap();
+        let a = error_budget(
+            &r,
+            &[
+                (InputAxis::MuzzleVelocityMps, 5.0),
+                (InputAxis::WindSpeed, 1.0),
+            ],
+            &[600.0],
+        )
+        .unwrap();
+        let b = error_budget(
+            &r,
+            &[
+                (InputAxis::WindSpeed, 1.0),
+                (InputAxis::MuzzleVelocityMps, 5.0),
+            ],
+            &[600.0],
+        )
+        .unwrap();
         let order_a: Vec<_> = a.rows[0].sources.iter().map(|s| s.axis).collect();
         let order_b: Vec<_> = b.rows[0].sources.iter().map(|s| s.axis).collect();
         assert_eq!(order_a, order_b);
@@ -1279,8 +1356,15 @@ mod tests {
     #[test]
     fn variance_shares_sum_to_one() {
         let r = resolved();
-        let rep = error_budget(&r, &[(InputAxis::MuzzleVelocityMps, 5.0),
-                                     (InputAxis::WindSpeed, 1.0)], &[600.0]).unwrap();
+        let rep = error_budget(
+            &r,
+            &[
+                (InputAxis::MuzzleVelocityMps, 5.0),
+                (InputAxis::WindSpeed, 1.0),
+            ],
+            &[600.0],
+        )
+        .unwrap();
         let sum: f64 = rep.rows[0].sources.iter().map(|s| s.variance_share).sum();
         assert!((sum - 1.0).abs() < 1e-9, "shares summed to {sum}");
     }
@@ -1297,14 +1381,27 @@ mod tests {
     #[test]
     fn the_priority_statement_names_the_gain_leader_when_it_diverges_from_the_variance_leader() {
         let r = resolved();
-        let declared =
-            [(InputAxis::MuzzleVelocityMps, 40.0), (InputAxis::WindSpeed, 0.5)];
-        let target = TargetGeometryV1::Rect { width_m: 0.15, height_m: 3.0 };
+        let declared = [
+            (InputAxis::MuzzleVelocityMps, 40.0),
+            (InputAxis::WindSpeed, 0.5),
+        ];
+        let target = TargetGeometryV1::Rect {
+            width_m: 0.15,
+            height_m: 3.0,
+        };
         let rep = error_budget_with_target(&r, &declared, &[600.0], Some(target)).unwrap();
         let row = &rep.rows[0];
 
-        let mv = row.sources.iter().find(|s| s.axis == InputAxis::MuzzleVelocityMps).unwrap();
-        let ws = row.sources.iter().find(|s| s.axis == InputAxis::WindSpeed).unwrap();
+        let mv = row
+            .sources
+            .iter()
+            .find(|s| s.axis == InputAxis::MuzzleVelocityMps)
+            .unwrap();
+        let ws = row
+            .sources
+            .iter()
+            .find(|s| s.axis == InputAxis::WindSpeed)
+            .unwrap();
         // Fixture assumptions, pinned so a future change to the physics or the quadrature that
         // breaks the divergence this test relies on fails HERE with a clear message, not with a
         // confusing failure deeper in the statement assertions below.
@@ -1315,9 +1412,15 @@ mod tests {
             mv.variance_share,
             ws.variance_share
         );
-        assert_eq!(row.sources[0].axis, InputAxis::MuzzleVelocityMps, "sorted by variance share");
-        let (mv_gain, ws_gain) =
-            (mv.p_hit_gain_if_perfect.unwrap(), ws.p_hit_gain_if_perfect.unwrap());
+        assert_eq!(
+            row.sources[0].axis,
+            InputAxis::MuzzleVelocityMps,
+            "sorted by variance share"
+        );
+        let (mv_gain, ws_gain) = (
+            mv.p_hit_gain_if_perfect.unwrap(),
+            ws.p_hit_gain_if_perfect.unwrap(),
+        );
         assert!(
             ws_gain > mv_gain + 0.1,
             "fixture assumption: WindSpeed's gain must diverge sharply from the variance \
@@ -1347,8 +1450,14 @@ mod tests {
     #[test]
     fn the_priority_statement_is_unchanged_when_the_leaders_coincide() {
         let r = resolved();
-        let declared = [(InputAxis::MuzzleVelocityMps, 5.0), (InputAxis::WindSpeed, 1.5)];
-        let target = TargetGeometryV1::Rect { width_m: 0.5, height_m: 0.75 };
+        let declared = [
+            (InputAxis::MuzzleVelocityMps, 5.0),
+            (InputAxis::WindSpeed, 1.5),
+        ];
+        let target = TargetGeometryV1::Rect {
+            width_m: 0.5,
+            height_m: 0.75,
+        };
         let rep = error_budget_with_target(&r, &declared, &[600.0], Some(target)).unwrap();
         let row = &rep.rows[0];
         assert_eq!(
@@ -1376,7 +1485,10 @@ mod tests {
         let r = resolved();
         let rep = error_budget(
             &r,
-            &[(InputAxis::MuzzleVelocityMps, 40.0), (InputAxis::WindSpeed, 0.5)],
+            &[
+                (InputAxis::MuzzleVelocityMps, 40.0),
+                (InputAxis::WindSpeed, 0.5),
+            ],
             &[600.0],
         )
         .unwrap();
@@ -1386,9 +1498,8 @@ mod tests {
             "{statement}"
         );
         assert!(
-            statement.ends_with(
-                "Measuring it better is the highest-value single improvement here."
-            ),
+            statement
+                .ends_with("Measuring it better is the highest-value single improvement here."),
             "the statement must end exactly where it always did when no target is supplied (no \
              extra sentence appended): {statement}"
         );
@@ -1405,7 +1516,10 @@ mod tests {
         let rep = error_budget(&r, &[(InputAxis::WindSpeed, 1.0)], &[600.0]).unwrap();
         assert_eq!(rep.method, "central_difference_first_order_propagation");
         assert!(rep.assumptions.iter().any(|s| s.contains("independent")));
-        assert!(rep.assumptions.iter().any(|s| s.to_lowercase().contains("linear")));
+        assert!(rep
+            .assumptions
+            .iter()
+            .any(|s| s.to_lowercase().contains("linear")));
     }
 
     /// The honesty requirement names three specific claims the payload must carry: independence,
@@ -1424,13 +1538,17 @@ mod tests {
             rep.assumptions
         );
         assert!(
-            rep.assumptions.iter().any(|s| s.to_lowercase().contains("one-sided")),
+            rep.assumptions
+                .iter()
+                .any(|s| s.to_lowercase().contains("one-sided")),
             "no assumption warns that a source's derivative may be one-sided: {:#?}",
             rep.assumptions
         );
         assert!(
-            rep.assumptions.iter().any(|s| s.contains("unavailable_sources")
-                && s.to_lowercase().contains("not the same fact as")),
+            rep.assumptions
+                .iter()
+                .any(|s| s.contains("unavailable_sources")
+                    && s.to_lowercase().contains("not the same fact as")),
             "no assumption distinguishes an unavailable source from a zero-contribution one: {:#?}",
             rep.assumptions
         );
@@ -1468,7 +1586,10 @@ mod tests {
             "priority_statement should flag a one-sided dominant source: {}",
             rep.rows[0].priority_statement
         );
-        assert!(rep.assumptions.iter().any(|s| s.to_lowercase().contains("one-sided")));
+        assert!(rep
+            .assumptions
+            .iter()
+            .any(|s| s.to_lowercase().contains("one-sided")));
     }
 
     /// (2) An unavailable source must be RECORDED, not silently dropped -- and must be
@@ -1479,13 +1600,19 @@ mod tests {
         let r = qnh_resolved();
         let rep = error_budget(
             &r,
-            &[(InputAxis::MuzzleVelocityMps, 5.0), (InputAxis::Altitude, 50.0)],
+            &[
+                (InputAxis::MuzzleVelocityMps, 5.0),
+                (InputAxis::Altitude, 50.0),
+            ],
             &[300.0],
         )
         .unwrap();
 
         // Altitude must NEVER appear as an evaluated source...
-        assert!(rep.rows[0].sources.iter().all(|s| s.axis != InputAxis::Altitude));
+        assert!(rep.rows[0]
+            .sources
+            .iter()
+            .all(|s| s.axis != InputAxis::Altitude));
         // ...but MUST appear, explicitly, as unavailable, with a reason naming the mechanism.
         let skipped = rep
             .unavailable_sources
@@ -1493,8 +1620,15 @@ mod tests {
             .find(|u| u.axis == InputAxis::Altitude)
             .expect("Altitude must be recorded as unavailable, not dropped");
         assert_eq!(skipped.sigma, 50.0);
-        assert_eq!(skipped.code, UnavailableReasonCodeV1::AxisUnsupportedForRequest);
-        assert!(skipped.reason.to_lowercase().contains("qnh"), "{}", skipped.reason);
+        assert_eq!(
+            skipped.code,
+            UnavailableReasonCodeV1::AxisUnsupportedForRequest
+        );
+        assert!(
+            skipped.reason.to_lowercase().contains("qnh"),
+            "{}",
+            skipped.reason
+        );
         // The unavailable list is not merely non-empty by accident -- it must be EXACTLY the one
         // axis that was actually refused, not every declared axis.
         assert_eq!(rep.unavailable_sources.len(), 1);
@@ -1506,7 +1640,9 @@ mod tests {
         assert_eq!(mv.axis, InputAxis::MuzzleVelocityMps);
         assert!(mv.variance_share > 0.0);
         assert!(
-            rep.rows[0].priority_statement.contains("could not be evaluated"),
+            rep.rows[0]
+                .priority_statement
+                .contains("could not be evaluated"),
             "priority_statement should mention the unavailable source too: {}",
             rep.rows[0].priority_statement
         );
@@ -1527,7 +1663,9 @@ mod tests {
             UnavailableReasonCodeV1::AxisUnsupportedForRequest
         );
         assert_eq!(rep.rows[0].ellipse_95.area_m2, 0.0);
-        assert!(rep.rows[0].priority_statement.contains("None of the declared sources"));
+        assert!(rep.rows[0]
+            .priority_statement
+            .contains("None of the declared sources"));
     }
 
     /// (2), continued once more: the classification itself, tested directly and exhaustively
@@ -1556,16 +1694,25 @@ mod tests {
 
         let structural = [
             (
-                KernelError::AxisUnsupportedForRequest { axis: InputAxis::Altitude, reason: "x" },
+                KernelError::AxisUnsupportedForRequest {
+                    axis: InputAxis::Altitude,
+                    reason: "x",
+                },
                 UnavailableReasonCodeV1::AxisUnsupportedForRequest,
             ),
-            (KernelError::AxisAbsent(InputAxis::WindSpeed), UnavailableReasonCodeV1::AxisAbsent),
+            (
+                KernelError::AxisAbsent(InputAxis::WindSpeed),
+                UnavailableReasonCodeV1::AxisAbsent,
+            ),
             (
                 KernelError::CategoricalAxis(InputAxis::CoriolisEnabled),
                 UnavailableReasonCodeV1::CategoricalAxis,
             ),
             (
-                KernelError::StepOutOfDomain { axis: InputAxis::RelativeHumidity, attempted: 2.0 },
+                KernelError::StepOutOfDomain {
+                    axis: InputAxis::RelativeHumidity,
+                    attempted: 2.0,
+                },
                 UnavailableReasonCodeV1::StepOutOfDomain,
             ),
         ];
@@ -1575,12 +1722,17 @@ mod tests {
                     code, *expected_code,
                     "{e:?} classified with the wrong UnavailableReasonCodeV1"
                 ),
-                None => panic!("{e:?} must be classified as unavailable (recorded), not propagated"),
+                None => {
+                    panic!("{e:?} must be classified as unavailable (recorded), not propagated")
+                }
             }
         }
 
         let genuine = [
-            KernelError::Solve { code: SolveErrorCodeV1::SolveFailed, message: "x".into() },
+            KernelError::Solve {
+                code: SolveErrorCodeV1::SolveFailed,
+                message: "x".into(),
+            },
             KernelError::Observation(TrajectoryObservationError::NonMonotonicTrajectory {
                 index: 3,
                 previous_distance_m: 10.0,
@@ -1593,7 +1745,10 @@ mod tests {
             // domain-validation variant. Not constructed by central_difference, but this
             // classifier is exhaustive over the whole KernelError type (see its doc comment),
             // so it belongs in this list on the same footing as DuplicateAxis above.
-            KernelError::InvalidDomain { axis: InputAxis::WindSpeed, reason: "x" },
+            KernelError::InvalidDomain {
+                axis: InputAxis::WindSpeed,
+                reason: "x",
+            },
         ];
         for e in &genuine {
             assert!(
@@ -1624,16 +1779,28 @@ mod tests {
                 p_hit_gain_if_perfect: None,
             }
         }
-        let mut a = vec![stub(InputAxis::WindSpeed, 0.5), stub(InputAxis::MuzzleVelocityMps, 0.5)];
-        let mut b = vec![stub(InputAxis::MuzzleVelocityMps, 0.5), stub(InputAxis::WindSpeed, 0.5)];
+        let mut a = vec![
+            stub(InputAxis::WindSpeed, 0.5),
+            stub(InputAxis::MuzzleVelocityMps, 0.5),
+        ];
+        let mut b = vec![
+            stub(InputAxis::MuzzleVelocityMps, 0.5),
+            stub(InputAxis::WindSpeed, 0.5),
+        ];
         sort_by_variance_share_desc(&mut a);
         sort_by_variance_share_desc(&mut b);
         let order_a: Vec<_> = a.iter().map(|s| s.axis).collect();
         let order_b: Vec<_> = b.iter().map(|s| s.axis).collect();
-        assert_eq!(order_a, order_b, "a tie must break the same way regardless of input order");
+        assert_eq!(
+            order_a, order_b,
+            "a tie must break the same way regardless of input order"
+        );
         // Pin down WHICH order, not just "some order both agree on": "MuzzleVelocityMps" sorts
         // before "WindSpeed" as a Debug string.
-        assert_eq!(order_a, vec![InputAxis::MuzzleVelocityMps, InputAxis::WindSpeed]);
+        assert_eq!(
+            order_a,
+            vec![InputAxis::MuzzleVelocityMps, InputAxis::WindSpeed]
+        );
     }
 
     /// (3), continued: a three-way tie (beyond a simple pairwise swap) stays fully deterministic
@@ -1652,16 +1819,24 @@ mod tests {
                 p_hit_gain_if_perfect: None,
             }
         }
-        let axes = [InputAxis::WindSpeed, InputAxis::MuzzleVelocityMps, InputAxis::Mass];
+        let axes = [
+            InputAxis::WindSpeed,
+            InputAxis::MuzzleVelocityMps,
+            InputAxis::Mass,
+        ];
         let mut orders = Vec::new();
         for rotation in 0..axes.len() {
-            let mut rotated: Vec<SourceContributionV1> =
-                (0..axes.len()).map(|k| stub(axes[(k + rotation) % axes.len()])).collect();
+            let mut rotated: Vec<SourceContributionV1> = (0..axes.len())
+                .map(|k| stub(axes[(k + rotation) % axes.len()]))
+                .collect();
             sort_by_variance_share_desc(&mut rotated);
             orders.push(rotated.iter().map(|s| s.axis).collect::<Vec<_>>());
         }
         for w in orders.windows(2) {
-            assert_eq!(w[0], w[1], "every rotation of a full tie must sort identically");
+            assert_eq!(
+                w[0], w[1],
+                "every rotation of a full tie must sort identically"
+            );
         }
     }
 
@@ -1676,24 +1851,34 @@ mod tests {
         let ws_sigma = 1.0_f64;
         let rep = error_budget(
             &r,
-            &[(InputAxis::MuzzleVelocityMps, mv_sigma), (InputAxis::WindSpeed, ws_sigma)],
+            &[
+                (InputAxis::MuzzleVelocityMps, mv_sigma),
+                (InputAxis::WindSpeed, ws_sigma),
+            ],
             &[600.0],
         )
         .unwrap();
 
-        let mv_deriv = central_difference(&r, InputAxis::MuzzleVelocityMps, &[600.0], None)
-            .unwrap()[0];
+        let mv_deriv =
+            central_difference(&r, InputAxis::MuzzleVelocityMps, &[600.0], None).unwrap()[0];
         let ws_deriv = central_difference(&r, InputAxis::WindSpeed, &[600.0], None).unwrap()[0];
 
-        let mv_var = (mv_deriv.d_drop_d_x * mv_sigma).powi(2)
-            + (mv_deriv.d_windage_d_x * mv_sigma).powi(2);
-        let ws_var = (ws_deriv.d_drop_d_x * ws_sigma).powi(2)
-            + (ws_deriv.d_windage_d_x * ws_sigma).powi(2);
+        let mv_var =
+            (mv_deriv.d_drop_d_x * mv_sigma).powi(2) + (mv_deriv.d_windage_d_x * mv_sigma).powi(2);
+        let ws_var =
+            (ws_deriv.d_drop_d_x * ws_sigma).powi(2) + (ws_deriv.d_windage_d_x * ws_sigma).powi(2);
         let independent_total = mv_var + ws_var;
 
-        let mv_row = rep.rows[0].sources.iter().find(|s| s.axis == InputAxis::MuzzleVelocityMps)
+        let mv_row = rep.rows[0]
+            .sources
+            .iter()
+            .find(|s| s.axis == InputAxis::MuzzleVelocityMps)
             .unwrap();
-        let ws_row = rep.rows[0].sources.iter().find(|s| s.axis == InputAxis::WindSpeed).unwrap();
+        let ws_row = rep.rows[0]
+            .sources
+            .iter()
+            .find(|s| s.axis == InputAxis::WindSpeed)
+            .unwrap();
 
         // Raw derivatives and sigma must match the independently-computed kernel call exactly --
         // this is what a transposition (assigning WindSpeed's numbers to the MuzzleVelocityMps
@@ -1754,7 +1939,10 @@ mod tests {
             );
             share_sum += s.variance_share;
         }
-        assert!((share_sum - 1.0).abs() < 1e-9, "shares summed to {share_sum}");
+        assert!(
+            (share_sum - 1.0).abs() < 1e-9,
+            "shares summed to {share_sum}"
+        );
     }
 
     /// (I6, review round) FOUR previously-unasserted public payload fields --
@@ -1843,7 +2031,10 @@ mod tests {
             row.covariance_m2,
             cov
         );
-        assert!(cov.abs() > 1e-5, "fixture must give a clearly nonzero covariance: {cov}");
+        assert!(
+            cov.abs() > 1e-5,
+            "fixture must give a clearly nonzero covariance: {cov}"
+        );
 
         // rotation_rad: verified via the DEFINITION of the major-axis angle (a Rayleigh-quotient
         // check), not by re-deriving the same atan2 formula error_budget itself uses to compute
@@ -1947,7 +2138,9 @@ mod tests {
         );
         let first = reductions[0].1;
         assert!(
-            reductions.iter().any(|&(_, red)| (red - first).abs() > 1e-6 * first.max(1.0)),
+            reductions
+                .iter()
+                .any(|&(_, red)| (red - first).abs() > 1e-6 * first.max(1.0)),
             "reductions must discriminate between sources with 3+ declared, not all be equal: \
              {reductions:?}"
         );
@@ -1966,8 +2159,8 @@ mod tests {
 
         for (i, &range_m) in ranges.iter().enumerate() {
             assert_eq!(rep.rows[i].range_m, range_m);
-            let expected = central_difference(&r, InputAxis::MuzzleVelocityMps, &[range_m], None)
-                .unwrap()[0];
+            let expected =
+                central_difference(&r, InputAxis::MuzzleVelocityMps, &[range_m], None).unwrap()[0];
             let got = &rep.rows[i].sources[0];
             assert_eq!(got.d_drop_d_x, expected.d_drop_d_x, "range {range_m}");
             assert_eq!(got.d_windage_d_x, expected.d_windage_d_x, "range {range_m}");
@@ -1992,11 +2185,20 @@ mod tests {
     fn a_non_finite_or_negative_sigma_is_rejected() {
         let r = resolved();
         let nan = error_budget(&r, &[(InputAxis::WindSpeed, f64::NAN)], &[600.0]);
-        assert!(matches!(nan, Err(KernelError::NonFinite(InputAxis::WindSpeed))));
+        assert!(matches!(
+            nan,
+            Err(KernelError::NonFinite(InputAxis::WindSpeed))
+        ));
         let neg = error_budget(&r, &[(InputAxis::WindSpeed, -1.0)], &[600.0]);
-        assert!(matches!(neg, Err(KernelError::NonFinite(InputAxis::WindSpeed))));
+        assert!(matches!(
+            neg,
+            Err(KernelError::NonFinite(InputAxis::WindSpeed))
+        ));
         let inf = error_budget(&r, &[(InputAxis::WindSpeed, f64::INFINITY)], &[600.0]);
-        assert!(matches!(inf, Err(KernelError::NonFinite(InputAxis::WindSpeed))));
+        assert!(matches!(
+            inf,
+            Err(KernelError::NonFinite(InputAxis::WindSpeed))
+        ));
     }
 
     /// (M1, review round) An astronomically large (but finite, non-negative -- so it PASSES the
@@ -2014,7 +2216,10 @@ mod tests {
         );
         let rep = error_budget(
             &r,
-            &[(InputAxis::MuzzleVelocityMps, huge), (InputAxis::WindSpeed, 1.0)],
+            &[
+                (InputAxis::MuzzleVelocityMps, huge),
+                (InputAxis::WindSpeed, 1.0),
+            ],
             &[600.0],
         )
         .unwrap();
@@ -2038,7 +2243,10 @@ mod tests {
             &[(InputAxis::WindSpeed, 1.0), (InputAxis::WindSpeed, 2.0)],
             &[600.0],
         );
-        assert!(matches!(e, Err(KernelError::DuplicateAxis(InputAxis::WindSpeed))));
+        assert!(matches!(
+            e,
+            Err(KernelError::DuplicateAxis(InputAxis::WindSpeed))
+        ));
     }
 
     /// (I4, continued) The duplicate check finds a repeat anywhere in the list, not just
@@ -2055,7 +2263,10 @@ mod tests {
             ],
             &[600.0],
         );
-        assert!(matches!(e, Err(KernelError::DuplicateAxis(InputAxis::MuzzleVelocityMps))));
+        assert!(matches!(
+            e,
+            Err(KernelError::DuplicateAxis(InputAxis::MuzzleVelocityMps))
+        ));
     }
 
     /// (I3, review round) A range beyond the BASE request's own `max_range_m` must be rejected
@@ -2069,7 +2280,10 @@ mod tests {
         let r = resolved(); // max_range_m: 900.0
         let e = error_budget(
             &r,
-            &[(InputAxis::MuzzleVelocityMps, 5.0), (InputAxis::WindSpeed, 1.0)],
+            &[
+                (InputAxis::MuzzleVelocityMps, 5.0),
+                (InputAxis::WindSpeed, 1.0),
+            ],
             &[600.0, 5000.0],
         );
         match e {
@@ -2100,8 +2314,8 @@ mod tests {
     /// own differencing step -- a "successful" report with a fabricated per-axis explanation for
     /// what was actually just a query past where the bullet landed.
     #[test]
-    fn a_range_within_max_range_m_but_beyond_the_actual_trajectory_is_rejected_with_the_real_extent()
-    {
+    fn a_range_within_max_range_m_but_beyond_the_actual_trajectory_is_rejected_with_the_real_extent(
+    ) {
         let json = serde_json::json!({
             "schema_version": 1,
             "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
@@ -2119,12 +2333,19 @@ mod tests {
 
         let e = error_budget(
             &r,
-            &[(InputAxis::MuzzleVelocityMps, 5.0), (InputAxis::WindSpeed, 1.0)],
+            &[
+                (InputAxis::MuzzleVelocityMps, 5.0),
+                (InputAxis::WindSpeed, 1.0),
+            ],
             &[900.0], // == max_range_m, so the cheap declared-bound check alone lets it through
         );
         match e {
             Err(KernelError::Observation(
-                inner @ TrajectoryObservationError::OutOfRange { requested_m, maximum_m, .. },
+                inner @ TrajectoryObservationError::OutOfRange {
+                    requested_m,
+                    maximum_m,
+                    ..
+                },
             )) => {
                 assert_eq!(requested_m, 900.0);
                 // Names the REAL trajectory extent (~17 m), not the declared max_range_m (900).
@@ -2172,7 +2393,10 @@ mod tests {
     /// default step, never a custom one.
     #[test]
     fn step_out_of_domain_reason_blames_the_default_step_not_the_sigma() {
-        let e = KernelError::StepOutOfDomain { axis: InputAxis::RelativeHumidity, attempted: 2.0 };
+        let e = KernelError::StepOutOfDomain {
+            axis: InputAxis::RelativeHumidity,
+            attempted: 2.0,
+        };
         let (code, reason) = unavailable_reason(&e).unwrap();
         assert_eq!(code, UnavailableReasonCodeV1::StepOutOfDomain);
         // Names the real trigger (the axis's own default step)...
@@ -2188,7 +2412,9 @@ mod tests {
             "reason should not claim the declared sigma's SIZE caused this: {reason}"
         );
         assert!(
-            reason.to_lowercase().contains("does not depend on the declared sigma"),
+            reason
+                .to_lowercase()
+                .contains("does not depend on the declared sigma"),
             "{reason}"
         );
     }
@@ -2201,7 +2427,9 @@ mod tests {
         assert!(rep.rows[0].sources.is_empty());
         assert!(rep.unavailable_sources.is_empty());
         assert_eq!(rep.rows[0].ellipse_95.area_m2, 0.0);
-        assert!(rep.rows[0].priority_statement.contains("No sources were declared"));
+        assert!(rep.rows[0]
+            .priority_statement
+            .contains("No sources were declared"));
     }
 
     /// The 95% ellipse for a single dominant source matches a hand-computable closed form: with
@@ -2264,7 +2492,10 @@ mod tests {
         let r = qnh_resolved();
         let rep = error_budget(
             &r,
-            &[(InputAxis::MuzzleVelocityMps, 5.0), (InputAxis::Altitude, 50.0)],
+            &[
+                (InputAxis::MuzzleVelocityMps, 5.0),
+                (InputAxis::Altitude, 50.0),
+            ],
             &[300.0],
         )
         .unwrap();
@@ -2296,7 +2527,10 @@ mod tests {
             sd * sd,
             sw * sw,
             0.0,
-            TargetGeometryV1::Rect { width_m: w, height_m: h },
+            TargetGeometryV1::Rect {
+                width_m: w,
+                height_m: h,
+            },
         );
         assert!((got - want).abs() < 1e-6, "got {got} want {want}");
     }
@@ -2323,7 +2557,12 @@ mod tests {
     #[test]
     fn circle_matches_the_rayleigh_closed_form_when_uncorrelated_and_isotropic() {
         for (sigma, r) in [(0.1_f64, 0.1_f64), (0.1, 0.15), (1.0, 1.2)] {
-            let got = p_hit_bivariate(sigma * sigma, sigma * sigma, 0.0, TargetGeometryV1::Circle { radius_m: r });
+            let got = p_hit_bivariate(
+                sigma * sigma,
+                sigma * sigma,
+                0.0,
+                TargetGeometryV1::Circle { radius_m: r },
+            );
             let want = 1.0 - (-(r * r) / (2.0 * sigma * sigma)).exp();
             assert!(
                 (got - want).abs() < 1e-4,
@@ -2344,8 +2583,16 @@ mod tests {
     /// already-tested eigenvalue arithmetic rather than re-deriving it by hand here.
     #[test]
     fn circle_probability_is_rotation_invariant() {
-        for (vd, vw, cov, r) in [(0.02_f64, 0.05_f64, 0.015_f64, 0.15_f64), (0.3, 0.1, -0.12, 0.4)] {
-            let (l1, l2) = Symmetric2 { a00: vd, a01: cov, a11: vw }.largest_smallest_eigenvalues();
+        for (vd, vw, cov, r) in [
+            (0.02_f64, 0.05_f64, 0.015_f64, 0.15_f64),
+            (0.3, 0.1, -0.12, 0.4),
+        ] {
+            let (l1, l2) = Symmetric2 {
+                a00: vd,
+                a01: cov,
+                a11: vw,
+            }
+            .largest_smallest_eigenvalues();
             let direct = p_hit_bivariate(vd, vw, cov, TargetGeometryV1::Circle { radius_m: r });
             let rotated = p_hit_bivariate(l1, l2, 0.0, TargetGeometryV1::Circle { radius_m: r });
             assert!(
@@ -2362,14 +2609,24 @@ mod tests {
         let r = resolved();
         let rep = error_budget_with_target(
             &r,
-            &[(InputAxis::MuzzleVelocityMps, 5.0), (InputAxis::WindSpeed, 1.5)],
+            &[
+                (InputAxis::MuzzleVelocityMps, 5.0),
+                (InputAxis::WindSpeed, 1.5),
+            ],
             &[600.0],
-            Some(TargetGeometryV1::Rect { width_m: 0.5, height_m: 0.75 }),
+            Some(TargetGeometryV1::Rect {
+                width_m: 0.5,
+                height_m: 0.75,
+            }),
         )
         .unwrap();
         for s in &rep.rows[0].sources {
             let gain = s.p_hit_gain_if_perfect.expect("target supplied");
-            assert!(gain >= -1e-9, "{:?} reported a negative gain {gain}", s.axis);
+            assert!(
+                gain >= -1e-9,
+                "{:?} reported a negative gain {gain}",
+                s.axis
+            );
         }
     }
 
@@ -2383,8 +2640,14 @@ mod tests {
     #[test]
     fn p_hit_gain_if_perfect_discriminates_with_only_two_sources() {
         let r = resolved();
-        let declared = [(InputAxis::MuzzleVelocityMps, 5.0), (InputAxis::WindSpeed, 1.5)];
-        let target = TargetGeometryV1::Rect { width_m: 0.5, height_m: 0.75 };
+        let declared = [
+            (InputAxis::MuzzleVelocityMps, 5.0),
+            (InputAxis::WindSpeed, 1.5),
+        ];
+        let target = TargetGeometryV1::Rect {
+            width_m: 0.5,
+            height_m: 0.75,
+        };
         let rep = error_budget_with_target(&r, &declared, &[600.0], Some(target)).unwrap();
         let row = &rep.rows[0];
         assert_eq!(row.sources.len(), 2);
@@ -2458,7 +2721,10 @@ mod tests {
             sd * sd,
             sw * sw,
             cov,
-            TargetGeometryV1::Rect { width_m: w, height_m: h },
+            TargetGeometryV1::Rect {
+                width_m: w,
+                height_m: h,
+            },
         );
         let wrong_separable = (normal_cdf(h / 2.0 / sd) - normal_cdf(-h / 2.0 / sd))
             * (normal_cdf(w / 2.0 / sw) - normal_cdf(-w / 2.0 / sw));
@@ -2494,7 +2760,10 @@ mod tests {
         let cov = dd * dw * sigma * sigma;
         let sd = var_drop.sqrt();
         let sw = var_wind.sqrt();
-        let target = TargetGeometryV1::Rect { width_m: sw, height_m: 20.0 * sd };
+        let target = TargetGeometryV1::Rect {
+            width_m: sw,
+            height_m: 20.0 * sd,
+        };
 
         let got = p_hit_bivariate(var_drop, var_wind, cov, target);
 
@@ -2515,18 +2784,46 @@ mod tests {
     /// covers the circle branch.
     #[test]
     fn p_hit_grows_with_target_size_for_a_rectangle_too() {
-        let small =
-            p_hit_bivariate(0.01, 0.01, 0.0, TargetGeometryV1::Rect { width_m: 0.1, height_m: 0.1 });
-        let big =
-            p_hit_bivariate(0.01, 0.01, 0.0, TargetGeometryV1::Rect { width_m: 0.5, height_m: 0.5 });
+        let small = p_hit_bivariate(
+            0.01,
+            0.01,
+            0.0,
+            TargetGeometryV1::Rect {
+                width_m: 0.1,
+                height_m: 0.1,
+            },
+        );
+        let big = p_hit_bivariate(
+            0.01,
+            0.01,
+            0.0,
+            TargetGeometryV1::Rect {
+                width_m: 0.5,
+                height_m: 0.5,
+            },
+        );
         assert!((0.0..=1.0).contains(&small) && (0.0..=1.0).contains(&big));
         assert!(big > small, "small={small} big={big}");
         // Also pins width_m/height_m against a transposition: growing ONLY the width, or ONLY
         // the height, must each independently grow p_hit.
-        let wider =
-            p_hit_bivariate(0.01, 0.01, 0.0, TargetGeometryV1::Rect { width_m: 0.5, height_m: 0.1 });
-        let taller =
-            p_hit_bivariate(0.01, 0.01, 0.0, TargetGeometryV1::Rect { width_m: 0.1, height_m: 0.5 });
+        let wider = p_hit_bivariate(
+            0.01,
+            0.01,
+            0.0,
+            TargetGeometryV1::Rect {
+                width_m: 0.5,
+                height_m: 0.1,
+            },
+        );
+        let taller = p_hit_bivariate(
+            0.01,
+            0.01,
+            0.0,
+            TargetGeometryV1::Rect {
+                width_m: 0.1,
+                height_m: 0.5,
+            },
+        );
         assert!(wider > small, "wider={wider} small={small}");
         assert!(taller > small, "taller={taller} small={small}");
     }
@@ -2569,7 +2866,10 @@ mod tests {
                         sd * sd,
                         sw * sw,
                         cov,
-                        TargetGeometryV1::Rect { width_m: s * w0, height_m: s * h0 },
+                        TargetGeometryV1::Rect {
+                            width_m: s * w0,
+                            height_m: s * h0,
+                        },
                     )
                 })
                 .collect();
@@ -2591,7 +2891,12 @@ mod tests {
             let circle_vals: Vec<f64> = scales
                 .iter()
                 .map(|&s| {
-                    p_hit_bivariate(sd * sd, sd * sd, cov, TargetGeometryV1::Circle { radius_m: s * r0 })
+                    p_hit_bivariate(
+                        sd * sd,
+                        sd * sd,
+                        cov,
+                        TargetGeometryV1::Circle { radius_m: s * r0 },
+                    )
                 })
                 .collect();
             for w in circle_vals.windows(2) {
@@ -2622,24 +2927,40 @@ mod tests {
     fn drop_deterministic_windage_random_matches_closed_form_not_hardcoded_zero() {
         let sw = 0.2_f64;
         // Tall enough that the deterministic drop = 0 is always inside the rectangle.
-        let target = TargetGeometryV1::Rect { width_m: 0.3, height_m: 10.0 };
+        let target = TargetGeometryV1::Rect {
+            width_m: 0.3,
+            height_m: 10.0,
+        };
         let got = p_hit_bivariate(0.0, sw * sw, 0.0, target);
         let want = normal_cdf(0.15 / sw) - normal_cdf(-0.15 / sw);
         assert!((got - want).abs() < 1e-9, "got={got} want={want}");
-        assert!(got > 0.0 && got < 1.0, "fixture must give a non-degenerate probability: {got}");
+        assert!(
+            got > 0.0 && got < 1.0,
+            "fixture must give a non-degenerate probability: {got}"
+        );
 
         let wider = p_hit_bivariate(
             0.0,
             sw * sw,
             0.0,
-            TargetGeometryV1::Rect { width_m: 1.0, height_m: 10.0 },
+            TargetGeometryV1::Rect {
+                width_m: 1.0,
+                height_m: 10.0,
+            },
         );
-        assert!(wider > got, "a hardcoded-zero bug would make wider == got == 0.0: {wider} {got}");
+        assert!(
+            wider > got,
+            "a hardcoded-zero bug would make wider == got == 0.0: {wider} {got}"
+        );
 
         let r = 0.15_f64;
-        let got_circle = p_hit_bivariate(0.0, sw * sw, 0.0, TargetGeometryV1::Circle { radius_m: r });
+        let got_circle =
+            p_hit_bivariate(0.0, sw * sw, 0.0, TargetGeometryV1::Circle { radius_m: r });
         let want_circle = normal_cdf(r / sw) - normal_cdf(-r / sw);
-        assert!((got_circle - want_circle).abs() < 1e-9, "got={got_circle} want={want_circle}");
+        assert!(
+            (got_circle - want_circle).abs() < 1e-9,
+            "got={got_circle} want={want_circle}"
+        );
     }
 
     /// The symmetric degenerate case (`var_wind == 0.0`, `var_drop > 0.0`): this one is already
@@ -2649,15 +2970,22 @@ mod tests {
     #[test]
     fn windage_deterministic_drop_random_matches_closed_form() {
         let sd = 0.15_f64;
-        let target = TargetGeometryV1::Rect { width_m: 10.0, height_m: 0.4 };
+        let target = TargetGeometryV1::Rect {
+            width_m: 10.0,
+            height_m: 0.4,
+        };
         let got = p_hit_bivariate(sd * sd, 0.0, 0.0, target);
         let want = normal_cdf(0.2 / sd) - normal_cdf(-0.2 / sd);
         assert!((got - want).abs() < 1e-9, "got={got} want={want}");
 
         let r = 0.2_f64;
-        let got_circle = p_hit_bivariate(sd * sd, 0.0, 0.0, TargetGeometryV1::Circle { radius_m: r });
+        let got_circle =
+            p_hit_bivariate(sd * sd, 0.0, 0.0, TargetGeometryV1::Circle { radius_m: r });
         let want_circle = normal_cdf(r / sd) - normal_cdf(-r / sd);
-        assert!((got_circle - want_circle).abs() < 1e-9, "got={got_circle} want={want_circle}");
+        assert!(
+            (got_circle - want_circle).abs() < 1e-9,
+            "got={got_circle} want={want_circle}"
+        );
         assert!(!got.is_nan() && !got_circle.is_nan());
     }
 
@@ -2669,8 +2997,14 @@ mod tests {
     #[test]
     fn zero_total_variance_means_a_deterministic_impact_at_the_nominal_point() {
         for target in [
-            TargetGeometryV1::Rect { width_m: 0.001, height_m: 0.001 },
-            TargetGeometryV1::Rect { width_m: 5.0, height_m: 5.0 },
+            TargetGeometryV1::Rect {
+                width_m: 0.001,
+                height_m: 0.001,
+            },
+            TargetGeometryV1::Rect {
+                width_m: 5.0,
+                height_m: 5.0,
+            },
             TargetGeometryV1::Circle { radius_m: 0.001 },
             TargetGeometryV1::Circle { radius_m: 5.0 },
         ] {
@@ -2697,10 +3031,22 @@ mod tests {
     #[test]
     fn a_degenerate_target_can_never_be_hit_regardless_of_covariance() {
         let degenerate_targets = [
-            TargetGeometryV1::Rect { width_m: 0.0, height_m: 0.0 },
-            TargetGeometryV1::Rect { width_m: 0.0, height_m: 5.0 },
-            TargetGeometryV1::Rect { width_m: 5.0, height_m: 0.0 },
-            TargetGeometryV1::Rect { width_m: -1.0, height_m: 5.0 },
+            TargetGeometryV1::Rect {
+                width_m: 0.0,
+                height_m: 0.0,
+            },
+            TargetGeometryV1::Rect {
+                width_m: 0.0,
+                height_m: 5.0,
+            },
+            TargetGeometryV1::Rect {
+                width_m: 5.0,
+                height_m: 0.0,
+            },
+            TargetGeometryV1::Rect {
+                width_m: -1.0,
+                height_m: 5.0,
+            },
             TargetGeometryV1::Circle { radius_m: 0.0 },
             TargetGeometryV1::Circle { radius_m: -1.0 },
         ];
@@ -2728,15 +3074,23 @@ mod tests {
     #[test]
     fn a_single_declared_source_gives_a_well_formed_rank_one_p_hit_not_nan_or_negative() {
         let r = resolved();
-        let target = TargetGeometryV1::Rect { width_m: 0.5, height_m: 0.75 };
+        let target = TargetGeometryV1::Rect {
+            width_m: 0.5,
+            height_m: 0.75,
+        };
         let rep =
             error_budget_with_target(&r, &[(InputAxis::WindSpeed, 1.5)], &[600.0], Some(target))
                 .unwrap();
         let row = &rep.rows[0];
         let p_hit = row.p_hit.expect("target supplied");
-        assert!(!p_hit.is_nan(), "single-source rank-1 covariance must not produce NaN");
+        assert!(
+            !p_hit.is_nan(),
+            "single-source rank-1 covariance must not produce NaN"
+        );
         assert!((0.0..=1.0).contains(&p_hit), "p_hit out of bounds: {p_hit}");
-        let gain = row.sources[0].p_hit_gain_if_perfect.expect("target supplied");
+        let gain = row.sources[0]
+            .p_hit_gain_if_perfect
+            .expect("target supplied");
         assert!(!gain.is_nan());
         assert!(gain >= 0.0, "gain={gain}");
     }
@@ -2749,13 +3103,16 @@ mod tests {
     /// `an_unavailable_source_is_recorded_not_silently_dropped` to the new target/p_hit
     /// machinery specifically.
     #[test]
-    fn an_unavailable_source_has_no_gain_field_while_the_evaluated_sibling_does_when_a_target_is_supplied()
-    {
+    fn an_unavailable_source_has_no_gain_field_while_the_evaluated_sibling_does_when_a_target_is_supplied(
+    ) {
         let r = qnh_resolved();
         let target = TargetGeometryV1::Circle { radius_m: 0.5 };
         let rep = error_budget_with_target(
             &r,
-            &[(InputAxis::MuzzleVelocityMps, 5.0), (InputAxis::Altitude, 50.0)],
+            &[
+                (InputAxis::MuzzleVelocityMps, 5.0),
+                (InputAxis::Altitude, 50.0),
+            ],
             &[300.0],
             Some(target),
         )
@@ -2770,13 +3127,18 @@ mod tests {
         assert_eq!(rep.rows[0].sources.len(), 1);
         let mv = &rep.rows[0].sources[0];
         assert_eq!(mv.axis, InputAxis::MuzzleVelocityMps);
-        let gain = mv.p_hit_gain_if_perfect.expect("target supplied, and MV evaluated");
+        let gain = mv
+            .p_hit_gain_if_perfect
+            .expect("target supplied, and MV evaluated");
         // With exactly one EVALUATED source, excluding it leaves a zero covariance (Altitude
         // never contributes any variance at all, evaluated or not), so the independent oracle
         // for "perfecting the only evaluated source" is exactly `1.0 - the row's own p_hit`.
         let base_p_hit = rep.rows[0].p_hit.expect("target supplied");
         let expected = (1.0 - base_p_hit).max(0.0);
-        assert!((gain - expected).abs() < 1e-9, "gain={gain} expected={expected}");
+        assert!(
+            (gain - expected).abs() < 1e-9,
+            "gain={gain} expected={expected}"
+        );
         assert!(
             gain > 0.0,
             "a real muzzle-velocity uncertainty against a finite target should show a strictly \
@@ -2804,7 +3166,10 @@ mod tests {
     #[test]
     fn p_hit_is_computed_from_the_rows_own_covariance_not_a_constant() {
         let r = resolved();
-        let declared = [(InputAxis::MuzzleVelocityMps, 5.0), (InputAxis::WindSpeed, 1.0)];
+        let declared = [
+            (InputAxis::MuzzleVelocityMps, 5.0),
+            (InputAxis::WindSpeed, 1.0),
+        ];
         let probe = error_budget(&r, &declared, &[600.0]).unwrap();
         let row0 = &probe.rows[0];
         let target = TargetGeometryV1::Rect {
@@ -2816,7 +3181,10 @@ mod tests {
         let row = &rep.rows[0];
         let got = row.p_hit.expect("target supplied");
 
-        assert!((0.01..0.99).contains(&got), "fixture should give a non-degenerate p_hit: {got}");
+        assert!(
+            (0.01..0.99).contains(&got),
+            "fixture should give a non-degenerate p_hit: {got}"
+        );
         let oracle = p_hit_bivariate(
             row.sigma_drop_m * row.sigma_drop_m,
             row.sigma_windage_m * row.sigma_windage_m,
@@ -2898,7 +3266,9 @@ mod tests {
         );
         let first = gains[0].1;
         assert!(
-            gains.iter().any(|&(_, g)| (g - first).abs() > 1e-6 * first.max(1.0)),
+            gains
+                .iter()
+                .any(|&(_, g)| (g - first).abs() > 1e-6 * first.max(1.0)),
             "gains must discriminate between sources, not all be equal: {gains:?}"
         );
     }
@@ -2918,7 +3288,10 @@ mod tests {
 
         let without = error_budget_with_target(&r, &sources, &[600.0], None).unwrap();
         assert_eq!(without.method, "central_difference_first_order_propagation");
-        assert!(!without.assumptions.iter().any(|s| s.to_lowercase().contains("gauss-legendre")));
+        assert!(!without
+            .assumptions
+            .iter()
+            .any(|s| s.to_lowercase().contains("gauss-legendre")));
 
         let with_target = error_budget_with_target(
             &r,
@@ -2946,10 +3319,16 @@ mod tests {
     /// convention.
     #[test]
     fn target_geometry_serializes_snake_case_externally_tagged() {
-        let rect = TargetGeometryV1::Rect { width_m: 0.5, height_m: 0.75 };
+        let rect = TargetGeometryV1::Rect {
+            width_m: 0.5,
+            height_m: 0.75,
+        };
         let json = serde_json::to_string(&rect).unwrap();
         assert!(json.contains("\"rect\""), "{json}");
-        assert!(json.contains("\"width_m\":0.5") || json.contains("\"width_m\": 0.5"), "{json}");
+        assert!(
+            json.contains("\"width_m\":0.5") || json.contains("\"width_m\": 0.5"),
+            "{json}"
+        );
         assert!(
             json.contains("\"height_m\":0.75") || json.contains("\"height_m\": 0.75"),
             "{json}"
@@ -2989,10 +3368,16 @@ mod tests {
     #[test]
     fn p_hit_and_gain_round_trip_through_json_when_present() {
         let r = resolved();
-        let target = TargetGeometryV1::Rect { width_m: 0.5, height_m: 0.75 };
+        let target = TargetGeometryV1::Rect {
+            width_m: 0.5,
+            height_m: 0.75,
+        };
         let rep = error_budget_with_target(
             &r,
-            &[(InputAxis::MuzzleVelocityMps, 5.0), (InputAxis::WindSpeed, 1.5)],
+            &[
+                (InputAxis::MuzzleVelocityMps, 5.0),
+                (InputAxis::WindSpeed, 1.5),
+            ],
             &[600.0],
             Some(target),
         )
@@ -3006,16 +3391,28 @@ mod tests {
             serde_json::from_str(&json).expect("report must deserialize back");
 
         let want_p_hit = rep.rows[0].p_hit.expect("target supplied");
-        let got_p_hit = round_tripped.rows[0].p_hit.expect("must round-trip as Some");
-        assert!((got_p_hit - want_p_hit).abs() < 1e-9, "got={got_p_hit} want={want_p_hit}");
+        let got_p_hit = round_tripped.rows[0]
+            .p_hit
+            .expect("must round-trip as Some");
+        assert!(
+            (got_p_hit - want_p_hit).abs() < 1e-9,
+            "got={got_p_hit} want={want_p_hit}"
+        );
 
-        assert_eq!(round_tripped.rows[0].sources.len(), rep.rows[0].sources.len());
-        for (got_s, want_s) in
-            round_tripped.rows[0].sources.iter().zip(rep.rows[0].sources.iter())
+        assert_eq!(
+            round_tripped.rows[0].sources.len(),
+            rep.rows[0].sources.len()
+        );
+        for (got_s, want_s) in round_tripped.rows[0]
+            .sources
+            .iter()
+            .zip(rep.rows[0].sources.iter())
         {
             assert_eq!(got_s.axis, want_s.axis);
             let want_gain = want_s.p_hit_gain_if_perfect.expect("target supplied");
-            let got_gain = got_s.p_hit_gain_if_perfect.expect("must round-trip as Some");
+            let got_gain = got_s
+                .p_hit_gain_if_perfect
+                .expect("must round-trip as Some");
             assert!(
                 (got_gain - want_gain).abs() < 1e-9,
                 "{:?}: got={got_gain} want={want_gain}",

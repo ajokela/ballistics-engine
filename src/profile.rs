@@ -486,7 +486,10 @@ impl ProfileData {
             "--travel-down",
             self.elevation_travel_down_mil,
         )?
-        .map(|(up, down)| TravelLimits { up_mil: up, down_mil: down });
+        .map(|(up, down)| TravelLimits {
+            up_mil: up,
+            down_mil: down,
+        });
 
         let windage_travel = require_angular_pair(
             "--windage-travel-left",
@@ -494,7 +497,10 @@ impl ProfileData {
             "--windage-travel-right",
             self.windage_travel_right_mil,
         )?
-        .map(|(left, right)| TravelLimits { down_mil: left, up_mil: right });
+        .map(|(left, right)| TravelLimits {
+            down_mil: left,
+            up_mil: right,
+        });
 
         let turret_state = require_angular_pair(
             "--turret-elev",
@@ -502,7 +508,10 @@ impl ProfileData {
             "--turret-wind",
             self.turret_windage_dialed_mil,
         )?
-        .map(|(elevation_mil, windage_mil)| TurretState { elevation_mil, windage_mil });
+        .map(|(elevation_mil, windage_mil)| TurretState {
+            elevation_mil,
+            windage_mil,
+        });
 
         let reticle_hold_bounds = require_hold_bounds(
             self.hold_bound_up_mil,
@@ -738,19 +747,40 @@ mod tests {
         assert_eq!(
             second.bc_segments,
             Some(vec![
-                ProfileBcSegment { bc: 0.243, velocity_mps: 792.0 },
-                ProfileBcSegment { bc: 0.230, velocity_mps: 400.0 },
+                ProfileBcSegment {
+                    bc: 0.243,
+                    velocity_mps: 792.0
+                },
+                ProfileBcSegment {
+                    bc: 0.230,
+                    velocity_mps: 400.0
+                },
             ])
         );
         assert_eq!(
             second.drag_curve,
             Some(vec![
-                ProfileDragPoint { mach: 0.5, cd: 0.23 },
-                ProfileDragPoint { mach: 1.2, cd: 0.45 },
-                ProfileDragPoint { mach: 3.0, cd: 0.28 },
+                ProfileDragPoint {
+                    mach: 0.5,
+                    cd: 0.23
+                },
+                ProfileDragPoint {
+                    mach: 1.2,
+                    cd: 0.45
+                },
+                ProfileDragPoint {
+                    mach: 3.0,
+                    cd: 0.28
+                },
             ])
         );
-        assert_eq!(second.dsf_points, Some(vec![DsfPoint { mach: 0.9, dsf: 1.04 }]));
+        assert_eq!(
+            second.dsf_points,
+            Some(vec![DsfPoint {
+                mach: 0.9,
+                dsf: 1.04
+            }])
+        );
         assert_eq!(second.bc_reference.as_deref(), Some("army-standard-metro"));
         assert_eq!(second.pressure_reference.as_deref(), Some("qnh"));
         assert_eq!(second.density_altitude, Some(500.0));
@@ -825,13 +855,24 @@ mod tests {
         let out: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&profile).unwrap()).unwrap();
         // Plain-`default` options serialize as explicit null (the historical shape)...
-        assert!(out.get("twist_rate").is_some_and(serde_json::Value::is_null));
-        assert!(out.get("bullet_name").is_some_and(serde_json::Value::is_null));
+        assert!(out
+            .get("twist_rate")
+            .is_some_and(serde_json::Value::is_null));
+        assert!(out
+            .get("bullet_name")
+            .is_some_and(serde_json::Value::is_null));
         assert!(out.get("created").is_some_and(serde_json::Value::is_null));
         // ...while `skip_serializing_if` options stay absent entirely.
         for absent in [
-            "wind_speed", "bc_segments", "drag_curve", "dsf_points", "zero_sets",
-            "reticle", "elevation_click", "elevation_cf", "clicks_per_revolution",
+            "wind_speed",
+            "bc_segments",
+            "drag_curve",
+            "dsf_points",
+            "zero_sets",
+            "reticle",
+            "elevation_click",
+            "elevation_cf",
+            "clicks_per_revolution",
         ] {
             assert!(out.get(absent).is_none(), "{absent} must stay absent");
         }
@@ -850,8 +891,17 @@ mod tests {
         profile.elevation_travel_down_mil = None; // breaks the all-or-nothing pair
         let warnings = profile.validation_warnings();
         assert_eq!(warnings.len(), 3, "{warnings:?}");
-        assert!(warnings.iter().any(|w| w.contains("elevation_cf")), "{warnings:?}");
-        assert!(warnings.iter().any(|w| w.contains("unsupported units")), "{warnings:?}");
-        assert!(warnings.iter().any(|w| w.contains("--travel-down")), "{warnings:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains("elevation_cf")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("unsupported units")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("--travel-down")),
+            "{warnings:?}"
+        );
     }
 }

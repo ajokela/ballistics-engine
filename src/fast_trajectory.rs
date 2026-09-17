@@ -114,17 +114,9 @@ impl FastSolution {
     }
 }
 
-fn direct_atmosphere_values(
-    atmo_params: (f64, f64, f64, f64),
-) -> Option<(f64, f64)> {
+fn direct_atmosphere_values(atmo_params: (f64, f64, f64, f64)) -> Option<(f64, f64)> {
     let (a, b, c, d) = atmo_params;
-    (a.is_finite()
-        && b.is_finite()
-        && c == 0.0
-        && d == 0.0
-        && a > 0.0
-        && a < 2.0
-        && b > 200.0)
+    (a.is_finite() && b.is_finite() && c == 0.0 && d == 0.0 && a > 0.0 && a < 2.0 && b > 200.0)
         .then_some((a, b))
 }
 
@@ -207,11 +199,7 @@ pub fn aerodynamic_jump_launch_offset_rad(
     atmo_params: (f64, f64, f64, f64),
 ) -> f64 {
     let crosswind_from_right_mps = inputs.wind_speed * inputs.wind_angle.sin();
-    aerodynamic_jump_launch_offset_for_crosswind_rad(
-        inputs,
-        atmo_params,
-        crosswind_from_right_mps,
-    )
+    aerodynamic_jump_launch_offset_for_crosswind_rad(inputs, atmo_params, crosswind_from_right_mps)
 }
 
 fn aerodynamic_jump_launch_offset_for_crosswind_rad(
@@ -278,11 +266,9 @@ fn launch_state_with_aerodynamic_jump(
     mut initial_state: [f64; 6],
 ) -> [f64; 6] {
     let offset = match segmented_crosswind_from_right_mps {
-        Some(crosswind) => aerodynamic_jump_launch_offset_for_crosswind_rad(
-            inputs,
-            atmo_params,
-            crosswind,
-        ),
+        Some(crosswind) => {
+            aerodynamic_jump_launch_offset_for_crosswind_rad(inputs, atmo_params, crosswind)
+        }
         None => aerodynamic_jump_launch_offset_rad(inputs, atmo_params),
     };
     if offset != 0.0 {
@@ -378,21 +364,20 @@ pub fn fast_integrate(
     // conditions plus base_ratio; its local density/sound speed are lapsed at every substep.
     // Guard a missing standard-mode ratio by falling back to sea-level density (MBA-1157 owns
     // stricter validation of that separate contract).
-    let atmosphere = if let Some((air_density, speed_of_sound)) =
-        direct_atmosphere_values(params.atmo_params)
-    {
-        FastAtmosphere::Direct {
-            air_density,
-            speed_of_sound,
-        }
-    } else {
-        let base_density = if params.atmo_params.3 > 0.0 {
-            params.atmo_params.3 * 1.225
+    let atmosphere =
+        if let Some((air_density, speed_of_sound)) = direct_atmosphere_values(params.atmo_params) {
+            FastAtmosphere::Direct {
+                air_density,
+                speed_of_sound,
+            }
         } else {
-            1.225
+            let base_density = if params.atmo_params.3 > 0.0 {
+                params.atmo_params.3 * 1.225
+            } else {
+                1.225
+            };
+            FastAtmosphere::Standard { base_density }
         };
-        FastAtmosphere::Standard { base_density }
-    };
 
     // MBA-1137: borrow the optional downrange-segmented atmosphere once (queried 4x per step).
     let atmo_sock = params.atmo_sock.as_ref();
@@ -989,13 +974,12 @@ pub fn fast_integrate_with_segments(
 
     // Match plain fast_integrate: this entry point also receives a prebuilt launch state, so
     // apply the experimental aerodynamic-jump angle exactly once before the low-level integrator.
-    let segmented_crosswind_from_right_mps = if inputs.enable_aerodynamic_jump
-        && !wind_segments.is_empty()
-    {
-        WindSock::new(wind_segments.clone()).muzzle_crosswind_from_right_mps()
-    } else {
-        None
-    };
+    let segmented_crosswind_from_right_mps =
+        if inputs.enable_aerodynamic_jump && !wind_segments.is_empty() {
+            WindSock::new(wind_segments.clone()).muzzle_crosswind_from_right_mps()
+        } else {
+            None
+        };
     let initial_state = launch_state_with_aerodynamic_jump(
         inputs,
         params.atmo_params,
@@ -1421,7 +1405,11 @@ mod tests {
             compute_derivatives(
                 &state,
                 &inputs,
-                &WindSock::new(vec![crate::wind::WindSegment::new(wind_speed_kmh, 90.0, 2_000.0)]),
+                &WindSock::new(vec![crate::wind::WindSegment::new(
+                    wind_speed_kmh,
+                    90.0,
+                    2_000.0,
+                )]),
                 FastAtmosphere::Direct {
                     air_density: 1.225,
                     speed_of_sound: 340.0,
@@ -1700,16 +1688,19 @@ mod tests {
         // band B alone. This is a deliberate, exact-value update -- not a loosened
         // tolerance -- and would fail against the old step behavior (0.50).
         assert_eq!(velocity_segment_bc(1000.0, &segments, 0.7), 0.6); // At second segment start (blended)
-        // v=0.0 is the coverage-entry boundary's center, but that edge is a no-op blend:
-        // the clamp below band A returns the same value band A itself would, so this stays
-        // exactly flat and is unchanged from before MBA-1404.
+                                                                      // v=0.0 is the coverage-entry boundary's center, but that edge is a no-op blend:
+                                                                      // the clamp below band A returns the same value band A itself would, so this stays
+                                                                      // exactly flat and is unchanged from before MBA-1404.
         assert_eq!(velocity_segment_bc(0.0, &segments, 0.7), 0.45); // At min (coverage edge: still flat, no jump to smooth)
-        // v=998.999 is inside the gap-exit boundary's [998.875, 999.125] margin window
-        // (t=0.496), partway through the smoothstep blend from band A (0.45) toward the
-        // gap's fallback (0.7).
-        assert_eq!(velocity_segment_bc(998.999, &segments, 0.7), 0.5735000320000354); // Just below exclusive max (blending toward the gap)
-        // v=999.0 is the gap-exit boundary's exact center (t=0.5): halfway between band A
-        // (0.45) and the fallback (0.7), not the old hard fallback value (0.7) alone.
+                                                                    // v=998.999 is inside the gap-exit boundary's [998.875, 999.125] margin window
+                                                                    // (t=0.496), partway through the smoothstep blend from band A (0.45) toward the
+                                                                    // gap's fallback (0.7).
+        assert_eq!(
+            velocity_segment_bc(998.999, &segments, 0.7),
+            0.5735000320000354
+        ); // Just below exclusive max (blending toward the gap)
+           // v=999.0 is the gap-exit boundary's exact center (t=0.5): halfway between band A
+           // (0.45) and the fallback (0.7), not the old hard fallback value (0.7) alone.
         assert_eq!(velocity_segment_bc(999.0, &segments, 0.7), 0.575); // Gap starts at exclusive max (blended)
     }
 

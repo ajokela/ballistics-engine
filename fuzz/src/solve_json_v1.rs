@@ -3,10 +3,9 @@
 use arbitrary::{Result, Unstructured};
 use ballistics_engine::solve_json::{
     AtmosphereV1, DragModelV1, DropsReferenceV1, EffectsV1, PressureReferenceV1, ProjectileV1,
-    ResolvedWindV1, RifleV1, SamplingV1,
-    SchemaVersionV1, ShotV1, SolveRequestV1, SolveSuccessV1, SolverMethodV1, SolverV1,
-    TwistDirectionV1, WindReferenceV1, WindSegmentV1, WindShearModelV1, WindV1,
-    MAX_SOLVE_JSON_SAMPLES_V1,
+    ResolvedWindV1, RifleV1, SamplingV1, SchemaVersionV1, ShotV1, SolveRequestV1, SolveSuccessV1,
+    SolverMethodV1, SolverV1, TwistDirectionV1, WindReferenceV1, WindSegmentV1, WindShearModelV1,
+    WindV1, MAX_SOLVE_JSON_SAMPLES_V1,
 };
 
 use crate::domain::{ranged, wild};

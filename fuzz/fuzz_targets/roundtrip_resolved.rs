@@ -2,7 +2,9 @@
 
 use arbitrary::Unstructured;
 use ballistics_engine::solve_json::ResolvedWindV1;
-use ballistics_engine::{decode_solve_request_v1, solve_v1, ResolvedSolveRequestV1, SolveRequestV1};
+use ballistics_engine::{
+    decode_solve_request_v1, solve_v1, ResolvedSolveRequestV1, SolveRequestV1,
+};
 use ballistics_engine_fuzz::solve_json_v1::valid_request;
 use libfuzzer_sys::fuzz_target;
 

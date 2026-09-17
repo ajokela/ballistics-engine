@@ -36,13 +36,35 @@ fn bin() -> &'static str {
 
 /// The .308-class load the MBA-1476 reproduction was filed with.
 const LOAD: &[&str] = &[
-    "-v", "2700", "-b", "0.243", "-m", "175", "-d", "0.308", "--drag-model", "g7",
-    "--zero-distance", "100", "--sight-height", "1.5", "--temperature", "59", "--pressure",
-    "29.92", "--humidity", "50", "--altitude", "0",
+    "-v",
+    "2700",
+    "-b",
+    "0.243",
+    "-m",
+    "175",
+    "-d",
+    "0.308",
+    "--drag-model",
+    "g7",
+    "--zero-distance",
+    "100",
+    "--sight-height",
+    "1.5",
+    "--temperature",
+    "59",
+    "--pressure",
+    "29.92",
+    "--humidity",
+    "50",
+    "--altitude",
+    "0",
 ];
 
 fn run(args: &[&str]) -> std::process::Output {
-    Command::new(bin()).args(args).output().expect("run ballistics")
+    Command::new(bin())
+        .args(args)
+        .output()
+        .expect("run ballistics")
 }
 
 fn stdout_of(args: &[&str]) -> String {
@@ -90,7 +112,15 @@ fn range_table(start: u32, end: u32, step: u32) -> Vec<String> {
     let mut args: Vec<&str> = vec!["range-table"];
     args.extend_from_slice(LOAD);
     args.extend_from_slice(&[
-        "--adjustment-unit", "mil", "--start", &start, "--end", &end, "--step", &step, "--output",
+        "--adjustment-unit",
+        "mil",
+        "--start",
+        &start,
+        "--end",
+        &end,
+        "--step",
+        &step,
+        "--output",
         "csv",
     ]);
     csv_rows(&args)
@@ -141,7 +171,15 @@ fn come_ups_row_is_invariant_to_start_and_step() {
         let mut args: Vec<&str> = vec!["come-ups"];
         args.extend_from_slice(LOAD);
         args.extend_from_slice(&[
-            "--adjustment-unit", "mil", "--start", &start, "--end", &end, "--step", &step, "-o",
+            "--adjustment-unit",
+            "mil",
+            "--start",
+            &start,
+            "--end",
+            &end,
+            "--step",
+            &step,
+            "-o",
             "csv",
         ]);
         csv_rows(&args)
@@ -150,7 +188,10 @@ fn come_ups_row_is_invariant_to_start_and_step() {
     // range_yd,drop_mil,come_up_mil,velocity_fps,energy_ft-lb,time_s — every field but
     // come_up (index 2) is a property of the range alone.
     let independent = |row: &str| -> Vec<f64> {
-        [0usize, 1, 3, 4, 5].iter().map(|&i| field(row, i)).collect()
+        [0usize, 1, 3, 4, 5]
+            .iter()
+            .map(|&i| field(row, i))
+            .collect()
     };
 
     let reference = independent(&row_at(&come_ups(100, 1000, 100), 700));
@@ -172,8 +213,18 @@ fn wind_card_row_is_invariant_to_start_and_step() {
         let mut args: Vec<&str> = vec!["wind-card"];
         args.extend_from_slice(LOAD);
         args.extend_from_slice(&[
-            "--adjustment-unit", "mil", "--wind-speeds", "5,10,15", "--start", &start, "--end",
-            &end, "--step", &step, "-o", "csv",
+            "--adjustment-unit",
+            "mil",
+            "--wind-speeds",
+            "5,10,15",
+            "--start",
+            &start,
+            "--end",
+            &end,
+            "--step",
+            &step,
+            "-o",
+            "csv",
         ]);
         csv_rows(&args)
     };
@@ -287,8 +338,14 @@ fn mba_1476_extending_end_does_not_rewrite_an_existing_row() {
     // drop grows monotonically and velocity falls.
     let (drop700, drop900) = (field(&row_at(&long, 700), 1), field(&row_at(&long, 900), 1));
     let (vel700, vel900) = (field(&row_at(&long, 700), 5), field(&row_at(&long, 900), 5));
-    assert!(drop900 > drop700, "drop must grow with range ({drop700} -> {drop900})");
-    assert!(vel900 < vel700, "velocity must fall with range ({vel700} -> {vel900})");
+    assert!(
+        drop900 > drop700,
+        "drop must grow with range ({drop700} -> {drop900})"
+    );
+    assert!(
+        vel900 < vel700,
+        "velocity must fall with range ({vel700} -> {vel900})"
+    );
 }
 
 // ---------------------------------------------------------------------------------------
@@ -306,8 +363,20 @@ fn mba_1476_extending_end_does_not_rewrite_an_existing_row() {
 /// is enough to fail the cross-surface reach equality below for a reason that has nothing
 /// to do with the sampling behaviour it exists to guard. Pin it and the two agree exactly.
 const UNREACHABLE_LOAD: &[&str] = &[
-    "-v", "900", "-b", "0.1", "-m", "40", "-d", "0.224", "--drag-model", "g1", "--zero-distance",
-    "100", "--sight-height", "1.5",
+    "-v",
+    "900",
+    "-b",
+    "0.1",
+    "-m",
+    "40",
+    "-d",
+    "0.224",
+    "--drag-model",
+    "g1",
+    "--zero-distance",
+    "100",
+    "--sight-height",
+    "1.5",
 ];
 
 // ---------------------------------------------------------------------------------------
@@ -409,15 +478,22 @@ fn owned(parts: &[&str]) -> Vec<String> {
 fn surfaces() -> Vec<Surface> {
     /// A stepped card on one of the three single-load, `--step`-taking surfaces.
     /// `wind-card` additionally needs a wind column to have a matrix at all.
-    fn stepped(command: &str, load: Load, start: &str, end: &str, step: &str, output: &str)
-        -> Vec<String>
-    {
+    fn stepped(
+        command: &str,
+        load: Load,
+        start: &str,
+        end: &str,
+        step: &str,
+        output: &str,
+    ) -> Vec<String> {
         let mut argv = vec![command.to_string()];
         argv.extend(owned(load.flags()));
         if command == "wind-card" {
             argv.extend(owned(&["--wind-speeds", "10"]));
         }
-        argv.extend(owned(&["--start", start, "--end", end, "--step", step, "-o", output]));
+        argv.extend(owned(&[
+            "--start", start, "--end", end, "--step", step, "-o", output,
+        ]));
         argv
     }
     /// A one-row card whose only row is `end`, for the surfaces that accept `start == end`.
@@ -436,17 +512,13 @@ fn surfaces() -> Vec<Surface> {
         },
         Surface {
             name: "come-ups",
-            argv: |load, start, end, output| {
-                stepped("come-ups", load, start, end, "100", output)
-            },
+            argv: |load, start, end, output| stepped("come-ups", load, start, end, "100", output),
             furthest_row_argv: |load, end, output| one_row("come-ups", load, end, output),
             solves_the_shared_load: true,
         },
         Surface {
             name: "wind-card",
-            argv: |load, start, end, output| {
-                stepped("wind-card", load, start, end, "100", output)
-            },
+            argv: |load, start, end, output| stepped("wind-card", load, start, end, "100", output),
             furthest_row_argv: |load, end, output| one_row("wind-card", load, end, output),
             solves_the_shared_load: true,
         },
@@ -466,8 +538,11 @@ fn surfaces() -> Vec<Surface> {
             // `compare` refuses `--start == --end`, so its last row is put on `--end` with a
             // half-`end` step from a half-`end` start instead.
             furthest_row_argv: |load, end, output| {
-                let (start, step, end) =
-                    (format!("{:.4}", end / 2.0), format!("{:.4}", end / 2.0), format!("{end}"));
+                let (start, step, end) = (
+                    format!("{:.4}", end / 2.0),
+                    format!("{:.4}", end / 2.0),
+                    format!("{end}"),
+                );
                 let mut argv = vec!["compare".to_string()];
                 argv.extend(owned(load.compare_flags()));
                 // Same reason as UNREACHABLE_LOAD's: this command's default sight height is
@@ -533,7 +608,9 @@ fn reach_phrase(stderr: &str) -> String {
         .split_once("reaches only ")
         .unwrap_or_else(|| panic!("no reach stated in: {stderr}"));
     let mut words = tail.split_whitespace();
-    let value = words.next().unwrap_or_else(|| panic!("no reach value in: {stderr}"));
+    let value = words
+        .next()
+        .unwrap_or_else(|| panic!("no reach value in: {stderr}"));
     let unit: String = words
         .next()
         .unwrap_or_else(|| panic!("no reach unit in: {stderr}"))
@@ -546,9 +623,13 @@ fn reach_phrase(stderr: &str) -> String {
 /// The same figure as a number of yards.
 fn reach_yards(stderr: &str) -> f64 {
     let phrase = reach_phrase(stderr);
-    let (value, unit) = phrase.split_once(' ').unwrap_or_else(|| panic!("bad reach: {phrase}"));
+    let (value, unit) = phrase
+        .split_once(' ')
+        .unwrap_or_else(|| panic!("bad reach: {phrase}"));
     assert_eq!(unit, "yd", "these cards are imperial");
-    value.parse().unwrap_or_else(|_| panic!("bad reach: {phrase}"))
+    value
+        .parse()
+        .unwrap_or_else(|_| panic!("bad reach: {phrase}"))
 }
 
 /// Where [`Load::Short`]'s flight ends, in yards.
@@ -655,7 +736,10 @@ fn the_adaptive_cards_json_carries_the_same_truncated_block_as_the_others() {
         "reach must be the flight's own terminal distance; got {truncated}"
     );
     assert!(
-        truncated["message"].as_str().expect("message").starts_with("card truncated at"),
+        truncated["message"]
+            .as_str()
+            .expect("message")
+            .starts_with("card truncated at"),
         "the message must be the shared wording; got {truncated}"
     );
 
@@ -721,7 +805,9 @@ fn every_card_surface_still_refuses_a_card_with_no_reachable_row() {
 fn a_card_prints_the_rows_it_reaches_and_says_what_it_truncated() {
     let mut args: Vec<&str> = vec!["range-table"];
     args.extend_from_slice(UNREACHABLE_LOAD);
-    args.extend_from_slice(&["--start", "100", "--end", "2000", "--step", "100", "-o", "csv"]);
+    args.extend_from_slice(&[
+        "--start", "100", "--end", "2000", "--step", "100", "-o", "csv",
+    ]);
     let out = run(&args);
 
     assert!(
@@ -761,7 +847,9 @@ fn a_card_prints_the_rows_it_reaches_and_says_what_it_truncated() {
     // truncating must not perturb the rows that survive it.
     let mut exact: Vec<&str> = vec!["range-table"];
     exact.extend_from_slice(UNREACHABLE_LOAD);
-    exact.extend_from_slice(&["--start", "100", "--end", "800", "--step", "100", "-o", "csv"]);
+    exact.extend_from_slice(&[
+        "--start", "100", "--end", "800", "--step", "100", "-o", "csv",
+    ]);
     assert_eq!(
         stdout,
         stdout_of(&exact),
@@ -777,7 +865,9 @@ fn a_card_prints_the_rows_it_reaches_and_says_what_it_truncated() {
 fn a_truncated_card_carries_a_structured_field_on_json() {
     let mut args: Vec<&str> = vec!["range-table"];
     args.extend_from_slice(UNREACHABLE_LOAD);
-    args.extend_from_slice(&["--start", "100", "--end", "2000", "--step", "100", "-o", "json"]);
+    args.extend_from_slice(&[
+        "--start", "100", "--end", "2000", "--step", "100", "-o", "json",
+    ]);
     let card: serde_json::Value =
         serde_json::from_str(&stdout_of(&args)).expect("range-table json");
 
@@ -799,7 +889,9 @@ fn a_truncated_card_carries_a_structured_field_on_json() {
     // Additive: a card that runs to its requested end says nothing at all.
     let mut whole: Vec<&str> = vec!["range-table"];
     whole.extend_from_slice(UNREACHABLE_LOAD);
-    whole.extend_from_slice(&["--start", "100", "--end", "800", "--step", "100", "-o", "json"]);
+    whole.extend_from_slice(&[
+        "--start", "100", "--end", "800", "--step", "100", "-o", "json",
+    ]);
     let whole: serde_json::Value = serde_json::from_str(&stdout_of(&whole)).expect("json");
     assert!(
         whole.get("truncated").is_none(),
@@ -813,7 +905,9 @@ fn a_truncated_card_carries_a_structured_field_on_json() {
 fn a_card_whose_flight_reaches_no_row_at_all_is_still_refused() {
     let mut args: Vec<&str> = vec!["range-table"];
     args.extend_from_slice(UNREACHABLE_LOAD);
-    args.extend_from_slice(&["--start", "1000", "--end", "2000", "--step", "100", "-o", "csv"]);
+    args.extend_from_slice(&[
+        "--start", "1000", "--end", "2000", "--step", "100", "-o", "csv",
+    ]);
     let out = run(&args);
 
     assert!(
@@ -836,7 +930,16 @@ fn wind_card_truncates_rather_than_printing_zero_drift_cells() {
     let mut args: Vec<&str> = vec!["wind-card"];
     args.extend_from_slice(UNREACHABLE_LOAD);
     args.extend_from_slice(&[
-        "--wind-speeds", "10,20", "--start", "100", "--end", "2000", "--step", "100", "-o", "csv",
+        "--wind-speeds",
+        "10,20",
+        "--start",
+        "100",
+        "--end",
+        "2000",
+        "--step",
+        "100",
+        "-o",
+        "csv",
     ]);
     let out = run(&args);
 
@@ -874,7 +977,9 @@ fn wind_card_truncates_rather_than_printing_zero_drift_cells() {
 fn come_ups_and_compare_truncate_on_the_same_terms() {
     let mut come_ups: Vec<&str> = vec!["come-ups"];
     come_ups.extend_from_slice(UNREACHABLE_LOAD);
-    come_ups.extend_from_slice(&["--start", "100", "--end", "2000", "--step", "100", "-o", "csv"]);
+    come_ups.extend_from_slice(&[
+        "--start", "100", "--end", "2000", "--step", "100", "-o", "csv",
+    ]);
     let out = run(&come_ups);
     assert!(
         out.status.success(),
@@ -882,7 +987,10 @@ fn come_ups_and_compare_truncate_on_the_same_terms() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("\n800,") && !stdout.contains("\n900,"), "{stdout}");
+    assert!(
+        stdout.contains("\n800,") && !stdout.contains("\n900,"),
+        "{stdout}"
+    );
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("card truncated at 800 yd"),
         "come-ups must state the truncation"
@@ -890,8 +998,21 @@ fn come_ups_and_compare_truncate_on_the_same_terms() {
 
     // compare: one load reaches far, one does not. The card runs to the shorter, and says so.
     let out = run(&[
-        "compare", "--load", "far:g7:0.3:175:2800", "--load", "short:g1:0.1:40:900",
-        "--zero-distance", "100", "--start", "100", "--end", "2000", "--step", "100", "-o", "csv",
+        "compare",
+        "--load",
+        "far:g7:0.3:175:2800",
+        "--load",
+        "short:g1:0.1:40:900",
+        "--zero-distance",
+        "100",
+        "--start",
+        "100",
+        "--end",
+        "2000",
+        "--step",
+        "100",
+        "-o",
+        "csv",
     ]);
     assert!(
         out.status.success(),
@@ -899,7 +1020,10 @@ fn come_ups_and_compare_truncate_on_the_same_terms() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("\n800,") && !stdout.contains("\n900,"), "{stdout}");
+    assert!(
+        stdout.contains("\n800,") && !stdout.contains("\n900,"),
+        "{stdout}"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("load 'short'") && stderr.contains("card truncated at 800 yd"),
@@ -976,8 +1100,7 @@ fn the_reported_reach_does_not_move_with_end_on_any_surface() {
 
 mod bridge {
     use ballistics_engine::card_service::{
-        come_ups_v1, range_table_v1, wind_card_v1, CardRequestV1, CardResponseV1,
-        CardServiceError,
+        come_ups_v1, range_table_v1, wind_card_v1, CardRequestV1, CardResponseV1, CardServiceError,
     };
 
     fn request(start: f64, end: f64, step: f64) -> CardRequestV1 {
@@ -1049,10 +1172,7 @@ mod bridge {
 
     fn strip_come_up(row_json: &str) -> String {
         let mut value: serde_json::Value = serde_json::from_str(row_json).expect("row json");
-        value
-            .as_object_mut()
-            .expect("row object")
-            .remove("come_up");
+        value.as_object_mut().expect("row object").remove("come_up");
         value.to_string()
     }
 
@@ -1089,7 +1209,10 @@ mod bridge {
                 .unwrap_or_else(|e| panic!("card.{name}: the reachable rows must survive: {e}"));
 
             let last = card.rows.last().expect("at least one reachable row").range;
-            assert_eq!(last, 800.0, "card.{name}: rows must stop at the flight's reach");
+            assert_eq!(
+                last, 800.0,
+                "card.{name}: rows must stop at the flight's reach"
+            );
             assert!(
                 !card.rows.iter().any(|row| row.range > 800.0),
                 "card.{name}: a row past the flight's reach was fabricated"
@@ -1184,7 +1307,9 @@ mod bridge {
 #[cfg(feature = "pdf")]
 mod printed {
     use super::pdf_text;
-    use ballistics_engine::card_service::{pdf_card_v1, range_table_v1, CardRequestV1, StoredCardV1};
+    use ballistics_engine::card_service::{
+        pdf_card_v1, range_table_v1, CardRequestV1, StoredCardV1,
+    };
 
     /// The ticket's own reproduction: a .22-class load asked for a 100..1200 yd card. The
     /// solved flight ends around 871 yd, so 18 rows print and the rest do not.
@@ -1271,7 +1396,10 @@ mod printed {
     #[test]
     fn a_card_that_reaches_its_end_prints_no_notice() {
         let card = pdf_card_v1(&whole_request(), None).expect("card");
-        assert!(card.truncation.is_none(), "this card reaches every row it asked for");
+        assert!(
+            card.truncation.is_none(),
+            "this card reaches every row it asked for"
+        );
 
         let text = pdf_text::tokens(&card.pdf_bytes, "whole card").join(" ");
         assert!(
@@ -1352,7 +1480,16 @@ fn the_adaptive_cards_printed_form_states_its_truncation() {
     let mut args: Vec<&str> = vec!["adaptive-card"];
     args.extend_from_slice(UNREACHABLE_LOAD);
     let path_arg = path.to_string_lossy().to_string();
-    args.extend_from_slice(&["--start", "100", "--end", "1200", "-o", "pdf", "--output-file", &path_arg]);
+    args.extend_from_slice(&[
+        "--start",
+        "100",
+        "--end",
+        "1200",
+        "-o",
+        "pdf",
+        "--output-file",
+        &path_arg,
+    ]);
     let out = run(&args);
     assert!(
         out.status.success(),

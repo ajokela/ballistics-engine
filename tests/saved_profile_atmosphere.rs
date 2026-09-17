@@ -35,8 +35,19 @@ fn save_profile(home: &std::path::Path, name: &str, extra: &[&str]) {
     let output = Command::new(BIN)
         .env("HOME", home)
         .args([
-            "profile", "save", name, "--velocity", "2700", "--bc", "0.243", "--drag-model", "g7",
-            "--mass", "175", "--diameter", "0.308",
+            "profile",
+            "save",
+            name,
+            "--velocity",
+            "2700",
+            "--bc",
+            "0.243",
+            "--drag-model",
+            "g7",
+            "--mass",
+            "175",
+            "--diameter",
+            "0.308",
         ])
         .args(extra)
         .output()
@@ -90,7 +101,15 @@ fn a_profiles_stored_atmosphere_reaches_the_trajectory() {
     let bare = impact_velocity(
         &home,
         &[
-            "--velocity", "2700", "--bc", "0.243", "--drag-model", "g7", "-m", "175", "-d",
+            "--velocity",
+            "2700",
+            "--bc",
+            "0.243",
+            "--drag-model",
+            "g7",
+            "-m",
+            "175",
+            "-d",
             "0.308",
         ],
     );
@@ -132,14 +151,17 @@ fn a_stored_mode_is_not_applied_to_a_cli_supplied_pressure() {
     save_profile(&home, "qnh", &args);
 
     let inherited = impact_velocity(&home, &["--saved-profile", "qnh", "--pressure", "24.90"]);
-    let explicit_absolute = impact_velocity(&home, &[
-        "--saved-profile",
-        "qnh",
-        "--pressure",
-        "24.90",
-        "--pressure-type",
-        "absolute",
-    ]);
+    let explicit_absolute = impact_velocity(
+        &home,
+        &[
+            "--saved-profile",
+            "qnh",
+            "--pressure",
+            "24.90",
+            "--pressure-type",
+            "absolute",
+        ],
+    );
 
     assert_eq!(
         inherited, explicit_absolute,
@@ -157,12 +179,10 @@ fn an_explicit_pressure_type_overrides_the_stored_one() {
     save_profile(&home, "qnh", &args);
 
     let stored = impact_velocity(&home, &["--saved-profile", "qnh"]);
-    let overridden = impact_velocity(&home, &[
-        "--saved-profile",
-        "qnh",
-        "--pressure-type",
-        "absolute",
-    ]);
+    let overridden = impact_velocity(
+        &home,
+        &["--saved-profile", "qnh", "--pressure-type", "absolute"],
+    );
 
     assert_ne!(
         stored, overridden,
@@ -181,7 +201,15 @@ fn a_profile_without_a_stored_atmosphere_is_byte_identical_to_no_profile() {
     let bare = run_stdout(
         &home,
         &[
-            "--velocity", "2700", "--bc", "0.243", "--drag-model", "g7", "-m", "175", "-d",
+            "--velocity",
+            "2700",
+            "--bc",
+            "0.243",
+            "--drag-model",
+            "g7",
+            "-m",
+            "175",
+            "-d",
             "0.308",
         ],
     );

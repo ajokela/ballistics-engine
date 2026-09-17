@@ -1,14 +1,16 @@
 #![no_main]
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Unstructured;
 use ballistics_engine::{
     calculate_zero_angle, AtmosphericConditions, TrajectorySolver, WindConditions,
 };
 use ballistics_engine_fuzz::domain::valid_inputs;
+use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
-    let Ok(inputs) = valid_inputs(&mut u) else { return };
+    let Ok(inputs) = valid_inputs(&mut u) else {
+        return;
+    };
     let target_distance = inputs.target_distance;
     let target_height = 0.0; // zero at the same height as the bore line
 
@@ -20,7 +22,10 @@ fuzz_target!(|data: &[u8]| {
             assert!(angle.is_finite(), "zero angle not finite: {angle}");
             // The zero search brackets [0, 0.785] rad (it expands high_angle up to 45°),
             // so any returned angle is <= ~0.785. Flag only truly out-of-range values.
-            assert!(angle.abs() < 0.8, "absurd zero angle {angle} rad for {target_distance} m");
+            assert!(
+                angle.abs() < 0.8,
+                "absurd zero angle {angle} rad for {target_distance} m"
+            );
 
             // Round-trip: firing at the solved angle should land ~on the target height at
             // target_distance (the solver's own convergence contract). Reproduce the zero
@@ -29,7 +34,11 @@ fuzz_target!(|data: &[u8]| {
             let mut z = inputs.clone();
             z.muzzle_angle = angle;
             z.enable_aerodynamic_jump = false;
-            let mut solver = TrajectorySolver::new(z, WindConditions::default(), AtmosphericConditions::default());
+            let mut solver = TrajectorySolver::new(
+                z,
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            );
             solver.set_max_range(target_distance * 2.0);
             solver.set_time_step(0.001);
             if let Ok(r) = solver.solve() {
@@ -40,7 +49,11 @@ fuzz_target!(|data: &[u8]| {
                         let p1 = &r.points[i - 1];
                         let p2 = &r.points[i];
                         let dx = p2.position.x - p1.position.x;
-                        let t = if dx.abs() < 1e-9 { 0.0 } else { (target_distance - p1.position.x) / dx };
+                        let t = if dx.abs() < 1e-9 {
+                            0.0
+                        } else {
+                            (target_distance - p1.position.x) / dx
+                        };
                         y_at = Some(p1.position.y + t * (p2.position.y - p1.position.y));
                         break;
                     }

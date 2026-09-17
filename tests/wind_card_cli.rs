@@ -4,12 +4,27 @@ use std::process::{Command, Output};
 
 const BIN: &str = env!("CARGO_BIN_EXE_ballistics");
 const BASE: &[&str] = &[
-    "wind-card", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
-    "--zero-distance", "100", "--end", "600",
+    "wind-card",
+    "-v",
+    "2700",
+    "-m",
+    "168",
+    "-d",
+    "0.308",
+    "-b",
+    "0.5",
+    "--zero-distance",
+    "100",
+    "--end",
+    "600",
 ];
 
 fn run(extra: &[&str]) -> Output {
-    Command::new(BIN).args(BASE).args(extra).output().expect("spawn")
+    Command::new(BIN)
+        .args(BASE)
+        .args(extra)
+        .output()
+        .expect("spawn")
 }
 
 /// Largest drift magnitude parsed from a card's table body (MIL numbers).
@@ -36,10 +51,16 @@ fn default_card_is_byte_identical_to_wind_angle_90_numbers() {
         String::from_utf8_lossy(&legacy.stdout).to_string(),
         String::from_utf8_lossy(&ninety.stdout).to_string(),
     );
-    assert!(l.contains("full-value"), "legacy default must keep legacy labeling");
+    assert!(
+        l.contains("full-value"),
+        "legacy default must keep legacy labeling"
+    );
     let (dl, dn) = (max_drift(&l), max_drift(&n));
     assert!(dl > 0.0, "legacy card must contain drift numbers");
-    assert!((dl - dn).abs() < 1e-9, "90° numbers must equal legacy: {dl} vs {dn}");
+    assert!(
+        (dl - dn).abs() < 1e-9,
+        "90° numbers must equal legacy: {dl} vs {dn}"
+    );
 }
 
 #[test]
@@ -108,7 +129,10 @@ fn mirrored_angles_have_opposite_signed_drift() {
             .expect("wind_10 drift")
     };
     let (right, left) = (signed_drift("90"), signed_drift("270"));
-    assert!(right.abs() > 0.1, "sanity: real drift expected, got {right}");
+    assert!(
+        right.abs() > 0.1,
+        "sanity: real drift expected, got {right}"
+    );
     assert!(
         (right + left).abs() < 1e-9,
         "90° and 270° must be antisymmetric: {right} vs {left}"

@@ -181,8 +181,8 @@ impl BcCorrectionTable {
         // Get type index (0 = G1, 1 = G7), clamped to the table's type axis so a
         // G1-only table (num_types == 1) queried with "G7" stays in bounds instead of
         // producing an out-of-range flat_index (mirrors Bc5dTable::lookup).
-        let type_idx =
-            (if bc_type.to_uppercase() == "G1" { 0 } else { 1 }).min(self.num_types.saturating_sub(1));
+        let type_idx = (if bc_type.to_uppercase() == "G1" { 0 } else { 1 })
+            .min(self.num_types.saturating_sub(1));
 
         // Find interpolation indices and weights for each dimension
         let (bc_idx, bc_weight) = self.interp_idx(bc as f32, &self.bc_bins);
@@ -199,9 +199,21 @@ impl BcCorrectionTable {
                     for dl in 0..2 {
                         // Calculate weight for this corner
                         let w = (if di == 0 { 1.0 - bc_weight } else { bc_weight })
-                            * (if dj == 0 { 1.0 - mass_weight } else { mass_weight })
-                            * (if dk == 0 { 1.0 - length_weight } else { length_weight })
-                            * (if dl == 0 { 1.0 - vel_weight } else { vel_weight });
+                            * (if dj == 0 {
+                                1.0 - mass_weight
+                            } else {
+                                mass_weight
+                            })
+                            * (if dk == 0 {
+                                1.0 - length_weight
+                            } else {
+                                length_weight
+                            })
+                            * (if dl == 0 {
+                                1.0 - vel_weight
+                            } else {
+                                vel_weight
+                            });
 
                         // Get clamped indices
                         let i = (bc_idx + di).min(self.bc_bins.len() - 1);
@@ -293,7 +305,14 @@ impl BcCorrectionTable {
     }
 
     /// Calculate flat array index from 5D indices
-    fn flat_index(&self, type_idx: usize, bc_idx: usize, mass_idx: usize, length_idx: usize, vel_idx: usize) -> usize {
+    fn flat_index(
+        &self,
+        type_idx: usize,
+        bc_idx: usize,
+        mass_idx: usize,
+        length_idx: usize,
+        vel_idx: usize,
+    ) -> usize {
         let n_bc = self.bc_bins.len();
         let n_mass = self.mass_bins.len();
         let n_length = self.length_bins.len();

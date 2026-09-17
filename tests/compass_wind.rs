@@ -70,10 +70,20 @@ fn explicit_shooter_mode_is_byte_identical_to_the_default() {
         trajectory_json(&home, &["--wind-direction", "90", "--wind-ref", "shooter"]),
     );
     assert_eq!(
-        trajectory_json(&home, &["--wind-direction", "90", "--shot-direction", "220"]),
         trajectory_json(
             &home,
-            &["--wind-direction", "90", "--shot-direction", "220", "--wind-ref", "shooter"],
+            &["--wind-direction", "90", "--shot-direction", "220"]
+        ),
+        trajectory_json(
+            &home,
+            &[
+                "--wind-direction",
+                "90",
+                "--shot-direction",
+                "220",
+                "--wind-ref",
+                "shooter"
+            ],
         ),
     );
 }
@@ -87,14 +97,28 @@ fn bearing_equal_to_azimuth_is_a_pure_headwind() {
 
     let north_north = trajectory_json(
         &home,
-        &["--wind-ref", "compass", "--shot-direction", "0", "--wind-direction", "0"],
+        &[
+            "--wind-ref",
+            "compass",
+            "--shot-direction",
+            "0",
+            "--wind-direction",
+            "0",
+        ],
     );
     let headwind = trajectory_json(&home, &["--wind-direction", "0", "--shot-direction", "0"]);
     assert_eq!(north_north, headwind);
 
     let sw_sw = trajectory_json(
         &home,
-        &["--wind-ref", "compass", "--shot-direction", "220", "--wind-direction", "220"],
+        &[
+            "--wind-ref",
+            "compass",
+            "--shot-direction",
+            "220",
+            "--wind-direction",
+            "220",
+        ],
     );
     let headwind_220 =
         trajectory_json(&home, &["--wind-direction", "0", "--shot-direction", "220"]);
@@ -110,7 +134,14 @@ fn bearing_90_on_a_northbound_shot_is_wind_from_the_right() {
 
     let compass = trajectory_json(
         &home,
-        &["--wind-ref", "compass", "--shot-direction", "0", "--wind-direction", "90"],
+        &[
+            "--wind-ref",
+            "compass",
+            "--shot-direction",
+            "0",
+            "--wind-direction",
+            "90",
+        ],
     );
     let shooter = trajectory_json(&home, &["--wind-direction", "90", "--shot-direction", "0"]);
     assert_eq!(compass, shooter);
@@ -118,7 +149,10 @@ fn bearing_90_on_a_northbound_shot_is_wind_from_the_right() {
     let v: serde_json::Value = serde_json::from_str(&compass).unwrap();
     let last = v["trajectory"].as_array().unwrap().last().unwrap().clone();
     let x = last["x"].as_f64().unwrap();
-    assert!(x < 0.0, "wind from the shooter's right must drift x negative, got {x}");
+    assert!(
+        x < 0.0,
+        "wind from the shooter's right must drift x negative, got {x}"
+    );
 }
 
 /// Segments in compass mode are each re-referenced: a bearing-annotated segmented run
@@ -130,16 +164,26 @@ fn compass_segments_are_each_re_referenced() {
     let compass = trajectory_json(
         &home,
         &[
-            "--wind-ref", "compass", "--shot-direction", "90",
-            "--wind-segment", "10:180:300", "--wind-segment", "5:45:600",
+            "--wind-ref",
+            "compass",
+            "--shot-direction",
+            "90",
+            "--wind-segment",
+            "10:180:300",
+            "--wind-segment",
+            "5:45:600",
         ],
     );
     // bearing 180 - azimuth 90 = relative 90; bearing 45 - 90 = -45 -> 315.
     let shooter = trajectory_json(
         &home,
         &[
-            "--shot-direction", "90",
-            "--wind-segment", "10:90:300", "--wind-segment", "5:315:600",
+            "--shot-direction",
+            "90",
+            "--wind-segment",
+            "10:90:300",
+            "--wind-segment",
+            "5:315:600",
         ],
     );
     assert_eq!(compass, shooter);
@@ -154,8 +198,16 @@ fn clock_positions_are_rejected_in_compass_mode() {
     let mut args = vec!["trajectory"];
     args.extend_from_slice(LOAD);
     args.extend_from_slice(&[
-        "--max-range", "400", "--wind-speed", "10",
-        "--wind-ref", "compass", "--shot-direction", "0", "--wind-direction", "3oc",
+        "--max-range",
+        "400",
+        "--wind-speed",
+        "10",
+        "--wind-ref",
+        "compass",
+        "--shot-direction",
+        "0",
+        "--wind-direction",
+        "3oc",
     ]);
     let out = run(&home, &args);
     assert!(!out.status.success());
@@ -168,8 +220,14 @@ fn clock_positions_are_rejected_in_compass_mode() {
     let mut args = vec!["trajectory"];
     args.extend_from_slice(LOAD);
     args.extend_from_slice(&[
-        "--max-range", "400",
-        "--wind-ref", "compass", "--shot-direction", "0", "--wind-segment", "10:3oc:400",
+        "--max-range",
+        "400",
+        "--wind-ref",
+        "compass",
+        "--shot-direction",
+        "0",
+        "--wind-segment",
+        "10:3oc:400",
     ]);
     let out = run(&home, &args);
     assert!(!out.status.success());
@@ -183,12 +241,19 @@ fn clock_positions_are_rejected_in_compass_mode() {
 /// Compass mode without a shot azimuth is a hard error naming --shot-direction, on
 /// trajectory and monte-carlo both (never a silent treat-as-shooter-relative).
 #[test]
-fn compass_without_shot_direction_is_a_hard_error()  {
+fn compass_without_shot_direction_is_a_hard_error() {
     let home = private_home();
 
     let mut args = vec!["trajectory"];
     args.extend_from_slice(LOAD);
-    args.extend_from_slice(&["--max-range", "400", "--wind-ref", "compass", "--wind-direction", "90"]);
+    args.extend_from_slice(&[
+        "--max-range",
+        "400",
+        "--wind-ref",
+        "compass",
+        "--wind-direction",
+        "90",
+    ]);
     let out = run(&home, &args);
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
@@ -197,7 +262,14 @@ fn compass_without_shot_direction_is_a_hard_error()  {
     let mut args = vec!["monte-carlo"];
     args.extend_from_slice(LOAD);
     args.extend_from_slice(&[
-        "-n", "50", "--wind-speed", "10", "--wind-direction", "90", "--wind-ref", "compass",
+        "-n",
+        "50",
+        "--wind-speed",
+        "10",
+        "--wind-direction",
+        "90",
+        "--wind-ref",
+        "compass",
     ]);
     let out = run(&home, &args);
     assert!(!out.status.success());
@@ -216,16 +288,40 @@ fn monte_carlo_converts_before_sampling_seeded_wez_equality() {
         let mut args = vec!["monte-carlo"];
         args.extend_from_slice(LOAD);
         args.extend_from_slice(&[
-            "-n", "300", "--wind-speed", "10", "--wind-std", "2",
-            "--wind-direction-std", "15", "--velocity-std", "10",
-            "--wez", "--target-size", "2",
-            "--wez-start", "200", "--wez-end", "600", "--wez-step", "200", "-o", "full",
+            "-n",
+            "300",
+            "--wind-speed",
+            "10",
+            "--wind-std",
+            "2",
+            "--wind-direction-std",
+            "15",
+            "--velocity-std",
+            "10",
+            "--wez",
+            "--target-size",
+            "2",
+            "--wez-start",
+            "200",
+            "--wez-end",
+            "600",
+            "--wez-step",
+            "200",
+            "-o",
+            "full",
         ]);
         args.extend_from_slice(extra);
         run_ok(&home, &args)
     };
 
-    let compass = wez(&["--wind-ref", "compass", "--shot-direction", "30", "--wind-direction", "120"]);
+    let compass = wez(&[
+        "--wind-ref",
+        "compass",
+        "--shot-direction",
+        "30",
+        "--wind-direction",
+        "120",
+    ]);
     let shooter = wez(&["--wind-direction", "90"]);
     assert_eq!(compass, shooter);
 }
@@ -344,7 +440,10 @@ fn solve_json_wind_reference_converts_at_the_wire() {
     let resolved_dir = compass_response["resolved_request"]["wind"]["direction_from_rad"]
         .as_f64()
         .expect("resolved constant wind direction");
-    assert!((resolved_dir - std::f64::consts::FRAC_PI_2).abs() < 1e-12, "{resolved_dir}");
+    assert!(
+        (resolved_dir - std::f64::consts::FRAC_PI_2).abs() < 1e-12,
+        "{resolved_dir}"
+    );
 
     // Segments convert per segment too.
     let mut segmented = base_request();
@@ -358,8 +457,13 @@ fn solve_json_wind_reference_converts_at_the_wire() {
     });
     let seg_response = solve_json(&segmented);
     assert_eq!(seg_response["status"], "ok", "{seg_response}");
-    let segs = seg_response["resolved_request"]["wind"]["segments"].as_array().unwrap();
-    assert!((segs[0]["direction_from_rad"].as_f64().unwrap() - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+    let segs = seg_response["resolved_request"]["wind"]["segments"]
+        .as_array()
+        .unwrap();
+    assert!(
+        (segs[0]["direction_from_rad"].as_f64().unwrap() - std::f64::consts::FRAC_PI_2).abs()
+            < 1e-12
+    );
     // PI/2 - PI/2 = 0 (a pure headwind segment).
     assert!(segs[1]["direction_from_rad"].as_f64().unwrap().abs() < 1e-12);
 }
@@ -372,7 +476,10 @@ fn solve_json_compass_requires_shot_azimuth_and_validates_values() {
     compass["wind"]["wind_reference"] = serde_json::json!("compass");
     let response = solve_json(&compass);
     assert_eq!(response["status"], "error", "{response}");
-    assert_eq!(response["error"]["path"], "$.wind.wind_reference", "{response}");
+    assert_eq!(
+        response["error"]["path"], "$.wind.wind_reference",
+        "{response}"
+    );
     assert!(
         response["error"]["message"]
             .as_str()
@@ -393,5 +500,8 @@ fn solve_json_compass_requires_shot_azimuth_and_validates_values() {
     bogus["wind"]["wind_reference"] = serde_json::json!("magnetic");
     let response = solve_json(&bogus);
     assert_eq!(response["status"], "error");
-    assert_eq!(response["error"]["path"], "$.wind.wind_reference", "{response}");
+    assert_eq!(
+        response["error"]["path"], "$.wind.wind_reference",
+        "{response}"
+    );
 }

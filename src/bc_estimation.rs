@@ -101,9 +101,10 @@ pub(crate) fn velocity_segment_bc(
 /// The pre-MBA-1404 step/clamp lookup, unchanged. Also used by [`velocity_segment_bc`] to
 /// sample the value on each side of a boundary when building a blend.
 fn raw_velocity_segment_bc(velocity_fps: f64, segments: &[BCSegmentData], fallback_bc: f64) -> f64 {
-    if let Some(segment) = segments.iter().find(|segment| {
-        velocity_fps >= segment.velocity_min && velocity_fps < segment.velocity_max
-    }) {
+    if let Some(segment) = segments
+        .iter()
+        .find(|segment| velocity_fps >= segment.velocity_min && velocity_fps < segment.velocity_max)
+    {
         return segment.bc_value;
     }
 
@@ -653,14 +654,15 @@ mod tests {
             assert_eq!(g7.len(), g1.len());
             assert_eq!(lowercase_g7.len(), g7.len());
 
-            for ((g1_band, g7_band), lowercase_band) in
-                g1.iter().zip(&g7).zip(&lowercase_g7)
-            {
+            for ((g1_band, g7_band), lowercase_band) in g1.iter().zip(&g7).zip(&lowercase_g7) {
                 assert_eq!(g7_band.velocity_min, g1_band.velocity_min);
                 assert_eq!(g7_band.velocity_max, g1_band.velocity_max);
                 assert_eq!(lowercase_band.velocity_min, g7_band.velocity_min);
                 assert_eq!(lowercase_band.velocity_max, g7_band.velocity_max);
-                assert_eq!(lowercase_band.bc_value.to_bits(), g7_band.bc_value.to_bits());
+                assert_eq!(
+                    lowercase_band.bc_value.to_bits(),
+                    g7_band.bc_value.to_bits()
+                );
                 let expected_g7 = base_bc - (base_bc - g1_band.bc_value) * 0.8;
                 assert!(
                     (g7_band.bc_value - expected_g7).abs() < 1e-12,
@@ -689,11 +691,7 @@ mod tests {
                 ("FMJ", &[1.0, 0.964, 0.88][..]),
             ] {
                 let segments = BCSegmentEstimator::estimate_bc_segments(
-                    base_bc,
-                    caliber,
-                    weight,
-                    model,
-                    drag_model,
+                    base_bc, caliber, weight, model, drag_model,
                 );
                 assert_eq!(segments.len(), raw_retentions.len());
 
@@ -719,14 +717,12 @@ mod tests {
         // High SD used to multiply every band above nominal and then cap them
         // all to base_bc, erasing the degradation ladder.
         let high_sd_base_bc = 0.3;
-        let high_sd_segments = BCSegmentEstimator::estimate_bc_segments(
-            high_sd_base_bc,
-            0.308,
-            220.0,
-            "SMK BT",
-            "G7",
+        let high_sd_segments =
+            BCSegmentEstimator::estimate_bc_segments(high_sd_base_bc, 0.308, 220.0, "SMK BT", "G7");
+        assert_eq!(
+            high_sd_segments[0].bc_value.to_bits(),
+            high_sd_base_bc.to_bits()
         );
-        assert_eq!(high_sd_segments[0].bc_value.to_bits(), high_sd_base_bc.to_bits());
         assert!(high_sd_segments.last().unwrap().bc_value < high_sd_base_bc);
         assert!((high_sd_segments.last().unwrap().bc_value - 0.28615384615384615).abs() < 1e-12);
     }
@@ -831,7 +827,7 @@ mod tests {
         assert_eq!(smoothstep(0.0), 0.0);
         assert_eq!(smoothstep(1.0), 1.0);
         assert_eq!(smoothstep(0.5), 0.5); // 3*0.25 - 2*0.125 = 0.75 - 0.25 = 0.5
-        // Out-of-range t is clamped rather than extrapolated.
+                                          // Out-of-range t is clamped rather than extrapolated.
         assert_eq!(smoothstep(-1.0), 0.0);
         assert_eq!(smoothstep(2.0), 1.0);
     }
@@ -853,8 +849,14 @@ mod tests {
         ];
 
         // Deep mid-band: exactly flat, bit-identical to the plain band value.
-        assert_eq!(velocity_segment_bc(200.0, &segments, 0.9).to_bits(), 0.25f64.to_bits());
-        assert_eq!(velocity_segment_bc(1800.0, &segments, 0.9).to_bits(), 0.75f64.to_bits());
+        assert_eq!(
+            velocity_segment_bc(200.0, &segments, 0.9).to_bits(),
+            0.25f64.to_bits()
+        );
+        assert_eq!(
+            velocity_segment_bc(1800.0, &segments, 0.9).to_bits(),
+            0.75f64.to_bits()
+        );
 
         // Exactly at the boundary (t = 0.5): the midpoint of the two band values.
         assert_eq!(velocity_segment_bc(1000.0, &segments, 0.9), 0.5);
@@ -915,12 +917,28 @@ mod tests {
     #[test]
     fn cache_gives_each_distinct_table_its_own_byte_identical_answer_when_interleaved() {
         let table_a = vec![
-            BCSegmentData { velocity_min: 0.0, velocity_max: 1000.0, bc_value: 0.25 },
-            BCSegmentData { velocity_min: 1000.0, velocity_max: 2000.0, bc_value: 0.75 },
+            BCSegmentData {
+                velocity_min: 0.0,
+                velocity_max: 1000.0,
+                bc_value: 0.25,
+            },
+            BCSegmentData {
+                velocity_min: 1000.0,
+                velocity_max: 2000.0,
+                bc_value: 0.75,
+            },
         ];
         let table_b = vec![
-            BCSegmentData { velocity_min: 0.0, velocity_max: 900.0, bc_value: 0.40 },
-            BCSegmentData { velocity_min: 900.0, velocity_max: 1800.0, bc_value: 0.60 },
+            BCSegmentData {
+                velocity_min: 0.0,
+                velocity_max: 900.0,
+                bc_value: 0.40,
+            },
+            BCSegmentData {
+                velocity_min: 900.0,
+                velocity_max: 1800.0,
+                bc_value: 0.60,
+            },
         ];
 
         // Reference: each table queried in isolation (fresh cache state going in).
@@ -1011,7 +1029,10 @@ mod tests {
     fn empty_table_never_blends_and_always_returns_the_fallback_exactly() {
         let empty: Vec<BCSegmentData> = vec![];
         for v in [-1e6, 0.0, 500.0, 1e6] {
-            assert_eq!(velocity_segment_bc(v, &empty, 0.73).to_bits(), 0.73f64.to_bits());
+            assert_eq!(
+                velocity_segment_bc(v, &empty, 0.73).to_bits(),
+                0.73f64.to_bits()
+            );
         }
     }
 

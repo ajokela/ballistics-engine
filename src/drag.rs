@@ -1,9 +1,9 @@
 use crate::transonic_drag::{get_projectile_shape, transonic_correction, ProjectileShape};
 use crate::DragModel;
 use ndarray::ArrayD;
-use std::sync::LazyLock;
 /// Drag coefficient calculations for ballistics using actual drag table data
 use std::path::Path;
+use std::sync::LazyLock;
 
 /// Drag table data structure
 #[derive(Debug, Clone)]
@@ -62,7 +62,10 @@ impl DragTable {
                 ));
             }
         }
-        Ok(Self { mach_values, cd_values })
+        Ok(Self {
+            mach_values,
+            cd_values,
+        })
     }
 
     /// Parse a user drag deck from CSV text: two columns `mach,cd` per line. Blank lines and
@@ -142,7 +145,10 @@ impl DragTable {
         if mach >= self.mach_values[n - 1] {
             // Guard against a caller-built mismatched table (`new` is infallible): index the Cd
             // axis defensively rather than trusting the Mach-derived length.
-            return self.cd_values.get(n - 1).copied()
+            return self
+                .cd_values
+                .get(n - 1)
+                .copied()
                 .or_else(|| self.cd_values.last().copied())
                 .unwrap_or(0.5);
         }
@@ -1078,10 +1084,7 @@ mod tests {
 
     #[test]
     fn nonuniform_cubic_reproduces_affine_data() {
-        let table = DragTable::new(
-            vec![0.0, 1.0, 3.0, 4.0],
-            vec![0.25, 0.3125, 0.4375, 0.5],
-        );
+        let table = DragTable::new(vec![0.0, 1.0, 3.0, 4.0], vec![0.25, 0.3125, 0.4375, 0.5]);
 
         for mach in [1.5, 2.5] {
             let expected = 0.25 + mach / 16.0;
@@ -1408,14 +1411,17 @@ mod tests {
             ("RA4", include_str!("../data/ra4.csv")),
         ];
         for (name, csv) in decks {
-            let table =
-                DragTable::from_csv_str(csv).unwrap_or_else(|e| panic!("{name} failed to parse: {e}"));
+            let table = DragTable::from_csv_str(csv)
+                .unwrap_or_else(|e| panic!("{name} failed to parse: {e}"));
             assert!(
                 table.mach_values.len() > 20,
                 "{name}: expected a high-resolution table, got {} points",
                 table.mach_values.len()
             );
-            assert_eq!(table.mach_values[0], 0.0, "{name}: expected Mach axis to start at 0.0");
+            assert_eq!(
+                table.mach_values[0], 0.0,
+                "{name}: expected Mach axis to start at 0.0"
+            );
         }
 
         // Also sweep the full public get_drag_coefficient API across all 9 families (including
@@ -1479,7 +1485,10 @@ mod tests {
         let result = solver.solve().expect("solve should succeed");
         assert!(result.max_range.is_finite());
         assert!(result.impact_velocity.is_finite() && result.impact_velocity > 0.0);
-        assert!(!result.points.is_empty(), "{model:?}: solver produced no points");
+        assert!(
+            !result.points.is_empty(),
+            "{model:?}: solver produced no points"
+        );
         let drop = interpolated_drop_at(&result.points, 457.2); // 500 yards
         assert!(drop.is_finite(), "{model:?}: non-finite drop at 500yd");
         drop
@@ -1502,7 +1511,10 @@ mod tests {
     fn mba1386_ra4_solver_smoke() {
         // RA4 never fell back to G1 (it's a new variant), so just prove it solves sanely.
         let drop = drop_at_500yd_m(DragModel::RA4);
-        assert!(drop < 0.0, "500yd drop should be a fall below the muzzle line: {drop}");
+        assert!(
+            drop < 0.0,
+            "500yd drop should be a fall below the muzzle line: {drop}"
+        );
     }
 }
 
@@ -1632,11 +1644,26 @@ mod reference_drag_table_tests {
     /// CLI help that both say so should change with it.
     #[test]
     fn the_mach_domain_is_per_table_not_universal() {
-        let g7_max = *reference_drag_table(&DragModel::G7).mach_values.last().unwrap();
-        let gs_max = *reference_drag_table(&DragModel::GS).mach_values.last().unwrap();
-        let ra4_max = *reference_drag_table(&DragModel::RA4).mach_values.last().unwrap();
+        let g7_max = *reference_drag_table(&DragModel::G7)
+            .mach_values
+            .last()
+            .unwrap();
+        let gs_max = *reference_drag_table(&DragModel::GS)
+            .mach_values
+            .last()
+            .unwrap();
+        let ra4_max = *reference_drag_table(&DragModel::RA4)
+            .mach_values
+            .last()
+            .unwrap();
 
-        assert!(g7_max > gs_max, "G7 should extend past GS ({g7_max} vs {gs_max})");
-        assert!(g7_max > ra4_max, "G7 should extend past RA4 ({g7_max} vs {ra4_max})");
+        assert!(
+            g7_max > gs_max,
+            "G7 should extend past GS ({g7_max} vs {gs_max})"
+        );
+        assert!(
+            g7_max > ra4_max,
+            "G7 should extend past RA4 ({g7_max} vs {ra4_max})"
+        );
     }
 }

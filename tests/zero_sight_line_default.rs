@@ -180,7 +180,8 @@ fn an_explicit_zero_target_height_still_zeroes_to_the_ground_datum() {
         &format!(r#"{}, "target_height_m": 0.0"#, zero_only()),
     ));
     assert_eq!(
-        ground.resolved_request.shot.muzzle_angle_rad, taller.resolved_request.shot.muzzle_angle_rad,
+        ground.resolved_request.shot.muzzle_angle_rad,
+        taller.resolved_request.shot.muzzle_angle_rad,
         "an explicit ground-datum zero is indifferent to sight height, as it always was"
     );
 }
@@ -233,8 +234,7 @@ fn a_raised_muzzle_composes_with_the_sight_height() {
 fn an_inclined_zero_needs_its_target_height_stated() {
     for degrees in [-10.0_f64, 10.0] {
         let radians = degrees.to_radians();
-        let projected =
-            ZERO_DISTANCE_M * radians.sin() + (0.0 + SIGHT_HEIGHT_M) * radians.cos();
+        let projected = ZERO_DISTANCE_M * radians.sin() + (0.0 + SIGHT_HEIGHT_M) * radians.cos();
 
         let stated = solve(&request_json(
             &sight(SIGHT_HEIGHT_M),
@@ -538,10 +538,12 @@ fn the_zero_search_excludes_aerodynamic_jump_and_leaves_it_at_the_zero() {
         sight(0.0508)
     );
     let crosswind_json = |effects: &str| {
-        request_json(&rifle_extra, &zero_only()).replace(
-            r#""wind": {"speed_mps": 0.0, "direction_from_rad": 0.0}"#,
-            r#""wind": {"speed_mps": 4.4704, "direction_from_rad": 1.5707963267948966}"#,
-        ).replace(r#""effects": {}"#, effects)
+        request_json(&rifle_extra, &zero_only())
+            .replace(
+                r#""wind": {"speed_mps": 0.0, "direction_from_rad": 0.0}"#,
+                r#""wind": {"speed_mps": 4.4704, "direction_from_rad": 1.5707963267948966}"#,
+            )
+            .replace(r#""effects": {}"#, effects)
     };
 
     let without = solve(&crosswind_json(r#""effects": {}"#));

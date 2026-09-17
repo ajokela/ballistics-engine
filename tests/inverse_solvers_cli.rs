@@ -28,7 +28,8 @@ fn run(args: &[&str]) -> (String, String, bool) {
 fn json(args: &[&str]) -> serde_json::Value {
     let (stdout, stderr, ok) = run(args);
     assert!(ok, "{args:?} failed: {stderr}");
-    serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{args:?} emitted non-JSON ({e}): {stdout}"))
+    serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("{args:?} emitted non-JSON ({e}): {stdout}"))
 }
 
 /// Angular drops (mil) at `ranges`, straight from `come-ups`, for a given zero.
@@ -142,8 +143,7 @@ fn mark_to_range_applies_sfp_scaling_to_the_subtension() {
     args.extend_from_slice(&["--zero-distance", "100", "-o", "json"]);
     let ffp = json(&args);
     assert_eq!(
-        ffp["marks"][0]["range"],
-        reference["marks"][0]["range"],
+        ffp["marks"][0]["range"], reference["marks"][0]["range"],
         "FFP subtensions do not depend on magnification"
     );
 }
@@ -199,7 +199,14 @@ fn bdc_match_recovers_a_constructed_magnification_exactly() {
         args.push(pair);
     }
     args.extend_from_slice(&LOAD);
-    args.extend_from_slice(&["--reference-mag", "12", "--zero-distance", "100", "-o", "json"]);
+    args.extend_from_slice(&[
+        "--reference-mag",
+        "12",
+        "--zero-distance",
+        "100",
+        "-o",
+        "json",
+    ]);
     let report = json(&args);
 
     let fitted = report["fitted_magnification"].as_f64().unwrap();
@@ -213,7 +220,10 @@ fn bdc_match_recovers_a_constructed_magnification_exactly() {
     );
     assert_eq!(report["fit_warning"], false);
     for mark in report["marks"].as_array().unwrap() {
-        assert!(mark["residual_mil"].as_f64().unwrap().abs() < 1e-9, "{mark}");
+        assert!(
+            mark["residual_mil"].as_f64().unwrap().abs() < 1e-9,
+            "{mark}"
+        );
     }
 }
 
@@ -231,10 +241,20 @@ fn bdc_match_warns_when_no_magnification_fits() {
         "6:700",
     ];
     args.extend_from_slice(&LOAD);
-    args.extend_from_slice(&["--reference-mag", "12", "--zero-distance", "100", "-o", "json"]);
+    args.extend_from_slice(&[
+        "--reference-mag",
+        "12",
+        "--zero-distance",
+        "100",
+        "-o",
+        "json",
+    ]);
     let report = json(&args);
     // Evenly spaced marks cannot follow a curved drop line: some residual must remain.
-    assert!(report["worst_residual_mil"].as_f64().unwrap() > 0.2, "{report}");
+    assert!(
+        report["worst_residual_mil"].as_f64().unwrap() > 0.2,
+        "{report}"
+    );
     assert_eq!(report["fit_warning"], true);
 
     let (table, _, ok) = run(&args[..args.len() - 2]);
@@ -329,7 +349,8 @@ fn optimal_zero_reports_the_vital_zone_verdict() {
 fn all_three_solvers_are_deterministic() {
     let cases: Vec<Vec<&str>> = vec![
         {
-            let mut a: Vec<&str> = vec!["mark-to-range", "--mark", "2", "--mark", "4", "--mark", "6"];
+            let mut a: Vec<&str> =
+                vec!["mark-to-range", "--mark", "2", "--mark", "4", "--mark", "6"];
             a.extend_from_slice(&LOAD);
             a.extend_from_slice(&["--zero-distance", "100", "-o", "json"]);
             a
@@ -345,7 +366,14 @@ fn all_three_solvers_are_deterministic() {
                 "6:700",
             ];
             a.extend_from_slice(&LOAD);
-            a.extend_from_slice(&["--reference-mag", "12", "--zero-distance", "100", "-o", "json"]);
+            a.extend_from_slice(&[
+                "--reference-mag",
+                "12",
+                "--zero-distance",
+                "100",
+                "-o",
+                "json",
+            ]);
             a
         },
         {
@@ -395,14 +423,25 @@ fn optimal_zero_is_insensitive_to_target_order() {
 #[test]
 fn rejection_cases() {
     // bdc-match on an FFP reticle is meaningless, and says why.
-    let mut args: Vec<&str> = vec!["bdc-match", "--mark-range", "2:300", "--mark-range", "4:500", "--focal-plane", "ffp"];
+    let mut args: Vec<&str> = vec![
+        "bdc-match",
+        "--mark-range",
+        "2:300",
+        "--mark-range",
+        "4:500",
+        "--focal-plane",
+        "ffp",
+    ];
     args.extend_from_slice(&LOAD);
     args.push("--zero-distance");
     args.push("100");
     let (_, stderr, ok) = run(&args);
     assert!(!ok);
     assert!(stderr.contains("SECOND focal plane"), "{stderr}");
-    assert!(stderr.contains("mark-to-range"), "the error should name the alternative: {stderr}");
+    assert!(
+        stderr.contains("mark-to-range"),
+        "the error should name the alternative: {stderr}"
+    );
 
     // One pair cannot constrain a fit.
     let mut args: Vec<&str> = vec!["bdc-match", "--mark-range", "2:300"];

@@ -5,14 +5,14 @@
 //! filesystem access, network access, profile lookup, or terminal output.
 
 use crate::solve_json::{
-    AtmosphereV1, DragModelV1, EffectsV1, PressureReferenceV1, ProjectileV1,
-    ResolvedAtmosphereV1, ResolvedConstantWindV1, ResolvedEffectsV1, ResolvedProjectileV1,
-    ResolvedRifleV1, ResolvedSamplingV1, ResolvedSegmentedWindV1, ResolvedShotV1,
-    ResolvedSolveRequestV1, ResolvedSolverV1, ResolvedWindSegmentV1, ResolvedWindV1, RifleV1,
-    SampleFlagV1, SamplingV1, SchemaVersionV1, ShotV1, SolveErrorCodeV1, SolveErrorEnvelopeV1,
-    SolveErrorV1, SolveNoticeV1, SolveRequestV1, SolveSuccessV1, SolveSummaryV1, SolverMethodV1,
-    SolverV1, SuccessStatusV1, TerminationReasonV1, TrajectorySampleV1, TwistDirectionV1,
-    WindReferenceV1, WindShearModelV1, WindV1, MAX_SOLVE_JSON_SAMPLES_V1,
+    AtmosphereV1, DragModelV1, EffectsV1, PressureReferenceV1, ProjectileV1, ResolvedAtmosphereV1,
+    ResolvedConstantWindV1, ResolvedEffectsV1, ResolvedProjectileV1, ResolvedRifleV1,
+    ResolvedSamplingV1, ResolvedSegmentedWindV1, ResolvedShotV1, ResolvedSolveRequestV1,
+    ResolvedSolverV1, ResolvedWindSegmentV1, ResolvedWindV1, RifleV1, SampleFlagV1, SamplingV1,
+    SchemaVersionV1, ShotV1, SolveErrorCodeV1, SolveErrorEnvelopeV1, SolveErrorV1, SolveNoticeV1,
+    SolveRequestV1, SolveSuccessV1, SolveSummaryV1, SolverMethodV1, SolverV1, SuccessStatusV1,
+    TerminationReasonV1, TrajectorySampleV1, TwistDirectionV1, WindReferenceV1, WindShearModelV1,
+    WindV1, MAX_SOLVE_JSON_SAMPLES_V1,
 };
 use crate::trajectory_observation::{
     bracket_param, Bracket, TrajectoryObservation, TrajectoryObservationError,
@@ -160,8 +160,7 @@ pub const WARNING_SPIN_EFFECT_ASSUMED_TWIST_RATE: &str = "spin_effect_assumed_tw
 /// of them; that breadth is the finding, not a reason to suppress it. The `default_applied`
 /// assumption at the same path stays, and says a default was applied without saying that a
 /// reported number now depends on it.
-pub const WARNING_STABILITY_FACTOR_ASSUMED_TWIST_RATE: &str =
-    "stability_factor_assumed_twist_rate";
+pub const WARNING_STABILITY_FACTOR_ASSUMED_TWIST_RATE: &str = "stability_factor_assumed_twist_rate";
 
 /// Whether the raw request supplied the geometry fields the twist-reading effects need, as
 /// opposed to letting `resolve_rifle`/`resolve_projectile` substitute a default.
@@ -240,11 +239,9 @@ pub fn solve_v1(request: SolveRequestV1) -> Result<SolveSuccessV1, SolveErrorEnv
     // validate_for_solve has already rejected target mode at |shooting_angle| >= 90 deg.
     let drops_scale_denominator = match request.shot.drops_reference.unwrap_or_default() {
         crate::solve_json::DropsReferenceV1::Los => 1.0,
-        crate::solve_json::DropsReferenceV1::Target => prepared
-            .resolved_request
-            .shot
-            .shooting_angle_rad
-            .cos(),
+        crate::solve_json::DropsReferenceV1::Target => {
+            prepared.resolved_request.shot.shooting_angle_rad.cos()
+        }
     };
     let samples = observations
         .iter()
@@ -1233,9 +1230,7 @@ fn resolve_atmosphere(
         // setting) is reduced to station pressure at `altitude_m` before use. `Absolute`
         // (including the omitted-field default) is a pure passthrough -- byte-identical to
         // pre-MBA-1397 behavior for every request that never sets `pressure_reference`.
-        Some(value)
-            if atmosphere.pressure_reference == Some(PressureReferenceV1::Qnh) =>
-        {
+        Some(value) if atmosphere.pressure_reference == Some(PressureReferenceV1::Qnh) => {
             let qnh_hpa = value / PASCALS_PER_HECTOPASCAL;
             let station_hpa =
                 crate::atmosphere::reduce_qnh_to_station_pressure(qnh_hpa, altitude_m);
@@ -2155,18 +2150,15 @@ mod tests {
             crate::atmosphere::reduce_qnh_to_station_pressure(1030.0, 1_500.0);
         assert!((prepared.atmosphere.pressure - expected_station_hpa).abs() < 1e-9);
         assert!(
-            (prepared.resolved_request.atmosphere.pressure_pa - expected_station_hpa * 100.0)
-                .abs()
+            (prepared.resolved_request.atmosphere.pressure_pa - expected_station_hpa * 100.0).abs()
                 < 1e-6
         );
         // Strictly lower than the raw QNH -- proves the reduction actually happened.
         assert!(prepared.resolved_request.atmosphere.pressure_pa < 103_000.0);
 
-        assert!(prepared
-            .assumptions
-            .iter()
-            .any(|notice| notice.code == ASSUMPTION_QNH_REDUCED_TO_STATION_PRESSURE
-                && notice.path.as_deref() == Some("$.atmosphere.pressure_pa")));
+        assert!(prepared.assumptions.iter().any(|notice| notice.code
+            == ASSUMPTION_QNH_REDUCED_TO_STATION_PRESSURE
+            && notice.path.as_deref() == Some("$.atmosphere.pressure_pa")));
         // Must NOT also emit the omitted-pressure notice: this is a present, explicit value.
         assert!(!prepared
             .assumptions
@@ -2284,10 +2276,7 @@ mod tests {
         let prepared =
             prepare_request(&request).expect("both fields together are no longer a conflict");
         assert_eq!(prepared.resolved_request.shot.muzzle_angle_rad, 0.01);
-        assert_eq!(
-            prepared.resolved_request.shot.zero_distance_m,
-            Some(100.0)
-        );
+        assert_eq!(prepared.resolved_request.shot.zero_distance_m, Some(100.0));
         // S5 (0.33.0 final-review fix wave): the elevation search did not run -- a caller must
         // be told so, not left to assume the echoed zero_distance_m confirms a zero was
         // actually solved for it.

@@ -18,10 +18,7 @@ pub const MAX_TRAJECTORY_SAMPLES: usize = 250_000;
 /// reach the requested range. The historical endpoint-tolerance filter can remove the final
 /// candidate; this function mirrors that decision so every grid with exactly the public limit is
 /// accepted.
-pub(crate) fn projected_sample_count(
-    max_dist: f64,
-    step_m: f64,
-) -> Result<usize, BallisticsError> {
+pub(crate) fn projected_sample_count(max_dist: f64, step_m: f64) -> Result<usize, BallisticsError> {
     if !max_dist.is_finite() || !step_m.is_finite() {
         return Err(BallisticsError::from(
             "trajectory sampling range and interval must be finite",
@@ -419,10 +416,7 @@ mod tests {
                     Vector3::new(0.0, -1.0, 0.0),
                     Vector3::new(max_dist, -1.0, 0.0),
                 ],
-                velocities: vec![
-                    Vector3::new(800.0, 0.0, 0.0),
-                    Vector3::new(700.0, 0.0, 0.0),
-                ],
+                velocities: vec![Vector3::new(800.0, 0.0, 0.0), Vector3::new(700.0, 0.0, 0.0)],
                 transonic_distances: vec![],
                 mach_1_2_distance_m: None,
                 mach_1_0_distance_m: None,
@@ -457,10 +451,7 @@ mod tests {
             3
         );
 
-        for (range, interval) in [
-            (MAX_TRAJECTORY_SAMPLES as f64, 1.0),
-            (f64::MAX, 0.1),
-        ] {
+        for (range, interval) in [(MAX_TRAJECTORY_SAMPLES as f64, 1.0), (f64::MAX, 0.1)] {
             let error = projected_sample_count(range, interval)
                 .expect_err("a grid above the sample cap must fail");
             assert!(

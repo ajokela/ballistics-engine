@@ -52,8 +52,8 @@ fn monte_carlo_kernel_uses_the_reduced_pressure_not_the_raw_qnh() {
 
     let with_reduced = solve_trajectory_for_monte_carlo(&si_bullet(reduced_hpa))
         .expect("monte carlo solve (reduced)");
-    let with_raw_qnh = solve_trajectory_for_monte_carlo(&si_bullet(QNH_HPA))
-        .expect("monte carlo solve (raw QNH)");
+    let with_raw_qnh =
+        solve_trajectory_for_monte_carlo(&si_bullet(QNH_HPA)).expect("monte carlo solve (raw QNH)");
 
     // Lower (correctly reduced) pressure means less dense air, less drag, higher retained
     // velocity at the same target distance.
@@ -91,8 +91,8 @@ fn run_monte_carlo_uses_the_reduced_pressure_not_the_raw_qnh() {
         azimuth_std_dev: 0.001,
     };
 
-    let reduced_results = run_monte_carlo(si_bullet(reduced_hpa), params.clone())
-        .expect("run_monte_carlo (reduced)");
+    let reduced_results =
+        run_monte_carlo(si_bullet(reduced_hpa), params.clone()).expect("run_monte_carlo (reduced)");
     let raw_qnh_results =
         run_monte_carlo(si_bullet(QNH_HPA), params).expect("run_monte_carlo (raw QNH)");
 

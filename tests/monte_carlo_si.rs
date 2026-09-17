@@ -10,10 +10,10 @@ use ballistics_engine::{
 
 fn si_bullet() -> BallisticInputs {
     BallisticInputs {
-        target_distance: 457.2,                 // meters (500 yd)
-        muzzle_velocity: 823.0,                 // m/s
-        bullet_mass: 168.0 * 0.00006479891,     // kg
-        bullet_diameter: 0.308 * 0.0254,         // meters
+        target_distance: 457.2,             // meters (500 yd)
+        muzzle_velocity: 823.0,             // m/s
+        bullet_mass: 168.0 * 0.00006479891, // kg
+        bullet_diameter: 0.308 * 0.0254,    // meters
         bullet_length: 1.215 * 0.0254,
         caliber_inches: 0.308,
         weight_grains: 168.0,
@@ -22,8 +22,8 @@ fn si_bullet() -> BallisticInputs {
         muzzle_angle: 0.006, // radians
         sight_height: 0.05,  // meters
         muzzle_height: 0.0,
-        temperature: 15.0,  // Celsius
-        pressure: 1013.25,  // hPa
+        temperature: 15.0, // Celsius
+        pressure: 1013.25, // hPa
         ..BallisticInputs::default()
     }
 }

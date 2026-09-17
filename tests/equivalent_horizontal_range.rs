@@ -18,8 +18,7 @@
 //!       inclined zeroed request, absent (not null) otherwise.
 
 use ballistics_engine::{
-    calculate_zero_angle, AtmosphericConditions, BallisticInputs, TrajectorySolver,
-    WindConditions,
+    calculate_zero_angle, AtmosphericConditions, BallisticInputs, TrajectorySolver, WindConditions,
 };
 use std::process::Command;
 
@@ -42,8 +41,8 @@ fn base_inputs() -> BallisticInputs {
 fn zeroed_inclined_inputs(zero_distance_m: f64, shooting_angle_rad: f64) -> BallisticInputs {
     let mut inputs = base_inputs();
     let los_height = inputs.muzzle_height + inputs.sight_height;
-    let zero_angle = calculate_zero_angle(inputs.clone(), zero_distance_m, los_height)
-        .expect("zero solve");
+    let zero_angle =
+        calculate_zero_angle(inputs.clone(), zero_distance_m, los_height).expect("zero solve");
     inputs.muzzle_angle = zero_angle;
     inputs.shooting_angle = shooting_angle_rad;
     inputs
@@ -103,7 +102,10 @@ fn boundary_and_negative_correction_return_none() {
     let solver = solver_for(zeroed_inclined_inputs(ZERO_100YD_M, angle), 800.0);
 
     // Target exactly at, and inside, the zero range.
-    assert_eq!(solver.equivalent_horizontal_range(ZERO_100YD_M, ZERO_100YD_M), None);
+    assert_eq!(
+        solver.equivalent_horizontal_range(ZERO_100YD_M, ZERO_100YD_M),
+        None
+    );
     assert_eq!(solver.equivalent_horizontal_range(45.0, ZERO_100YD_M), None);
 
     // Negative correction: zeroed at 25 yd (a NEAR zero), the bullet rides ABOVE the
@@ -254,8 +256,7 @@ fn solve_json_summary_field_only_when_defined() {
         )
     };
     let solve = |json: &str| -> ballistics_engine::solve_json::SolveSuccessV1 {
-        let request =
-            ballistics_engine::solve_json::decode_solve_request_v1(json).expect("decode");
+        let request = ballistics_engine::solve_json::decode_solve_request_v1(json).expect("decode");
         ballistics_engine::solve_v1(request).expect("solve")
     };
 
@@ -264,7 +265,9 @@ fn solve_json_summary_field_only_when_defined() {
     ));
     assert_eq!(flat.summary.equivalent_horizontal_range_m, None);
     assert!(
-        !serde_json::to_string(&flat).unwrap().contains("equivalent_horizontal_range_m"),
+        !serde_json::to_string(&flat)
+            .unwrap()
+            .contains("equivalent_horizontal_range_m"),
         "absent — not null — for a flat solve (byte-identity class)"
     );
 

@@ -42,7 +42,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::adjustment::{drop_to_adjustment, AdjustmentUnit};
 use crate::cli_api::TrajectoryResult;
-use crate::optic::{plan_corrections, AngularCorrection, DialPlanReportV1, OpticError, OpticProfile, Preferences};
+use crate::optic::{
+    plan_corrections, AngularCorrection, DialPlanReportV1, OpticError, OpticProfile, Preferences,
+};
 use crate::truing::{DropUnit, TruingModelInputsV1};
 use crate::truing_dsf::{
     dsf_observation_warrants_90pct_warning, interpolate_position_and_velocity,
@@ -231,7 +233,9 @@ impl DsfServiceErrorV1 {
 ///
 /// **Derive only** — never writes a DSF table, opens a profile, touches the filesystem, or
 /// calls `std::process::exit`.
-pub fn derive_dsf_point_v1(req: &DsfDeriveRequestV1) -> Result<DsfPointResultV1, DsfServiceErrorV1> {
+pub fn derive_dsf_point_v1(
+    req: &DsfDeriveRequestV1,
+) -> Result<DsfPointResultV1, DsfServiceErrorV1> {
     req.model
         .validate()
         .map_err(DsfServiceErrorV1::InvalidInput)?;
@@ -417,15 +421,15 @@ mod tests {
             unit: AdjustmentUnit::Clicks,
             ..req
         };
-        assert_eq!(tall_target_v1(&bad), Err(TallTargetErrorV1::ClicksNotAngular));
+        assert_eq!(
+            tall_target_v1(&bad),
+            Err(TallTargetErrorV1::ClicksNotAngular)
+        );
 
         // Non-positive and sub-1 range are rejected, matching the CLI guards, each with its
         // own variant (not a shared stringly-typed error).
         assert_eq!(
-            tall_target_v1(&TallTargetRequestV1 {
-                dialed: 0.0,
-                ..req
-            }),
+            tall_target_v1(&TallTargetRequestV1 { dialed: 0.0, ..req }),
             Err(TallTargetErrorV1::InvalidDialed)
         );
         assert_eq!(
@@ -436,10 +440,7 @@ mod tests {
             Err(TallTargetErrorV1::InvalidMeasured)
         );
         assert_eq!(
-            tall_target_v1(&TallTargetRequestV1 {
-                range: 0.5,
-                ..req
-            }),
+            tall_target_v1(&TallTargetRequestV1 { range: 0.5, ..req }),
             Err(TallTargetErrorV1::InvalidRange)
         );
     }
@@ -464,7 +465,6 @@ mod tests {
             assert!((r.actual - expected).abs() < 1e-12, "metric={metric}");
         }
     }
-
 
     // ---- dsf derivation (MBA-1357 Task 9) ----
     //

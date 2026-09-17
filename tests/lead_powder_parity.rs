@@ -45,8 +45,25 @@ fn run_json(args: &[&str]) -> Value {
 /// first trajectory point's velocity, same technique as tests/powder_temp_curve.rs.
 fn resolved_velocity(temp_f: &str, extra: &[&str]) -> f64 {
     let mut args: Vec<&str> = vec![
-        "trajectory", "-v", "2700", "-b", "0.19", "-m", "77", "-d", "0.224", "--drag-model", "g7",
-        "--max-range", "5", "--sight-height", "2.48", "--temperature", temp_f, "--full", "-o",
+        "trajectory",
+        "-v",
+        "2700",
+        "-b",
+        "0.19",
+        "-m",
+        "77",
+        "-d",
+        "0.224",
+        "--drag-model",
+        "g7",
+        "--max-range",
+        "5",
+        "--sight-height",
+        "2.48",
+        "--temperature",
+        temp_f,
+        "--full",
+        "-o",
         "json",
     ];
     args.extend_from_slice(extra);
@@ -58,9 +75,29 @@ const CURVE: &str = "40:2620,70:2700,100:2760";
 
 fn base_lead_args<'a>(temp_f: &'a str, velocity: &'a str) -> Vec<&'a str> {
     vec![
-        "lead", "-v", velocity, "-b", "0.19", "-m", "77", "-d", "0.224", "--drag-model", "g7",
-        "--sight-height", "2.48", "--temperature", temp_f, "--target-speed", "5", "--start",
-        "300", "--end", "300", "-o", "json",
+        "lead",
+        "-v",
+        velocity,
+        "-b",
+        "0.19",
+        "-m",
+        "77",
+        "-d",
+        "0.224",
+        "--drag-model",
+        "g7",
+        "--sight-height",
+        "2.48",
+        "--temperature",
+        temp_f,
+        "--target-speed",
+        "5",
+        "--start",
+        "300",
+        "--end",
+        "300",
+        "-o",
+        "json",
     ]
 }
 
@@ -82,7 +119,14 @@ fn lead_with_powder_curve_matches_manually_resolved_velocity() {
     let resolved_str = resolved.to_string();
     let manual = run_json(&base_lead_args("55", &resolved_str));
 
-    for field in ["lead_mil", "lead_moa", "lead", "tof_s", "intercept_range", "iterations"] {
+    for field in [
+        "lead_mil",
+        "lead_moa",
+        "lead",
+        "tof_s",
+        "intercept_range",
+        "iterations",
+    ] {
         assert_eq!(
             with_curve["rows"][0][field], manual["rows"][0][field],
             "field '{field}' differs between curve-corrected and manually-resolved lead runs"
@@ -157,6 +201,9 @@ fn lead_help_lists_new_powder_flags() {
         "--powder-temp",
         "--powder-temp-curve",
     ] {
-        assert!(help.contains(flag), "`lead --help` is missing {flag}:\n{help}");
+        assert!(
+            help.contains(flag),
+            "`lead --help` is missing {flag}:\n{help}"
+        );
     }
 }

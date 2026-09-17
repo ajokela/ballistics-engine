@@ -314,10 +314,16 @@ pub fn import_ventum_reticle_with_report(
     let mut arcs_unresolved = 0usize;
     for instance in instances {
         match instance.role {
-            Role::Dot => marks.push(ReticleMark::new(instance.down, instance.right, MarkKind::Dot)),
-            Role::Tick => {
-                marks.push(ReticleMark::new(instance.down, instance.right, MarkKind::Hash))
-            }
+            Role::Dot => marks.push(ReticleMark::new(
+                instance.down,
+                instance.right,
+                MarkKind::Dot,
+            )),
+            Role::Tick => marks.push(ReticleMark::new(
+                instance.down,
+                instance.right,
+                MarkKind::Hash,
+            )),
             Role::Text(label) => texts.push(TextLabel {
                 down: instance.down,
                 right: instance.right,
@@ -666,7 +672,9 @@ impl PointRole<'_> {
         match self {
             PointRole::Dot => Role::Dot,
             PointRole::Tick => Role::Tick,
-            PointRole::Text(base) => Role::Text(ladder_label.unwrap_or_else(|| (*base).to_string())),
+            PointRole::Text(base) => {
+                Role::Text(ladder_label.unwrap_or_else(|| (*base).to_string()))
+            }
             PointRole::Circle(shape) => Role::Circle(*shape),
         }
     }
@@ -675,9 +683,9 @@ impl PointRole<'_> {
     /// labeled text ladder (dot/tick, or text without `label:true`).
     fn ladder_label(&self, repeat: &Repeat, i: u32) -> Option<String> {
         match self {
-            PointRole::Text(_) if repeat.label => {
-                Some(format_label_number(repeat.label_start + f64::from(i) * repeat.label_step))
-            }
+            PointRole::Text(_) if repeat.label => Some(format_label_number(
+                repeat.label_start + f64::from(i) * repeat.label_step,
+            )),
             _ => None,
         }
     }
@@ -705,9 +713,9 @@ fn expand_elements(
         let (x, y, repeat, base) = match element {
             Element::Dot { x, y, repeat } => (*x, *y, repeat.as_ref(), PointRole::Dot),
             Element::Tick { x, y, repeat } => (*x, *y, repeat.as_ref(), PointRole::Tick),
-            Element::Text {
-                x, y, text, repeat,
-            } => (*x, *y, repeat.as_ref(), PointRole::Text(text)),
+            Element::Text { x, y, text, repeat } => {
+                (*x, *y, repeat.as_ref(), PointRole::Text(text))
+            }
             Element::Circle(CircleFields {
                 x,
                 y,
@@ -979,8 +987,7 @@ impl<'de> Deserialize<'de> for Spec {
             where
                 E: de::Error,
             {
-                let elements: Vec<Element> =
-                    serde_json::from_str(v).map_err(de::Error::custom)?;
+                let elements: Vec<Element> = serde_json::from_str(v).map_err(de::Error::custom)?;
                 Ok(Spec(elements))
             }
 
@@ -1339,14 +1346,29 @@ mod tests {
     fn assert_mbr(desc: &ReticleDescription) {
         // 78 marks: row y=4 spans ±1..±9 (18), y=8 spans ±1..±13 (26), y=12 spans ±1..±17 (34).
         assert_eq!(desc.marks.len(), 78, "MBR expands to 78 holdable marks");
-        assert_eq!(row_rights(desc, 4.0), symmetric_spread(9), "row down=4 -> ±1..±9");
-        assert_eq!(row_rights(desc, 8.0), symmetric_spread(13), "row down=8 -> ±1..±13");
-        assert_eq!(row_rights(desc, 12.0), symmetric_spread(17), "row down=12 -> ±1..±17");
+        assert_eq!(
+            row_rights(desc, 4.0),
+            symmetric_spread(9),
+            "row down=4 -> ±1..±9"
+        );
+        assert_eq!(
+            row_rights(desc, 8.0),
+            symmetric_spread(13),
+            "row down=8 -> ±1..±13"
+        );
+        assert_eq!(
+            row_rights(desc, 12.0),
+            symmetric_spread(17),
+            "row down=12 -> ±1..±17"
+        );
         assert_eq!(row_rights(desc, 4.0).len(), 18);
         assert_eq!(row_rights(desc, 8.0).len(), 26);
         assert_eq!(row_rights(desc, 12.0).len(), 34);
         // Every mark is a dot, none sits on the vertical axis, and none exceeds its row span.
-        assert!(desc.marks.iter().all(|m| m.kind == MarkKind::Dot), "all MBR marks are dots");
+        assert!(
+            desc.marks.iter().all(|m| m.kind == MarkKind::Dot),
+            "all MBR marks are dots"
+        );
         assert!(
             desc.marks.iter().all(|m| m.right_mil != 0.0),
             "no MBR mark lands on the center line"
@@ -1373,7 +1395,8 @@ mod tests {
             "name": "MBR", "plane": "ffp", "unit": "mil", "spec": MBR_SPEC
         })
         .to_string();
-        let array_form = format!(r#"{{"name":"MBR","plane":"ffp","unit":"mil","spec":{MBR_SPEC}}}"#);
+        let array_form =
+            format!(r#"{{"name":"MBR","plane":"ffp","unit":"mil","spec":{MBR_SPEC}}}"#);
 
         let from_string = import_ventum_reticle(&string_form).unwrap();
         let from_array = import_ventum_reticle(&array_form).unwrap();
@@ -1492,9 +1515,21 @@ mod tests {
         assert_eq!(
             instances,
             vec![
-                ExpandedInstance { down: 1.0, right: 0.0, role: Role::Text("0".to_string()) },
-                ExpandedInstance { down: 2.0, right: 0.0, role: Role::Text("1".to_string()) },
-                ExpandedInstance { down: 3.0, right: 0.0, role: Role::Text("2".to_string()) },
+                ExpandedInstance {
+                    down: 1.0,
+                    right: 0.0,
+                    role: Role::Text("0".to_string())
+                },
+                ExpandedInstance {
+                    down: 2.0,
+                    right: 0.0,
+                    role: Role::Text("1".to_string())
+                },
+                ExpandedInstance {
+                    down: 3.0,
+                    right: 0.0,
+                    role: Role::Text("2".to_string())
+                },
             ]
         );
     }
@@ -1572,18 +1607,30 @@ mod tests {
 
         assert_eq!(report.arcs.len(), 1, "the horseshoe is reported");
         let arc = report.arcs[0];
-        assert!((arc.sweep_degrees - 140.0).abs() < 1e-9, "200 -> 340 clockwise is 140 deg");
+        assert!(
+            (arc.sweep_degrees - 140.0).abs() < 1e-9,
+            "200 -> 340 clockwise is 140 deg"
+        );
 
         // Apex at 270 deg, radius 2: (cos 270, sin 270) = (0, -1) with +y DOWN, so 2 mil UP.
-        assert!(arc.apex.right_mil.abs() < 1e-9, "apex is on the vertical axis");
+        assert!(
+            arc.apex.right_mil.abs() < 1e-9,
+            "apex is on the vertical axis"
+        );
         assert!(
             (arc.apex.down_mil + 2.0).abs() < 1e-9,
             "apex must be 2 mil ABOVE center (down_mil -2), not below: {:?}",
             arc.apex
         );
         // Both tips sit below the apex and straddle it, leaving the gap at the bottom.
-        assert!(arc.start_tip.right_mil < 0.0, "the 200 deg tip is on the left");
-        assert!(arc.end_tip.right_mil > 0.0, "the 340 deg tip is on the right");
+        assert!(
+            arc.start_tip.right_mil < 0.0,
+            "the 200 deg tip is on the left"
+        );
+        assert!(
+            arc.end_tip.right_mil > 0.0,
+            "the 340 deg tip is on the right"
+        );
         for tip in [arc.start_tip, arc.end_tip] {
             assert!(
                 tip.down_mil > arc.apex.down_mil,
@@ -1598,9 +1645,7 @@ mod tests {
     #[test]
     fn an_arc_is_reported_but_never_becomes_a_mark() {
         let spec = |arc: &str| {
-            format!(
-                r#"{{"name":"A","unit":"mil","spec":[{{"type":"tick","x":0,"y":5}}{arc}]}}"#
-            )
+            format!(r#"{{"name":"A","unit":"mil","spec":[{{"type":"tick","x":0,"y":5}}{arc}]}}"#)
         };
         let without = import_ventum_reticle(&spec("")).unwrap();
         let with = import_ventum_reticle(&spec(
@@ -1665,7 +1710,10 @@ mod tests {
             ]
         );
         assert_eq!(report.dropped_elements, 6);
-        assert_eq!(report.tally(), "grid x1, line x2, rect x1, text x1, unknown x1");
+        assert_eq!(
+            report.tally(),
+            "grid x1, line x2, rect x1, text x1, unknown x1"
+        );
         assert!(!report.is_empty());
     }
 
@@ -1695,11 +1743,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.arcs.len(), 2, "mirror emits both horseshoes");
-        let right = report.arcs.iter().find(|a| a.center.right_mil > 0.0).unwrap();
-        let left = report.arcs.iter().find(|a| a.center.right_mil < 0.0).unwrap();
+        let right = report
+            .arcs
+            .iter()
+            .find(|a| a.center.right_mil > 0.0)
+            .unwrap();
+        let left = report
+            .arcs
+            .iter()
+            .find(|a| a.center.right_mil < 0.0)
+            .unwrap();
 
         // The original's apex is at 0 deg: 1 mil right of its own center, so 4 mil right.
-        assert!((right.apex.right_mil - 4.0).abs() < 1e-9, "{:?}", right.apex);
+        assert!(
+            (right.apex.right_mil - 4.0).abs() < 1e-9,
+            "{:?}",
+            right.apex
+        );
         // The twin must be the mirror image: 1 mil LEFT of its center at -3, so -4 — not -2,
         // which is what an unreflected sweep would give.
         assert!(
@@ -1775,7 +1835,13 @@ mod tests {
     /// imported since 0.32.0 would have gone with the ring.
     #[test]
     fn a_non_numeric_radius_is_ignored_rather_than_rejected() {
-        for radius in [r#""2mil""#, r#"{"v":2,"unit":"mil"}"#, "[2]", "true", "null"] {
+        for radius in [
+            r#""2mil""#,
+            r#"{"v":2,"unit":"mil"}"#,
+            "[2]",
+            "true",
+            "null",
+        ] {
             let json = format!(
                 r#"{{"name":"L","unit":"mil","spec":[
                     {{"type":"dot","x":0,"y":1}},
@@ -1873,7 +1939,10 @@ mod tests {
         assert_eq!(report.dropped_element_types, vec![("arc".to_string(), 1)]);
         assert_eq!(report.arcs_unresolved, 1);
         assert!(report.arcs.is_empty());
-        assert_eq!(report.arcs.len() + report.arcs_unresolved, report.dropped_elements);
+        assert_eq!(
+            report.arcs.len() + report.arcs_unresolved,
+            report.dropped_elements
+        );
     }
 
     /// An ABSENT center — omitted, or `null`, which is how JSON spells absent — is the
@@ -1934,7 +2003,10 @@ mod tests {
             r#"{"name":"C","unit":"mil","spec":[{"type":"circle","x":"left","r":2}]}"#,
         )
         .unwrap();
-        assert_eq!(report.dropped_element_types, vec![("circle".to_string(), 1)]);
+        assert_eq!(
+            report.dropped_element_types,
+            vec![("circle".to_string(), 1)]
+        );
         assert_eq!(report.arcs_unresolved, 0);
         assert!(report.arcs.is_empty());
 
@@ -1963,7 +2035,10 @@ mod tests {
             ]}"#,
         )
         .unwrap();
-        assert_eq!(readable.dropped_element_types, vec![("circle".to_string(), 1)]);
+        assert_eq!(
+            readable.dropped_element_types,
+            vec![("circle".to_string(), 1)]
+        );
     }
 
     /// Leniency must not cost a real arc its geometry: a genuine numeric circle in the SAME
@@ -1978,7 +2053,11 @@ mod tests {
             ]}"#,
         )
         .unwrap();
-        assert_eq!(desc.marks.len(), 1, "the dot is unaffected by either circle");
+        assert_eq!(
+            desc.marks.len(),
+            1,
+            "the dot is unaffected by either circle"
+        );
         assert_eq!(
             report.dropped_element_types,
             vec![("arc".to_string(), 1), ("circle".to_string(), 1)],
@@ -2021,12 +2100,15 @@ mod tests {
                     {{"type":"circle","x":0,"y":0,"r":2,"repeat":{repeat}}}
                 ]}}"#
             );
-            let (desc, report) = import_ventum_reticle_with_report(&json).unwrap_or_else(|e| {
-                panic!("repeat {repeat} must not fail the import, got {e:?}")
-            });
+            let (desc, report) = import_ventum_reticle_with_report(&json)
+                .unwrap_or_else(|e| panic!("repeat {repeat} must not fail the import, got {e:?}"));
 
             // The document imported: the sibling dot is still a hold point...
-            assert_eq!(desc.marks.len(), 1, "repeat {repeat} — the dot must survive");
+            assert_eq!(
+                desc.marks.len(),
+                1,
+                "repeat {repeat} — the dot must survive"
+            );
             assert_eq!(desc.marks[0].down_mil, 1.0);
             // ...the ring is counted once, as an unrepeated circle...
             assert_eq!(
@@ -2075,7 +2157,10 @@ mod tests {
             ]}"#,
         )
         .unwrap();
-        assert_eq!(report.dropped_element_types, vec![("circle".to_string(), 4)]);
+        assert_eq!(
+            report.dropped_element_types,
+            vec![("circle".to_string(), 4)]
+        );
         assert_eq!(report.circle_repeats_unreadable, 0);
     }
 
@@ -2142,7 +2227,10 @@ mod tests {
         );
         let (desc, report) = import_ventum_reticle_with_report(&at_cap).unwrap();
         assert_eq!(desc.marks.len(), MAX_RETICLE_MARKS - 1);
-        assert_eq!(report.dropped_element_types, vec![("circle".to_string(), 1)]);
+        assert_eq!(
+            report.dropped_element_types,
+            vec![("circle".to_string(), 1)]
+        );
 
         // A full cap of marks plus one ring: refused, where 0.32.0 imported the marks and
         // dropped the ring unexamined.
@@ -2180,8 +2268,16 @@ mod tests {
         // Original apex is at 290 + 140/2 = 0 deg, i.e. 2 mil RIGHT of center; the twin's is
         // at 180 deg, 2 mil LEFT. Same center, same sweep, opposite sides.
         let (first, second) = (report.arcs[0], report.arcs[1]);
-        assert!((first.apex.right_mil - 2.0).abs() < 1e-9, "{:?}", first.apex);
-        assert!((second.apex.right_mil + 2.0).abs() < 1e-9, "{:?}", second.apex);
+        assert!(
+            (first.apex.right_mil - 2.0).abs() < 1e-9,
+            "{:?}",
+            first.apex
+        );
+        assert!(
+            (second.apex.right_mil + 2.0).abs() < 1e-9,
+            "{:?}",
+            second.apex
+        );
         assert!((first.sweep_degrees - second.sweep_degrees).abs() < 1e-9);
         assert_eq!(first.center, second.center);
     }
@@ -2199,7 +2295,10 @@ mod tests {
             ]}"#,
         )
         .unwrap();
-        assert_eq!(horseshoe.dropped_element_types, vec![("arc".to_string(), 1)]);
+        assert_eq!(
+            horseshoe.dropped_element_types,
+            vec![("arc".to_string(), 1)]
+        );
         assert_eq!(horseshoe.arcs.len(), 1);
 
         // ...and a plain ring maps onto itself under any reflection through its own center.
@@ -2222,8 +2321,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(flipped.dropped_element_types, vec![("arc".to_string(), 2)]);
-        assert!((flipped.arcs[0].apex.down_mil + 2.0).abs() < 1e-9, "apex up");
-        assert!((flipped.arcs[1].apex.down_mil - 2.0).abs() < 1e-9, "twin apex down");
+        assert!(
+            (flipped.arcs[0].apex.down_mil + 2.0).abs() < 1e-9,
+            "apex up"
+        );
+        assert!(
+            (flipped.arcs[1].apex.down_mil - 2.0).abs() < 1e-9,
+            "twin apex down"
+        );
     }
 
     /// The centered-arc dedupe decision, stated as a table, for the two horseshoes this
@@ -2557,7 +2662,9 @@ mod tests {
         // And nothing the claim names may sit outside the keys the sweep drives, or it would
         // be asserted about nothing at all.
         for element_type in every_element_type() {
-            for key in ["x", "y", "cx", "cy", "r", "start", "end", "text", "repeat", "label"] {
+            for key in [
+                "x", "y", "cx", "cy", "r", "start", "end", "text", "repeat", "label",
+            ] {
                 assert!(
                     !is_strict(element_type, key) || EVERY_ELEMENT_KEY.contains(&key),
                     "{element_type}.{key} is claimed strict but is not in the swept key list"
@@ -2615,8 +2722,12 @@ mod tests {
                     "cy" => Some("y"),
                     _ => None,
                 } {
-                    circles.push(format!(r#"{{"type":"circle","{other}":1,"{key}":{value}}}"#));
-                    circles.push(format!(r#"{{"type":"circle","{key}":{value},"{other}":1}}"#));
+                    circles.push(format!(
+                        r#"{{"type":"circle","{other}":1,"{key}":{value}}}"#
+                    ));
+                    circles.push(format!(
+                        r#"{{"type":"circle","{key}":{value},"{other}":1}}"#
+                    ));
                 }
 
                 for circle in circles {
@@ -2669,8 +2780,14 @@ mod tests {
             ]}"#,
         )
         .unwrap();
-        assert_eq!(report.dropped_element_types, vec![("circle".to_string(), 1)]);
-        assert_eq!(report.circle_repeats_unreadable, 0, "`null` is absence, not garbage");
+        assert_eq!(
+            report.dropped_element_types,
+            vec![("circle".to_string(), 1)]
+        );
+        assert_eq!(
+            report.circle_repeats_unreadable, 0,
+            "`null` is absence, not garbage"
+        );
     }
 
     /// What an arc's points are built from, and therefore what leaves one unresolved.
@@ -2696,20 +2813,41 @@ mod tests {
 
         for (what, circle) in [
             ("no radius", r#""x":0,"y":0,"start":200,"end":340"#),
-            ("unreadable radius", r#""x":0,"y":0,"r":"2mil","start":200,"end":340"#),
+            (
+                "unreadable radius",
+                r#""x":0,"y":0,"r":"2mil","start":200,"end":340"#,
+            ),
             ("zero radius", r#""x":0,"y":0,"r":0,"start":200,"end":340"#),
-            ("negative radius", r#""x":0,"y":0,"r":-2,"start":200,"end":340"#),
-            ("unreadable start", r#""x":0,"y":0,"r":2,"start":"200deg","end":340"#),
-            ("unreadable end", r#""x":0,"y":0,"r":2,"start":200,"end":"340deg""#),
-            ("unreadable center x", r#""x":"left","y":0,"r":2,"start":200,"end":340"#),
-            ("unreadable center y", r#""x":0,"y":"up","r":2,"start":200,"end":340"#),
+            (
+                "negative radius",
+                r#""x":0,"y":0,"r":-2,"start":200,"end":340"#,
+            ),
+            (
+                "unreadable start",
+                r#""x":0,"y":0,"r":2,"start":"200deg","end":340"#,
+            ),
+            (
+                "unreadable end",
+                r#""x":0,"y":0,"r":2,"start":200,"end":"340deg""#,
+            ),
+            (
+                "unreadable center x",
+                r#""x":"left","y":0,"r":2,"start":200,"end":340"#,
+            ),
+            (
+                "unreadable center y",
+                r#""x":0,"y":"up","r":2,"start":200,"end":340"#,
+            ),
         ] {
             let json =
                 format!(r#"{{"name":"A","unit":"mil","spec":[{{"type":"circle",{circle}}}]}}"#);
             let (_, report) = import_ventum_reticle_with_report(&json)
                 .unwrap_or_else(|e| panic!("{what} must not fail the import: {e:?}"));
             assert!(report.arcs.is_empty(), "{what}: no points may be reported");
-            assert_eq!(report.arcs_unresolved, 1, "{what}: must be declared unresolved");
+            assert_eq!(
+                report.arcs_unresolved, 1,
+                "{what}: must be declared unresolved"
+            );
             assert_eq!(
                 report.dropped_element_types,
                 vec![(ARC_TAG.to_string(), 1)],
@@ -2728,10 +2866,19 @@ mod tests {
     #[test]
     fn null_is_read_as_absence_not_as_a_bad_value() {
         for (what, circle) in [
-            ("start null, end unreadable", r#""r":2,"start":null,"end":"340deg""#),
-            ("start unreadable, end null", r#""r":2,"start":"200deg","end":null"#),
+            (
+                "start null, end unreadable",
+                r#""r":2,"start":null,"end":"340deg""#,
+            ),
+            (
+                "start unreadable, end null",
+                r#""r":2,"start":"200deg","end":null"#,
+            ),
             ("both null", r#""r":2,"start":null,"end":null"#),
-            ("every key null", r#""x":null,"y":null,"r":null,"start":null,"end":null"#),
+            (
+                "every key null",
+                r#""x":null,"y":null,"r":null,"start":null,"end":null"#,
+            ),
         ] {
             let json =
                 format!(r#"{{"name":"N","unit":"mil","spec":[{{"type":"circle",{circle}}}]}}"#);
@@ -2797,10 +2944,22 @@ mod tests {
     #[test]
     fn a_marks_own_position_refuses_a_null_like_any_other_wrong_value() {
         for (what, document) in [
-            ("dot x", r#"{"name":"N","unit":"mil","spec":[{"type":"dot","x":null,"y":4}]}"#),
-            ("dot y", r#"{"name":"N","unit":"mil","spec":[{"type":"dot","x":4,"y":null}]}"#),
-            ("tick x", r#"{"name":"N","unit":"mil","spec":[{"type":"tick","x":null,"y":4}]}"#),
-            ("tick y", r#"{"name":"N","unit":"mil","spec":[{"type":"tick","x":4,"y":null}]}"#),
+            (
+                "dot x",
+                r#"{"name":"N","unit":"mil","spec":[{"type":"dot","x":null,"y":4}]}"#,
+            ),
+            (
+                "dot y",
+                r#"{"name":"N","unit":"mil","spec":[{"type":"dot","x":4,"y":null}]}"#,
+            ),
+            (
+                "tick x",
+                r#"{"name":"N","unit":"mil","spec":[{"type":"tick","x":null,"y":4}]}"#,
+            ),
+            (
+                "tick y",
+                r#"{"name":"N","unit":"mil","spec":[{"type":"tick","x":4,"y":null}]}"#,
+            ),
             (
                 "text x",
                 r#"{"name":"N","unit":"mil","spec":[{"type":"text","x":null,"y":4,"text":"2"}]}"#,
@@ -2822,7 +2981,6 @@ mod tests {
             );
         }
     }
-
 
     /// What a `repeat` does to the tally, which is not one answer for every type.
     ///

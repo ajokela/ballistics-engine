@@ -25,7 +25,11 @@ fn base() -> BallisticInputs {
 }
 
 fn solve(inputs: BallisticInputs, max_range: f64) -> ballistics_engine::TrajectoryResult {
-    let mut s = TrajectorySolver::new(inputs, WindConditions::default(), AtmosphericConditions::default());
+    let mut s = TrajectorySolver::new(
+        inputs,
+        WindConditions::default(),
+        AtmosphericConditions::default(),
+    );
     s.set_max_range(max_range);
     s.set_time_step(0.001);
     s.solve().expect("solve")
@@ -37,7 +41,11 @@ fn yz_at(r: &ballistics_engine::TrajectoryResult, x: f64) -> (f64, f64) {
         if pts[i].position.x >= x {
             let (p1, p2) = (&pts[i - 1], &pts[i]);
             let dx = p2.position.x - p1.position.x;
-            let t = if dx.abs() < 1e-12 { 0.0 } else { (x - p1.position.x) / dx };
+            let t = if dx.abs() < 1e-12 {
+                0.0
+            } else {
+                (x - p1.position.x) / dx
+            };
             return (
                 p1.position.y + t * (p2.position.y - p1.position.y),
                 p1.position.z + t * (p2.position.z - p1.position.z),
@@ -75,7 +83,10 @@ fn canted_fire_matches_small_angle_prediction() {
         let (y_canted, z_canted) = yz_at(&r_canted, range);
 
         let d = y_zeroed - y_flat; // measured elevation-correction height at this range
-        assert!(d > 0.1, "sanity: zero elevation must add height at {range} m (d={d})");
+        assert!(
+            d > 0.1,
+            "sanity: zero elevation must add height at {range} m (d={d})"
+        );
 
         let dz = z_canted - z_zeroed;
         let dy = y_canted - y_zeroed;

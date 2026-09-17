@@ -139,9 +139,13 @@ pub fn map_a7p_to_profile(
             let rows = src.bc_rows();
             // The row measured at the highest velocity is the muzzle-regime BC, retained as
             // the scalar `bc` for back-compat with tools that only understand one BC.
-            let (bc, bc_row_velocity) = rows.iter().copied().max_by(|a, b| a.1.total_cmp(&b.1)).ok_or_else(
-                || "no BC rows in file — cannot build a profile without a BC".to_string(),
-            )?;
+            let (bc, bc_row_velocity) = rows
+                .iter()
+                .copied()
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+                .ok_or_else(|| {
+                    "no BC rows in file — cannot build a profile without a BC".to_string()
+                })?;
             push(
                 "coef_rows[fastest]",
                 format!("BC {bc:.3} @ {bc_row_velocity:.0} m/s"),
@@ -157,7 +161,10 @@ pub fn map_a7p_to_profile(
                 sorted.sort_by(|a, b| b.1.total_cmp(&a.1));
                 push(
                     "coef_rows[all]",
-                    format!("{} row(s), fastest {bc:.3} @ {bc_row_velocity:.0} m/s", rows.len()),
+                    format!(
+                        "{} row(s), fastest {bc:.3} @ {bc_row_velocity:.0} m/s",
+                        rows.len()
+                    ),
                     format!("{} bc_segments (velocity-banded, descending)", sorted.len()),
                     "bc_segments",
                 );
@@ -218,7 +225,9 @@ pub fn map_a7p_to_profile(
             ("CUSTOM", 0.0, None, drag_curve)
         }
         A7pBcType::Other(v) => {
-            return Err(format!("unknown bc_type {v} — file newer than this importer"))
+            return Err(format!(
+                "unknown bc_type {v} — file newer than this importer"
+            ))
         }
     };
 
@@ -292,8 +301,7 @@ pub fn map_a7p_to_profile(
     }
 
     // Honest non-mapping: things the profile store cannot hold today.
-    let tcoeff_mps_per_c =
-        src.muzzle_velocity_mps * (src.temp_coeff_pct_per_15c / 100.0) / 15.0;
+    let tcoeff_mps_per_c = src.muzzle_velocity_mps * (src.temp_coeff_pct_per_15c / 100.0) / 15.0;
     report.unmapped.push((
         "c_t_coeff".to_string(),
         format!(
@@ -304,7 +312,10 @@ pub fn map_a7p_to_profile(
     ));
     report.unmapped.push((
         "c_zero_p_temperature".to_string(),
-        format!("{:.0} C powder temperature at zeroing", src.powder_temperature_c),
+        format!(
+            "{:.0} C powder temperature at zeroing",
+            src.powder_temperature_c
+        ),
     ));
     report.unmapped.push((
         "c_zero_temperature".to_string(),
@@ -355,8 +366,7 @@ pub fn map_a7p_to_profile(
     if src.zero_x_raw != 0 || src.zero_y_raw != 0 {
         match (zero_click, src.zero_distance_m) {
             (Some(click), Some(zero_distance_m)) if zero_distance_m > 0.0 => {
-                let click_rad =
-                    click.size / crate::adjustment::adjustment_factor(click.base);
+                let click_rad = click.size / crate::adjustment::adjustment_factor(click.base);
                 let up_clicks = f64::from(src.zero_y_raw) / 1000.0;
                 let right_clicks = -f64::from(src.zero_x_raw) / 1000.0;
                 let up_m = up_clicks * click_rad * zero_distance_m;
@@ -425,7 +435,10 @@ pub fn map_a7p_to_profile(
     if !src.distances_m.is_empty() {
         report.unmapped.push((
             "distances".to_string(),
-            format!("{} range-card entries (device UI list)", src.distances_m.len()),
+            format!(
+                "{} range-card entries (device UI list)",
+                src.distances_m.len()
+            ),
         ));
     }
     if src.switches_count > 0 {
@@ -448,9 +461,10 @@ pub fn map_a7p_to_profile(
         }
     }
     if !src.user_note.trim().is_empty() {
-        report
-            .unmapped
-            .push(("user_note".to_string(), format!("\"{}\"", src.user_note.trim())));
+        report.unmapped.push((
+            "user_note".to_string(),
+            format!("\"{}\"", src.user_note.trim()),
+        ));
     }
     for unknown in &doc.unknown_fields {
         report.unmapped.push((

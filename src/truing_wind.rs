@@ -335,11 +335,36 @@ pub struct WindTruingSolution {
 /// t quantile is within 0.5% of the normal z, so [`NORMAL_95_TWO_SIDED_Z`] is used instead.
 /// Generated from the regularized incomplete beta and checked against published tables.
 const T_95_TWO_SIDED: [f64; 30] = [
-    12.706204736, 4.302652730, 3.182446305, 2.776445105, 2.570581836, 2.446911851,
-    2.364624252, 2.306004135, 2.262157163, 2.228138852, 2.200985160, 2.178812830,
-    2.160368656, 2.144786688, 2.131449546, 2.119905299, 2.109815578, 2.100922040,
-    2.093024054, 2.085963447, 2.079613845, 2.073873068, 2.068657610, 2.063898562,
-    2.059538553, 2.055529439, 2.051830516, 2.048407142, 2.045229642, 2.042272456,
+    12.706204736,
+    4.302652730,
+    3.182446305,
+    2.776445105,
+    2.570581836,
+    2.446911851,
+    2.364624252,
+    2.306004135,
+    2.262157163,
+    2.228138852,
+    2.200985160,
+    2.178812830,
+    2.160368656,
+    2.144786688,
+    2.131449546,
+    2.119905299,
+    2.109815578,
+    2.100922040,
+    2.093024054,
+    2.085963447,
+    2.079613845,
+    2.073873068,
+    2.068657610,
+    2.063898562,
+    2.059538553,
+    2.055529439,
+    2.051830516,
+    2.048407142,
+    2.045229642,
+    2.042272456,
 ];
 
 /// Two-sided 95% normal quantile, matching `truing_uncertainty`'s constant.
@@ -427,7 +452,11 @@ fn build_wind_uncertainty(
 
     // Standard error of the mean from observed scatter (needs at least two shots).
     let empirical_sigma_mph = if n >= 2 {
-        let mean: f64 = solutions.iter().map(|s| s.solved_crosswind_mph).sum::<f64>() / n as f64;
+        let mean: f64 = solutions
+            .iter()
+            .map(|s| s.solved_crosswind_mph)
+            .sum::<f64>()
+            / n as f64;
         let var = solutions
             .iter()
             .map(|s| {
@@ -450,9 +479,17 @@ fn build_wind_uncertainty(
 
     // Wider wins. When only one exists, it is used on its own terms.
     let (sigma_mph, basis, dof) = match (empirical_sigma_mph, propagated) {
-        (Some(e), Some(p)) if e >= p => (e, WindUncertaintyBasisV1::EmpiricalScatter, Some(n as u32 - 1)),
+        (Some(e), Some(p)) if e >= p => (
+            e,
+            WindUncertaintyBasisV1::EmpiricalScatter,
+            Some(n as u32 - 1),
+        ),
         (Some(_), Some(p)) => (p, WindUncertaintyBasisV1::PropagatedMeasurement, None),
-        (Some(e), None) => (e, WindUncertaintyBasisV1::EmpiricalScatter, Some(n as u32 - 1)),
+        (Some(e), None) => (
+            e,
+            WindUncertaintyBasisV1::EmpiricalScatter,
+            Some(n as u32 - 1),
+        ),
         (None, Some(p)) => (p, WindUncertaintyBasisV1::PropagatedMeasurement, None),
         (None, None) => {
             let (code, message) = if n < 2 {
@@ -1354,7 +1391,10 @@ mod tests {
             .expect("solve")
             .wind_call_factor
             .expect("factor");
-        assert!(flipped < 0.0, "a wrong-side call must read negative: {flipped}");
+        assert!(
+            flipped < 0.0,
+            "a wrong-side call must read negative: {flipped}"
+        );
     }
 
     /// Sigmas: all-or-none. Every observation weighted -> inverse-variance mean with a
@@ -1573,8 +1613,7 @@ mod tests {
             "twist": {"rate_in": 11.0, "right_hand": true},
             "earth": null, "called_crosswind_mph": null
         });
-        let req: WindTruingRequest =
-            serde_json::from_value(json).expect("request deserializes");
+        let req: WindTruingRequest = serde_json::from_value(json).expect("request deserializes");
         let report = solve_wind_truing(&req).expect("solves");
         let out = serde_json::to_value(&report).expect("report serializes");
         assert!(out["mean_crosswind_mph"].is_number());
@@ -1584,7 +1623,11 @@ mod tests {
     // ---- interval on the combined crosswind (wind uncertainty model) ----------------
 
     /// Build a solution carrying only the fields the estimator reads.
-    fn sol(solved_crosswind_mph: f64, sigma_m: Option<f64>, solved_sigma_mph: Option<f64>) -> WindTruingSolution {
+    fn sol(
+        solved_crosswind_mph: f64,
+        sigma_m: Option<f64>,
+        solved_sigma_mph: Option<f64>,
+    ) -> WindTruingSolution {
         WindTruingSolution {
             range_m: 500.0,
             observed_miss_right_m: 0.3,
@@ -1604,7 +1647,11 @@ mod tests {
     fn interval_uses_scatter_when_no_sigmas_supplied() {
         // Three shots that disagree; no measurement sigma anywhere. The old code reported
         // a bare mean here -- this is the case the model exists to cover.
-        let sols = vec![sol(6.0, None, None), sol(8.0, None, None), sol(7.0, None, None)];
+        let sols = vec![
+            sol(6.0, None, None),
+            sol(8.0, None, None),
+            sol(7.0, None, None),
+        ];
         let got = build_wind_uncertainty(&sols, 7.0, None);
         let WindUncertaintyV1::Available(i) = got else {
             panic!("expected an interval, got {got:?}");
@@ -1634,12 +1681,17 @@ mod tests {
         ];
         let propagated = Some(0.02 / 3f64.sqrt()); // what inverse-variance weighting yields
         let got = build_wind_uncertainty(&sols, 6.5, propagated);
-        let WindUncertaintyV1::Available(i) = got else { panic!("expected an interval") };
+        let WindUncertaintyV1::Available(i) = got else {
+            panic!("expected an interval")
+        };
         assert_eq!(i.basis, WindUncertaintyBasisV1::EmpiricalScatter);
         let e = i.empirical_sigma_mph.expect("scatter");
         let pr = i.propagated_sigma_mph.expect("propagated");
         assert!(e > pr, "scatter {e} should exceed propagated {pr}");
-        assert!((i.sigma_mph - e).abs() < 1e-12, "the wider estimate must drive the interval");
+        assert!(
+            (i.sigma_mph - e).abs() < 1e-12,
+            "the wider estimate must drive the interval"
+        );
         // both remain visible so the shooter can see why
         assert!(i.propagated_sigma_mph.is_some());
     }
@@ -1655,9 +1707,14 @@ mod tests {
         ];
         let propagated = Some(1.5 / 3f64.sqrt());
         let got = build_wind_uncertainty(&sols, 7.0, propagated);
-        let WindUncertaintyV1::Available(i) = got else { panic!("expected an interval") };
+        let WindUncertaintyV1::Available(i) = got else {
+            panic!("expected an interval")
+        };
         assert_eq!(i.basis, WindUncertaintyBasisV1::PropagatedMeasurement);
-        assert_eq!(i.dof, None, "a supplied sigma is treated as known, so normal not t");
+        assert_eq!(
+            i.dof, None,
+            "a supplied sigma is treated as known, so normal not t"
+        );
         let half = NORMAL_95_TWO_SIDED_Z * i.sigma_mph;
         assert!((i.high_mph - (7.0 + half)).abs() < 1e-9);
     }
@@ -1677,7 +1734,9 @@ mod tests {
     fn single_observation_with_sigma_still_gets_an_interval() {
         let sols = vec![sol(7.0, Some(0.1), Some(2.0))];
         let got = build_wind_uncertainty(&sols, 7.0, Some(2.0));
-        let WindUncertaintyV1::Available(i) = got else { panic!("expected an interval") };
+        let WindUncertaintyV1::Available(i) = got else {
+            panic!("expected an interval")
+        };
         assert_eq!(i.basis, WindUncertaintyBasisV1::PropagatedMeasurement);
         assert!(i.empirical_sigma_mph.is_none(), "one shot has no scatter");
     }
@@ -1696,7 +1755,13 @@ mod tests {
     #[test]
     fn t_multiplier_table_matches_published_values() {
         // Spot-check the generated table against published t(0.975, nu).
-        for (dof, want) in [(1usize, 12.706205), (2, 4.302653), (5, 2.570582), (10, 2.228139), (30, 2.042272)] {
+        for (dof, want) in [
+            (1usize, 12.706205),
+            (2, 4.302653),
+            (5, 2.570582),
+            (10, 2.228139),
+            (30, 2.042272),
+        ] {
             let got = T_95_TWO_SIDED[dof - 1];
             assert!((got - want).abs() < 5e-6, "dof {dof}: {got} vs {want}");
         }

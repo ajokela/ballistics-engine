@@ -202,7 +202,12 @@ fn round_trip_metric_several_distances() {
     for &distance_m in &[22.86, 45.72, 91.44, 182.88, 274.32, 457.2] {
         let angle = solve_angle_metric(distance_m);
         let (near, far) = solve_crossings_metric(angle);
-        assert_original_is_one_of_the_crossings(distance_m, near, far, &format!("metric {distance_m} m"));
+        assert_original_is_one_of_the_crossings(
+            distance_m,
+            near,
+            far,
+            &format!("metric {distance_m} m"),
+        );
     }
 }
 
@@ -254,7 +259,11 @@ fn table_output_labels_both_crossings() {
         ])
         .output()
         .expect("run zero --from-angle table output");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Near Zero"), "{stdout}");
     assert!(stdout.contains("Far Zero"), "{stdout}");
@@ -369,10 +378,25 @@ mod max_ordinate_containment {
 
     fn zero_json(extra: &[&str]) -> serde_json::Value {
         run_zero(
-            &[&[
-                "zero", "--velocity", "2700", "--bc", "0.243", "--mass", "175", "--diameter",
-                "0.308", "--from-angle", "45", "--output", "json",
-            ], extra].concat(),
+            &[
+                &[
+                    "zero",
+                    "--velocity",
+                    "2700",
+                    "--bc",
+                    "0.243",
+                    "--mass",
+                    "175",
+                    "--diameter",
+                    "0.308",
+                    "--from-angle",
+                    "45",
+                    "--output",
+                    "json",
+                ],
+                extra,
+            ]
+            .concat(),
         )
     }
 
@@ -413,8 +437,17 @@ mod max_ordinate_containment {
         let run_raw = |extra: &[&str]| -> String {
             let out = std::process::Command::new(env!("CARGO_BIN_EXE_ballistics"))
                 .args([
-                    "zero", "--velocity", "2700", "--bc", "0.243", "--mass", "175",
-                    "--diameter", "0.308", "--from-angle", "45",
+                    "zero",
+                    "--velocity",
+                    "2700",
+                    "--bc",
+                    "0.243",
+                    "--mass",
+                    "175",
+                    "--diameter",
+                    "0.308",
+                    "--from-angle",
+                    "45",
                 ])
                 .args(extra)
                 .output()
@@ -447,8 +480,19 @@ mod max_ordinate_containment {
     #[test]
     fn two_crossing_solves_still_report_the_apex() {
         let doc = run_zero(&[
-            "zero", "--velocity", "2700", "--bc", "0.243", "--mass", "175", "--diameter",
-            "0.308", "--from-angle", "5", "--output", "json",
+            "zero",
+            "--velocity",
+            "2700",
+            "--bc",
+            "0.243",
+            "--mass",
+            "175",
+            "--diameter",
+            "0.308",
+            "--from-angle",
+            "5",
+            "--output",
+            "json",
         ]);
         assert!(doc["max_ordinate"].as_f64().is_some());
         assert_eq!(doc["primary_crossing"], "far");

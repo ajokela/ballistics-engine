@@ -128,10 +128,7 @@ fn the_probe_step_is_not_a_no_op() {
         normalized.bc_value
     );
     assert!(
-        matches!(
-            normalized.bc_reference_standard,
-            BcReferenceStandard::Icao
-        ),
+        matches!(normalized.bc_reference_standard, BcReferenceStandard::Icao),
         "the step must disarm itself so a second application is a no-op"
     );
 }
@@ -182,4 +179,3 @@ fn the_parity_tolerance_is_tight_enough_to_catch_a_skipped_conversion() {
         (converted - unconverted).abs()
     );
 }
-

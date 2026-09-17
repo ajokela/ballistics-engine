@@ -39,40 +39,134 @@ fn json_ok(args: &[&str]) -> Value {
 }
 
 const LOAD: &[&str] = &[
-    "-b", "0.243", "--drag-model", "g7", "-v", "2700", "-m", "175", "-d", "0.308",
+    "-b",
+    "0.243",
+    "--drag-model",
+    "g7",
+    "-v",
+    "2700",
+    "-m",
+    "175",
+    "-d",
+    "0.308",
 ];
 
 // true-velocity takes no -v (it SOLVES the velocity).
-const TV_LOAD: &[&str] = &["-b", "0.243", "--drag-model", "g7", "-m", "175", "-d", "0.308"];
+const TV_LOAD: &[&str] = &[
+    "-b",
+    "0.243",
+    "--drag-model",
+    "g7",
+    "-m",
+    "175",
+    "-d",
+    "0.308",
+];
 
 // (a) explicit CF = 1.0 is byte-identical on every dial surface.
 #[test]
 fn cf_of_one_is_byte_identical() {
     let cases: Vec<(Vec<&str>, Vec<&str>)> = vec![
         (
-            [&["come-ups"], LOAD, &["--zero-distance", "100", "--start", "200", "--end", "400", "--step", "100"]].concat(),
+            [
+                &["come-ups"],
+                LOAD,
+                &[
+                    "--zero-distance",
+                    "100",
+                    "--start",
+                    "200",
+                    "--end",
+                    "400",
+                    "--step",
+                    "100",
+                ],
+            ]
+            .concat(),
             vec!["--elevation-cf", "1.0"],
         ),
         (
-            [&["range-table"], LOAD, &["--zero-distance", "100", "--start", "200", "--end", "400", "--step", "100"]].concat(),
+            [
+                &["range-table"],
+                LOAD,
+                &[
+                    "--zero-distance",
+                    "100",
+                    "--start",
+                    "200",
+                    "--end",
+                    "400",
+                    "--step",
+                    "100",
+                ],
+            ]
+            .concat(),
             vec!["--elevation-cf", "1.0", "--windage-cf", "1.0"],
         ),
         (
-            [&["wind-card"], LOAD, &["--zero-distance", "100", "--start", "200", "--end", "300", "--step", "100"]].concat(),
+            [
+                &["wind-card"],
+                LOAD,
+                &[
+                    "--zero-distance",
+                    "100",
+                    "--start",
+                    "200",
+                    "--end",
+                    "300",
+                    "--step",
+                    "100",
+                ],
+            ]
+            .concat(),
             vec!["--windage-cf", "1.0"],
         ),
         (
-            [&["lead"], LOAD, &["--target-speed", "3", "--start", "200", "--end", "300", "--step", "100"]].concat(),
+            [
+                &["lead"],
+                LOAD,
+                &[
+                    "--target-speed",
+                    "3",
+                    "--start",
+                    "200",
+                    "--end",
+                    "300",
+                    "--step",
+                    "100",
+                ],
+            ]
+            .concat(),
             vec!["--windage-cf", "1.0"],
         ),
         (
-            [&["trajectory"], LOAD, &["--max-range", "500", "--auto-zero", "100", "--target-speed", "10", "-o", "csv", "--full"]].concat(),
+            [
+                &["trajectory"],
+                LOAD,
+                &[
+                    "--max-range",
+                    "500",
+                    "--auto-zero",
+                    "100",
+                    "--target-speed",
+                    "10",
+                    "-o",
+                    "csv",
+                    "--full",
+                ],
+            ]
+            .concat(),
             vec!["--elevation-cf", "1.0", "--windage-cf", "1.0"],
         ),
         (
             // --offline: the single-observation path would otherwise try the online
             // API under the default `online` feature (network-dependent test).
-            [&["true-velocity"], TV_LOAD, &["--range", "600", "--measured-drop", "4.1", "--offline"]].concat(),
+            [
+                &["true-velocity"],
+                TV_LOAD,
+                &["--range", "600", "--measured-drop", "4.1", "--offline"],
+            ]
+            .concat(),
             vec!["--elevation-cf", "1.0"],
         ),
         (
@@ -108,19 +202,62 @@ fn cf_divides_every_dial_surface_exactly() {
     };
 
     // come-ups: drop and come_up columns are dial values.
-    let base_args =
-        [&["come-ups"][..], LOAD, &["--zero-distance", "100", "--start", "200", "--end", "400", "--step", "100", "-o", "json"]].concat();
+    let base_args = [
+        &["come-ups"][..],
+        LOAD,
+        &[
+            "--zero-distance",
+            "100",
+            "--start",
+            "200",
+            "--end",
+            "400",
+            "--step",
+            "100",
+            "-o",
+            "json",
+        ],
+    ]
+    .concat();
     let mut cf_args = base_args.clone();
     cf_args.extend(["--elevation-cf", "0.95"]);
     let (b, s) = (json_ok(&base_args), json_ok(&cf_args));
-    for (rb, rs) in b["data"].as_array().unwrap().iter().zip(s["data"].as_array().unwrap()) {
-        close(rs["drop"].as_f64().unwrap(), rb["drop"].as_f64().unwrap(), "come-ups drop");
-        close(rs["come_up"].as_f64().unwrap(), rb["come_up"].as_f64().unwrap(), "come-ups come_up");
+    for (rb, rs) in b["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(s["data"].as_array().unwrap())
+    {
+        close(
+            rs["drop"].as_f64().unwrap(),
+            rb["drop"].as_f64().unwrap(),
+            "come-ups drop",
+        );
+        close(
+            rs["come_up"].as_f64().unwrap(),
+            rb["come_up"].as_f64().unwrap(),
+            "come-ups come_up",
+        );
     }
 
     // range-table CSV: drop_mil/wind_mil scale; drop_in/wind_in (raw inches) must NOT.
-    let base_args =
-        [&["range-table"][..], LOAD, &["--zero-distance", "100", "--start", "200", "--end", "400", "--step", "100", "-o", "csv"]].concat();
+    let base_args = [
+        &["range-table"][..],
+        LOAD,
+        &[
+            "--zero-distance",
+            "100",
+            "--start",
+            "200",
+            "--end",
+            "400",
+            "--step",
+            "100",
+            "-o",
+            "csv",
+        ],
+    ]
+    .concat();
     let mut cf_args = base_args.clone();
     cf_args.extend(["--elevation-cf", "0.95", "--windage-cf", "0.95"]);
     let (b, s) = (run_ok(&base_args), run_ok(&cf_args));
@@ -145,26 +282,78 @@ fn cf_divides_every_dial_surface_exactly() {
     }
 
     // wind-card: every wind_N cell is a dial value.
-    let base_args =
-        [&["wind-card"][..], LOAD, &["--zero-distance", "100", "--start", "200", "--end", "300", "--step", "100", "-o", "json"]].concat();
+    let base_args = [
+        &["wind-card"][..],
+        LOAD,
+        &[
+            "--zero-distance",
+            "100",
+            "--start",
+            "200",
+            "--end",
+            "300",
+            "--step",
+            "100",
+            "-o",
+            "json",
+        ],
+    ]
+    .concat();
     let mut cf_args = base_args.clone();
     cf_args.extend(["--windage-cf", "0.95"]);
     let (b, s) = (json_ok(&base_args), json_ok(&cf_args));
-    for (rb, rs) in b["data"].as_array().unwrap().iter().zip(s["data"].as_array().unwrap()) {
+    for (rb, rs) in b["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(s["data"].as_array().unwrap())
+    {
         for speed in ["wind_5", "wind_10", "wind_15", "wind_20"] {
-            close(rs[speed].as_f64().unwrap(), rb[speed].as_f64().unwrap(), "wind-card drift");
+            close(
+                rs[speed].as_f64().unwrap(),
+                rb[speed].as_f64().unwrap(),
+                "wind-card drift",
+            );
         }
     }
 
     // lead: lead_mil/lead_moa scale (dialed quantity); linear lead must NOT.
-    let base_args =
-        [&["lead"][..], LOAD, &["--target-speed", "3", "--start", "200", "--end", "300", "--step", "100", "-o", "json"]].concat();
+    let base_args = [
+        &["lead"][..],
+        LOAD,
+        &[
+            "--target-speed",
+            "3",
+            "--start",
+            "200",
+            "--end",
+            "300",
+            "--step",
+            "100",
+            "-o",
+            "json",
+        ],
+    ]
+    .concat();
     let mut cf_args = base_args.clone();
     cf_args.extend(["--windage-cf", "0.95"]);
     let (b, s) = (json_ok(&base_args), json_ok(&cf_args));
-    for (rb, rs) in b["rows"].as_array().unwrap().iter().zip(s["rows"].as_array().unwrap()) {
-        close(rs["lead_mil"].as_f64().unwrap(), rb["lead_mil"].as_f64().unwrap(), "lead_mil");
-        close(rs["lead_moa"].as_f64().unwrap(), rb["lead_moa"].as_f64().unwrap(), "lead_moa");
+    for (rb, rs) in b["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(s["rows"].as_array().unwrap())
+    {
+        close(
+            rs["lead_mil"].as_f64().unwrap(),
+            rb["lead_mil"].as_f64().unwrap(),
+            "lead_mil",
+        );
+        close(
+            rs["lead_moa"].as_f64().unwrap(),
+            rb["lead_moa"].as_f64().unwrap(),
+            "lead_moa",
+        );
         assert_eq!(
             rs["lead"].as_f64().unwrap().to_bits(),
             rb["lead"].as_f64().unwrap().to_bits(),
@@ -173,15 +362,33 @@ fn cf_divides_every_dial_surface_exactly() {
     }
 
     // trajectory mover Ring: mover_ring_mil scales, mover_ring_m (raw meters) must NOT.
-    let base_args =
-        [&["trajectory"][..], LOAD, &["--max-range", "500", "--auto-zero", "100", "--target-speed", "10", "-o", "json", "--full"]].concat();
+    let base_args = [
+        &["trajectory"][..],
+        LOAD,
+        &[
+            "--max-range",
+            "500",
+            "--auto-zero",
+            "100",
+            "--target-speed",
+            "10",
+            "-o",
+            "json",
+            "--full",
+        ],
+    ]
+    .concat();
     let mut cf_args = base_args.clone();
     cf_args.extend(["--windage-cf", "0.95"]);
     let (b, s) = (json_ok(&base_args), json_ok(&cf_args));
-    let (pb, ps) = (b["trajectory"].as_array().unwrap(), s["trajectory"].as_array().unwrap());
+    let (pb, ps) = (
+        b["trajectory"].as_array().unwrap(),
+        s["trajectory"].as_array().unwrap(),
+    );
     let mut checked = 0;
     for (rb, rs) in pb.iter().zip(ps) {
-        if let (Some(mb), Some(ms)) = (rb["mover_ring_mil"].as_f64(), rs["mover_ring_mil"].as_f64()) {
+        if let (Some(mb), Some(ms)) = (rb["mover_ring_mil"].as_f64(), rs["mover_ring_mil"].as_f64())
+        {
             close(ms, mb, "mover_ring_mil");
             assert_eq!(
                 rs["mover_ring_m"].as_f64().unwrap().to_bits(),
@@ -194,7 +401,12 @@ fn cf_divides_every_dial_surface_exactly() {
     assert!(checked > 3, "expected several ring points, got {checked}");
 
     // zero: the MOA/mrad dial outputs scale; the degrees bore-angle echo must NOT.
-    let base_args = [&["zero"][..], LOAD, &["--target-distance", "100", "-o", "json"]].concat();
+    let base_args = [
+        &["zero"][..],
+        LOAD,
+        &["--target-distance", "100", "-o", "json"],
+    ]
+    .concat();
     let mut cf_args = base_args.clone();
     cf_args.extend(["--elevation-cf", "0.95"]);
     let (b, s) = (json_ok(&base_args), json_ok(&cf_args));
@@ -227,8 +439,20 @@ fn cf_corrects_clicks_through_the_quantizer() {
         &["come-ups"][..],
         LOAD,
         &[
-            "--zero-distance", "100", "--start", "200", "--end", "600", "--step", "100",
-            "-o", "json", "--adjustment-unit", "clicks", "--elevation-click-value", "0.1mil",
+            "--zero-distance",
+            "100",
+            "--start",
+            "200",
+            "--end",
+            "600",
+            "--step",
+            "100",
+            "-o",
+            "json",
+            "--adjustment-unit",
+            "clicks",
+            "--elevation-click-value",
+            "0.1mil",
         ],
     ]
     .concat();
@@ -240,7 +464,18 @@ fn cf_corrects_clicks_through_the_quantizer() {
     let mil_args = [
         &["come-ups"][..],
         LOAD,
-        &["--zero-distance", "100", "--start", "200", "--end", "600", "--step", "100", "-o", "json"],
+        &[
+            "--zero-distance",
+            "100",
+            "--start",
+            "200",
+            "--end",
+            "600",
+            "--step",
+            "100",
+            "-o",
+            "json",
+        ],
     ]
     .concat();
     let mil = json_ok(&mil_args);
@@ -270,15 +505,30 @@ fn truing_multiplies_dialed_observations_by_the_cf() {
         &["true-velocity"][..],
         TV_LOAD,
         &[
-            "--range", "600", "--measured-drop", "10.526315789473685",
-            "--elevation-cf", "0.95", "--offline", "-o", "json",
+            "--range",
+            "600",
+            "--measured-drop",
+            "10.526315789473685",
+            "--elevation-cf",
+            "0.95",
+            "--offline",
+            "-o",
+            "json",
         ],
     ]
     .concat();
     let without = [
         &["true-velocity"][..],
         TV_LOAD,
-        &["--range", "600", "--measured-drop", "10", "--offline", "-o", "json"],
+        &[
+            "--range",
+            "600",
+            "--measured-drop",
+            "10",
+            "--offline",
+            "-o",
+            "json",
+        ],
     ]
     .concat();
     let (cf_doc, base_doc) = (json_ok(&with_cf), json_ok(&without));
@@ -315,16 +565,32 @@ fn truing_multiplies_dialed_observations_by_the_cf() {
         &["true-velocity"][..],
         TV_LOAD,
         &[
-            "--range", "600", "--measured-drop", "4.315789473684211",
-            "--observed", "800:8.31578947368421",
-            "--elevation-cf", "0.95", "-o", "json",
+            "--range",
+            "600",
+            "--measured-drop",
+            "4.315789473684211",
+            "--observed",
+            "800:8.31578947368421",
+            "--elevation-cf",
+            "0.95",
+            "-o",
+            "json",
         ],
     ]
     .concat();
     let without = [
         &["true-velocity"][..],
         TV_LOAD,
-        &["--range", "600", "--measured-drop", "4.1", "--observed", "800:7.9", "-o", "json"],
+        &[
+            "--range",
+            "600",
+            "--measured-drop",
+            "4.1",
+            "--observed",
+            "800:7.9",
+            "-o",
+            "json",
+        ],
     ]
     .concat();
     let (cf_doc, base_doc) = (json_ok(&with_cf), json_ok(&without));
@@ -342,7 +608,9 @@ fn truing_multiplies_dialed_observations_by_the_cf() {
     );
     assert!((bc_cf - bc_base).abs() < 1e-3, "{bc_cf} vs {bc_base}");
     // The report echoes the dialed (scope-unit) observations back.
-    let echoed = cf_doc["observations"][0]["observed_drop_mil"].as_f64().unwrap();
+    let echoed = cf_doc["observations"][0]["observed_drop_mil"]
+        .as_f64()
+        .unwrap();
     assert!(
         (echoed - 4.315789473684211).abs() < 1e-9,
         "multi-obs echo must show the entered dialed value, got {echoed}"
@@ -353,8 +621,18 @@ fn truing_multiplies_dialed_observations_by_the_cf() {
         &["true-velocity"][..],
         TV_LOAD,
         &[
-            "--range", "600", "--measured-drop", "95.0", "--observed", "800:225.0",
-            "--drop-unit", "in", "--elevation-cf", "0.95", "-o", "json",
+            "--range",
+            "600",
+            "--measured-drop",
+            "95.0",
+            "--observed",
+            "800:225.0",
+            "--drop-unit",
+            "in",
+            "--elevation-cf",
+            "0.95",
+            "-o",
+            "json",
         ],
     ]
     .concat();
@@ -362,8 +640,16 @@ fn truing_multiplies_dialed_observations_by_the_cf() {
         &["true-velocity"][..],
         TV_LOAD,
         &[
-            "--range", "600", "--measured-drop", "95.0", "--observed", "800:225.0",
-            "--drop-unit", "in", "-o", "json",
+            "--range",
+            "600",
+            "--measured-drop",
+            "95.0",
+            "--observed",
+            "800:225.0",
+            "--drop-unit",
+            "in",
+            "-o",
+            "json",
         ],
     ]
     .concat();
@@ -381,11 +667,25 @@ fn validation_rejects_out_of_band_factors() {
         let args = [
             &["come-ups"][..],
             LOAD,
-            &["--zero-distance", "100", "--start", "200", "--end", "300", "--step", "100", "--elevation-cf", bad],
+            &[
+                "--zero-distance",
+                "100",
+                "--start",
+                "200",
+                "--end",
+                "300",
+                "--step",
+                "100",
+                "--elevation-cf",
+                bad,
+            ],
         ]
         .concat();
         let output = run(&args);
-        assert!(!output.status.success(), "--elevation-cf {bad} must be rejected");
+        assert!(
+            !output.status.success(),
+            "--elevation-cf {bad} must be rejected"
+        );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
             stderr.contains("--elevation-cf") && stderr.contains("0.5") && stderr.contains("1.5"),
@@ -404,26 +704,53 @@ fn validation_rejects_out_of_band_factors() {
     let save = Command::new(BIN)
         .env("HOME", &home)
         .args([
-            "profile", "save", "cf-test", "--velocity", "2700", "--bc", "0.475",
-            "--drag-model", "g1", "--mass", "168", "--diameter", "0.308",
+            "profile",
+            "save",
+            "cf-test",
+            "--velocity",
+            "2700",
+            "--bc",
+            "0.475",
+            "--drag-model",
+            "g1",
+            "--mass",
+            "168",
+            "--diameter",
+            "0.308",
         ])
         .output()
         .expect("profile save");
     assert!(save.status.success());
-    let path = home.join(".ballistics").join("profiles").join("cf-test.json");
-    let mut profile: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let path = home
+        .join(".ballistics")
+        .join("profiles")
+        .join("cf-test.json");
+    let mut profile: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     profile["elevation_cf"] = Value::from(1.6);
     std::fs::write(&path, serde_json::to_string_pretty(&profile).unwrap()).unwrap();
 
     let output = Command::new(BIN)
         .env("HOME", &home)
         .args([
-            "come-ups", "--profile", "cf-test", "--zero-distance", "100",
-            "--start", "200", "--end", "300", "--step", "100",
+            "come-ups",
+            "--profile",
+            "cf-test",
+            "--zero-distance",
+            "100",
+            "--start",
+            "200",
+            "--end",
+            "300",
+            "--step",
+            "100",
         ])
         .output()
         .expect("come-ups run");
-    assert!(!output.status.success(), "an out-of-band stored CF must fail on load");
+    assert!(
+        !output.status.success(),
+        "an out-of-band stored CF must fail on load"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("elevation_cf"),
@@ -436,8 +763,19 @@ fn validation_rejects_out_of_band_factors() {
     let stored = Command::new(BIN)
         .env("HOME", &home)
         .args([
-            "come-ups", "--profile", "cf-test", "--zero-distance", "100",
-            "--start", "200", "--end", "300", "--step", "100", "-o", "json",
+            "come-ups",
+            "--profile",
+            "cf-test",
+            "--zero-distance",
+            "100",
+            "--start",
+            "200",
+            "--end",
+            "300",
+            "--step",
+            "100",
+            "-o",
+            "json",
         ])
         .output()
         .expect("come-ups stored cf");
@@ -445,9 +783,21 @@ fn validation_rejects_out_of_band_factors() {
     let flagged = Command::new(BIN)
         .env("HOME", &home)
         .args([
-            "come-ups", "--profile", "cf-test", "--zero-distance", "100",
-            "--start", "200", "--end", "300", "--step", "100", "-o", "json",
-            "--elevation-cf", "1.0",
+            "come-ups",
+            "--profile",
+            "cf-test",
+            "--zero-distance",
+            "100",
+            "--start",
+            "200",
+            "--end",
+            "300",
+            "--step",
+            "100",
+            "-o",
+            "json",
+            "--elevation-cf",
+            "1.0",
         ])
         .output()
         .expect("come-ups flag override");
@@ -468,32 +818,97 @@ fn validation_rejects_out_of_band_factors() {
 #[test]
 fn tall_target_computes_actual_over_dialed() {
     // 36.0 in at 100 yd is exactly 10 mil (1 mil = 3.6 in / 100 yd): CF = 1.0000.
-    let out = run_ok(&["tall-target", "--dialed", "10", "--measured", "36", "--range", "100"]);
-    assert!(out.contains("Correction factor (actual / dialed): 1.0000"), "{out}");
+    let out = run_ok(&[
+        "tall-target",
+        "--dialed",
+        "10",
+        "--measured",
+        "36",
+        "--range",
+        "100",
+    ]);
+    assert!(
+        out.contains("Correction factor (actual / dialed): 1.0000"),
+        "{out}"
+    );
 
     // 37.8 in = 10.5 mil: CF = 1.0500, and the printout states the division rule.
-    let out = run_ok(&["tall-target", "--dialed", "10", "--measured", "37.8", "--range", "100"]);
-    assert!(out.contains("Correction factor (actual / dialed): 1.0500"), "{out}");
+    let out = run_ok(&[
+        "tall-target",
+        "--dialed",
+        "10",
+        "--measured",
+        "37.8",
+        "--range",
+        "100",
+    ]);
+    assert!(
+        out.contains("Correction factor (actual / dialed): 1.0500"),
+        "{out}"
+    );
     assert!(
         out.contains("dial solutions are divided by it"),
         "the helper must state the application direction: {out}"
     );
 
     // 34.2 in = 9.5 mil: the under-tracking worked example, CF = 0.9500.
-    let out = run_ok(&["tall-target", "--dialed", "10", "--measured", "34.2", "--range", "100"]);
-    assert!(out.contains("Correction factor (actual / dialed): 0.9500"), "{out}");
+    let out = run_ok(&[
+        "tall-target",
+        "--dialed",
+        "10",
+        "--measured",
+        "34.2",
+        "--range",
+        "100",
+    ]);
+    assert!(
+        out.contains("Correction factor (actual / dialed): 0.9500"),
+        "{out}"
+    );
 
     // MOA uses the locked printed-table factor (3438): 20.94 in at 100 yd ≈ 20 MOA.
     let out = run_ok(&[
-        "tall-target", "--dialed", "20", "--measured", "20.94", "--range", "100", "--unit", "moa",
+        "tall-target",
+        "--dialed",
+        "20",
+        "--measured",
+        "20.94",
+        "--range",
+        "100",
+        "--unit",
+        "moa",
     ]);
-    assert!(out.contains("Correction factor (actual / dialed): 0.9999"), "{out}");
+    assert!(
+        out.contains("Correction factor (actual / dialed): 0.9999"),
+        "{out}"
+    );
 
     // Out-of-band results warn instead of pretending to be usable.
-    let out = run_ok(&["tall-target", "--dialed", "10", "--measured", "72", "--range", "100"]);
-    assert!(out.contains("outside the accepted (0.5, 1.5) band"), "{out}");
+    let out = run_ok(&[
+        "tall-target",
+        "--dialed",
+        "10",
+        "--measured",
+        "72",
+        "--range",
+        "100",
+    ]);
+    assert!(
+        out.contains("outside the accepted (0.5, 1.5) band"),
+        "{out}"
+    );
 
     // No solve: clicks is not an angular dial unit here.
-    let output = run(&["tall-target", "--dialed", "10", "--measured", "36", "--range", "100", "--unit", "clicks"]);
+    let output = run(&[
+        "tall-target",
+        "--dialed",
+        "10",
+        "--measured",
+        "36",
+        "--range",
+        "100",
+        "--unit",
+        "clicks",
+    ]);
     assert!(!output.status.success());
 }

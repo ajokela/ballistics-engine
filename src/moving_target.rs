@@ -78,7 +78,10 @@ pub enum LeadError {
     /// The intercept range moved beyond the distance the trajectory solve covered
     /// (an outbound target outrunning the solve's headroom, or a solve that
     /// terminated early — e.g. ground impact — before reaching it).
-    BeyondSolvedSpan { corrected_range_m: f64, solved_span_m: f64 },
+    BeyondSolvedSpan {
+        corrected_range_m: f64,
+        solved_span_m: f64,
+    },
     /// The underlying trajectory solve failed (invalid ballistic inputs, etc.).
     Solver(BallisticsError),
 }
@@ -175,7 +178,11 @@ fn tof_at(points: &[TrajectoryPoint], x_m: f64) -> Option<f64> {
         let (p1, p2) = (&w[0], &w[1]);
         if p2.position.x >= x_m {
             let dx = p2.position.x - p1.position.x;
-            let t = if dx.abs() < 1e-12 { 0.0 } else { (x_m - p1.position.x) / dx };
+            let t = if dx.abs() < 1e-12 {
+                0.0
+            } else {
+                (x_m - p1.position.x) / dx
+            };
             return Some(p1.time + t * (p2.time - p1.time));
         }
     }
@@ -243,7 +250,9 @@ pub fn calculate_lead(
             let tof = tof_at(points, corrected).ok_or_else(|| beyond_solved(corrected))?;
             let next = range_m + v_radial * tof;
             if next <= 0.0 {
-                return Err(LeadError::TargetOvertakesShooter { corrected_range_m: next });
+                return Err(LeadError::TargetOvertakesShooter {
+                    corrected_range_m: next,
+                });
             }
             let residual = (next - corrected).abs();
             iterations += 1;
@@ -252,7 +261,10 @@ pub fn calculate_lead(
                 break;
             }
             if iterations >= MAX_ITERATIONS {
-                return Err(LeadError::Convergence { iterations, residual_m: residual });
+                return Err(LeadError::Convergence {
+                    iterations,
+                    residual_m: residual,
+                });
             }
         }
     }
@@ -313,7 +325,10 @@ mod tests {
     #[test]
     fn right_to_left_lead_is_negative() {
         let c = lead_from_tof(3.0, 270.0, 0.5, 300.0);
-        assert!(c.lead_m < 0.0, "270 deg = target moving left => negative (hold left)");
+        assert!(
+            c.lead_m < 0.0,
+            "270 deg = target moving left => negative (hold left)"
+        );
     }
 
     #[test]
@@ -344,7 +359,10 @@ mod tests {
         )
         .expect("outbound must converge");
         assert!(s.iterations < 10, "iterations {}", s.iterations);
-        assert!(s.corrected_range_m > 600.0, "outbound target => longer intercept");
+        assert!(
+            s.corrected_range_m > 600.0,
+            "outbound target => longer intercept"
+        );
         // residual check: one more application of the map moves R by < 0.1 m
     }
 
@@ -392,9 +410,21 @@ mod tests {
                 range,
             )
         };
-        assert!(matches!(bad(f64::NAN, 90.0, 300.0), Err(LeadError::InvalidInput(_))));
-        assert!(matches!(bad(-1.0, 90.0, 300.0), Err(LeadError::InvalidInput(_))));
-        assert!(matches!(bad(3.0, f64::INFINITY, 300.0), Err(LeadError::InvalidInput(_))));
-        assert!(matches!(bad(3.0, 90.0, 0.0), Err(LeadError::InvalidInput(_))));
+        assert!(matches!(
+            bad(f64::NAN, 90.0, 300.0),
+            Err(LeadError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            bad(-1.0, 90.0, 300.0),
+            Err(LeadError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            bad(3.0, f64::INFINITY, 300.0),
+            Err(LeadError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            bad(3.0, 90.0, 0.0),
+            Err(LeadError::InvalidInput(_))
+        ));
     }
 }

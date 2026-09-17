@@ -33,7 +33,9 @@ fn output_with_deadline(mut cmd: Command, deadline: Duration) -> Output {
 
 /// Common ballistic args each subcommand needs to get past required-arg checks.
 fn base_args(subcommand: &'static str) -> Vec<&'static str> {
-    let mut v = vec![subcommand, "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5"];
+    let mut v = vec![
+        subcommand, "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
+    ];
     match subcommand {
         "come-ups" | "wind-card" | "range-table" => v.extend(["--zero-distance", "100"]),
         "lead" => v.extend(["--target-speed", "3"]),
@@ -44,7 +46,8 @@ fn base_args(subcommand: &'static str) -> Vec<&'static str> {
 
 fn run_with_step(subcommand: &'static str, step: &str) -> Output {
     let mut cmd = Command::new(BIN);
-    cmd.args(base_args(subcommand)).arg(format!("--step={step}"));
+    cmd.args(base_args(subcommand))
+        .arg(format!("--step={step}"));
     // Rejections are parse-time (instant); 30 s comfortably covers the slowest
     // legitimate sweep (the positive control) on a loaded machine.
     output_with_deadline(cmd, Duration::from_secs(30))
@@ -87,5 +90,8 @@ fn valid_step_still_accepted() {
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("Lead"), "expected a lead table, got: {stdout}");
+    assert!(
+        stdout.contains("Lead"),
+        "expected a lead table, got: {stdout}"
+    );
 }

@@ -51,11 +51,28 @@ fn save_base_profile(home: &std::path::Path, name: &str) {
     let out = run(
         home,
         &[
-            "profile", "save", name, "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308",
-            "--zero-distance", "100", "--auto-zero", "100",
+            "profile",
+            "save",
+            name,
+            "-v",
+            "2700",
+            "-b",
+            "0.475",
+            "-m",
+            "168",
+            "-d",
+            "0.308",
+            "--zero-distance",
+            "100",
+            "--auto-zero",
+            "100",
         ],
     );
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 fn come_up_rows(json: &str) -> Vec<(f64, f64)> {
@@ -96,13 +113,27 @@ fn zero_set_management_round_trips() {
     run_ok(
         &home,
         &[
-            "profile", "zero-set", "add", "mgmt", "--name", "suppressed", "--zero-distance",
-            "200", "--poi-up", "-0.3", "--poi-right", "0.1", "--notes", "suppressed load",
+            "profile",
+            "zero-set",
+            "add",
+            "mgmt",
+            "--name",
+            "suppressed",
+            "--zero-distance",
+            "200",
+            "--poi-up",
+            "-0.3",
+            "--poi-right",
+            "0.1",
+            "--notes",
+            "suppressed load",
         ],
     );
     run_ok(
         &home,
-        &["profile", "zero-set", "add", "mgmt", "--name", "match", "--poi-up", "0.25"],
+        &[
+            "profile", "zero-set", "add", "mgmt", "--name", "match", "--poi-up", "0.25",
+        ],
     );
 
     let list = run_ok(&home, &["profile", "zero-set", "list", "mgmt"]);
@@ -117,7 +148,9 @@ fn zero_set_management_round_trips() {
     // Upsert by name: replacing announces itself and does not duplicate.
     let out = run(
         &home,
-        &["profile", "zero-set", "add", "mgmt", "--name", "match", "--poi-up", "0.5"],
+        &[
+            "profile", "zero-set", "add", "mgmt", "--name", "match", "--poi-up", "0.5",
+        ],
     );
     assert!(out.status.success());
     assert!(
@@ -130,14 +163,30 @@ fn zero_set_management_round_trips() {
     assert!(list.contains("up +0.50 mil"), "{list}");
 
     // Remove; removing again is a hard error naming the remaining sets.
-    run_ok(&home, &["profile", "zero-set", "remove", "mgmt", "--name", "match"]);
-    let out = run(&home, &["profile", "zero-set", "remove", "mgmt", "--name", "match"]);
+    run_ok(
+        &home,
+        &["profile", "zero-set", "remove", "mgmt", "--name", "match"],
+    );
+    let out = run(
+        &home,
+        &["profile", "zero-set", "remove", "mgmt", "--name", "match"],
+    );
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("available zero sets: suppressed"), "{err}");
 
     // Removing the last set drops the key from the stored JSON entirely.
-    run_ok(&home, &["profile", "zero-set", "remove", "mgmt", "--name", "suppressed"]);
+    run_ok(
+        &home,
+        &[
+            "profile",
+            "zero-set",
+            "remove",
+            "mgmt",
+            "--name",
+            "suppressed",
+        ],
+    );
     let stored = std::fs::read_to_string(home.join(".ballistics/profiles/mgmt.json")).unwrap();
     assert!(!stored.contains("zero_sets"), "{stored}");
 }
@@ -151,7 +200,9 @@ fn zero_set_selection_shifts_dials_by_exactly_the_stored_mils() {
     save_base_profile(&home, "plain");
     run_ok(
         &home,
-        &["profile", "zero-set", "add", "sel", "--name", "match", "--poi-up", "0.25"],
+        &[
+            "profile", "zero-set", "add", "sel", "--name", "match", "--poi-up", "0.25",
+        ],
     );
 
     let mut args = vec!["come-ups", "--profile", "sel"];
@@ -187,7 +238,9 @@ fn zero_set_bias_is_added_before_the_tracking_cf_division() {
     save_base_profile(&home, "cfsel");
     run_ok(
         &home,
-        &["profile", "zero-set", "add", "cfsel", "--name", "match", "--poi-up", "0.25"],
+        &[
+            "profile", "zero-set", "add", "cfsel", "--name", "match", "--poi-up", "0.25",
+        ],
     );
 
     let mut base_args = vec!["come-ups", "--profile", "cfsel"];
@@ -195,7 +248,13 @@ fn zero_set_bias_is_added_before_the_tracking_cf_division() {
     let base = come_up_rows(&run_ok(&home, &base_args));
 
     let mut cf_args = vec![
-        "come-ups", "--profile", "cfsel", "--zero-set", "match", "--elevation-cf", "0.95",
+        "come-ups",
+        "--profile",
+        "cfsel",
+        "--zero-set",
+        "match",
+        "--elevation-cf",
+        "0.95",
     ];
     cf_args.extend_from_slice(COME_UPS_ARGS);
     let corrected = come_up_rows(&run_ok(&home, &cf_args));
@@ -208,7 +267,10 @@ fn zero_set_bias_is_added_before_the_tracking_cf_division() {
         );
         // Pin the ORDER, not just a formula: the wrong order differs measurably.
         let wrong = d0 / 0.95 + 0.25;
-        assert!((d1 - wrong).abs() > 1e-4, "at {r0} yd: bias must precede the CF division");
+        assert!(
+            (d1 - wrong).abs() > 1e-4,
+            "at {r0} yd: bias must precede the CF division"
+        );
     }
 }
 
@@ -220,11 +282,26 @@ fn zero_set_distance_feeds_the_auto_zero() {
     save_base_profile(&home, "dist");
     run_ok(
         &home,
-        &["profile", "zero-set", "add", "dist", "--name", "far", "--zero-distance", "300"],
+        &[
+            "profile",
+            "zero-set",
+            "add",
+            "dist",
+            "--name",
+            "far",
+            "--zero-distance",
+            "300",
+        ],
     );
 
     let zero_angle = |extra: &[&str]| -> f64 {
-        let mut args = vec!["trajectory", "--saved-profile", "dist", "--max-range", "600"];
+        let mut args = vec![
+            "trajectory",
+            "--saved-profile",
+            "dist",
+            "--max-range",
+            "600",
+        ];
         args.extend_from_slice(extra);
         args.extend_from_slice(&["-o", "json"]);
         let v: serde_json::Value = serde_json::from_str(&run_ok(&home, &args)).unwrap();
@@ -236,9 +313,18 @@ fn zero_set_distance_feeds_the_auto_zero() {
     let explicit300 = zero_angle(&["--auto-zero", "300"]);
     let flag_wins = zero_angle(&["--zero-set", "far", "--auto-zero", "100"]);
 
-    assert!(far > master, "300 yd zero must dial above the 100 yd master zero");
-    assert!((far - explicit300).abs() < 1e-12, "set zero == explicit --auto-zero 300");
-    assert!((flag_wins - master).abs() < 1e-12, "explicit --auto-zero must beat the set");
+    assert!(
+        far > master,
+        "300 yd zero must dial above the 100 yd master zero"
+    );
+    assert!(
+        (far - explicit300).abs() < 1e-12,
+        "set zero == explicit --auto-zero 300"
+    );
+    assert!(
+        (flag_wins - master).abs() < 1e-12,
+        "explicit --auto-zero must beat the set"
+    );
 }
 
 /// Unknown set names are a hard error listing the available names; --zero-set with no
@@ -249,11 +335,22 @@ fn unknown_zero_set_is_a_hard_error_listing_names() {
     save_base_profile(&home, "errs");
     run_ok(
         &home,
-        &["profile", "zero-set", "add", "errs", "--name", "a", "--poi-up", "0.1"],
+        &[
+            "profile", "zero-set", "add", "errs", "--name", "a", "--poi-up", "0.1",
+        ],
     );
     run_ok(
         &home,
-        &["profile", "zero-set", "add", "errs", "--name", "b", "--poi-right", "0.2"],
+        &[
+            "profile",
+            "zero-set",
+            "add",
+            "errs",
+            "--name",
+            "b",
+            "--poi-right",
+            "0.2",
+        ],
     );
 
     let mut args = vec!["come-ups", "--profile", "errs", "--zero-set", "nope"];
@@ -267,8 +364,19 @@ fn unknown_zero_set_is_a_hard_error_listing_names() {
     let out = run(
         &home,
         &[
-            "trajectory", "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308",
-            "--zero-set", "x", "--max-range", "400",
+            "trajectory",
+            "-v",
+            "2700",
+            "-b",
+            "0.475",
+            "-m",
+            "168",
+            "-d",
+            "0.308",
+            "--zero-set",
+            "x",
+            "--max-range",
+            "400",
         ],
     );
     assert!(!out.status.success());
@@ -297,18 +405,46 @@ fn profile_csv_offsets_form_a_selectable_set() {
     let out = run(
         &home,
         &[
-            "trajectory", "--profile", csv, "--profile-row", "R1", "-m", "175", "-d", "0.308",
-            "--zero-set", "R1", "--max-range", "400", "-o", "json",
+            "trajectory",
+            "--profile",
+            csv,
+            "--profile-row",
+            "R1",
+            "-m",
+            "175",
+            "-d",
+            "0.308",
+            "--zero-set",
+            "R1",
+            "--max-range",
+            "400",
+            "-o",
+            "json",
         ],
     );
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // Unknown name: the CSV-derived set shows up in the available list.
     let out = run(
         &home,
         &[
-            "trajectory", "--profile", csv, "--profile-row", "R1", "-m", "175", "-d", "0.308",
-            "--zero-set", "bogus", "--max-range", "400",
+            "trajectory",
+            "--profile",
+            csv,
+            "--profile-row",
+            "R1",
+            "-m",
+            "175",
+            "-d",
+            "0.308",
+            "--zero-set",
+            "bogus",
+            "--max-range",
+            "400",
         ],
     );
     assert!(!out.status.success());
@@ -319,13 +455,27 @@ fn profile_csv_offsets_form_a_selectable_set() {
     let out = run(
         &home,
         &[
-            "trajectory", "--profile", csv, "--profile-row", "R2", "-m", "175", "-d", "0.308",
-            "--zero-set", "R2", "--max-range", "400",
+            "trajectory",
+            "--profile",
+            csv,
+            "--profile-row",
+            "R2",
+            "-m",
+            "175",
+            "-d",
+            "0.308",
+            "--zero-set",
+            "R2",
+            "--max-range",
+            "400",
         ],
     );
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("has no zero sets") || err.contains("requires a profile"), "{err}");
+    assert!(
+        err.contains("has no zero sets") || err.contains("requires a profile"),
+        "{err}"
+    );
 }
 
 /// wind-card and range-table inherit the windage/elevation corrections through the same
@@ -337,25 +487,45 @@ fn wind_card_drift_shifts_by_the_windage_correction() {
     save_base_profile(&home, "wc");
     run_ok(
         &home,
-        &["profile", "zero-set", "add", "wc", "--name", "load2", "--poi-right", "0.2"],
+        &[
+            "profile",
+            "zero-set",
+            "add",
+            "wc",
+            "--name",
+            "load2",
+            "--poi-right",
+            "0.2",
+        ],
     );
 
     let card = |extra: &[&str]| -> String {
         let mut args = vec!["wind-card", "--profile", "wc"];
         args.extend_from_slice(extra);
         args.extend_from_slice(&[
-            "--zero-distance", "100", "--start", "300", "--end", "300", "--step", "100",
-            "--wind-speeds", "10", "-o", "json",
+            "--zero-distance",
+            "100",
+            "--start",
+            "300",
+            "--end",
+            "300",
+            "--step",
+            "100",
+            "--wind-speeds",
+            "10",
+            "-o",
+            "json",
         ]);
         run_ok(&home, &args)
     };
 
     let base: serde_json::Value = serde_json::from_str(&card(&[])).unwrap();
-    let sel: serde_json::Value =
-        serde_json::from_str(&card(&["--zero-set", "load2"])).unwrap();
+    let sel: serde_json::Value = serde_json::from_str(&card(&["--zero-set", "load2"])).unwrap();
     let get = |v: &serde_json::Value| -> f64 {
         // wind-card JSON rows carry one `wind_<speed>` drift value per speed column.
-        v["data"].as_array().unwrap()[0]["wind_10"].as_f64().unwrap()
+        v["data"].as_array().unwrap()[0]["wind_10"]
+            .as_f64()
+            .unwrap()
     };
     let d0 = get(&base);
     let d1 = get(&sel);

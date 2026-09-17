@@ -48,8 +48,19 @@ fn run_json(args: &[&str]) -> Value {
 }
 
 const BASE_METRIC: &[&str] = &[
-    "--units", "metric", "trajectory", "-v", "823", "-b", "0.475", "-m", "10.9", "-d", "7.82",
-    "--max-range", "450",
+    "--units",
+    "metric",
+    "trajectory",
+    "-v",
+    "823",
+    "-b",
+    "0.475",
+    "-m",
+    "10.9",
+    "-d",
+    "7.82",
+    "--max-range",
+    "450",
 ];
 
 // ---------------------------------------------------------------------------------
@@ -65,7 +76,11 @@ fn json_ring_m_equals_target_speed_times_time() {
     args.extend(["--full", "-o", "json", "--target-speed", "3"]);
     let json = run_json(&args);
     let points = json["trajectory"].as_array().expect("trajectory array");
-    assert!(points.len() > 5, "expected several points, got {}", points.len());
+    assert!(
+        points.len() > 5,
+        "expected several points, got {}",
+        points.len()
+    );
 
     let mut checked = 0;
     for p in points {
@@ -92,7 +107,11 @@ fn json_ring_mil_matches_formula_and_omits_at_muzzle() {
 
     // First point is the muzzle: z (downrange, metric = meters) must be 0.
     let muzzle = &points[0];
-    assert_eq!(muzzle["z"].as_f64().unwrap(), 0.0, "first point should be the muzzle");
+    assert_eq!(
+        muzzle["z"].as_f64().unwrap(),
+        0.0,
+        "first point should be the muzzle"
+    );
     assert_eq!(
         muzzle["mover_ring_m"].as_f64().unwrap(),
         0.0,
@@ -121,7 +140,10 @@ fn json_ring_mil_matches_formula_and_omits_at_muzzle() {
         );
         checked += 1;
     }
-    assert!(checked > 5, "expected several non-muzzle points checked, got {checked}");
+    assert!(
+        checked > 5,
+        "expected several non-muzzle points checked, got {checked}"
+    );
 }
 
 /// Imperial (default units): --target-speed is mph, converted to m/s before the ring
@@ -131,8 +153,22 @@ fn json_ring_m_imperial_uses_mph_conversion() {
     let target_speed_mph = 5.0_f64;
     let target_speed_mps = target_speed_mph * 0.44704;
     let out = run_json(&[
-        "trajectory", "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308", "--max-range",
-        "500", "--full", "-o", "json", "--target-speed", "5",
+        "trajectory",
+        "-v",
+        "2700",
+        "-b",
+        "0.475",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "--max-range",
+        "500",
+        "--full",
+        "-o",
+        "json",
+        "--target-speed",
+        "5",
     ]);
     let points = out["trajectory"].as_array().expect("trajectory array");
     let last = points.last().expect("at least one point");
@@ -182,7 +218,11 @@ fn parse_table_ring_rows(table: &str) -> Vec<(f64, f64, Option<f64>)> {
             let ring = if cells[5] == "-" {
                 None
             } else {
-                Some(cells[5].parse::<f64>().expect("ring cell should be numeric or '-'"))
+                Some(
+                    cells[5]
+                        .parse::<f64>()
+                        .expect("ring cell should be numeric or '-'"),
+                )
             };
             rows.push((time, x, ring));
         }
@@ -195,13 +235,26 @@ fn table_has_ring_column_with_correct_header_and_muzzle_dash() {
     let mut args: Vec<&str> = BASE_METRIC.to_vec();
     args.extend(["--full", "-o", "table", "--target-speed", "3"]);
     let out = run(&args);
-    assert!(out.contains("Ring(mil)"), "table should carry a Ring(mil) header:\n{out}");
+    assert!(
+        out.contains("Ring(mil)"),
+        "table should carry a Ring(mil) header:\n{out}"
+    );
 
     let rows = parse_table_ring_rows(&out);
-    assert!(rows.len() > 3, "expected several parsed rows, got {}", rows.len());
+    assert!(
+        rows.len() > 3,
+        "expected several parsed rows, got {}",
+        rows.len()
+    );
     let (t0, x0, ring0) = rows[0];
-    assert!(t0.abs() < 1e-9 && x0.abs() < 1e-9, "first row should be the muzzle (t=0, x=0)");
-    assert_eq!(ring0, None, "muzzle row must print '-' for Ring, not a number");
+    assert!(
+        t0.abs() < 1e-9 && x0.abs() < 1e-9,
+        "first row should be the muzzle (t=0, x=0)"
+    );
+    assert_eq!(
+        ring0, None,
+        "muzzle row must print '-' for Ring, not a number"
+    );
 
     // The table prints time to 3dp and X to 2dp, so re-deriving target_speed*t/x*1000
     // from the DISPLAYED text (not the full-precision values the engine actually used)
@@ -223,7 +276,10 @@ fn table_has_ring_column_with_correct_header_and_muzzle_dash() {
         );
         checked += 1;
     }
-    assert!(checked > 2, "expected several far-downrange rows checked, got {checked}");
+    assert!(
+        checked > 2,
+        "expected several far-downrange rows checked, got {checked}"
+    );
 }
 
 // ---------------------------------------------------------------------------------
@@ -237,7 +293,10 @@ fn csv_raw_points_gains_ring_mil_column_when_flag_set() {
     let out = run(&args);
     let mut lines = out.lines();
     let header = lines.next().expect("header line");
-    assert!(header.ends_with(",ring_mil"), "CSV header should end with ,ring_mil: {header}");
+    assert!(
+        header.ends_with(",ring_mil"),
+        "CSV header should end with ,ring_mil: {header}"
+    );
 
     // As in the table test above: CSV prints x/z to 2dp, so re-deriving the ratio from
     // that rounded text has its own error, amplified at small downrange. Restrict the
@@ -246,11 +305,18 @@ fn csv_raw_points_gains_ring_mil_column_when_flag_set() {
     let mut checked = 0;
     for line in lines {
         let cols: Vec<&str> = line.split(',').collect();
-        assert_eq!(cols.len(), 7, "expected 7 columns (6 base + ring_mil): {line}");
+        assert_eq!(
+            cols.len(),
+            7,
+            "expected 7 columns (6 base + ring_mil): {line}"
+        );
         let time: f64 = cols[0].parse().expect("time");
         let downrange_m: f64 = cols[3].parse().expect("z column (downrange, meters)");
         if downrange_m <= 0.0 {
-            assert_eq!(cols[6], "", "muzzle row's ring_mil field should be empty: {line}");
+            assert_eq!(
+                cols[6], "",
+                "muzzle row's ring_mil field should be empty: {line}"
+            );
             continue;
         }
         let ring_mil: f64 = cols[6].parse().expect("ring_mil");
@@ -265,13 +331,23 @@ fn csv_raw_points_gains_ring_mil_column_when_flag_set() {
         );
         checked += 1;
     }
-    assert!(checked > 3, "expected several non-muzzle rows checked, got {checked}");
+    assert!(
+        checked > 3,
+        "expected several non-muzzle rows checked, got {checked}"
+    );
 }
 
 #[test]
 fn csv_sampled_points_also_gains_ring_mil_column() {
     let mut args: Vec<&str> = BASE_METRIC.to_vec();
-    args.extend(["--full", "--sample-trajectory", "-o", "csv", "--target-speed", "3"]);
+    args.extend([
+        "--full",
+        "--sample-trajectory",
+        "-o",
+        "csv",
+        "--target-speed",
+        "3",
+    ]);
     let out = run(&args);
     let mut lines = out.lines();
     let header = lines.next().expect("header line");
@@ -280,7 +356,11 @@ fn csv_sampled_points_also_gains_ring_mil_column() {
         "sampled CSV header should also end with ,ring_mil: {header}"
     );
     let row = lines.next().expect("at least one sampled row");
-    assert_eq!(row.split(',').count(), 7, "expected 7 columns in sampled CSV row: {row}");
+    assert_eq!(
+        row.split(',').count(),
+        7,
+        "expected 7 columns in sampled CSV row: {row}"
+    );
 }
 
 // ---------------------------------------------------------------------------------
@@ -291,10 +371,23 @@ fn csv_sampled_points_also_gains_ring_mil_column() {
 #[test]
 fn no_flag_table_has_no_ring_column() {
     let out = run(&[
-        "trajectory", "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308", "--full", "-o",
+        "trajectory",
+        "-v",
+        "2700",
+        "-b",
+        "0.475",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "--full",
+        "-o",
         "table",
     ]);
-    assert!(!out.contains("Ring"), "Ring column must not appear without --target-speed");
+    assert!(
+        !out.contains("Ring"),
+        "Ring column must not appear without --target-speed"
+    );
     // The original 5-column border must be exactly preserved (byte-identical width).
     assert!(out.contains("┌──────────┬──────────┬──────────┬──────────┬──────────┐"));
     assert!(!out.contains("┌──────────┬──────────┬──────────┬──────────┬──────────┬──────────┐"));
@@ -303,29 +396,77 @@ fn no_flag_table_has_no_ring_column() {
 #[test]
 fn no_flag_json_has_no_mover_ring_fields() {
     let out = run(&[
-        "trajectory", "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308", "--full", "-o",
+        "trajectory",
+        "-v",
+        "2700",
+        "-b",
+        "0.475",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "--full",
+        "-o",
         "json",
     ]);
-    assert!(!out.contains("mover_ring"), "mover_ring fields must not appear without --target-speed");
+    assert!(
+        !out.contains("mover_ring"),
+        "mover_ring fields must not appear without --target-speed"
+    );
 }
 
 #[test]
 fn zero_target_speed_behaves_identically_to_omitted() {
     let with_zero = run(&[
-        "trajectory", "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308", "--full", "-o",
-        "json", "--target-speed", "0",
+        "trajectory",
+        "-v",
+        "2700",
+        "-b",
+        "0.475",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "--full",
+        "-o",
+        "json",
+        "--target-speed",
+        "0",
     ]);
     let omitted = run(&[
-        "trajectory", "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308", "--full", "-o",
+        "trajectory",
+        "-v",
+        "2700",
+        "-b",
+        "0.475",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "--full",
+        "-o",
         "json",
     ]);
-    assert_eq!(with_zero, omitted, "--target-speed 0 must match omitting the flag entirely");
+    assert_eq!(
+        with_zero, omitted,
+        "--target-speed 0 must match omitting the flag entirely"
+    );
 }
 
 #[test]
 fn no_flag_csv_header_is_unchanged() {
     let out = run(&[
-        "trajectory", "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308", "--full", "-o",
+        "trajectory",
+        "-v",
+        "2700",
+        "-b",
+        "0.475",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "--full",
+        "-o",
         "csv",
     ]);
     let header = out.lines().next().expect("header");
@@ -341,10 +482,23 @@ fn trajectory_rejects_out_of_range_target_speed() {
     // "=" syntax so the negative case reaches the value parser rather than being
     // eaten earlier as an unexpected hyphen argument (also a rejection, but this
     // asserts the f64_range bound specifically).
-    for bad in ["--target-speed=301", "--target-speed=1000000000", "--target-speed=-1"] {
+    for bad in [
+        "--target-speed=301",
+        "--target-speed=1000000000",
+        "--target-speed=-1",
+    ] {
         let out = Command::new(get_cli_binary())
             .args([
-                "trajectory", "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308", bad,
+                "trajectory",
+                "-v",
+                "2700",
+                "-b",
+                "0.475",
+                "-m",
+                "168",
+                "-d",
+                "0.308",
+                bad,
             ])
             .output()
             .expect("run");
@@ -372,8 +526,20 @@ fn table_ring_column_honors_moa_adjustment_unit() {
     // variant at 2 printed decimals: the two differ by mil x 6.57e-5 > 0.012, more
     // than the 0.01 print quantum, so a wrong constant cannot round to the same cell.
     let base = [
-        "trajectory", "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308", "--max-range",
-        "400", "--target-speed", "300", "--full",
+        "trajectory",
+        "-v",
+        "2700",
+        "-b",
+        "0.475",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "--max-range",
+        "400",
+        "--target-speed",
+        "300",
+        "--full",
     ];
 
     // Full-precision mil from JSON (JSON is adjustment-unit-invariant by contract).
@@ -397,8 +563,14 @@ fn table_ring_column_honors_moa_adjustment_unit() {
     let mut moa_args = base.to_vec();
     moa_args.extend(["--adjustment-unit", "moa", "-o", "table"]);
     let moa_table = run(&moa_args);
-    assert!(moa_table.contains("Ring(moa)"), "moa run must show Ring(moa):\n{moa_table}");
-    assert!(!moa_table.contains("Ring(mil)"), "moa run must not show Ring(mil)");
+    assert!(
+        moa_table.contains("Ring(moa)"),
+        "moa run must show Ring(moa):\n{moa_table}"
+    );
+    assert!(
+        !moa_table.contains("Ring(mil)"),
+        "moa run must not show Ring(mil)"
+    );
     let moa_rows = parse_table_ring_rows(&moa_table);
     let (_, _, moa_cell) = moa_rows.last().expect("moa table rows");
     let moa_cell = moa_cell.expect("last row has a numeric ring cell");
@@ -440,7 +612,17 @@ fn run_capturing_stderr(args: &[&str]) -> (String, String) {
 }
 
 const NOOP_BASE: &[&str] = &[
-    "trajectory", "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308", "--max-range", "300",
+    "trajectory",
+    "-v",
+    "2700",
+    "-b",
+    "0.475",
+    "-m",
+    "168",
+    "-d",
+    "0.308",
+    "--max-range",
+    "300",
 ];
 
 #[test]
@@ -450,7 +632,10 @@ fn inert_adjustment_unit_warns_once_and_leaves_stdout_untouched() {
     let (warned_stdout, stderr) = run_capturing_stderr(&warned);
 
     let hits = stderr.matches("--adjustment-unit only affects").count();
-    assert_eq!(hits, 1, "expected exactly one warning, got {hits}: {stderr}");
+    assert_eq!(
+        hits, 1,
+        "expected exactly one warning, got {hits}: {stderr}"
+    );
     assert!(stderr.contains("--target-speed"), "{stderr}");
 
     // The warning is advice, not a behavior change: stdout must be byte-identical to the
@@ -506,9 +691,15 @@ fn inert_unit_warning_precedes_the_click_graduation_error() {
     // after the fail-fast would silently drop it for exactly this case.
     let mut args = NOOP_BASE.to_vec();
     args.extend(["--adjustment-unit", "clicks"]);
-    let out = Command::new(get_cli_binary()).args(&args).output().expect("run");
+    let out = Command::new(get_cli_binary())
+        .args(&args)
+        .output()
+        .expect("run");
 
-    assert!(!out.status.success(), "a missing click graduation must still fail");
+    assert!(
+        !out.status.success(),
+        "a missing click graduation must still fail"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
 
     let warn_at = stderr
@@ -531,26 +722,47 @@ fn a_saved_profiles_pressure_mode_does_not_hijack_a_cli_supplied_pressure() {
     // then typed an absolute station reading got it silently reduced a second time: measured
     // 2299.49 fps vs the correct 2222.86 fps at 300 yd, a 77 fps error. A mode must travel
     // with its value or not at all.
-    let home = std::env::temp_dir().join(format!(
-        "ballistics-profile-mode-{}",
-        std::process::id()
-    ));
+    let home = std::env::temp_dir().join(format!("ballistics-profile-mode-{}", std::process::id()));
     std::fs::create_dir_all(&home).expect("temp home");
 
     let save = Command::new(get_cli_binary())
         .env("HOME", &home)
         .args([
-            "profile", "save", "modetest", "--velocity", "2700", "--bc", "0.475", "--mass",
-            "168", "--diameter", "0.308", "--pressure", "30.41", "--pressure-type", "qnh",
+            "profile",
+            "save",
+            "modetest",
+            "--velocity",
+            "2700",
+            "--bc",
+            "0.475",
+            "--mass",
+            "168",
+            "--diameter",
+            "0.308",
+            "--pressure",
+            "30.41",
+            "--pressure-type",
+            "qnh",
         ])
         .output()
         .expect("profile save");
-    assert!(save.status.success(), "save failed: {}", String::from_utf8_lossy(&save.stderr));
+    assert!(
+        save.status.success(),
+        "save failed: {}",
+        String::from_utf8_lossy(&save.stderr)
+    );
 
     let run = |extra: &[&str]| -> String {
         let mut args = vec![
-            "trajectory", "--saved-profile", "modetest", "--altitude", "5000", "--pressure",
-            "25.20", "--max-range", "300",
+            "trajectory",
+            "--saved-profile",
+            "modetest",
+            "--altitude",
+            "5000",
+            "--pressure",
+            "25.20",
+            "--max-range",
+            "300",
         ];
         args.extend_from_slice(extra);
         let out = Command::new(get_cli_binary())
@@ -590,15 +802,36 @@ fn a_saved_profiles_bc_reference_does_not_hijack_a_cli_supplied_bc() {
     let save = Command::new(get_cli_binary())
         .env("HOME", &home)
         .args([
-            "profile", "save", "asmprof", "--velocity", "2700", "--bc", "0.475", "--mass",
-            "168", "--diameter", "0.308", "--bc-reference", "army-standard-metro",
+            "profile",
+            "save",
+            "asmprof",
+            "--velocity",
+            "2700",
+            "--bc",
+            "0.475",
+            "--mass",
+            "168",
+            "--diameter",
+            "0.308",
+            "--bc-reference",
+            "army-standard-metro",
         ])
         .output()
         .expect("profile save");
-    assert!(save.status.success(), "save failed: {}", String::from_utf8_lossy(&save.stderr));
+    assert!(
+        save.status.success(),
+        "save failed: {}",
+        String::from_utf8_lossy(&save.stderr)
+    );
 
     let run = |extra: &[&str]| -> String {
-        let mut args = vec!["trajectory", "--saved-profile", "asmprof", "--max-range", "300"];
+        let mut args = vec![
+            "trajectory",
+            "--saved-profile",
+            "asmprof",
+            "--max-range",
+            "300",
+        ];
         args.extend_from_slice(extra);
         let out = Command::new(get_cli_binary())
             .env("HOME", &home)
@@ -665,8 +898,21 @@ fn density_altitude_blocks_an_explicit_zero_day_pressure_mode() {
     // --zero-pressure-type qnh reduced it a second time (apex 1.6959 -> 1.6655 m at an 800 m
     // zero), silently. The earlier shot-day reset did not close this door.
     let base = [
-        "trajectory", "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308",
-        "--density-altitude", "2000", "--auto-zero", "800", "--max-range", "900",
+        "trajectory",
+        "-v",
+        "2700",
+        "-b",
+        "0.475",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "--density-altitude",
+        "2000",
+        "--auto-zero",
+        "800",
+        "--max-range",
+        "900",
     ];
 
     let plain = run(&base);
@@ -692,7 +938,12 @@ fn density_altitude_blocks_an_explicit_zero_day_pressure_mode() {
     let mut own_pressure_qnh = base.to_vec();
     own_pressure_qnh.extend(["--zero-pressure", "30.41", "--zero-pressure-type", "qnh"]);
     let mut own_pressure_absolute = base.to_vec();
-    own_pressure_absolute.extend(["--zero-pressure", "30.41", "--zero-pressure-type", "absolute"]);
+    own_pressure_absolute.extend([
+        "--zero-pressure",
+        "30.41",
+        "--zero-pressure-type",
+        "absolute",
+    ]);
     assert_ne!(
         run(&own_pressure_qnh),
         run(&own_pressure_absolute),

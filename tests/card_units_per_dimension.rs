@@ -25,7 +25,6 @@ const PRE_1519_METRIC_RANGE_TABLE: &str = r#"{"schema_version":1,"kind":"range_t
 
 const PRE_1519_METRIC_WIND_CARD: &str = r#"{"schema_version":1,"kind":"wind_card","zero_distance":100.0,"bc_for_solve":0.243,"units":{"distance":"m","velocity":"m/s","energy":"J","drop":"mm","wind_speed":"m/s","elevation_adjustment":"MIL","windage_adjustment":"MIL"},"wind_speeds":[5.0,10.0],"wind_angles_deg":[90.0],"rows":[{"range":100.0,"wind_columns":[-0.2375723202489912,-0.475159884082741]},{"range":200.0,"wind_columns":[-0.492905779349289,-0.985844981097689]},{"range":300.0,"wind_columns":[-0.7682927823335854,-1.5366407398475035]},{"range":400.0,"wind_columns":[-1.0658388574319029,-2.1317577842821906]},{"range":500.0,"wind_columns":[-1.3890531109105293,-2.7782143698540036]},{"range":600.0,"wind_columns":[-1.7422546196349102,-3.4846488495115473]}]}"#;
 
-
 /// The imperial request whose bytes the goldens above hold. Written the way a card request
 /// was written before MBA-1519: one `units` scalar and no per-dimension field anywhere.
 fn pre_1519_imperial() -> Value {
@@ -277,7 +276,10 @@ fn the_wind_axis_accepts_the_two_units_no_preset_can_reach() {
 
     let base = range_table_json(&mps);
     assert_eq!(units_block(&base)["wind_speed"], json!("m/s"));
-    for (name, card) in [("km/h", range_table_json(&kph)), ("kn", range_table_json(&knots))] {
+    for (name, card) in [
+        ("km/h", range_table_json(&kph)),
+        ("kn", range_table_json(&knots)),
+    ] {
         assert_eq!(units_block(&card)["wind_speed"], json!(name));
         for (b, m) in rows(&base).iter().zip(&rows(&card)) {
             assert_close(
@@ -323,7 +325,10 @@ fn altitude_defaults_to_metres_even_on_an_imperial_card() {
     // And feet mean feet: 1000 ft is the 304.8 m card.
     let mut as_metres = unstated.clone();
     as_metres["altitude"] = json!(1000.0 * 0.3048);
-    for (f, m) in rows(&range_table_json(&feet)).iter().zip(&rows(&range_table_json(&as_metres))) {
+    for (f, m) in rows(&range_table_json(&feet))
+        .iter()
+        .zip(&rows(&range_table_json(&as_metres)))
+    {
         assert_close(
             f["drop_adj"].as_f64().unwrap(),
             m["drop_adj"].as_f64().unwrap(),
@@ -376,10 +381,19 @@ fn the_angular_axis_is_unchanged_and_the_pseudo_units_are_still_refused() {
     iphy["adjustment_unit"] = json!("iphy");
     iphy["windage_unit"] = json!("iphy");
     let smoa_card = range_table_json(&smoa);
-    assert_eq!(units_block(&smoa_card)["elevation_adjustment"], json!("SMOA"));
-    assert_eq!(units_block(&range_table_json(&iphy))["elevation_adjustment"], json!("IPHY"));
+    assert_eq!(
+        units_block(&smoa_card)["elevation_adjustment"],
+        json!("SMOA")
+    );
+    assert_eq!(
+        units_block(&range_table_json(&iphy))["elevation_adjustment"],
+        json!("IPHY")
+    );
     for (s, i) in rows(&smoa_card).iter().zip(&rows(&range_table_json(&iphy))) {
-        assert_eq!(s["drop_adj"], i["drop_adj"], "SMOA and IPHY must print one number");
+        assert_eq!(
+            s["drop_adj"], i["drop_adj"],
+            "SMOA and IPHY must print one number"
+        );
     }
 
     // The linear-at-distance spellings are NOT values of the linear drop dimension. Accepting
@@ -425,7 +439,12 @@ fn the_angular_axis_is_unchanged_and_the_pseudo_units_are_still_refused() {
 
     // And there is no clicks unit on any of the new dimensions — again as a refusal of the
     // value rather than of the field.
-    for field in ["distance_unit", "velocity_unit", "drop_unit", "wind_speed_unit"] {
+    for field in [
+        "distance_unit",
+        "velocity_unit",
+        "drop_unit",
+        "wind_speed_unit",
+    ] {
         let mut bogus = pre_1519_imperial();
         bogus[field] = json!("clicks");
         let err = serde_json::from_value::<CardRequestV1>(bogus)

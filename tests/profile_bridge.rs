@@ -73,7 +73,9 @@ fn validate_accepts_the_fixture_and_normalizes_it() {
     assert_eq!(normalized["zero_sets"][0]["name"], "suppressed");
     assert_eq!(normalized["reticle"]["marks"][0]["kind"], "center");
     assert_eq!(normalized["elevation_click"], "0.1mil");
-    assert!(normalized.get("future_field_this_engine_never_wrote").is_none());
+    assert!(normalized
+        .get("future_field_this_engine_never_wrote")
+        .is_none());
 }
 
 #[test]
@@ -88,10 +90,15 @@ fn validate_reports_the_cli_load_gates_as_warnings() {
     }));
     assert_eq!(out["ok"], true, "{out}");
     assert_eq!(out["result"]["valid"], false, "{out}");
-    let warnings: Vec<String> =
-        serde_json::from_value(out["result"]["warnings"].clone()).unwrap();
-    assert!(warnings.iter().any(|w| w.contains("elevation_cf")), "{warnings:?}");
-    assert!(warnings.iter().any(|w| w.contains("unsupported units")), "{warnings:?}");
+    let warnings: Vec<String> = serde_json::from_value(out["result"]["warnings"].clone()).unwrap();
+    assert!(
+        warnings.iter().any(|w| w.contains("elevation_cf")),
+        "{warnings:?}"
+    );
+    assert!(
+        warnings.iter().any(|w| w.contains("unsupported units")),
+        "{warnings:?}"
+    );
 }
 
 #[test]
@@ -132,8 +139,7 @@ fn a_non_profile_document_is_an_invalid_request() {
 #[test]
 fn import_command_presence_matches_compiled_features() {
     let caps = call(json!({"api_version": BRIDGE_API_VERSION, "command": "meta.capabilities"}));
-    let commands: Vec<String> =
-        serde_json::from_value(caps["result"]["commands"].clone()).unwrap();
+    let commands: Vec<String> = serde_json::from_value(caps["result"]["commands"].clone()).unwrap();
     assert_eq!(
         commands.contains(&"profile.import_a7p".to_string()),
         cfg!(feature = "profile-import")
@@ -220,12 +226,24 @@ mod import {
             b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut out = String::new();
         for chunk in bytes.chunks(3) {
-            let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+            let b = [
+                chunk[0],
+                *chunk.get(1).unwrap_or(&0),
+                *chunk.get(2).unwrap_or(&0),
+            ];
             let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
             out.push(char::from(ALPHABET[(n >> 18 & 63) as usize]));
             out.push(char::from(ALPHABET[(n >> 12 & 63) as usize]));
-            out.push(if chunk.len() > 1 { char::from(ALPHABET[(n >> 6 & 63) as usize]) } else { '=' });
-            out.push(if chunk.len() > 2 { char::from(ALPHABET[(n & 63) as usize]) } else { '=' });
+            out.push(if chunk.len() > 1 {
+                char::from(ALPHABET[(n >> 6 & 63) as usize])
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 {
+                char::from(ALPHABET[(n & 63) as usize])
+            } else {
+                '='
+            });
         }
         out
     }
@@ -256,11 +274,17 @@ mod import {
         assert_eq!(profile["twist_right"], true);
 
         // The report surfaces everything the CLI's report carries.
-        assert!(result["mapped"].as_array().unwrap().iter().any(|row| row[0] == "b_weight"));
+        assert!(result["mapped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row[0] == "b_weight"));
         assert!(!result["unmapped"].as_array().unwrap().is_empty());
         let unknown = result["unknown_fields"].as_array().unwrap();
         assert!(
-            unknown.iter().any(|u| u["context"] == "Profile" && u["number"] == 63),
+            unknown
+                .iter()
+                .any(|u| u["context"] == "Profile" && u["number"] == 63),
             "{unknown:?}"
         );
 
@@ -375,7 +399,10 @@ mod import {
         assert_eq!(garbage["ok"], false, "{garbage}");
         assert_eq!(garbage["error"]["code"], "command_failed");
         assert!(
-            garbage["error"]["message"].as_str().unwrap().contains("a7p"),
+            garbage["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("a7p"),
             "{garbage}"
         );
 
@@ -391,6 +418,9 @@ mod import {
             "command": "profile.import_a7p",
             "request": {"a7p_base64": "AAAA", "surprise": 1},
         }));
-        assert_eq!(unknown_key["error"]["code"], "invalid_request", "{unknown_key}");
+        assert_eq!(
+            unknown_key["error"]["code"], "invalid_request",
+            "{unknown_key}"
+        );
     }
 }

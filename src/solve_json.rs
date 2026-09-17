@@ -1558,7 +1558,10 @@ fn validate_reticle(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
         &["range_m", "magnification", "description"],
     )?;
     validate_required_numbers(object, path, &["range_m", "magnification"])?;
-    require_object(required_value(object, "description", path)?, "$.reticle.description")?;
+    require_object(
+        required_value(object, "description", path)?,
+        "$.reticle.description",
+    )?;
     Ok(())
 }
 
@@ -2101,11 +2104,7 @@ mod request_range_tests {
                 &format!("\"{field}\":{bad_value}"),
             );
             let envelope = decode_err(&json);
-            assert_eq!(
-                envelope.error.path(),
-                Some(path),
-                "wrong path for {field}"
-            );
+            assert_eq!(envelope.error.path(), Some(path), "wrong path for {field}");
             assert_eq!(envelope.error.code, SolveErrorCodeV1::InvalidValue);
         }
     }

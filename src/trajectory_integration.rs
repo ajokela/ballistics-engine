@@ -267,7 +267,7 @@ pub struct TrajectoryParams {
     /// binding entry point (fast_integrate_with_segments) cannot silently drop it.
     pub cd_scale: f64,
     pub bc_segments: Option<Vec<(f64, f64)>>, // Mach-based BC segments: (mach, bc)
-    pub use_bc_segments: bool, // Whether to use BC segment interpolation
+    pub use_bc_segments: bool,                // Whether to use BC segment interpolation
     /// MBA-954: altitude (m, relative to launch) below which integration stops. -1000.0 is the
     /// historical default — effectively "no early ground impact" for normal flat-fire shots.
     pub ground_threshold: f64,
@@ -790,7 +790,7 @@ pub fn solve_trajectory_rust(
         twist_rate: 10.0,
         custom_drag_table: None, // No CDM for test function
         cd_scale: 1.0,
-        bc_segments: None,       // No BC segments for legacy function
+        bc_segments: None, // No BC segments for legacy function
         use_bc_segments: false,
         ground_threshold: -1000.0, // MBA-954: preserve the historical default
         atmo_sock: None,           // MBA-1137: legacy entry has no downrange atmosphere
@@ -982,14 +982,8 @@ mod tests {
         let mut magnus_params = create_test_params(1_000.0);
         magnus_params.enable_magnus = true;
 
-        let trajectory = integrate_trajectory(
-            initial_state,
-            (0.0, 0.1),
-            magnus_params,
-            "RK4",
-            1e-6,
-            0.001,
-        );
+        let trajectory =
+            integrate_trajectory(initial_state, (0.0, 0.1), magnus_params, "RK4", 1e-6, 0.001);
         let baseline_y = baseline.last().expect("baseline trajectory is empty").1[1];
         let magnus_y = trajectory.last().expect("trajectory is empty").1[1];
         let vertical_delta = magnus_y - baseline_y;

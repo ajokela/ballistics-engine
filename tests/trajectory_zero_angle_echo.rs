@@ -96,7 +96,9 @@ fn csv_summary_echoes_zero_angle_only_when_auto_zero_ran() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.lines().any(|line| line.starts_with("zero_angle_degrees,")),
+        stdout
+            .lines()
+            .any(|line| line.starts_with("zero_angle_degrees,")),
         "auto-zero CSV summary must include a zero_angle_degrees row:\n{stdout}"
     );
 }

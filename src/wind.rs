@@ -54,11 +54,10 @@ pub(crate) fn sort_wind_segments_by_distance(segments: &mut [WindSegment]) {
         (true, true) => Ordering::Equal,
         (true, false) => Ordering::Greater,
         (false, true) => Ordering::Less,
-        (false, false) => {
-            a.until_m
-                .partial_cmp(&b.until_m)
-                .expect("non-NaN distances are ordered")
-        }
+        (false, false) => a
+            .until_m
+            .partial_cmp(&b.until_m)
+            .expect("non-NaN distances are ordered"),
     });
 }
 
@@ -368,7 +367,10 @@ pub fn parse_wind_segment_str_detailed(
     }
     let num = |i: usize, name: &str| -> Result<f64, String> {
         parts[i].trim().parse::<f64>().map_err(|_| {
-            format!("invalid wind segment '{s}': {name} '{}' is not a number", parts[i])
+            format!(
+                "invalid wind segment '{s}': {name} '{}' is not a number",
+                parts[i]
+            )
         })
     };
     let speed = num(0, "speed")?;
@@ -402,7 +404,9 @@ pub fn parse_wind_segment_str_detailed(
         return Err(format!("invalid wind segment '{s}': speed must be >= 0"));
     }
     if until <= 0.0 {
-        return Err(format!("invalid wind segment '{s}': until-distance must be > 0"));
+        return Err(format!(
+            "invalid wind segment '{s}': until-distance must be > 0"
+        ));
     }
     let (speed_kmh, until_m) = if imperial {
         (speed * 1.609344, until * 0.9144) // mph -> km/h, yards -> meters
@@ -503,7 +507,9 @@ pub fn parse_wind_direction(token: &str) -> Result<ParsedWindDirection, WindDire
     }
 
     let lower = raw.to_ascii_lowercase();
-    let clock = |hour_str: &str, minute_str: Option<&str>| -> Result<ParsedWindDirection, WindDirectionParseError> {
+    let clock = |hour_str: &str,
+                 minute_str: Option<&str>|
+     -> Result<ParsedWindDirection, WindDirectionParseError> {
         let hour: u32 = hour_str
             .parse()
             .map_err(|_| WindDirectionParseError::Unrecognized(raw.to_string()))?;
@@ -511,10 +517,9 @@ pub fn parse_wind_direction(token: &str) -> Result<ParsedWindDirection, WindDire
             return Err(WindDirectionParseError::HourOutOfRange(raw.to_string()));
         }
         let minutes: u32 = match minute_str {
-            Some(m) if !m.is_empty() && m.len() <= 2 && m.bytes().all(|b| b.is_ascii_digit()) => {
-                m.parse()
-                    .map_err(|_| WindDirectionParseError::Unrecognized(raw.to_string()))?
-            }
+            Some(m) if !m.is_empty() && m.len() <= 2 && m.bytes().all(|b| b.is_ascii_digit()) => m
+                .parse()
+                .map_err(|_| WindDirectionParseError::Unrecognized(raw.to_string()))?,
             Some(_) => return Err(WindDirectionParseError::Unrecognized(raw.to_string())),
             None => 0,
         };
@@ -771,7 +776,7 @@ mod tests {
     fn test_wind_sock_multiple_segments() {
         // Multiple wind segments (in kmh)
         let sock = WindSock::new(vec![
-            WindSegment::new(16.0934, 90.0, 50.0),  // 10 mph @ 90° until 50m
+            WindSegment::new(16.0934, 90.0, 50.0), // 10 mph @ 90° until 50m
             WindSegment::new(24.1401, 45.0, 100.0), // 15 mph @ 45° until 100m
             WindSegment::new(8.0467, 180.0, 200.0), // 5 mph @ 180° until 200m
         ]);
@@ -875,7 +880,7 @@ mod tests {
         assert!(parse_wind_segment_str("10:bad:100", true).is_err()); // non-numeric
         assert!(parse_wind_segment_str("10:90:0", true).is_err()); // zero until-distance
         assert!(parse_wind_segment_str("-3:90:100", true).is_err()); // negative speed
-        // Non-finite values must be rejected (NaN comparisons would slip past < / <=).
+                                                                     // Non-finite values must be rejected (NaN comparisons would slip past < / <=).
         assert!(parse_wind_segment_str("10:nan:5000", true).is_err());
         assert!(parse_wind_segment_str("10:90:nan", true).is_err());
         assert!(parse_wind_segment_str("inf:90:100", true).is_err());
@@ -920,7 +925,13 @@ mod tests {
     #[test]
     fn clock_positions_map_to_wind_from_degrees() {
         let deg = |t: &str| parse_wind_direction(t).unwrap();
-        assert_eq!(deg("3oc"), ParsedWindDirection { degrees: 90.0, was_clock: true });
+        assert_eq!(
+            deg("3oc"),
+            ParsedWindDirection {
+                degrees: 90.0,
+                was_clock: true
+            }
+        );
         assert_eq!(deg("6oc").degrees, 180.0);
         assert_eq!(deg("9oc").degrees, 270.0);
         assert_eq!(deg("12oc").degrees, 0.0); // 12 o'clock = headwind = 0° (post-0.19.0)
@@ -933,14 +944,29 @@ mod tests {
         assert_eq!(deg("10H30").degrees, 315.0);
 
         // Bare numbers stay degrees, byte-for-byte the old f64 acceptance.
-        assert_eq!(deg("90"), ParsedWindDirection { degrees: 90.0, was_clock: false });
+        assert_eq!(
+            deg("90"),
+            ParsedWindDirection {
+                degrees: 90.0,
+                was_clock: false
+            }
+        );
         assert_eq!(deg("-45").degrees, -45.0);
         assert_eq!(deg("370.5").degrees, 370.5);
 
         // Standalone flags additionally accept the colon form.
         let sa = parse_wind_direction_standalone("10:30").unwrap();
-        assert_eq!(sa, ParsedWindDirection { degrees: 315.0, was_clock: true });
-        assert_eq!(parse_wind_direction_standalone("3oc").unwrap().degrees, 90.0);
+        assert_eq!(
+            sa,
+            ParsedWindDirection {
+                degrees: 315.0,
+                was_clock: true
+            }
+        );
+        assert_eq!(
+            parse_wind_direction_standalone("3oc").unwrap().degrees,
+            90.0
+        );
         assert!(!parse_wind_direction_standalone("90").unwrap().was_clock);
         // ...but the non-standalone parser rejects the colon form (segment grammar).
         assert!(matches!(
@@ -972,7 +998,9 @@ mod tests {
             Err(WindDirectionParseError::MinutesOutOfRange(_))
         ));
         // Malformed shapes are Unrecognized, with a message naming the accepted forms.
-        for bad in ["oc", "hoc", "3.5oc", "3h", "3h123", "10h3x", "3:", ":30", "10:301", "x"] {
+        for bad in [
+            "oc", "hoc", "3.5oc", "3h", "3h123", "10h3x", "3:", ":30", "10:301", "x",
+        ] {
             let err = parse_wind_direction_standalone(bad).unwrap_err();
             assert!(
                 matches!(err, WindDirectionParseError::Unrecognized(_)),

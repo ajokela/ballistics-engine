@@ -256,7 +256,10 @@ mod tests {
             GasVelocityModel::Saami(FirearmType::Rifle).resolve_mps(muzzle),
             1.75 * muzzle
         );
-        assert_eq!(GasVelocityModel::Factor(2.0).resolve_mps(muzzle), 2.0 * muzzle);
+        assert_eq!(
+            GasVelocityModel::Factor(2.0).resolve_mps(muzzle),
+            2.0 * muzzle
+        );
         // Fixed is independent of the muzzle velocity passed in.
         assert_eq!(GasVelocityModel::Fixed(1433.0).resolve_mps(muzzle), 1433.0);
         assert_eq!(GasVelocityModel::Fixed(1433.0).resolve_mps(1.0), 1433.0);

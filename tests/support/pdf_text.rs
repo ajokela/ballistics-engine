@@ -63,7 +63,12 @@ pub fn glyph_runs(pdf: &[u8]) -> Vec<Vec<u32>> {
             k += 1;
         }
         if closed && pdf[k..].starts_with(b"Tj") {
-            runs.push(digits.chunks(4).map(|q| q.iter().fold(0, |acc, d| acc * 16 + d)).collect());
+            runs.push(
+                digits
+                    .chunks(4)
+                    .map(|q| q.iter().fold(0, |acc, d| acc * 16 + d))
+                    .collect(),
+            );
             i = k + 2;
         } else {
             i += 1;
@@ -74,7 +79,11 @@ pub fn glyph_runs(pdf: &[u8]) -> Vec<Vec<u32>> {
 
 pub fn decode_runs(runs: &[Vec<u32>], offset: u32) -> Vec<String> {
     runs.iter()
-        .map(|run| run.iter().filter_map(|&g| char::from_u32(g + offset)).collect())
+        .map(|run| {
+            run.iter()
+                .filter_map(|&g| char::from_u32(g + offset))
+                .collect()
+        })
         .collect()
 }
 
@@ -84,7 +93,10 @@ pub fn decode_runs(runs: &[Vec<u32>], offset: u32) -> Vec<String> {
 /// happens to notice.
 pub fn glyph_scan(pdf: &[u8], label: &str) -> String {
     let runs = glyph_runs(pdf);
-    assert!(!runs.is_empty(), "{label}: no show-text operands found in the PDF");
+    assert!(
+        !runs.is_empty(),
+        "{label}: no show-text operands found in the PDF"
+    );
     let offset = (0u32..=0x2000)
         .find(|&offset| decode_runs(&runs, offset).iter().any(|s| s == "Range"))
         .unwrap_or_else(|| {
@@ -122,7 +134,6 @@ pub fn tokens(pdf: &[u8], label: &str) -> Vec<String> {
     let text = pdftotext(pdf).unwrap_or_else(|| glyph_scan(pdf, label));
     text.split_whitespace().map(str::to_string).collect()
 }
-
 
 /// True when `phrase`'s whitespace-separated words appear consecutively in the card's text.
 ///

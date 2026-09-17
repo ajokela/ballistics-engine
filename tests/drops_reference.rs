@@ -169,7 +169,10 @@ fn target_mode_relabels_table_and_csv() {
     los_csv_args.extend(["--shooting-angle", "30", "-o", "csv", "--full"]);
     let los_csv = String::from_utf8(run_ok(&los_csv_args).stdout).unwrap();
     assert!(
-        los_csv.lines().next().is_some_and(|h| h.contains(",drop_in,")),
+        los_csv
+            .lines()
+            .next()
+            .is_some_and(|h| h.contains(",drop_in,")),
         "LOS-mode sampled CSV header must stay drop_in:\n{los_csv}"
     );
 }

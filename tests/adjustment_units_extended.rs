@@ -10,7 +10,10 @@ use std::process::{Command, Output};
 const BIN: &str = env!("CARGO_BIN_EXE_ballistics");
 
 fn run(args: &[&str]) -> Output {
-    Command::new(BIN).args(args).output().expect("spawn ballistics")
+    Command::new(BIN)
+        .args(args)
+        .output()
+        .expect("spawn ballistics")
 }
 
 fn stdout(out: &Output) -> String {
@@ -31,9 +34,23 @@ const OLD_REJECTION: &str =
 #[test]
 fn old_rejection_message_is_gone_from_wind_card() {
     let out = run(&[
-        "wind-card", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
-        "--zero-distance", "100", "--end", "300",
-        "--adjustment-unit", "clicks", "--windage-click-value", "0.1mil",
+        "wind-card",
+        "-v",
+        "2700",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "-b",
+        "0.5",
+        "--zero-distance",
+        "100",
+        "--end",
+        "300",
+        "--adjustment-unit",
+        "clicks",
+        "--windage-click-value",
+        "0.1mil",
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(!stderr(&out).contains(OLD_REJECTION));
@@ -42,9 +59,21 @@ fn old_rejection_message_is_gone_from_wind_card() {
 #[test]
 fn old_rejection_message_is_gone_from_lead() {
     let out = run(&[
-        "lead", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
-        "--target-speed", "5",
-        "--adjustment-unit", "clicks", "--windage-click-value", "0.1mil",
+        "lead",
+        "-v",
+        "2700",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "-b",
+        "0.5",
+        "--target-speed",
+        "5",
+        "--adjustment-unit",
+        "clicks",
+        "--windage-click-value",
+        "0.1mil",
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(!stderr(&out).contains(OLD_REJECTION));
@@ -53,10 +82,25 @@ fn old_rejection_message_is_gone_from_lead() {
 #[test]
 fn old_rejection_message_is_gone_from_range_table() {
     let out = run(&[
-        "range-table", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
-        "--zero-distance", "100", "--end", "300",
-        "--adjustment-unit", "clicks",
-        "--elevation-click-value", "0.1mil", "--windage-click-value", "0.1mil",
+        "range-table",
+        "-v",
+        "2700",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "-b",
+        "0.5",
+        "--zero-distance",
+        "100",
+        "--end",
+        "300",
+        "--adjustment-unit",
+        "clicks",
+        "--elevation-click-value",
+        "0.1mil",
+        "--windage-click-value",
+        "0.1mil",
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(!stderr(&out).contains(OLD_REJECTION));
@@ -66,11 +110,20 @@ fn old_rejection_message_is_gone_from_range_table() {
 fn old_rejection_message_is_gone_from_compare() {
     let out = run(&[
         "compare",
-        "--load", "A:g1:0.5:168:2700",
-        "--load", "B:g1:0.45:175:2650",
-        "--zero-distance", "100", "--end", "300",
-        "--adjustment-unit", "clicks",
-        "--elevation-click-value", "0.1mil", "--windage-click-value", "0.1mil",
+        "--load",
+        "A:g1:0.5:168:2700",
+        "--load",
+        "B:g1:0.45:175:2650",
+        "--zero-distance",
+        "100",
+        "--end",
+        "300",
+        "--adjustment-unit",
+        "clicks",
+        "--elevation-click-value",
+        "0.1mil",
+        "--windage-click-value",
+        "0.1mil",
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(!stderr(&out).contains(OLD_REJECTION));
@@ -83,32 +136,19 @@ fn old_rejection_message_is_gone_from_compare() {
 #[test]
 fn wind_card_renders_smoa_iphy_and_clicks() {
     let base = [
-        "wind-card", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
-        "--zero-distance", "100", "--end", "300",
-    ];
-    for unit in ["smoa", "iphy"] {
-        let out = run(&[&base[..], &["--adjustment-unit", unit]].concat());
-        assert!(out.status.success(), "{unit}: {}", stderr(&out));
-    }
-    let out = run(&[&base[..], &["--adjustment-unit", "clicks", "--windage-click-value", "0.25moa"]].concat());
-    assert!(out.status.success(), "{}", stderr(&out));
-}
-
-#[test]
-fn lead_renders_clicks() {
-    let out = run(&[
-        "lead", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
-        "--target-speed", "5",
-        "--adjustment-unit", "clicks", "--windage-click-value", "0.25moa",
-    ]);
-    assert!(out.status.success(), "{}", stderr(&out));
-}
-
-#[test]
-fn range_table_renders_smoa_iphy_and_clicks() {
-    let base = [
-        "range-table", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
-        "--zero-distance", "100", "--end", "300",
+        "wind-card",
+        "-v",
+        "2700",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "-b",
+        "0.5",
+        "--zero-distance",
+        "100",
+        "--end",
+        "300",
     ];
     for unit in ["smoa", "iphy"] {
         let out = run(&[&base[..], &["--adjustment-unit", unit]].concat());
@@ -117,9 +157,68 @@ fn range_table_renders_smoa_iphy_and_clicks() {
     let out = run(&[
         &base[..],
         &[
-            "--adjustment-unit", "clicks",
-            "--elevation-click-value", "0.1mil",
-            "--windage-click-value", "0.1mil",
+            "--adjustment-unit",
+            "clicks",
+            "--windage-click-value",
+            "0.25moa",
+        ],
+    ]
+    .concat());
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+#[test]
+fn lead_renders_clicks() {
+    let out = run(&[
+        "lead",
+        "-v",
+        "2700",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "-b",
+        "0.5",
+        "--target-speed",
+        "5",
+        "--adjustment-unit",
+        "clicks",
+        "--windage-click-value",
+        "0.25moa",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+#[test]
+fn range_table_renders_smoa_iphy_and_clicks() {
+    let base = [
+        "range-table",
+        "-v",
+        "2700",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "-b",
+        "0.5",
+        "--zero-distance",
+        "100",
+        "--end",
+        "300",
+    ];
+    for unit in ["smoa", "iphy"] {
+        let out = run(&[&base[..], &["--adjustment-unit", unit]].concat());
+        assert!(out.status.success(), "{unit}: {}", stderr(&out));
+    }
+    let out = run(&[
+        &base[..],
+        &[
+            "--adjustment-unit",
+            "clicks",
+            "--elevation-click-value",
+            "0.1mil",
+            "--windage-click-value",
+            "0.1mil",
         ],
     ]
     .concat());
@@ -130,9 +229,14 @@ fn range_table_renders_smoa_iphy_and_clicks() {
 fn compare_renders_smoa_iphy_and_clicks() {
     let base = [
         "compare",
-        "--load", "A:g1:0.5:168:2700",
-        "--load", "B:g1:0.45:175:2650",
-        "--zero-distance", "100", "--end", "300",
+        "--load",
+        "A:g1:0.5:168:2700",
+        "--load",
+        "B:g1:0.45:175:2650",
+        "--zero-distance",
+        "100",
+        "--end",
+        "300",
     ];
     for unit in ["smoa", "iphy"] {
         let out = run(&[&base[..], &["--adjustment-unit", unit]].concat());
@@ -141,9 +245,12 @@ fn compare_renders_smoa_iphy_and_clicks() {
     let out = run(&[
         &base[..],
         &[
-            "--adjustment-unit", "clicks",
-            "--elevation-click-value", "0.1mil",
-            "--windage-click-value", "0.1mil",
+            "--adjustment-unit",
+            "clicks",
+            "--elevation-click-value",
+            "0.1mil",
+            "--windage-click-value",
+            "0.1mil",
         ],
     ]
     .concat());
@@ -160,10 +267,25 @@ fn compare_renders_smoa_iphy_and_clicks() {
 #[test]
 fn range_table_json_carries_independent_elevation_and_windage_units() {
     let out = run(&[
-        "range-table", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
-        "--zero-distance", "100", "--end", "300",
-        "--adjustment-unit", "mil", "--windage-unit", "moa",
-        "-o", "json",
+        "range-table",
+        "-v",
+        "2700",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "-b",
+        "0.5",
+        "--zero-distance",
+        "100",
+        "--end",
+        "300",
+        "--adjustment-unit",
+        "mil",
+        "--windage-unit",
+        "moa",
+        "-o",
+        "json",
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
     let v: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("json");
@@ -179,23 +301,57 @@ fn range_table_drop_and_wind_adj_values_differ_by_unit_ratio_when_axes_diverge()
     // drop/drift would differ by the MOA/MIL ratio, unlike a same-unit run where the
     // columns coincidentally use one factor. Compare against a mil/mil run.
     let mil_mil = run(&[
-        "range-table", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
-        "--zero-distance", "100", "--end", "300",
-        "--adjustment-unit", "mil", "-o", "json",
+        "range-table",
+        "-v",
+        "2700",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "-b",
+        "0.5",
+        "--zero-distance",
+        "100",
+        "--end",
+        "300",
+        "--adjustment-unit",
+        "mil",
+        "-o",
+        "json",
     ]);
     let mixed = run(&[
-        "range-table", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
-        "--zero-distance", "100", "--end", "300",
-        "--adjustment-unit", "mil", "--windage-unit", "moa", "-o", "json",
+        "range-table",
+        "-v",
+        "2700",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "-b",
+        "0.5",
+        "--zero-distance",
+        "100",
+        "--end",
+        "300",
+        "--adjustment-unit",
+        "mil",
+        "--windage-unit",
+        "moa",
+        "-o",
+        "json",
     ]);
     assert!(mil_mil.status.success() && mixed.status.success());
     let mm: serde_json::Value = serde_json::from_str(&stdout(&mil_mil)).unwrap();
     let mx: serde_json::Value = serde_json::from_str(&stdout(&mixed)).unwrap();
     let last_row_wind = |v: &serde_json::Value| -> f64 {
-        v["data"].as_array().unwrap().last().unwrap()["wind_adj"].as_f64().unwrap()
+        v["data"].as_array().unwrap().last().unwrap()["wind_adj"]
+            .as_f64()
+            .unwrap()
     };
     let last_row_drop = |v: &serde_json::Value| -> f64 {
-        v["data"].as_array().unwrap().last().unwrap()["drop_adj"].as_f64().unwrap()
+        v["data"].as_array().unwrap().last().unwrap()["drop_adj"]
+            .as_f64()
+            .unwrap()
     };
     // Drop (elevation) is unchanged between the two runs -- only windage moved.
     assert!((last_row_drop(&mm) - last_row_drop(&mx)).abs() < 1e-9);
@@ -227,17 +383,35 @@ fn range_table_drop_and_wind_adj_values_differ_by_unit_ratio_when_axes_diverge()
 #[test]
 fn range_table_clicks_elevation_with_moa_windage_reports_true_moa_not_clicks() {
     let base = [
-        "range-table", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
-        "--zero-distance", "100", "--end", "300",
-        "--wind-speed", "10", "--wind-direction", "90",
-        "-o", "json",
+        "range-table",
+        "-v",
+        "2700",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "-b",
+        "0.5",
+        "--zero-distance",
+        "100",
+        "--end",
+        "300",
+        "--wind-speed",
+        "10",
+        "--wind-direction",
+        "90",
+        "-o",
+        "json",
     ];
     let clicks_moa = run(&[
         &base[..],
         &[
-            "--adjustment-unit", "clicks",
-            "--elevation-click-value", "0.1mil",
-            "--windage-unit", "moa",
+            "--adjustment-unit",
+            "clicks",
+            "--elevation-click-value",
+            "0.1mil",
+            "--windage-unit",
+            "moa",
         ],
     ]
     .concat());
@@ -253,7 +427,10 @@ fn range_table_clicks_elevation_with_moa_windage_reports_true_moa_not_clicks() {
 
     let mut saw_nonzero_wind = false;
     for (c, m) in cm_rows.iter().zip(mo_rows.iter()) {
-        let (c_wind, m_wind) = (c["wind_adj"].as_f64().unwrap(), m["wind_adj"].as_f64().unwrap());
+        let (c_wind, m_wind) = (
+            c["wind_adj"].as_f64().unwrap(),
+            m["wind_adj"].as_f64().unwrap(),
+        );
         assert!(
             (c_wind - m_wind).abs() < 1e-9,
             "clicks-elevation/moa-windage wind_adj={c_wind} must equal pure-moa wind_adj={m_wind} \
@@ -263,18 +440,30 @@ fn range_table_clicks_elevation_with_moa_windage_reports_true_moa_not_clicks() {
             saw_nonzero_wind = true;
         }
     }
-    assert!(saw_nonzero_wind, "sanity: at least one row must have nonzero drift");
+    assert!(
+        saw_nonzero_wind,
+        "sanity: at least one row must have nonzero drift"
+    );
 }
 
 #[test]
 fn compare_json_carries_independent_elevation_and_windage_units() {
     let out = run(&[
         "compare",
-        "--load", "A:g1:0.5:168:2700",
-        "--load", "B:g1:0.45:175:2650",
-        "--zero-distance", "100", "--end", "300",
-        "--adjustment-unit", "mil", "--windage-unit", "moa",
-        "-o", "json",
+        "--load",
+        "A:g1:0.5:168:2700",
+        "--load",
+        "B:g1:0.45:175:2650",
+        "--zero-distance",
+        "100",
+        "--end",
+        "300",
+        "--adjustment-unit",
+        "mil",
+        "--windage-unit",
+        "moa",
+        "-o",
+        "json",
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
     let v: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("json");
@@ -288,17 +477,26 @@ fn compare_json_carries_independent_elevation_and_windage_units() {
 fn compare_clicks_elevation_with_moa_windage_reports_true_moa_not_clicks() {
     let base = [
         "compare",
-        "--load", "A:g1:0.5:168:2700",
-        "--load", "B:g1:0.45:175:2650",
-        "--zero-distance", "100", "--end", "300",
-        "-o", "json",
+        "--load",
+        "A:g1:0.5:168:2700",
+        "--load",
+        "B:g1:0.45:175:2650",
+        "--zero-distance",
+        "100",
+        "--end",
+        "300",
+        "-o",
+        "json",
     ];
     let clicks_moa = run(&[
         &base[..],
         &[
-            "--adjustment-unit", "clicks",
-            "--elevation-click-value", "0.1mil",
-            "--windage-unit", "moa",
+            "--adjustment-unit",
+            "clicks",
+            "--elevation-click-value",
+            "0.1mil",
+            "--windage-unit",
+            "moa",
         ],
     ]
     .concat());
@@ -318,8 +516,10 @@ fn compare_clicks_elevation_with_moa_windage_reports_true_moa_not_clicks() {
         let m_loads = m_row["loads"].as_array().unwrap();
         assert_eq!(c_loads.len(), m_loads.len());
         for (c, m) in c_loads.iter().zip(m_loads.iter()) {
-            let (c_drift, m_drift) =
-                (c["drift_adj"].as_f64().unwrap(), m["drift_adj"].as_f64().unwrap());
+            let (c_drift, m_drift) = (
+                c["drift_adj"].as_f64().unwrap(),
+                m["drift_adj"].as_f64().unwrap(),
+            );
             assert!(
                 (c_drift - m_drift).abs() < 1e-9,
                 "clicks-elevation/moa-windage drift_adj={c_drift} must equal pure-moa \
@@ -331,7 +531,10 @@ fn compare_clicks_elevation_with_moa_windage_reports_true_moa_not_clicks() {
             }
         }
     }
-    assert!(saw_nonzero_wind, "sanity: at least one row must have nonzero drift");
+    assert!(
+        saw_nonzero_wind,
+        "sanity: at least one row must have nonzero drift"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -342,9 +545,23 @@ fn compare_clicks_elevation_with_moa_windage_reports_true_moa_not_clicks() {
 #[test]
 fn windage_unit_clicks_without_elevation_clicks_is_rejected() {
     let out = run(&[
-        "range-table", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
-        "--zero-distance", "100", "--end", "300",
-        "--adjustment-unit", "mil", "--windage-unit", "clicks",
+        "range-table",
+        "-v",
+        "2700",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "-b",
+        "0.5",
+        "--zero-distance",
+        "100",
+        "--end",
+        "300",
+        "--adjustment-unit",
+        "mil",
+        "--windage-unit",
+        "clicks",
     ]);
     assert!(!out.status.success());
     let e = stderr(&out);
@@ -360,8 +577,19 @@ fn windage_unit_clicks_without_elevation_clicks_is_rejected() {
 #[test]
 fn wind_card_default_is_byte_identical_to_pre_mba_1410() {
     let base = [
-        "wind-card", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
-        "--zero-distance", "100", "--end", "300",
+        "wind-card",
+        "-v",
+        "2700",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "-b",
+        "0.5",
+        "--zero-distance",
+        "100",
+        "--end",
+        "300",
     ];
     let no_flag = run(&base);
     let explicit_mil = run(&[&base[..], &["--adjustment-unit", "mil"]].concat());
@@ -372,8 +600,17 @@ fn wind_card_default_is_byte_identical_to_pre_mba_1410() {
 #[test]
 fn lead_default_is_byte_identical_to_pre_mba_1410() {
     let base = [
-        "lead", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
-        "--target-speed", "5",
+        "lead",
+        "-v",
+        "2700",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "-b",
+        "0.5",
+        "--target-speed",
+        "5",
     ];
     let no_flag = run(&base);
     let explicit_mil = run(&[&base[..], &["--adjustment-unit", "mil"]].concat());
@@ -384,13 +621,30 @@ fn lead_default_is_byte_identical_to_pre_mba_1410() {
 #[test]
 fn range_table_default_is_byte_identical_to_pre_mba_1410() {
     let base = [
-        "range-table", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
-        "--zero-distance", "100", "--end", "300",
+        "range-table",
+        "-v",
+        "2700",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "-b",
+        "0.5",
+        "--zero-distance",
+        "100",
+        "--end",
+        "300",
     ];
     let no_flag = run(&base);
     let explicit_mil = run(&[&base[..], &["--adjustment-unit", "mil"]].concat());
-    let explicit_both = run(&[&base[..], &["--adjustment-unit", "mil", "--windage-unit", "mil"]].concat());
-    assert!(no_flag.status.success() && explicit_mil.status.success() && explicit_both.status.success());
+    let explicit_both = run(&[
+        &base[..],
+        &["--adjustment-unit", "mil", "--windage-unit", "mil"],
+    ]
+    .concat());
+    assert!(
+        no_flag.status.success() && explicit_mil.status.success() && explicit_both.status.success()
+    );
     assert_eq!(stdout(&no_flag), stdout(&explicit_mil));
     assert_eq!(stdout(&no_flag), stdout(&explicit_both));
 }
@@ -399,14 +653,25 @@ fn range_table_default_is_byte_identical_to_pre_mba_1410() {
 fn compare_default_is_byte_identical_to_pre_mba_1410() {
     let base = [
         "compare",
-        "--load", "A:g1:0.5:168:2700",
-        "--load", "B:g1:0.45:175:2650",
-        "--zero-distance", "100", "--end", "300",
+        "--load",
+        "A:g1:0.5:168:2700",
+        "--load",
+        "B:g1:0.45:175:2650",
+        "--zero-distance",
+        "100",
+        "--end",
+        "300",
     ];
     let no_flag = run(&base);
     let explicit_mil = run(&[&base[..], &["--adjustment-unit", "mil"]].concat());
-    let explicit_both = run(&[&base[..], &["--adjustment-unit", "mil", "--windage-unit", "mil"]].concat());
-    assert!(no_flag.status.success() && explicit_mil.status.success() && explicit_both.status.success());
+    let explicit_both = run(&[
+        &base[..],
+        &["--adjustment-unit", "mil", "--windage-unit", "mil"],
+    ]
+    .concat());
+    assert!(
+        no_flag.status.success() && explicit_mil.status.success() && explicit_both.status.success()
+    );
     assert_eq!(stdout(&no_flag), stdout(&explicit_mil));
     assert_eq!(stdout(&no_flag), stdout(&explicit_both));
 }
@@ -424,8 +689,21 @@ fn compare_default_is_byte_identical_to_pre_mba_1410() {
 #[test]
 fn range_table_json_default_path_is_byte_identical_without_windage_unit() {
     let base = [
-        "range-table", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
-        "--zero-distance", "100", "--end", "300", "-o", "json",
+        "range-table",
+        "-v",
+        "2700",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "-b",
+        "0.5",
+        "--zero-distance",
+        "100",
+        "--end",
+        "300",
+        "-o",
+        "json",
     ];
     let no_flag = run(&base);
     let explicit_mil = run(&[&base[..], &["--adjustment-unit", "mil"]].concat());
@@ -434,7 +712,11 @@ fn range_table_json_default_path_is_byte_identical_without_windage_unit() {
     let explicit_windage_mil = run(&[&base[..], &["--windage-unit", "mil"]].concat());
     assert!(no_flag.status.success(), "{}", stderr(&no_flag));
     assert!(explicit_mil.status.success(), "{}", stderr(&explicit_mil));
-    assert!(explicit_windage_mil.status.success(), "{}", stderr(&explicit_windage_mil));
+    assert!(
+        explicit_windage_mil.status.success(),
+        "{}",
+        stderr(&explicit_windage_mil)
+    );
     assert_eq!(stdout(&no_flag), stdout(&explicit_mil));
     assert_eq!(stdout(&no_flag), stdout(&explicit_windage_mil));
 
@@ -449,16 +731,27 @@ fn range_table_json_default_path_is_byte_identical_without_windage_unit() {
 fn compare_json_default_path_is_byte_identical_without_windage_unit() {
     let base = [
         "compare",
-        "--load", "A:g1:0.5:168:2700",
-        "--load", "B:g1:0.45:175:2650",
-        "--zero-distance", "100", "--end", "300", "-o", "json",
+        "--load",
+        "A:g1:0.5:168:2700",
+        "--load",
+        "B:g1:0.45:175:2650",
+        "--zero-distance",
+        "100",
+        "--end",
+        "300",
+        "-o",
+        "json",
     ];
     let no_flag = run(&base);
     let explicit_mil = run(&[&base[..], &["--adjustment-unit", "mil"]].concat());
     let explicit_windage_mil = run(&[&base[..], &["--windage-unit", "mil"]].concat());
     assert!(no_flag.status.success(), "{}", stderr(&no_flag));
     assert!(explicit_mil.status.success(), "{}", stderr(&explicit_mil));
-    assert!(explicit_windage_mil.status.success(), "{}", stderr(&explicit_windage_mil));
+    assert!(
+        explicit_windage_mil.status.success(),
+        "{}",
+        stderr(&explicit_windage_mil)
+    );
     assert_eq!(stdout(&no_flag), stdout(&explicit_mil));
     assert_eq!(stdout(&no_flag), stdout(&explicit_windage_mil));
 
@@ -477,11 +770,25 @@ fn compare_json_default_path_is_byte_identical_without_windage_unit() {
 #[test]
 fn come_ups_windage_click_value_now_warns_instead_of_silently_doing_nothing() {
     let out = run(&[
-        "come-ups", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
-        "--zero-distance", "100", "--end", "300",
-        "--adjustment-unit", "clicks",
-        "--elevation-click-value", "0.1mil",
-        "--windage-click-value", "0.1mil",
+        "come-ups",
+        "-v",
+        "2700",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "-b",
+        "0.5",
+        "--zero-distance",
+        "100",
+        "--end",
+        "300",
+        "--adjustment-unit",
+        "clicks",
+        "--elevation-click-value",
+        "0.1mil",
+        "--windage-click-value",
+        "0.1mil",
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
     let e = stderr(&out);
@@ -492,10 +799,23 @@ fn come_ups_windage_click_value_now_warns_instead_of_silently_doing_nothing() {
 #[test]
 fn come_ups_without_windage_click_value_has_no_inert_flag_warning() {
     let out = run(&[
-        "come-ups", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
-        "--zero-distance", "100", "--end", "300",
-        "--adjustment-unit", "clicks",
-        "--elevation-click-value", "0.1mil",
+        "come-ups",
+        "-v",
+        "2700",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "-b",
+        "0.5",
+        "--zero-distance",
+        "100",
+        "--end",
+        "300",
+        "--adjustment-unit",
+        "clicks",
+        "--elevation-click-value",
+        "0.1mil",
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(!stderr(&out).contains("--windage-click-value"));
@@ -510,15 +830,44 @@ fn come_ups_without_windage_click_value_has_no_inert_flag_warning() {
 fn clicks_dope_card_generates_a_valid_pdf() {
     let out_path = std::env::temp_dir().join("bx_dope_clicks_mba1410.pdf");
     let out = run(&[
-        "trajectory", "-v", "2700", "-b", "0.5", "-m", "175", "-d", "0.308", "--drag-model", "g7",
-        "--max-range", "800", "--temperature", "59", "--pressure", "29.92", "--auto-zero", "100",
-        "--sample-trajectory", "-o", "pdf", "--output-file", out_path.to_str().unwrap(),
-        "--target-speed", "3",
-        "--adjustment-unit", "clicks", "--elevation-click-value", "0.25moa",
+        "trajectory",
+        "-v",
+        "2700",
+        "-b",
+        "0.5",
+        "-m",
+        "175",
+        "-d",
+        "0.308",
+        "--drag-model",
+        "g7",
+        "--max-range",
+        "800",
+        "--temperature",
+        "59",
+        "--pressure",
+        "29.92",
+        "--auto-zero",
+        "100",
+        "--sample-trajectory",
+        "-o",
+        "pdf",
+        "--output-file",
+        out_path.to_str().unwrap(),
+        "--target-speed",
+        "3",
+        "--adjustment-unit",
+        "clicks",
+        "--elevation-click-value",
+        "0.25moa",
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
     let bytes = std::fs::read(&out_path).expect("PDF written");
-    assert!(bytes.len() > 10_000, "PDF suspiciously small ({} bytes)", bytes.len());
+    assert!(
+        bytes.len() > 10_000,
+        "PDF suspiciously small ({} bytes)",
+        bytes.len()
+    );
     assert_eq!(&bytes[..5], b"%PDF-");
     let _ = std::fs::remove_file(&out_path);
 }

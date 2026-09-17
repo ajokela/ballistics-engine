@@ -141,7 +141,11 @@ fn compare_uses_api_drop_frame_and_same_default_zero() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        request.lines().next().unwrap().contains("zero_distance=100.0"),
+        request
+            .lines()
+            .next()
+            .unwrap()
+            .contains("zero_distance=100.0"),
         "imperial comparison must use the API's 100-yard default zero: {request}"
     );
 
@@ -336,20 +340,51 @@ fn generate_bc_segments_warns_once_on_g1_g7_coercion() {
     let silent = ["G1", "G7"];
     for model in silent {
         let output = Command::new(get_cli_binary())
-            .args(["generate-bc-segments", "-b", "0.475", "-m", "168", "-d", "0.308", "--drag-model", model])
+            .args([
+                "generate-bc-segments",
+                "-b",
+                "0.475",
+                "-m",
+                "168",
+                "-d",
+                "0.308",
+                "--drag-model",
+                model,
+            ])
             .output()
             .expect("Failed to execute command");
-        assert!(output.status.success(), "{model}: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{model}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(!stderr.contains("supports G1/G7 only"), "{model} must not warn: {stderr}");
+        assert!(
+            !stderr.contains("supports G1/G7 only"),
+            "{model} must not warn: {stderr}"
+        );
     }
 
     for (model, expected_name) in [("G5", "G5"), ("RA4", "RA4"), ("GI", "GI")] {
         let output = Command::new(get_cli_binary())
-            .args(["generate-bc-segments", "-b", "0.475", "-m", "168", "-d", "0.308", "--drag-model", model])
+            .args([
+                "generate-bc-segments",
+                "-b",
+                "0.475",
+                "-m",
+                "168",
+                "-d",
+                "0.308",
+                "--drag-model",
+                model,
+            ])
             .output()
             .expect("Failed to execute command");
-        assert!(output.status.success(), "{model}: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "{model}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let stderr = String::from_utf8_lossy(&output.stderr);
         let expected = format!(
             "warning: generate-bc-segments supports G1/G7 only; treating drag model '{expected_name}' as G1"

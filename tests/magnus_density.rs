@@ -8,11 +8,11 @@ use ballistics_engine::{
 
 fn magnus_vertical_delta(pressure_hpa: f64, temp_c: f64) -> f64 {
     let inputs = BallisticInputs {
-        muzzle_velocity: 800.0,                 // m/s
+        muzzle_velocity: 800.0, // m/s
         bc_value: 0.5,
         bc_type: DragModel::G7,
-        bullet_mass: 168.0 * 0.00006479891,     // kg
-        bullet_diameter: 0.308 * 0.0254,         // m
+        bullet_mass: 168.0 * 0.00006479891, // kg
+        bullet_diameter: 0.308 * 0.0254,    // m
         bullet_length: 1.24 * 0.0254,
         caliber_inches: 0.308,
         weight_grains: 168.0,

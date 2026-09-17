@@ -57,10 +57,20 @@ impl std::fmt::Display for Bc5dDownloadError {
             Bc5dDownloadError::Timeout => write!(f, "Download timed out"),
             Bc5dDownloadError::IoError(e) => write!(f, "IO error: {}", e),
             Bc5dDownloadError::ChecksumMismatch { expected, actual } => {
-                write!(f, "Checksum mismatch: expected {}, got {}", expected, actual)
+                write!(
+                    f,
+                    "Checksum mismatch: expected {}, got {}",
+                    expected, actual
+                )
             }
-            Bc5dDownloadError::CaliberNotAvailable { requested, available } => {
-                let available_str: Vec<String> = available.iter().map(|c| format!(".{}", (c * 1000.0) as i32)).collect();
+            Bc5dDownloadError::CaliberNotAvailable {
+                requested,
+                available,
+            } => {
+                let available_str: Vec<String> = available
+                    .iter()
+                    .map(|c| format!(".{}", (c * 1000.0) as i32))
+                    .collect();
                 write!(
                     f,
                     "No BC5D table available for caliber {:.3} ({:.1}mm)\nAvailable calibers: {}",
@@ -69,8 +79,12 @@ impl std::fmt::Display for Bc5dDownloadError {
                     available_str.join(", ")
                 )
             }
-            Bc5dDownloadError::ManifestParseError(msg) => write!(f, "Manifest parse error: {}", msg),
-            Bc5dDownloadError::CacheDirectoryError(msg) => write!(f, "Cache directory error: {}", msg),
+            Bc5dDownloadError::ManifestParseError(msg) => {
+                write!(f, "Manifest parse error: {}", msg)
+            }
+            Bc5dDownloadError::CacheDirectoryError(msg) => {
+                write!(f, "Cache directory error: {}", msg)
+            }
         }
     }
 }
@@ -259,31 +273,38 @@ impl Bc5dDownloader {
         })?;
 
         // Parse manifest
-        let version = json["version"]
-            .as_str()
-            .unwrap_or("unknown")
-            .to_string();
-        let generated = json["generated"]
-            .as_str()
-            .unwrap_or("unknown")
-            .to_string();
+        let version = json["version"].as_str().unwrap_or("unknown").to_string();
+        let generated = json["generated"].as_str().unwrap_or("unknown").to_string();
 
-        let tables_obj = json["tables"]
-            .as_object()
-            .ok_or_else(|| Bc5dDownloadError::ManifestParseError("Missing 'tables' field".to_string()))?;
+        let tables_obj = json["tables"].as_object().ok_or_else(|| {
+            Bc5dDownloadError::ManifestParseError("Missing 'tables' field".to_string())
+        })?;
 
         let mut tables = std::collections::HashMap::new();
         for (caliber, entry) in tables_obj {
             let file = entry["file"]
                 .as_str()
-                .ok_or_else(|| Bc5dDownloadError::ManifestParseError(format!("Missing 'file' for caliber {}", caliber)))?
+                .ok_or_else(|| {
+                    Bc5dDownloadError::ManifestParseError(format!(
+                        "Missing 'file' for caliber {}",
+                        caliber
+                    ))
+                })?
                 .to_string();
-            let size = entry["size"]
-                .as_u64()
-                .ok_or_else(|| Bc5dDownloadError::ManifestParseError(format!("Missing 'size' for caliber {}", caliber)))?;
+            let size = entry["size"].as_u64().ok_or_else(|| {
+                Bc5dDownloadError::ManifestParseError(format!(
+                    "Missing 'size' for caliber {}",
+                    caliber
+                ))
+            })?;
             let crc32 = entry["crc32"]
                 .as_str()
-                .ok_or_else(|| Bc5dDownloadError::ManifestParseError(format!("Missing 'crc32' for caliber {}", caliber)))?
+                .ok_or_else(|| {
+                    Bc5dDownloadError::ManifestParseError(format!(
+                        "Missing 'crc32' for caliber {}",
+                        caliber
+                    ))
+                })?
                 .to_string();
 
             tables.insert(caliber.clone(), TableEntry { file, size, crc32 });
@@ -306,7 +327,12 @@ impl Bc5dDownloader {
 
     /// Download a table file
     #[cfg(feature = "online")]
-    fn download_table(&self, filename: &str, dest_path: &PathBuf, expected_crc: &str) -> Result<(), Bc5dDownloadError> {
+    fn download_table(
+        &self,
+        filename: &str,
+        dest_path: &PathBuf,
+        expected_crc: &str,
+    ) -> Result<(), Bc5dDownloadError> {
         let url = format!("{}/{}", self.base_url, filename);
 
         eprintln!("Downloading BC5D table: {}...", filename);
@@ -357,7 +383,12 @@ impl Bc5dDownloader {
 
     /// Stub for non-online builds
     #[cfg(not(feature = "online"))]
-    fn download_table(&self, _filename: &str, _dest_path: &PathBuf, _expected_crc: &str) -> Result<(), Bc5dDownloadError> {
+    fn download_table(
+        &self,
+        _filename: &str,
+        _dest_path: &PathBuf,
+        _expected_crc: &str,
+    ) -> Result<(), Bc5dDownloadError> {
         Err(Bc5dDownloadError::NetworkError(
             "Online features not enabled. Build with --features online".to_string(),
         ))
@@ -374,10 +405,19 @@ pub fn get_cache_directory() -> Result<PathBuf, Bc5dDownloadError> {
     // Fallback to home directory
     if let Some(home) = dirs::home_dir() {
         #[cfg(target_os = "macos")]
-        return Ok(home.join("Library").join("Caches").join("ballistics-engine").join("bc5d"));
+        return Ok(home
+            .join("Library")
+            .join("Caches")
+            .join("ballistics-engine")
+            .join("bc5d"));
 
         #[cfg(target_os = "windows")]
-        return Ok(home.join("AppData").join("Local").join("ballistics-engine").join("cache").join("bc5d"));
+        return Ok(home
+            .join("AppData")
+            .join("Local")
+            .join("ballistics-engine")
+            .join("cache")
+            .join("bc5d"));
 
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         return Ok(home.join(".cache").join("ballistics-engine").join("bc5d"));

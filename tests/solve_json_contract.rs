@@ -36,7 +36,11 @@ const ZEROED_SUCCESS: &str = include_str!("fixtures/solve_json_v1/zeroed.success
 const CONFORMANCE_PAIRS: [(&str, &str, &str); 4] = [
     ("calm-air", CALM_AIR_REQUEST, CALM_AIR_SUCCESS),
     ("crosswind", CROSSWIND_REQUEST, CROSSWIND_SUCCESS),
-    ("segmented-wind", SEGMENTED_WIND_REQUEST, SEGMENTED_WIND_SUCCESS),
+    (
+        "segmented-wind",
+        SEGMENTED_WIND_REQUEST,
+        SEGMENTED_WIND_SUCCESS,
+    ),
     ("zeroed", ZEROED_REQUEST, ZEROED_SUCCESS),
 ];
 
@@ -254,7 +258,11 @@ fn checked_fixtures_have_order_independent_v1_shapes() {
         ("resource error", RESOURCE_REQUEST, RESOURCE_ERROR),
         ("early termination", EARLY_REQUEST, EARLY_SUCCESS),
         ("calm-air conformance", CALM_AIR_REQUEST, CALM_AIR_SUCCESS),
-        ("crosswind conformance", CROSSWIND_REQUEST, CROSSWIND_SUCCESS),
+        (
+            "crosswind conformance",
+            CROSSWIND_REQUEST,
+            CROSSWIND_SUCCESS,
+        ),
         (
             "segmented-wind conformance",
             SEGMENTED_WIND_REQUEST,

@@ -123,7 +123,12 @@ fn fit_ranges_noisy(load: &Load, ranges: &[f64], start_bc: f64, noise: &[f64]) -
     let drops: Vec<(f64, f64)> = ranges
         .iter()
         .enumerate()
-        .map(|(i, &r)| (r, forward_drop_mil(load, r) + noise.get(i).copied().unwrap_or(0.0)))
+        .map(|(i, &r)| {
+            (
+                r,
+                forward_drop_mil(load, r) + noise.get(i).copied().unwrap_or(0.0),
+            )
+        })
         .collect();
     let mut args: Vec<String> = vec![
         "true-velocity".into(),
@@ -243,7 +248,10 @@ fn synthetic_round_trip_noise_free_is_exact() {
 fn ill_conditioned_set_refuses_joint_and_fits_mv_only() {
     let load = test_load();
     let v = fit_ranges(&load, &[200.0, 250.0, 300.0], 0.45);
-    assert_eq!(v["mode"], "mv_only", "short cluster must not attempt joint fit");
+    assert_eq!(
+        v["mode"], "mv_only",
+        "short cluster must not attempt joint fit"
+    );
     assert_eq!(v["bc_fitted"], false);
     // BC is held exactly at the input.
     assert_eq!(v["fitted_bc"].as_f64().unwrap(), 0.45);
@@ -404,7 +412,12 @@ fn joint_json_has_legend_and_unit_labeled_keys() {
     assert_eq!(v["velocity_unit"], "fps");
     assert!(v["rms_residual_mil"].is_number());
     let o0 = &v["observations"][0];
-    for key in ["range_yd", "observed_drop_mil", "predicted_drop_mil", "residual_mil"] {
+    for key in [
+        "range_yd",
+        "observed_drop_mil",
+        "predicted_drop_mil",
+        "residual_mil",
+    ] {
         assert!(o0[key].is_number(), "missing key {key}");
     }
 }
@@ -441,7 +454,11 @@ fn metric_units_range_in_meters() {
         "--output",
         "json",
     ]);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["velocity_unit"], "m/s");
     assert_eq!(v["legend"]["units"]["range"], "m");
@@ -512,7 +529,11 @@ const FULLY_SUPERSONIC_FIXTURE_ARGS: &[&str] = &[
 #[test]
 fn mv_calibration_window_line_appears_for_a_transonic_fixture() {
     let out = run_true_velocity(TRANSONIC_FIXTURE_ARGS);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("MV-calibration window: 656.7-729.7 yd (90-100% of the Mach 1.2 distance)"),
@@ -523,7 +544,11 @@ fn mv_calibration_window_line_appears_for_a_transonic_fixture() {
 #[test]
 fn no_mv_window_note_for_a_fully_supersonic_fixture() {
     let out = run_true_velocity(FULLY_SUPERSONIC_FIXTURE_ARGS);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains(
@@ -539,7 +564,11 @@ fn no_mv_window_note_for_a_fully_supersonic_fixture() {
 #[test]
 fn out_of_window_observations_warn_on_stderr() {
     let out = run_true_velocity(TRANSONIC_FIXTURE_ARGS);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     for r in ["300.0", "600.0", "900.0"] {
         assert!(
@@ -557,7 +586,11 @@ fn out_of_window_observations_warn_on_stderr() {
 #[test]
 fn no_out_of_window_warning_when_there_is_no_window() {
     let out = run_true_velocity(FULLY_SUPERSONIC_FIXTURE_ARGS);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("MV-calibration window"), "{stderr}");
 }
@@ -565,7 +598,11 @@ fn no_out_of_window_warning_when_there_is_no_window() {
 #[test]
 fn plan_truing_cross_reference_line_appears_exactly_once() {
     let out = run_true_velocity(TRANSONIC_FIXTURE_ARGS);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let needle = "for optimal observation ranges run: ballistics plan-truing";
     assert_eq!(
@@ -580,15 +617,23 @@ fn json_gets_additive_window_fields_only_never_note_text() {
     let mut json_args: Vec<&str> = TRANSONIC_FIXTURE_ARGS.to_vec();
     json_args.extend(["--output", "json"]);
     let out = run_true_velocity(&json_args);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let raw = String::from_utf8_lossy(&out.stdout);
     assert!(
         !raw.to_lowercase().contains("calibration window"),
         "JSON must carry no note text: {raw}"
     );
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-    let lo = v["mv_window_start_m"].as_f64().expect("mv_window_start_m present and numeric");
-    let hi = v["mv_window_end_m"].as_f64().expect("mv_window_end_m present and numeric");
+    let lo = v["mv_window_start_m"]
+        .as_f64()
+        .expect("mv_window_start_m present and numeric");
+    let hi = v["mv_window_end_m"]
+        .as_f64()
+        .expect("mv_window_end_m present and numeric");
     assert!(lo > 0.0 && hi > lo, "lo={lo} hi={hi}");
     // 656.7-729.7 yd pinned above, in meters (yd * 0.9144).
     assert!((lo - 656.7 * 0.9144).abs() < 0.5, "lo={lo}");
@@ -600,7 +645,11 @@ fn json_window_fields_are_null_when_there_is_no_window() {
     let mut json_args: Vec<&str> = FULLY_SUPERSONIC_FIXTURE_ARGS.to_vec();
     json_args.extend(["--output", "json"]);
     let out = run_true_velocity(&json_args);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(v["mv_window_start_m"].is_null(), "{v}");
     assert!(v["mv_window_end_m"].is_null(), "{v}");
@@ -611,10 +660,20 @@ fn csv_output_carries_no_window_note_text() {
     let mut csv_args: Vec<&str> = TRANSONIC_FIXTURE_ARGS.to_vec();
     csv_args.extend(["--output", "csv"]);
     let out = run_true_velocity(&csv_args);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(!stdout.to_lowercase().contains("calibration window"), "{stdout}");
-    assert!(!stdout.to_lowercase().contains("mv is identifiable"), "{stdout}");
+    assert!(
+        !stdout.to_lowercase().contains("calibration window"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.to_lowercase().contains("mv is identifiable"),
+        "{stdout}"
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -648,8 +707,10 @@ fn never_supersonic_load() -> Load {
 fn never_supersonic_fixture_args(extra: &[&str]) -> Vec<String> {
     let load = never_supersonic_load();
     let ranges = [100.0, 400.0];
-    let drops: Vec<(f64, f64)> =
-        ranges.iter().map(|&r| (r, forward_drop_mil(&load, r))).collect();
+    let drops: Vec<(f64, f64)> = ranges
+        .iter()
+        .map(|&r| (r, forward_drop_mil(&load, r)))
+        .collect();
     let mut args: Vec<String> = vec![
         "true-velocity".into(),
         "--range".into(),
@@ -682,7 +743,11 @@ fn no_mv_window_note_for_a_never_supersonic_fixture() {
     let args = never_supersonic_fixture_args(&[]);
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let out = run_true_velocity(&refs);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains(
@@ -702,10 +767,15 @@ fn json_window_fields_are_null_for_a_never_supersonic_fixture() {
     let args = never_supersonic_fixture_args(&["--output", "json"]);
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let out = run_true_velocity(&refs);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let raw = String::from_utf8_lossy(&out.stdout);
     assert!(
-        !raw.to_lowercase().contains("calibration window") && !raw.to_lowercase().contains("mach 1.2"),
+        !raw.to_lowercase().contains("calibration window")
+            && !raw.to_lowercase().contains("mach 1.2"),
         "JSON must carry no note text: {raw}"
     );
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();

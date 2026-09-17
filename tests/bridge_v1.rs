@@ -27,10 +27,9 @@ fn call(envelope: Value) -> Value {
 #[test]
 fn solve_through_bridge_matches_library_solve_json_exactly() {
     // Reference: the transport-free library service.
-    let request = ballistics_engine::solve_json::decode_solve_request_v1(
-        &solve_request_v1().to_string(),
-    )
-    .expect("fixture must decode");
+    let request =
+        ballistics_engine::solve_json::decode_solve_request_v1(&solve_request_v1().to_string())
+            .expect("fixture must decode");
     let reference = ballistics_engine::solve_v1(request).expect("fixture must solve");
     let reference_value = serde_json::to_value(&reference).expect("reference serializes");
 
@@ -61,7 +60,10 @@ fn solve_result_carries_physical_sanity() {
     let result = &out["result"];
     assert_eq!(result["schema_version"], 1);
     let text = result.to_string();
-    assert!(text.len() > 100, "solve result should be substantive: {text}");
+    assert!(
+        text.len() > 100,
+        "solve result should be substantive: {text}"
+    );
 }
 
 #[test]
@@ -94,7 +96,10 @@ fn card_commands_keep_their_error_shape_through_the_generic_adapter() {
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["ok"], false);
     assert_eq!(v["error"]["code"], "invalid_request");
-    assert!(v["error"]["message"].as_str().unwrap().contains("card.range_table"));
+    assert!(v["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("card.range_table"));
 }
 
 #[test]

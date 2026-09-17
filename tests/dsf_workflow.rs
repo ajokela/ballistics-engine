@@ -54,7 +54,9 @@ fn tempfile_dir() -> std::path::PathBuf {
 }
 
 fn profile_path(home: &Path, name: &str) -> std::path::PathBuf {
-    home.join(".ballistics").join("profiles").join(format!("{name}.json"))
+    home.join(".ballistics")
+        .join("profiles")
+        .join(format!("{name}.json"))
 }
 
 fn profile_json(home: &Path, name: &str) -> Value {
@@ -62,8 +64,12 @@ fn profile_json(home: &Path, name: &str) -> Value {
 }
 
 fn parse_json(out: &Output) -> Value {
-    serde_json::from_slice(&out.stdout)
-        .unwrap_or_else(|e| panic!("invalid JSON ({e}): {}", String::from_utf8_lossy(&out.stdout)))
+    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "invalid JSON ({e}): {}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    })
 }
 
 /// Save a synthetic profile. Every scenario below derives its own predicted drop
@@ -122,7 +128,17 @@ fn save_profile(
     drag_model: &str,
     zero_distance: f64,
 ) -> Output {
-    save_profile_inner(home, name, velocity, bc, mass, diameter, drag_model, zero_distance, false)
+    save_profile_inner(
+        home,
+        name,
+        velocity,
+        bc,
+        mass,
+        diameter,
+        drag_model,
+        zero_distance,
+        false,
+    )
 }
 
 #[allow(clippy::too_many_arguments, reason = "see save_profile_inner")]
@@ -136,11 +152,27 @@ fn save_profile_clear_dsf(
     drag_model: &str,
     zero_distance: f64,
 ) -> Output {
-    save_profile_inner(home, name, velocity, bc, mass, diameter, drag_model, zero_distance, true)
+    save_profile_inner(
+        home,
+        name,
+        velocity,
+        bc,
+        mass,
+        diameter,
+        drag_model,
+        zero_distance,
+        true,
+    )
 }
 
 /// `trajectory --saved-profile NAME --max-range R [--sample-trajectory] -o FMT --full`.
-fn full_trajectory_out(home: &Path, name: &str, max_range: f64, sampled: bool, output_fmt: &str) -> Output {
+fn full_trajectory_out(
+    home: &Path,
+    name: &str,
+    max_range: f64,
+    sampled: bool,
+    output_fmt: &str,
+) -> Output {
     let mut cmd = cli();
     cmd.env("HOME", home)
         .args(["trajectory", "--saved-profile", name])
@@ -167,7 +199,11 @@ fn trajectory_table_out(home: &Path, name: &str, max_range: f64) -> Output {
 
 fn full_trajectory_json(home: &Path, name: &str, max_range: f64) -> Value {
     let out = full_trajectory_out(home, name, max_range, false, "json");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     parse_json(&out)
 }
 
@@ -250,7 +286,11 @@ fn stage_one_mv_calibration_precedes_dsf_and_supersonic_gate_rejects() {
         ])
         .output()
         .expect("spawn true-velocity");
-    assert!(tv_out.status.success(), "{}", String::from_utf8_lossy(&tv_out.stderr));
+    assert!(
+        tv_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&tv_out.stderr)
+    );
     let tv_json = parse_json(&tv_out);
     let trued_velocity = tv_json["effective_velocity"]
         .as_f64()
@@ -263,11 +303,27 @@ fn stage_one_mv_calibration_precedes_dsf_and_supersonic_gate_rejects() {
 
     // Carry the trued velocity into a saved profile using the SAME load true-velocity
     // just solved for — still comfortably supersonic near the muzzle.
-    let save = save_profile(&home, "mv-calibrated", trued_velocity, 0.27, 140.0, 0.264, "g7", 300.0);
-    assert!(save.status.success(), "{}", String::from_utf8_lossy(&save.stderr));
+    let save = save_profile(
+        &home,
+        "mv-calibrated",
+        trued_velocity,
+        0.27,
+        140.0,
+        0.264,
+        "g7",
+        300.0,
+    );
+    assert!(
+        save.status.success(),
+        "{}",
+        String::from_utf8_lossy(&save.stderr)
+    );
 
     let dsf_out = run_dsf(&home, "mv-calibrated", 100.0, 0.5);
-    assert!(!dsf_out.status.success(), "a short-range observation on this load must still be supersonic");
+    assert!(
+        !dsf_out.status.success(),
+        "a short-range observation on this load must still be supersonic"
+    );
     let stderr = String::from_utf8_lossy(&dsf_out.stderr);
     assert!(
         stderr.contains("error: observation is supersonic (Mach")
@@ -278,7 +334,10 @@ fn stage_one_mv_calibration_precedes_dsf_and_supersonic_gate_rejects() {
     );
 
     let saved = profile_json(&home, "mv-calibrated");
-    assert!(saved.get("dsf_points").is_none(), "rejected observation must not be saved: {saved}");
+    assert!(
+        saved.get("dsf_points").is_none(),
+        "rejected observation must not be saved: {saved}"
+    );
 }
 
 // ---------------------------------------------------------------------------------
@@ -293,7 +352,11 @@ fn stage_one_mv_calibration_precedes_dsf_and_supersonic_gate_rejects() {
 fn dsf_accumulates_multiple_observations_growing_the_table() {
     let home = tempfile_dir();
     let save = save_profile(&home, "dsf-accum", 1300.0, 0.4, 168.0, 0.308, "g1", 1500.0);
-    assert!(save.status.success(), "{}", String::from_utf8_lossy(&save.stderr));
+    assert!(
+        save.status.success(),
+        "{}",
+        String::from_utf8_lossy(&save.stderr)
+    );
 
     let baseline = full_trajectory_json(&home, "dsf-accum", 1600.0);
     let points = baseline["trajectory"].as_array().expect("trajectory array");
@@ -301,15 +364,25 @@ fn dsf_accumulates_multiple_observations_growing_the_table() {
     let ranges = [50.0, 400.0, 950.0];
     for (i, &range_yd) in ranges.iter().enumerate() {
         let predicted = predicted_drop_in_at(points, range_yd);
-        assert!(predicted.abs() > 1.0, "predicted drop should be a real, non-trivial value: {predicted}");
+        assert!(
+            predicted.abs() > 1.0,
+            "predicted drop should be a real, non-trivial value: {predicted}"
+        );
         let observed = predicted * 1.1;
         let out = run_dsf(&home, "dsf-accum", range_yd, observed);
-        assert!(out.status.success(), "range {range_yd}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "range {range_yd}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(stdout.contains("Added DSF point"), "{stdout}");
         assert!(!stdout.contains("Superseded"), "{stdout}");
         let expected_count = i + 1;
-        assert!(stdout.contains(&format!("({expected_count} points, Mach")), "{stdout}");
+        assert!(
+            stdout.contains(&format!("({expected_count} points, Mach")),
+            "{stdout}"
+        );
     }
 
     let saved = profile_json(&home, "dsf-accum");
@@ -328,15 +401,32 @@ fn dsf_accumulates_multiple_observations_growing_the_table() {
 #[test]
 fn dsf_supersedes_a_point_within_mach_tolerance() {
     let home = tempfile_dir();
-    let save = save_profile(&home, "dsf-supersede", 1300.0, 0.4, 168.0, 0.308, "g1", 1500.0);
-    assert!(save.status.success(), "{}", String::from_utf8_lossy(&save.stderr));
+    let save = save_profile(
+        &home,
+        "dsf-supersede",
+        1300.0,
+        0.4,
+        168.0,
+        0.308,
+        "g1",
+        1500.0,
+    );
+    assert!(
+        save.status.success(),
+        "{}",
+        String::from_utf8_lossy(&save.stderr)
+    );
 
     let baseline = full_trajectory_json(&home, "dsf-supersede", 1600.0);
     let points = baseline["trajectory"].as_array().unwrap();
 
     let first_predicted = predicted_drop_in_at(points, 50.0);
     let first = run_dsf(&home, "dsf-supersede", 50.0, first_predicted * 1.1);
-    assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
     assert!(String::from_utf8_lossy(&first.stdout).contains("Added DSF point"));
 
     let first_dsf_value = profile_json(&home, "dsf-supersede")["dsf_points"][0]["dsf"]
@@ -345,10 +435,17 @@ fn dsf_supersedes_a_point_within_mach_tolerance() {
 
     let second_predicted = predicted_drop_in_at(points, 90.0);
     let second = run_dsf(&home, "dsf-supersede", 90.0, second_predicted * 1.3);
-    assert!(second.status.success(), "{}", String::from_utf8_lossy(&second.stderr));
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
     let stdout = String::from_utf8_lossy(&second.stdout);
     assert!(stdout.contains("Superseded DSF point"), "{stdout}");
-    assert!(stdout.contains("(1 points, Mach"), "table must still hold exactly 1 point: {stdout}");
+    assert!(
+        stdout.contains("(1 points, Mach"),
+        "table must still hold exactly 1 point: {stdout}"
+    );
 
     let saved_after = profile_json(&home, "dsf-supersede");
     let after_points = saved_after["dsf_points"].as_array().unwrap();
@@ -377,7 +474,11 @@ fn dsf_supersedes_a_point_within_mach_tolerance() {
 fn dsf_table_caps_at_six_points_and_seventh_errors() {
     let home = tempfile_dir();
     let save = save_profile(&home, "dsf-cap", 1300.0, 0.4, 168.0, 0.308, "g1", 1500.0);
-    assert!(save.status.success(), "{}", String::from_utf8_lossy(&save.stderr));
+    assert!(
+        save.status.success(),
+        "{}",
+        String::from_utf8_lossy(&save.stderr)
+    );
 
     let baseline = full_trajectory_json(&home, "dsf-cap", 1600.0);
     let points = baseline["trajectory"].as_array().unwrap();
@@ -386,11 +487,21 @@ fn dsf_table_caps_at_six_points_and_seventh_errors() {
     for (i, &range_yd) in ranges.iter().enumerate() {
         let predicted = predicted_drop_in_at(points, range_yd);
         let out = run_dsf(&home, "dsf-cap", range_yd, predicted * 1.1);
-        assert!(out.status.success(), "range {range_yd}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "range {range_yd}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(stdout.contains("Added DSF point"), "range {range_yd}: {stdout}");
+        assert!(
+            stdout.contains("Added DSF point"),
+            "range {range_yd}: {stdout}"
+        );
         let expected_count = i + 1;
-        assert!(stdout.contains(&format!("({expected_count} points, Mach")), "{stdout}");
+        assert!(
+            stdout.contains(&format!("({expected_count} points, Mach")),
+            "{stdout}"
+        );
     }
 
     let saved = profile_json(&home, "dsf-cap");
@@ -400,7 +511,10 @@ fn dsf_table_caps_at_six_points_and_seventh_errors() {
     // first two additions above) — a clean cap rejection, not a supersede.
     let seventh_predicted = predicted_drop_in_at(points, 120.0);
     let seventh = run_dsf(&home, "dsf-cap", 120.0, seventh_predicted * 1.1);
-    assert!(!seventh.status.success(), "7th observation must be rejected outright");
+    assert!(
+        !seventh.status.success(),
+        "7th observation must be rejected outright"
+    );
     let stderr = String::from_utf8_lossy(&seventh.stderr);
     assert!(
         stderr.contains("already holds the maximum 6 points") && stderr.contains("--clear-dsf"),
@@ -435,12 +549,29 @@ fn dsf_table_caps_at_six_points_and_seventh_errors() {
 #[test]
 fn drop_only_invariant_end_to_end_then_clear_dsf_restores_exactly() {
     let home = tempfile_dir();
-    let save = save_profile(&home, "dsf-invariant", 1300.0, 0.4, 168.0, 0.308, "g1", 300.0);
-    assert!(save.status.success(), "{}", String::from_utf8_lossy(&save.stderr));
+    let save = save_profile(
+        &home,
+        "dsf-invariant",
+        1300.0,
+        0.4,
+        168.0,
+        0.308,
+        "g1",
+        300.0,
+    );
+    assert!(
+        save.status.success(),
+        "{}",
+        String::from_utf8_lossy(&save.stderr)
+    );
 
     let baseline_full = full_trajectory_json(&home, "dsf-invariant", 1500.0);
     let baseline_sampled_out = full_trajectory_out(&home, "dsf-invariant", 1500.0, true, "csv");
-    assert!(baseline_sampled_out.status.success(), "{}", String::from_utf8_lossy(&baseline_sampled_out.stderr));
+    assert!(
+        baseline_sampled_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&baseline_sampled_out.stderr)
+    );
     let baseline_sampled_csv = String::from_utf8_lossy(&baseline_sampled_out.stdout).into_owned();
 
     // Derive a DSF point from a genuinely subsonic (< 1000 fps), below-LOS point (real
@@ -461,9 +592,16 @@ fn drop_only_invariant_end_to_end_then_clear_dsf_restores_exactly() {
             })
             .expect("a subsonic point must exist on this profile's trajectory")
     };
-    assert!(predicted_drop_in > 0.0, "expected a real positive drop: {predicted_drop_in}");
+    assert!(
+        predicted_drop_in > 0.0,
+        "expected a real positive drop: {predicted_drop_in}"
+    );
     let dsf_out = run_dsf(&home, "dsf-invariant", range_yd, predicted_drop_in * 1.3);
-    assert!(dsf_out.status.success(), "{}", String::from_utf8_lossy(&dsf_out.stderr));
+    assert!(
+        dsf_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dsf_out.stderr)
+    );
     assert!(String::from_utf8_lossy(&dsf_out.stdout).contains("Added DSF point"));
 
     // --- Full JSON: top-level scalars untouched ---
@@ -479,7 +617,10 @@ fn drop_only_invariant_end_to_end_then_clear_dsf_restores_exactly() {
         "spin_drift",
         "legend",
     ] {
-        assert_eq!(baseline_full[key], corrected_full[key], "field {key} must stay identical");
+        assert_eq!(
+            baseline_full[key], corrected_full[key],
+            "field {key} must stay identical"
+        );
     }
 
     let base_points = baseline_full["trajectory"].as_array().unwrap();
@@ -488,7 +629,10 @@ fn drop_only_invariant_end_to_end_then_clear_dsf_restores_exactly() {
     let mut any_drop_changed = false;
     for (bp, cp) in base_points.iter().zip(corr_points.iter()) {
         assert_eq!(bp["time"], cp["time"], "time must stay identical");
-        assert_eq!(bp["velocity"], cp["velocity"], "velocity must stay identical");
+        assert_eq!(
+            bp["velocity"], cp["velocity"],
+            "velocity must stay identical"
+        );
         assert_eq!(bp["energy"], cp["energy"], "energy must stay identical");
         assert_eq!(bp["z"], cp["z"], "downrange must stay identical");
         assert_eq!(bp["x"], cp["x"], "lateral position must stay identical");
@@ -498,7 +642,10 @@ fn drop_only_invariant_end_to_end_then_clear_dsf_restores_exactly() {
             any_drop_changed = true;
         }
     }
-    assert!(any_drop_changed, "at least one point's drop must change after DSF auto-apply");
+    assert!(
+        any_drop_changed,
+        "at least one point's drop must change after DSF auto-apply"
+    );
 
     // The trajectory's final point (ground impact) is at or beyond the derivation
     // range, hence at or below the derivation point's Mach — flat-clamped to EXACTLY
@@ -508,7 +655,10 @@ fn drop_only_invariant_end_to_end_then_clear_dsf_restores_exactly() {
     let last_corr_y = corr_points.last().unwrap()["y"].as_f64().unwrap();
     let last_base_drop = LOS_YD - last_base_y;
     let last_corr_drop = LOS_YD - last_corr_y;
-    assert!(last_base_drop > 0.0, "the final point must be a real, positive drop below LOS: {last_base_drop}");
+    assert!(
+        last_base_drop > 0.0,
+        "the final point must be a real, positive drop below LOS: {last_base_drop}"
+    );
     assert!(
         (last_corr_drop / last_base_drop - 1.3).abs() < 0.02,
         "the flat-clamped final point's drop must scale by exactly the derived 1.3 ratio: \
@@ -517,10 +667,14 @@ fn drop_only_invariant_end_to_end_then_clear_dsf_restores_exactly() {
     );
 
     // JSON purity: no DSF text anywhere in the raw stdout.
-    let corrected_full_raw =
-        String::from_utf8_lossy(&full_trajectory_out(&home, "dsf-invariant", 1500.0, false, "json").stdout)
-            .into_owned();
-    assert!(!corrected_full_raw.to_lowercase().contains("dsf"), "{corrected_full_raw}");
+    let corrected_full_raw = String::from_utf8_lossy(
+        &full_trajectory_out(&home, "dsf-invariant", 1500.0, false, "json").stdout,
+    )
+    .into_owned();
+    assert!(
+        !corrected_full_raw.to_lowercase().contains("dsf"),
+        "{corrected_full_raw}"
+    );
 
     // --- Sampled CSV (--sample-trajectory): same invariant, separate array ---
     let corrected_sampled_out = full_trajectory_out(&home, "dsf-invariant", 1500.0, true, "csv");
@@ -529,8 +683,15 @@ fn drop_only_invariant_end_to_end_then_clear_dsf_restores_exactly() {
     let mut base_lines = baseline_sampled_csv.lines();
     let mut corr_lines = corrected_sampled_csv.lines();
     let header = base_lines.next().expect("csv header");
-    assert_eq!(corr_lines.next(), Some(header), "csv header must be unchanged");
-    assert!(header.starts_with("distance_yd,drop_in,drift_in,velocity_fps"), "{header}");
+    assert_eq!(
+        corr_lines.next(),
+        Some(header),
+        "csv header must be unchanged"
+    );
+    assert!(
+        header.starts_with("distance_yd,drop_in,drift_in,velocity_fps"),
+        "{header}"
+    );
 
     let mut any_sampled_drop_changed = false;
     let mut last_base_row: Option<Vec<f64>> = None;
@@ -538,11 +699,26 @@ fn drop_only_invariant_end_to_end_then_clear_dsf_restores_exactly() {
     for (b, c) in base_lines.zip(corr_lines) {
         let bcols: Vec<f64> = b.split(',').map(|s| s.parse().unwrap()).collect();
         let ccols: Vec<f64> = c.split(',').map(|s| s.parse().unwrap()).collect();
-        assert!((bcols[0] - ccols[0]).abs() < 1e-9, "distance must be byte-identical");
-        assert!((bcols[2] - ccols[2]).abs() < 1e-9, "drift must be byte-identical");
-        assert!((bcols[3] - ccols[3]).abs() < 1e-9, "velocity must be byte-identical");
-        assert!((bcols[4] - ccols[4]).abs() < 1e-9, "energy must be byte-identical");
-        assert!((bcols[5] - ccols[5]).abs() < 1e-9, "time must be byte-identical");
+        assert!(
+            (bcols[0] - ccols[0]).abs() < 1e-9,
+            "distance must be byte-identical"
+        );
+        assert!(
+            (bcols[2] - ccols[2]).abs() < 1e-9,
+            "drift must be byte-identical"
+        );
+        assert!(
+            (bcols[3] - ccols[3]).abs() < 1e-9,
+            "velocity must be byte-identical"
+        );
+        assert!(
+            (bcols[4] - ccols[4]).abs() < 1e-9,
+            "energy must be byte-identical"
+        );
+        assert!(
+            (bcols[5] - ccols[5]).abs() < 1e-9,
+            "time must be byte-identical"
+        );
         if (bcols[1] - ccols[1]).abs() > 1e-6 {
             any_sampled_drop_changed = true;
         }
@@ -552,7 +728,10 @@ fn drop_only_invariant_end_to_end_then_clear_dsf_restores_exactly() {
     assert!(any_sampled_drop_changed, "sampled CSV drop must also bend");
     let last_base_drop_in = last_base_row.expect("at least one sampled row")[1];
     let last_corr_drop_in = last_corr_row.expect("at least one sampled row")[1];
-    assert!(last_base_drop_in > 0.0, "final sampled row must be a real positive drop: {last_base_drop_in}");
+    assert!(
+        last_base_drop_in > 0.0,
+        "final sampled row must be a real positive drop: {last_base_drop_in}"
+    );
     assert!(
         (last_corr_drop_in / last_base_drop_in - 1.3).abs() < 0.02,
         "final sampled row must also scale by exactly the derived 1.3 ratio: \
@@ -566,10 +745,26 @@ fn drop_only_invariant_end_to_end_then_clear_dsf_restores_exactly() {
     assert!(String::from_utf8_lossy(&table_out.stdout).contains("DSF table active (1 points"));
 
     // --- Scenario 6: --clear-dsf restores the untrued output EXACTLY ---
-    let clear = save_profile_clear_dsf(&home, "dsf-invariant", 1300.0, 0.4, 168.0, 0.308, "g1", 300.0);
-    assert!(clear.status.success(), "{}", String::from_utf8_lossy(&clear.stderr));
+    let clear = save_profile_clear_dsf(
+        &home,
+        "dsf-invariant",
+        1300.0,
+        0.4,
+        168.0,
+        0.308,
+        "g1",
+        300.0,
+    );
+    assert!(
+        clear.status.success(),
+        "{}",
+        String::from_utf8_lossy(&clear.stderr)
+    );
     let cleared_profile = profile_json(&home, "dsf-invariant");
-    assert!(cleared_profile.get("dsf_points").is_none(), "{cleared_profile}");
+    assert!(
+        cleared_profile.get("dsf_points").is_none(),
+        "{cleared_profile}"
+    );
 
     let restored_full = full_trajectory_json(&home, "dsf-invariant", 1500.0);
     assert_eq!(

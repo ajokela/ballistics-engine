@@ -34,7 +34,10 @@ fn drag_accel(tipoff_yaw_rad: f64, decay_m: f64, cd_delta2: f64, pos_x: f64) -> 
 /// With zero tip-off yaw (the default), cd_delta2 must be completely inert.
 #[test]
 fn zero_yaw_leaves_cd_delta2_inert() {
-    assert_eq!(drag_accel(0.0, 0.0, 7.5, 0.0), drag_accel(0.0, 0.0, 20.0, 0.0));
+    assert_eq!(
+        drag_accel(0.0, 0.0, 7.5, 0.0),
+        drag_accel(0.0, 0.0, 20.0, 0.0)
+    );
 }
 
 /// A 2-degree constant yaw with the literature default must raise drag by a few

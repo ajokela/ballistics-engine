@@ -43,13 +43,21 @@ const BASE_ARGS: [&str; 16] = [
 #[test]
 fn absent_chrono_distance_is_byte_identical_to_explicit_zero() {
     let absent = run(&BASE_ARGS);
-    assert!(absent.status.success(), "{}", String::from_utf8_lossy(&absent.stderr));
+    assert!(
+        absent.status.success(),
+        "{}",
+        String::from_utf8_lossy(&absent.stderr)
+    );
 
     let mut with_zero: Vec<&str> = BASE_ARGS.to_vec();
     with_zero.push("--chrono-distance");
     with_zero.push("0");
     let zero = run(&with_zero);
-    assert!(zero.status.success(), "{}", String::from_utf8_lossy(&zero.stderr));
+    assert!(
+        zero.status.success(),
+        "{}",
+        String::from_utf8_lossy(&zero.stderr)
+    );
 
     assert_eq!(
         absent.stdout, zero.stdout,
@@ -83,7 +91,11 @@ fn nonzero_chrono_distance_raises_the_reported_muzzle_velocity() {
     corrected_args.push("--chrono-distance");
     corrected_args.push("15");
     let corrected = run(&corrected_args);
-    assert!(corrected.status.success(), "{}", String::from_utf8_lossy(&corrected.stderr));
+    assert!(
+        corrected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&corrected.stderr)
+    );
     let corrected_out = String::from_utf8_lossy(&corrected.stdout);
 
     assert_ne!(
@@ -146,16 +158,17 @@ fn chrono_distance_requires_chrono_velocity() {
 fn out_of_band_chrono_distance_is_rejected_not_silently_applied() {
     // "--chrono-distance=-5" (a single token, `=`-joined) so clap doesn't mistake the negative
     // number for a short flag.
-    for bad in ["--chrono-distance=-5", "--chrono-distance=0.05", "--chrono-distance=1000"] {
+    for bad in [
+        "--chrono-distance=-5",
+        "--chrono-distance=0.05",
+        "--chrono-distance=1000",
+    ] {
         let mut args: Vec<&str> = BASE_ARGS.to_vec();
         args.push(bad);
         let out = run(&args);
         assert!(!out.status.success(), "distance {bad} should be rejected");
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("out of range"),
-            "distance {bad}: {stderr}"
-        );
+        assert!(stderr.contains("out of range"), "distance {bad}: {stderr}");
     }
 }
 
@@ -186,5 +199,9 @@ fn metric_units_convert_chrono_distance_from_meters() {
         "--offline",
     ];
     let out = run(&args);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

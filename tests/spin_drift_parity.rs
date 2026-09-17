@@ -23,15 +23,15 @@ const TOL_M: f64 = 0.00762; // 0.3 in
 /// standard atmosphere, no wind. Spin drift + advanced effects on.
 fn parity_inputs() -> BallisticInputs {
     BallisticInputs {
-        muzzle_velocity: 800.0,                 // m/s (~2625 fps)
-        bullet_mass: 175.0 * 0.00006479891,     // kg
-        bullet_diameter: 0.308 * 0.0254,         // m
-        bullet_length: 1.24 * 0.0254,            // m (175 SMK-class)
+        muzzle_velocity: 800.0,             // m/s (~2625 fps)
+        bullet_mass: 175.0 * 0.00006479891, // kg
+        bullet_diameter: 0.308 * 0.0254,    // m
+        bullet_length: 1.24 * 0.0254,       // m (175 SMK-class)
         caliber_inches: 0.308,
         weight_grains: 175.0,
         bc_value: 0.243,
         bc_type: DragModel::G7,
-        twist_rate: 10.0,                        // 1:10"
+        twist_rate: 10.0, // 1:10"
         is_twist_right: true,
         muzzle_angle: 0.0, // flat launch; identical for all three paths
         target_distance: TARGET_M,
@@ -89,7 +89,12 @@ fn lateral_fast_segments(i: &BallisticInputs) -> f64 {
         t_span: (0.0, 30.0),
         horiz: TARGET_M,
         vert: sight_position,
-        atmo_params: (i.altitude, resolved_temp_c, resolved_pressure_hpa, base_ratio),
+        atmo_params: (
+            i.altitude,
+            resolved_temp_c,
+            resolved_pressure_hpa,
+            base_ratio,
+        ),
         atmo_sock: None,
     };
     let sol = fast_integrate_with_segments(i, vec![], params);
@@ -121,7 +126,12 @@ fn lateral_fast_integrate(i: &BallisticInputs) -> f64 {
         t_span: (0.0, 30.0),
         horiz: TARGET_M,
         vert: sight_position,
-        atmo_params: (i.altitude, resolved_temp_c, resolved_pressure_hpa, base_ratio),
+        atmo_params: (
+            i.altitude,
+            resolved_temp_c,
+            resolved_pressure_hpa,
+            base_ratio,
+        ),
         atmo_sock: None,
     };
     let sol = fast_integrate(i, &WindSock::new(vec![]), params);
@@ -141,16 +151,44 @@ fn litz_spin_drift_parity_across_three_solvers() {
 
     let to_in = |m: f64| m / 0.0254;
     println!("MBA-1134 spin-drift parity (.308 175gr, 1:10 RH, 1000 yd, no wind):");
-    println!("  (a) cli_api TrajectorySolver : {:.6} m ({:.4} in)", a, to_in(a));
-    println!("  (b) monte_carlo fast_integrate: {:.6} m ({:.4} in)", b, to_in(b));
-    println!("  (c) fast_integrate_w_segments : {:.6} m ({:.4} in)", c, to_in(c));
-    println!("  (d) plain fast_integrate      : {:.6} m ({:.4} in)", d, to_in(d));
+    println!(
+        "  (a) cli_api TrajectorySolver : {:.6} m ({:.4} in)",
+        a,
+        to_in(a)
+    );
+    println!(
+        "  (b) monte_carlo fast_integrate: {:.6} m ({:.4} in)",
+        b,
+        to_in(b)
+    );
+    println!(
+        "  (c) fast_integrate_w_segments : {:.6} m ({:.4} in)",
+        c,
+        to_in(c)
+    );
+    println!(
+        "  (d) plain fast_integrate      : {:.6} m ({:.4} in)",
+        d,
+        to_in(d)
+    );
 
     // Right-hand twist => positive (rightward) drift on all four.
-    assert!(a > 0.0, "cli_api drift should be positive (RH twist), got {a}");
-    assert!(b > 0.0, "monte_carlo drift should be positive (RH twist), got {b}");
-    assert!(c > 0.0, "fast_segments drift should be positive (RH twist), got {c}");
-    assert!(d > 0.0, "fast_integrate drift should be positive (RH twist), got {d}");
+    assert!(
+        a > 0.0,
+        "cli_api drift should be positive (RH twist), got {a}"
+    );
+    assert!(
+        b > 0.0,
+        "monte_carlo drift should be positive (RH twist), got {b}"
+    );
+    assert!(
+        c > 0.0,
+        "fast_segments drift should be positive (RH twist), got {c}"
+    );
+    assert!(
+        d > 0.0,
+        "fast_integrate drift should be positive (RH twist), got {d}"
+    );
 
     for (name, x, y) in [
         ("cli_api vs monte_carlo", a, b),

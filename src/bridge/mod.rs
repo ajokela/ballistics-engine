@@ -283,20 +283,23 @@ fn dispatch(request_json: &str) -> String {
                 "solve_schema_version": crate::solve_json::SOLVE_JSON_SCHEMA_VERSION_V1,
             }),
         ),
-        "meta.version" => success(
-            "meta.version",
-            json!({ "engine_version": ENGINE_VERSION }),
-        ),
+        "meta.version" => success("meta.version", json!({ "engine_version": ENGINE_VERSION })),
         "solve" => run_solve(&request.request),
-        "card.come_ups" => {
-            run_service(&request.request, "card.come_ups", crate::card_service::come_ups_v1)
-        }
+        "card.come_ups" => run_service(
+            &request.request,
+            "card.come_ups",
+            crate::card_service::come_ups_v1,
+        ),
         "card.range_table" => run_service(
             &request.request,
             "card.range_table",
             crate::card_service::range_table_v1,
         ),
-        "card.wind" => run_service(&request.request, "card.wind", crate::card_service::wind_card_v1),
+        "card.wind" => run_service(
+            &request.request,
+            "card.wind",
+            crate::card_service::wind_card_v1,
+        ),
         #[cfg(feature = "pdf")]
         "card.pdf" => run_card_pdf(&request.request),
         "profile.validate" => run_profile_validate(&request.request),
@@ -826,18 +829,17 @@ fn run_bc5d_info(inner: &Value) -> String {
         }
     };
 
-    let table = match crate::bc_table_5d::path_cache::load_verified(std::path::Path::new(
-        &request.path,
-    )) {
-        Ok(table) => table,
-        Err(err) => {
-            return error(
-                BridgeErrorCode::CommandFailed,
-                format!("bc5d.info: not a usable BC5D table: {err}"),
-                None,
-            )
-        }
-    };
+    let table =
+        match crate::bc_table_5d::path_cache::load_verified(std::path::Path::new(&request.path)) {
+            Ok(table) => table,
+            Err(err) => {
+                return error(
+                    BridgeErrorCode::CommandFailed,
+                    format!("bc5d.info: not a usable BC5D table: {err}"),
+                    None,
+                )
+            }
+        };
 
     let (weight, bc, muzzle_vel, current_vel, drag_types) = table.bin_counts();
     let (weight_lo, weight_hi) = table.weight_range();
@@ -1750,7 +1752,10 @@ mod tests {
         assert!(decode_base64("Zm9v\n").is_err(), "whitespace is rejected");
         assert!(decode_base64("Zg=X").is_err(), "inner padding is rejected");
         assert!(decode_base64("Z").is_err(), "4n+1 length is rejected");
-        assert!(decode_base64("Zm9v!").is_err(), "non-alphabet byte is rejected");
+        assert!(
+            decode_base64("Zm9v!").is_err(),
+            "non-alphabet byte is rejected"
+        );
     }
 
     /// `card.pdf` must be listed exactly when the `pdf` feature is compiled in, and be an
@@ -1815,7 +1820,10 @@ mod tests {
         let out = call(json!({"api_version": 1, "command": "card.pdf"}));
         assert_eq!(out["error"]["code"], "invalid_request", "{out}");
         assert!(
-            out["error"]["message"].as_str().unwrap().contains("card v1 document"),
+            out["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("card v1 document"),
             "{out}"
         );
     }
@@ -1873,7 +1881,9 @@ mod tests {
     #[test]
     fn base64_encode_decode_round_trips_arbitrary_bytes() {
         for len in 0..=32usize {
-            let bytes: Vec<u8> = (0..len).map(|i| (i as u8).wrapping_mul(37).wrapping_add(11)).collect();
+            let bytes: Vec<u8> = (0..len)
+                .map(|i| (i as u8).wrapping_mul(37).wrapping_add(11))
+                .collect();
             let decoded = decode_base64(&encode_base64(&bytes)).expect("own output decodes");
             assert_eq!(decoded, bytes, "len {len}");
         }

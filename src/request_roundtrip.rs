@@ -242,11 +242,7 @@ mod tests {
         );
         // Sanity check: the bias is actually nonzero in this fixture, so the comparisons
         // above are exercising the real thing rather than two agreeing zeros.
-        let windage_m = first
-            .samples
-            .last()
-            .expect("at least one sample")
-            .windage_m;
+        let windage_m = first.samples.last().expect("at least one sample").windage_m;
         assert!(
             windage_m.abs() > 0.1,
             "fixture must produce a non-negligible windage-zero bias to be a meaningful test, \

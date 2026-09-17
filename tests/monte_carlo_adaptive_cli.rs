@@ -27,7 +27,10 @@ fn run(tail: &[&str]) -> (String, String, bool) {
     let mut args: Vec<&str> = vec!["--units", "metric", "monte-carlo"];
     args.extend_from_slice(LOAD_ARGS);
     args.extend_from_slice(tail);
-    let output = Command::new(bin()).args(&args).output().expect("run ballistics");
+    let output = Command::new(bin())
+        .args(&args)
+        .output()
+        .expect("run ballistics");
     (
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -45,7 +48,10 @@ fn default_run_gains_the_ci_line_and_is_reproducible_with_a_seed() {
 
     let (out1, err1, ok1) = run(&tail);
     assert!(ok1, "stderr: {err1}");
-    assert!(out1.contains("Hit Probability:"), "point-estimate line missing: {out1}");
+    assert!(
+        out1.contains("Hit Probability:"),
+        "point-estimate line missing: {out1}"
+    );
     assert!(
         out1.contains("Hit probability 95% CI: ["),
         "missing the additive Wilson CI line: {out1}"
@@ -54,13 +60,19 @@ fn default_run_gains_the_ci_line_and_is_reproducible_with_a_seed() {
     // The CI line reads UNDER the point-estimate line, not interleaved with the box.
     let hp_idx = out1.find("Hit Probability:").unwrap();
     let ci_idx = out1.find("Hit probability 95% CI:").unwrap();
-    assert!(ci_idx > hp_idx, "CI line must come after the point estimate: {out1}");
+    assert!(
+        ci_idx > hp_idx,
+        "CI line must come after the point estimate: {out1}"
+    );
 
     // Same --seed, same everything else -> identical stdout, including the new line: the
     // numeric estimates are exactly as reproducible as they were before this line existed.
     let (out2, err2, ok2) = run(&tail);
     assert!(ok2, "stderr: {err2}");
-    assert_eq!(out1, out2, "same --seed must reproduce stdout byte-for-byte");
+    assert_eq!(
+        out1, out2,
+        "same --seed must reproduce stdout byte-for-byte"
+    );
 }
 
 /// A run with no `--target-distance` has no hit-probability line at all today, and must still
@@ -88,8 +100,16 @@ fn fixed_count_json_carries_the_additive_hit_probability_ci_object() {
     );
     assert!(v["hit_probability_ci"].is_null());
 
-    let (stdout, stderr, ok) =
-        run(&["-n", "30", "--seed", "3", "--target-distance", "300", "-o", "json"]);
+    let (stdout, stderr, ok) = run(&[
+        "-n",
+        "30",
+        "--seed",
+        "3",
+        "--target-distance",
+        "300",
+        "-o",
+        "json",
+    ]);
     assert!(ok, "stderr: {stderr}");
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
     let p_hat = v["hit_probability"].as_f64().expect("hit_probability");
@@ -99,7 +119,10 @@ fn fixed_count_json_carries_the_additive_hit_probability_ci_object() {
     assert_eq!(ci["samples"], 30);
     let lo = ci["low"].as_f64().expect("low");
     let hi = ci["high"].as_f64().expect("high");
-    assert!(lo <= p_hat && p_hat <= hi, "p_hat {p_hat} not inside [{lo}, {hi}]");
+    assert!(
+        lo <= p_hat && p_hat <= hi,
+        "p_hat {p_hat} not inside [{lo}, {hi}]"
+    );
     assert!((0.0..=1.0).contains(&lo) && (0.0..=1.0).contains(&hi));
 }
 
@@ -112,14 +135,21 @@ fn fixed_count_json_carries_the_additive_hit_probability_ci_object() {
 #[test]
 fn adaptive_json_report_parses_and_covers_every_field() {
     let (stdout, stderr, ok) = run(&[
-        "--target-distance", "300",
+        "--target-distance",
+        "300",
         "--adaptive",
-        "--seed", "99",
-        "--min-samples", "20",
-        "--mc-batch-size", "20",
-        "--max-samples", "500",
-        "--target-ci-half-width", "0.3",
-        "-o", "json",
+        "--seed",
+        "99",
+        "--min-samples",
+        "20",
+        "--mc-batch-size",
+        "20",
+        "--max-samples",
+        "500",
+        "--target-ci-half-width",
+        "0.3",
+        "-o",
+        "json",
     ]);
     assert!(ok, "stderr: {stderr}");
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
@@ -153,7 +183,10 @@ fn adaptive_json_report_parses_and_covers_every_field() {
     let p_hat = v["hit_probability"].as_f64().expect("hit_probability");
     let ci_low = v["ci_low"].as_f64().expect("ci_low");
     let ci_high = v["ci_high"].as_f64().expect("ci_high");
-    assert!(ci_low <= p_hat && p_hat <= ci_high, "{ci_low} <= {p_hat} <= {ci_high}");
+    assert!(
+        ci_low <= p_hat && p_hat <= ci_high,
+        "{ci_low} <= {p_hat} <= {ci_high}"
+    );
     assert!((0.0..=1.0).contains(&ci_low) && (0.0..=1.0).contains(&ci_high));
 
     // THE WIRE GREW: samples/attempts/arrivals, in that declaration order, immediately
@@ -166,9 +199,18 @@ fn adaptive_json_report_parses_and_covers_every_field() {
     assert_eq!(v["attempts"], 20);
     let arrivals = v["arrivals"].as_u64().expect("arrivals");
     assert!(arrivals > 0, "arrivals must be positive for this fixture");
-    assert!(arrivals < 20, "this fixture must have a real target-plane shortfall (arrivals < samples)");
-    let (attempts, samples) = (v["attempts"].as_u64().unwrap(), v["samples"].as_u64().unwrap());
-    assert!(attempts >= samples && samples >= arrivals, "ordering invariant violated");
+    assert!(
+        arrivals < 20,
+        "this fixture must have a real target-plane shortfall (arrivals < samples)"
+    );
+    let (attempts, samples) = (
+        v["attempts"].as_u64().unwrap(),
+        v["samples"].as_u64().unwrap(),
+    );
+    assert!(
+        attempts >= samples && samples >= arrivals,
+        "ordering invariant violated"
+    );
 
     assert_eq!(v["stop_reason"], "target_half_width_met");
     assert_eq!(v["hit_radius_m"], 0.3);
@@ -184,7 +226,10 @@ fn adaptive_json_report_parses_and_covers_every_field() {
         "mean_wind_drift_at_target_m",
         "std_wind_drift_at_target_m",
     ] {
-        assert!(v[key].as_f64().expect(key).is_finite(), "{key} must be finite: {stdout}");
+        assert!(
+            v[key].as_f64().expect(key).is_finite(),
+            "{key} must be finite: {stdout}"
+        );
     }
     assert!(v["mean_impact_velocity_mps"].as_f64().unwrap() > 0.0);
     assert!(v["std_impact_velocity_mps"].as_f64().unwrap() > 0.0);
@@ -195,15 +240,32 @@ fn adaptive_json_report_parses_and_covers_every_field() {
     let keys: std::collections::BTreeSet<&str> =
         v.as_object().unwrap().keys().map(String::as_str).collect();
     let expected: std::collections::BTreeSet<&str> = [
-        "schema_version", "method", "assumptions", "confidence_percent", "hit_probability",
-        "ci_low", "ci_high", "samples", "attempts", "arrivals", "stop_reason", "hit_radius_m",
-        "target_distance_m", "mean_impact_velocity_mps", "std_impact_velocity_mps",
-        "mean_drop_at_target_m", "std_drop_at_target_m", "mean_wind_drift_at_target_m",
+        "schema_version",
+        "method",
+        "assumptions",
+        "confidence_percent",
+        "hit_probability",
+        "ci_low",
+        "ci_high",
+        "samples",
+        "attempts",
+        "arrivals",
+        "stop_reason",
+        "hit_radius_m",
+        "target_distance_m",
+        "mean_impact_velocity_mps",
+        "std_impact_velocity_mps",
+        "mean_drop_at_target_m",
+        "std_drop_at_target_m",
+        "mean_wind_drift_at_target_m",
         "std_wind_drift_at_target_m",
     ]
     .into_iter()
     .collect();
-    assert_eq!(keys, expected, "AdaptiveMcReportV1's JSON key set changed underneath this pin");
+    assert_eq!(
+        keys, expected,
+        "AdaptiveMcReportV1's JSON key set changed underneath this pin"
+    );
 }
 
 // ---- (c) a very loose --target-ci-half-width is met immediately, at min-samples. ----
@@ -211,19 +273,29 @@ fn adaptive_json_report_parses_and_covers_every_field() {
 #[test]
 fn adaptive_loose_half_width_stops_at_min_samples() {
     let (stdout, stderr, ok) = run(&[
-        "--target-distance", "300",
+        "--target-distance",
+        "300",
         "--adaptive",
-        "--seed", "5",
-        "--min-samples", "20",
-        "--mc-batch-size", "20",
-        "--max-samples", "5000",
-        "--target-ci-half-width", "0.5",
-        "-o", "json",
+        "--seed",
+        "5",
+        "--min-samples",
+        "20",
+        "--mc-batch-size",
+        "20",
+        "--max-samples",
+        "5000",
+        "--target-ci-half-width",
+        "0.5",
+        "-o",
+        "json",
     ]);
     assert!(ok, "stderr: {stderr}");
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
     assert_eq!(v["stop_reason"], "target_half_width_met");
-    assert_eq!(v["samples"], 20, "must stop at exactly min_samples on this easy a target");
+    assert_eq!(
+        v["samples"], 20,
+        "must stop at exactly min_samples on this easy a target"
+    );
     assert_eq!(v["attempts"], 20);
 }
 
@@ -232,7 +304,10 @@ fn adaptive_loose_half_width_stops_at_min_samples() {
 #[test]
 fn bad_confidence_value_is_a_usage_error_naming_the_flag_and_choices() {
     let (_stdout, stderr, ok) = run(&["--confidence", "85"]);
-    assert!(!ok, "85 is not one of the three permitted confidence levels");
+    assert!(
+        !ok,
+        "85 is not one of the three permitted confidence levels"
+    );
     assert!(stderr.contains("--confidence"), "{stderr}");
     assert!(stderr.contains("90"), "{stderr}");
     assert!(stderr.contains("95"), "{stderr}");
@@ -248,7 +323,10 @@ fn non_positive_half_width_is_a_usage_error_naming_the_flag() {
     for bad in ["0", "-1", "-0.5"] {
         let (_stdout, stderr, ok) = run(&["--adaptive", "--target-ci-half-width", bad]);
         assert!(!ok, "{bad} must be rejected");
-        assert!(stderr.contains("--target-ci-half-width"), "value {bad}: {stderr}");
+        assert!(
+            stderr.contains("--target-ci-half-width"),
+            "value {bad}: {stderr}"
+        );
     }
 }
 
@@ -259,16 +337,26 @@ fn non_positive_half_width_is_a_usage_error_naming_the_flag() {
 #[test]
 fn adaptive_impossible_half_width_caps_at_max_samples_and_still_exits_zero() {
     let (stdout, stderr, ok) = run(&[
-        "--target-distance", "300",
+        "--target-distance",
+        "300",
         "--adaptive",
-        "--seed", "7",
-        "--min-samples", "20",
-        "--mc-batch-size", "100",
-        "--max-samples", "1500",
-        "--target-ci-half-width", "0.000001",
-        "-o", "json",
+        "--seed",
+        "7",
+        "--min-samples",
+        "20",
+        "--mc-batch-size",
+        "100",
+        "--max-samples",
+        "1500",
+        "--target-ci-half-width",
+        "0.000001",
+        "-o",
+        "json",
     ]);
-    assert!(ok, "an honest max-samples cap is still exit 0; stderr: {stderr}");
+    assert!(
+        ok,
+        "an honest max-samples cap is still exit 0; stderr: {stderr}"
+    );
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
     assert_eq!(v["stop_reason"], "max_samples_reached");
     assert_eq!(v["samples"], 1500);
@@ -285,7 +373,10 @@ fn adaptive_only_flags_require_adaptive_and_name_it() {
         ["--mc-batch-size", "250"],
     ] {
         let (_stdout, stderr, ok) = run(&flag_value);
-        assert!(!ok, "{flag_value:?} without --adaptive must be a usage error");
+        assert!(
+            !ok,
+            "{flag_value:?} without --adaptive must be a usage error"
+        );
         assert!(stderr.contains("--adaptive"), "{flag_value:?}: {stderr}");
     }
     // --target-ci-half-width too, checked separately since it takes a value already used above.
@@ -311,13 +402,19 @@ fn adaptive_and_wez_conflict() {
 #[test]
 fn adaptive_statistics_output_is_a_clean_named_error() {
     let (_stdout, stderr, ok) = run(&[
-        "--target-distance", "300",
+        "--target-distance",
+        "300",
         "--adaptive",
-        "--seed", "1",
-        "--min-samples", "20",
-        "--mc-batch-size", "20",
-        "--max-samples", "40",
-        "-o", "statistics",
+        "--seed",
+        "1",
+        "--min-samples",
+        "20",
+        "--mc-batch-size",
+        "20",
+        "--max-samples",
+        "40",
+        "-o",
+        "statistics",
     ]);
     assert!(!ok, "--output statistics must be rejected under --adaptive");
     assert!(stderr.contains("--output statistics"), "{stderr}");
@@ -331,17 +428,26 @@ fn adaptive_statistics_output_is_a_clean_named_error() {
 #[test]
 fn adaptive_table_output_is_a_summary_block_with_every_reported_fact() {
     let (stdout, stderr, ok) = run(&[
-        "--target-distance", "300",
+        "--target-distance",
+        "300",
         "--adaptive",
-        "--seed", "5",
-        "--min-samples", "20",
-        "--mc-batch-size", "20",
-        "--max-samples", "5000",
-        "--target-ci-half-width", "0.5",
+        "--seed",
+        "5",
+        "--min-samples",
+        "20",
+        "--mc-batch-size",
+        "20",
+        "--max-samples",
+        "5000",
+        "--target-ci-half-width",
+        "0.5",
     ]);
     assert!(ok, "stderr: {stderr}");
     assert!(stdout.contains("Adaptive Monte Carlo"), "{stdout}");
-    assert!(stdout.contains("anytime_beta_binomial_mixture_cs_v1"), "{stdout}");
+    assert!(
+        stdout.contains("anytime_beta_binomial_mixture_cs_v1"),
+        "{stdout}"
+    );
     assert!(stdout.contains("95%"), "{stdout}");
     assert!(stdout.contains("hit probability:"), "{stdout}");
     assert!(stdout.contains("CI: ["), "{stdout}");
@@ -364,13 +470,19 @@ fn adaptive_table_output_is_a_summary_block_with_every_reported_fact() {
 #[test]
 fn adaptive_o_json_and_o_full_are_the_same_report() {
     let common = [
-        "--target-distance", "300",
+        "--target-distance",
+        "300",
         "--adaptive",
-        "--seed", "5",
-        "--min-samples", "20",
-        "--mc-batch-size", "20",
-        "--max-samples", "5000",
-        "--target-ci-half-width", "0.5",
+        "--seed",
+        "5",
+        "--min-samples",
+        "20",
+        "--mc-batch-size",
+        "20",
+        "--max-samples",
+        "5000",
+        "--target-ci-half-width",
+        "0.5",
     ];
 
     let (json_out, stderr, ok) = {
@@ -387,7 +499,10 @@ fn adaptive_o_json_and_o_full_are_the_same_report() {
     };
     assert!(ok, "stderr: {stderr}");
 
-    assert_eq!(json_out, full_out, "-o json must be an alias for -o full, not a distinct shape");
+    assert_eq!(
+        json_out, full_out,
+        "-o json must be an alias for -o full, not a distinct shape"
+    );
 }
 
 // ---- review fix round (task-5-review.md), I1: `json` must be discoverable in --help's own
@@ -403,7 +518,10 @@ fn output_help_lists_json_and_carries_no_maintainer_prose() {
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
 
-    assert!(help.contains("- json:"), "json must be a listed possible value: {help}");
+    assert!(
+        help.contains("- json:"),
+        "json must be a listed possible value: {help}"
+    );
     // `full` still works (checked functionally by adaptive_o_json_and_o_full_are_the_same_report
     // above) but is a backward-compatible alias now, not the primary/listed spelling.
     assert!(!help.contains("- full:"), "{help}");
@@ -413,7 +531,9 @@ fn output_help_lists_json_and_carries_no_maintainer_prose() {
     // user-facing help, so checking the whole page would false-positive on those.
     let output_block_start = help.find("-o, --output").expect("--output flag block");
     let output_block = &help[output_block_start..];
-    let output_block_end = output_block.find("-h, --help").unwrap_or(output_block.len());
+    let output_block_end = output_block
+        .find("-h, --help")
+        .unwrap_or(output_block.len());
     let output_block = &output_block[..output_block_end];
 
     // The old doc comment named these private items and a ticket ID as CLI help text, right on
@@ -426,7 +546,10 @@ fn output_help_lists_json_and_carries_no_maintainer_prose() {
         "dispatch match",
         "MBA-1352",
     ] {
-        assert!(!output_block.contains(leaked), "maintainer-note leak {leaked:?}: {output_block}");
+        assert!(
+            !output_block.contains(leaked),
+            "maintainer-note leak {leaked:?}: {output_block}"
+        );
     }
 }
 
@@ -437,8 +560,17 @@ fn output_help_lists_json_and_carries_no_maintainer_prose() {
 #[test]
 fn wez_with_confidence_or_seed_notes_the_no_op_and_still_succeeds() {
     let wez_tail = [
-        "-n", "5", "--wez", "--target-size", "30x30",
-        "--wez-start", "100", "--wez-end", "100", "--wez-step", "100",
+        "-n",
+        "5",
+        "--wez",
+        "--target-size",
+        "30x30",
+        "--wez-start",
+        "100",
+        "--wez-end",
+        "100",
+        "--wez-step",
+        "100",
     ];
 
     let mut with_both = wez_tail.to_vec();
@@ -453,7 +585,10 @@ fn wez_with_confidence_or_seed_notes_the_no_op_and_still_succeeds() {
         stderr.contains("--seed") && stderr.contains("no effect"),
         "{stderr}"
     );
-    assert!(stdout.contains("WEZ sweep:"), "the sweep itself must still run: {stdout}");
+    assert!(
+        stdout.contains("WEZ sweep:"),
+        "the sweep itself must still run: {stdout}"
+    );
 
     // Neither flag given: no note at all.
     let (_stdout, stderr, ok) = run(&wez_tail);
@@ -472,12 +607,18 @@ fn cross_field_sample_bounds_error_names_the_flags_and_states_defaults() {
     assert!(!ok, "50 < 100 must be rejected");
     assert!(stderr.contains("--max-samples (50)"), "{stderr}");
     assert!(stderr.contains("--min-samples (100)"), "{stderr}");
-    assert!(!stderr.contains("McConvergence"), "the library struct name must not leak: {stderr}");
+    assert!(
+        !stderr.contains("McConvergence"),
+        "the library struct name must not leak: {stderr}"
+    );
 
     // Only --min-samples given: the untouched --max-samples default must say so.
     let (_stdout, stderr, ok) = run(&["--adaptive", "--min-samples", "200000"]);
     assert!(!ok);
-    assert!(stderr.contains("--max-samples (default 100000)"), "{stderr}");
+    assert!(
+        stderr.contains("--max-samples (default 100000)"),
+        "{stderr}"
+    );
     assert!(stderr.contains("--min-samples (200000)"), "{stderr}");
 
     // Only --max-samples given: the untouched --min-samples default must say so.
@@ -491,8 +632,17 @@ fn cross_field_sample_bounds_error_names_the_flags_and_states_defaults() {
     // trip the new pre-check. `--min-samples 20`/loose half-width keeps this fast (~20 trials)
     // rather than running out the full 1000-sample default floor this fix must not require.
     let (_stdout, stderr, ok) = run(&[
-        "--target-distance", "300", "--adaptive", "--seed", "1",
-        "--min-samples", "20", "--mc-batch-size", "20", "--target-ci-half-width", "0.9",
+        "--target-distance",
+        "300",
+        "--adaptive",
+        "--seed",
+        "1",
+        "--min-samples",
+        "20",
+        "--mc-batch-size",
+        "20",
+        "--target-ci-half-width",
+        "0.9",
     ]);
     assert!(ok, "one defaulted side must remain valid; stderr: {stderr}");
 }

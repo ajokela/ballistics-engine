@@ -79,7 +79,11 @@ fn import_dry_run_saves_nothing_and_prints_report() {
     assert!(stdout.contains("823.0 m/s"), "{stdout}");
     assert!(stdout.contains("Dry run"), "{stdout}");
     assert!(
-        !home.join(".ballistics").join("profiles").join("CLI 6.5CM.json").exists(),
+        !home
+            .join(".ballistics")
+            .join("profiles")
+            .join("CLI 6.5CM.json")
+            .exists(),
         "dry run must not write"
     );
 }
@@ -138,7 +142,10 @@ fn corrupted_checksum_warns_by_default_and_fails_with_strict() {
         .args(["--dry-run", "--strict"])
         .output()
         .unwrap();
-    assert!(!strict.status.success(), "strict must fail on checksum mismatch");
+    assert!(
+        !strict.status.success(),
+        "strict must fail on checksum mismatch"
+    );
 }
 
 #[test]

@@ -272,8 +272,7 @@ fn the_model_survives_a_resolved_request_round_trip() {
         let first = solve(&lofted_request_json(&model_clause(model)));
         let rebuilt: SolveRequestV1 = (&first.resolved_request).into();
         assert_eq!(
-            rebuilt.effects.wind_shear_model,
-            first.resolved_request.effects.wind_shear_model,
+            rebuilt.effects.wind_shear_model, first.resolved_request.effects.wind_shear_model,
             "`{model}` must be carried onto the rebuilt request"
         );
 
@@ -295,11 +294,7 @@ fn the_model_survives_a_resolved_request_round_trip() {
     let rebuilt: SolveRequestV1 = (&first.resolved_request).into();
     assert!(rebuilt.effects.wind_shear_model.is_none());
     let second = solve_v1(rebuilt).expect("solve");
-    assert!(second
-        .resolved_request
-        .effects
-        .wind_shear_model
-        .is_none());
+    assert!(second.resolved_request.effects.wind_shear_model.is_none());
 }
 
 // (g)

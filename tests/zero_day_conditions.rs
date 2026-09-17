@@ -290,8 +290,14 @@ fn zeroed_hot_and_fast_prints_low() {
 fn zero_day_atmosphere_resolves_at_short_zero() {
     let base = run_traj(&[]); // run_traj already zeroes at 100 yd
     let extreme = run_traj(&[
-        "--zero-temperature", "20", "--zero-pressure", "20", "--zero-humidity", "90",
-        "--zero-altitude", "12000",
+        "--zero-temperature",
+        "20",
+        "--zero-pressure",
+        "20",
+        "--zero-humidity",
+        "90",
+        "--zero-altitude",
+        "12000",
     ]);
     // Measure near the far end of run_traj's 300 yd range.
     let far = 290.0;

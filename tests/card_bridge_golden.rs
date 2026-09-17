@@ -71,13 +71,32 @@ fn fixture_request() -> Value {
 
 fn fixture_cli_args<'a>(extra: &[&'a str]) -> Vec<&'a str> {
     let mut args = vec![
-        "-v", "2600", "-b", "0.243", "-m", "175", "-d", "0.308",
-        "--drag-model", "g7",
-        "--sight-height", "1.5",
-        "--wind-speed", "10", "--wind-direction", "90",
-        "--start", "100", "--end", "600", "--step", "100",
-        "--adjustment-unit", "mil",
-        "-o", "json",
+        "-v",
+        "2600",
+        "-b",
+        "0.243",
+        "-m",
+        "175",
+        "-d",
+        "0.308",
+        "--drag-model",
+        "g7",
+        "--sight-height",
+        "1.5",
+        "--wind-speed",
+        "10",
+        "--wind-direction",
+        "90",
+        "--start",
+        "100",
+        "--end",
+        "600",
+        "--step",
+        "100",
+        "--adjustment-unit",
+        "mil",
+        "-o",
+        "json",
     ];
     args.extend_from_slice(extra);
     args
@@ -85,9 +104,11 @@ fn fixture_cli_args<'a>(extra: &[&'a str]) -> Vec<&'a str> {
 
 #[test]
 fn come_ups_matches_cli() {
-    let cli_out = cli(
-        &[&["come-ups", "--zero-distance", "100"][..], &fixture_cli_args(&[])[..]].concat(),
-    );
+    let cli_out = cli(&[
+        &["come-ups", "--zero-distance", "100"][..],
+        &fixture_cli_args(&[])[..],
+    ]
+    .concat());
     let bridge_out = bridge("card.come_ups", fixture_request());
 
     let cli_rows = cli_out["data"].as_array().expect("CLI data rows");
@@ -107,9 +128,11 @@ fn come_ups_matches_cli() {
 
 #[test]
 fn range_table_matches_cli() {
-    let cli_out = cli(
-        &[&["range-table", "--zero-distance", "100"][..], &fixture_cli_args(&[])[..]].concat(),
-    );
+    let cli_out = cli(&[
+        &["range-table", "--zero-distance", "100"][..],
+        &fixture_cli_args(&[])[..],
+    ]
+    .concat());
     let bridge_out = bridge("card.range_table", fixture_request());
 
     let cli_rows = cli_out["data"].as_array().expect("CLI data rows");
@@ -133,14 +156,32 @@ fn range_table_matches_cli() {
 fn wind_card_matches_cli() {
     let cli_out = cli(&[
         "wind-card",
-        "--zero-distance", "100",
-        "-v", "2600", "-b", "0.243", "-m", "175", "-d", "0.308",
-        "--drag-model", "g7",
-        "--sight-height", "1.5",
-        "--start", "100", "--end", "600", "--step", "100",
-        "--wind-speeds", "5,10,15",
-        "--adjustment-unit", "mil",
-        "-o", "json",
+        "--zero-distance",
+        "100",
+        "-v",
+        "2600",
+        "-b",
+        "0.243",
+        "-m",
+        "175",
+        "-d",
+        "0.308",
+        "--drag-model",
+        "g7",
+        "--sight-height",
+        "1.5",
+        "--start",
+        "100",
+        "--end",
+        "600",
+        "--step",
+        "100",
+        "--wind-speeds",
+        "5,10,15",
+        "--adjustment-unit",
+        "mil",
+        "-o",
+        "json",
     ]);
     let mut request = fixture_request();
     request["wind_speeds"] = json!([5.0, 10.0, 15.0]);

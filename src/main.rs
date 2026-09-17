@@ -33,22 +33,22 @@ use ballistics_engine::optic::{OpticProfile, TravelLimits, TurretState};
 // the CLI; file persistence (save_profile/load_profile) and unit conversion (converted_to,
 // via the ProfileDataUnitExt trait below) stay here.
 use ballistics_engine::profile::{
-    require_angular_pair, require_hold_bounds, validate_tracking_cf, ProfileBcSegment,
-    ProfileData, ProfileDragPoint, ProfileZeroSet,
+    require_angular_pair, require_hold_bounds, validate_tracking_cf, ProfileBcSegment, ProfileData,
+    ProfileDragPoint, ProfileZeroSet,
 };
 // The A7pDocument -> ProfileData mapping shared with the bridge's profile.import_a7p.
 #[cfg(feature = "profile-import")]
 use ballistics_engine::profile_import::{map_a7p_to_profile, sanitize_profile_name, ImportReport};
 // MBA-1348 Plan B Task 6: `dial-plan` -- the `plan_corrections` CLI surface.
 use ballistics_engine::optic::{
-    plan_corrections, AngularCorrection, Axis, DialPlanReportV1, Direction, LimitKind,
-    Preferences, Strategy,
+    plan_corrections, AngularCorrection, Axis, DialPlanReportV1, Direction, LimitKind, Preferences,
+    Strategy,
 };
-use ballistics_engine::terminal_plot;
 #[cfg(feature = "pdf")]
 use ballistics_engine::pdf_dope_card::{
     calculate_density_altitude, DopeCardConfig, FontSizePreset, RangeUnit,
 };
+use ballistics_engine::terminal_plot;
 
 #[cfg(feature = "online")]
 use ballistics_engine::api_client::{ApiClient, TrajectoryRequestBuilder, TrueVelocityRequest};
@@ -56,8 +56,11 @@ use ballistics_engine::bc_table::BcCorrectionTable;
 use ballistics_engine::bc_table_5d::{Bc5dError, Bc5dTableManager};
 #[cfg(feature = "online")]
 use ballistics_engine::bc_table_download::Bc5dDownloader;
-use ballistics_engine::constants::{GRAINS_TO_KG, DEFAULT_POWDER_REFERENCE_TEMP_C, DEFAULT_POWDER_REFERENCE_TEMP_F, GRAMS_PER_GRAIN, GRAINS_PER_GRAM, FPS_TO_MPS};
 use ballistics_engine::cli_api::UnitSystem;
+use ballistics_engine::constants::{
+    DEFAULT_POWDER_REFERENCE_TEMP_C, DEFAULT_POWDER_REFERENCE_TEMP_F, FPS_TO_MPS, GRAINS_PER_GRAM,
+    GRAINS_TO_KG, GRAMS_PER_GRAIN,
+};
 // MBA-1352: confidence levels for monte-carlo's Wilson/adaptive CLI surface. ConfidenceLevel
 // itself derives no clap trait -- mc_stats.rs is deliberately clap-free so it keeps compiling
 // unconditionally for wasm32 -- so the CLI-only 90/95/99 mapping lives here (parse_confidence_level).
@@ -69,18 +72,19 @@ use ballistics_engine::truing::{
     MultiTruingReport, TruingEarthFrame, TruingModelInputsV1, TruingObservation, TruingTwist,
 };
 // MBA-1392: wind-call truing (back-solve the effective crosswind from an observed miss).
-use ballistics_engine::truing_wind::{
-    format_wind_truing_report, parse_wind_observation, solve_wind_truing, WindTruingOutput,
-    WindTruingRequest, MPH_TO_MPS,
-};
 use ballistics_engine::truing_dsf::{apply_dsf, DsfPoint, DsfTable, UpsertOutcome};
 use ballistics_engine::truing_plan::{
     plan_truing_experiment_v1, TruingExperimentPlanRequestV1, TruingExperimentPlanV1,
     TruingPlanModeV1,
 };
 use ballistics_engine::truing_uncertainty::{
-    run_uncertainty_truing_v1, NormalPriorV1, TruingApproximationV1, TruingPredictionRequestV1, TruingPriorsV1,
-    UncertaintyTruingReportV1, UncertaintyTruingRequestV1, WeightedTruingObservationV1,
+    run_uncertainty_truing_v1, NormalPriorV1, TruingApproximationV1, TruingPredictionRequestV1,
+    TruingPriorsV1, UncertaintyTruingReportV1, UncertaintyTruingRequestV1,
+    WeightedTruingObservationV1,
+};
+use ballistics_engine::truing_wind::{
+    format_wind_truing_report, parse_wind_observation, solve_wind_truing, WindTruingOutput,
+    WindTruingRequest, MPH_TO_MPS,
 };
 // Task 6 (truing JSON bridge): the tall-target arithmetic, shared with a future bridge command.
 // Task 9: the `dsf` verb's post-solve derivation (interpolation, Mach, both gates, the DSF
@@ -91,15 +95,17 @@ use ballistics_engine::truing_service::{
 };
 use ballistics_engine::wez::{compute_wez, parse_target_size, TargetSizeMetric, WezResult, WezRow};
 // MBA-1372: SAAMI free-recoil and power-factor calculators.
-use ballistics_engine::power_factor::{evaluate_all as pf_evaluate_all, scored_power_factor};
-use ballistics_engine::recoil::{free_recoil, FirearmType, FreeRecoilInputs, GasVelocityModel, POUNDS_TO_KG};
 use ballistics_engine::atmosphere::{
     resolve_station_conditions_with_pressure_mode, PressureReferenceMode,
 };
+use ballistics_engine::power_factor::{evaluate_all as pf_evaluate_all, scored_power_factor};
+use ballistics_engine::recoil::{
+    free_recoil, FirearmType, FreeRecoilInputs, GasVelocityModel, POUNDS_TO_KG,
+};
 use ballistics_engine::{
-    run_monte_carlo_adaptive_seeded, trajectory_sampling, AdaptiveMcReportV1, AtmosphericConditions,
-    BCSegmentData, BallisticInputs, BcReferenceStandard, DragModel, McConvergence, McStopReason,
-    MonteCarloParams, TrajectorySolver, WindConditions,
+    run_monte_carlo_adaptive_seeded, trajectory_sampling, AdaptiveMcReportV1,
+    AtmosphericConditions, BCSegmentData, BallisticInputs, BcReferenceStandard, DragModel,
+    McConvergence, McStopReason, MonteCarloParams, TrajectorySolver, WindConditions,
 };
 // 0.33.0 decision-support Task 8: HoldCurve (mark-to-range/bdc-match/optimal-zero/reticle
 // hold --range) and the sampled-trajectory helpers it solves through, promoted into the
@@ -131,10 +137,14 @@ use ballistics_engine::wind_scenarios::{
 };
 // 0.33.0 decision-support Tasks 14-15: `explain`/`tolerance`/`error-budget` CLI surfaces for
 // MBA-1345/MBA-1347/MBA-1350.
-use ballistics_engine::error_budget::{error_budget_with_target, ErrorBudgetReportV1, TargetGeometryV1};
+use ballistics_engine::error_budget::{
+    error_budget_with_target, ErrorBudgetReportV1, TargetGeometryV1,
+};
 use ballistics_engine::explain::{explain_difference, DeltaV1, SolutionDiffReportV1};
 use ballistics_engine::perturbation::{axis_meta, AxisKind, DifferenceScheme, InputAxis};
-use ballistics_engine::solve_json::{decode_solve_request_v1, ResolvedSolveRequestV1, SolveErrorEnvelopeV1};
+use ballistics_engine::solve_json::{
+    decode_solve_request_v1, ResolvedSolveRequestV1, SolveErrorEnvelopeV1,
+};
 use ballistics_engine::tolerance::{tolerance_envelope, LimitingBoundaryV1, ToleranceReportV1};
 // MBA-1361: reticle schema, generators and the hold-point API (shared with WASM/FFI).
 use ballistics_engine::reticle::{
@@ -849,7 +859,12 @@ enum Commands {
 
         /// Rifle cant in DEGREES, positive = clockwise from the shooter (top of scope tips
         /// right). Models "zeroed level, fired canted": POI moves right and low. 0 = level.
-        #[arg(long, alias = "cant-angle", value_name = "DEGREES", default_value_t = 0.0)]
+        #[arg(
+            long,
+            alias = "cant-angle",
+            value_name = "DEGREES",
+            default_value_t = 0.0
+        )]
         cant: f64,
 
         /// Print the BC5D-generated segment ladder as ready-to-paste
@@ -1334,7 +1349,12 @@ enum Commands {
 
         /// Rifle cant in DEGREES, positive = clockwise from the shooter (top of scope tips
         /// right). Models "zeroed level, fired canted": POI moves right and low. 0 = level.
-        #[arg(long, alias = "cant-angle", value_name = "DEGREES", default_value_t = 0.0)]
+        #[arg(
+            long,
+            alias = "cant-angle",
+            value_name = "DEGREES",
+            default_value_t = 0.0
+        )]
         cant: f64,
 
         /// Lateral sight-to-bore mount offset (inches imperial / mm metric; signed;
@@ -4662,7 +4682,6 @@ impl PlotStyle {
     }
 }
 
-
 #[derive(Debug, Serialize, Deserialize)]
 struct TrajectoryPoint {
     time: f64,
@@ -5027,7 +5046,7 @@ impl UnitConverter {
 
     fn mass_to_metric(val: f64, units: UnitSystem) -> f64 {
         match units {
-            UnitSystem::Metric => val * 0.001,           // grams to kg
+            UnitSystem::Metric => val * 0.001,          // grams to kg
             UnitSystem::Imperial => val * GRAINS_TO_KG, // grains to kg
         }
     }
@@ -5163,7 +5182,7 @@ impl UnitConverter {
 
     fn mass_from_metric(val: f64, units: UnitSystem) -> f64 {
         match units {
-            UnitSystem::Metric => val * 1000.0,          // kg to grams
+            UnitSystem::Metric => val * 1000.0,         // kg to grams
             UnitSystem::Imperial => val / GRAINS_TO_KG, // kg to grains
         }
     }
@@ -5259,7 +5278,6 @@ fn parse_angular_mil(s: &str) -> Result<f64, String> {
     Ok(value * adjustment_factor(ClickBase::Mil) / adjustment_factor(base))
 }
 
-
 /// `profile save`'s carry-forward merge for one of the twelve turret/hold fields (MBA-1348
 /// review fix I1): an explicit `flag` always wins; otherwise `existing` (the value already
 /// on disk, if any) carries forward — UNLESS `clear_turret` (`--clear-turret`) was given,
@@ -5276,7 +5294,11 @@ fn parse_angular_mil(s: &str) -> Result<f64, String> {
 /// despite that: without it, `flag.or(existing)` would incorrectly resurrect `existing`'s
 /// stored value on a clear, since `flag` being `None` looks identical to "the user didn't
 /// mention this field" and "the user cleared it" from this function's point of view alone.
-fn carry_turret_field<T: Copy>(flag: Option<T>, existing: Option<T>, clear_turret: bool) -> Option<T> {
+fn carry_turret_field<T: Copy>(
+    flag: Option<T>,
+    existing: Option<T>,
+    clear_turret: bool,
+) -> Option<T> {
     if clear_turret {
         None
     } else {
@@ -5669,7 +5691,6 @@ fn load_profile(name: &str) -> Result<ProfileData, Box<dyn Error>> {
     Ok(profile)
 }
 
-
 /// MBA-1358: resolve one axis's tracking CF — explicit CLI flag beats the saved
 /// profile's field, default 1.0 (no correction). The flag value is validated here
 /// (profile values were already validated on load, but re-validating is harmless and
@@ -5728,9 +5749,7 @@ fn resolve_zero_selection(
         });
     };
 
-    let stored: &[ProfileZeroSet] = profile
-        .and_then(|p| p.zero_sets.as_deref())
-        .unwrap_or(&[]);
+    let stored: &[ProfileZeroSet] = profile.and_then(|p| p.zero_sets.as_deref()).unwrap_or(&[]);
     let candidates: Vec<&ProfileZeroSet> = stored.iter().chain(extra_set).collect();
     if candidates.is_empty() {
         return Err(match profile {
@@ -5832,9 +5851,7 @@ fn render_import_report(report: &ImportReport) -> String {
         "SOURCE (.a7p)", "VALUE", "CONVERTED", "DESTINATION"
     ));
     for [field, raw, converted, dest] in &report.mapped {
-        out.push_str(&format!(
-            "  {field:<32} {raw:<26} {converted:<22} {dest}\n"
-        ));
+        out.push_str(&format!("  {field:<32} {raw:<26} {converted:<22} {dest}\n"));
     }
     // muzzle velocity appears in the header row name for the g7 render test
     if !report.unmapped.is_empty() {
@@ -5851,7 +5868,6 @@ fn render_import_report(report: &ImportReport) -> String {
     }
     out
 }
-
 
 /// SMOA/IPHY-per-MIL ratio (3600/1000 = 3.6, exact) for sites that already hold a
 /// mil-based value (e.g. `moving_target::LeadSolution::lead_mil`) and need to rescale it
@@ -5946,7 +5962,8 @@ fn resolve_windage_unit(
     windage_unit: Option<AdjustmentUnit>,
 ) -> Result<AdjustmentUnit, String> {
     let resolved = windage_unit.unwrap_or(elevation_unit);
-    if matches!(resolved, AdjustmentUnit::Clicks) && !matches!(elevation_unit, AdjustmentUnit::Clicks)
+    if matches!(resolved, AdjustmentUnit::Clicks)
+        && !matches!(elevation_unit, AdjustmentUnit::Clicks)
     {
         return Err(
             "--windage-unit clicks requires --adjustment-unit clicks (turret click output \
@@ -6091,9 +6108,7 @@ fn pressure_reference_profile_field(value: PressureReferenceMode) -> Option<Stri
 fn resolve_bc_for_reference_standard(bc: f64, standard: BcReferenceStandard) -> f64 {
     match standard {
         BcReferenceStandard::Icao => bc,
-        BcReferenceStandard::ArmyStandardMetro => {
-            bc * ballistics_engine::constants::ASM_TO_ICAO_BC
-        }
+        BcReferenceStandard::ArmyStandardMetro => bc * ballistics_engine::constants::ASM_TO_ICAO_BC,
     }
 }
 
@@ -6285,10 +6300,12 @@ fn parse_powder_temp_curve(s: &str, units: UnitSystem) -> Result<Vec<(f64, f64)>
                 part
             )
         })?;
-        let t: f64 = t_str
-            .trim()
-            .parse()
-            .map_err(|_| format!("invalid temperature '{}' in --powder-temp-curve", t_str.trim()))?;
+        let t: f64 = t_str.trim().parse().map_err(|_| {
+            format!(
+                "invalid temperature '{}' in --powder-temp-curve",
+                t_str.trim()
+            )
+        })?;
         let v: f64 = v_str
             .trim()
             .parse()
@@ -6635,8 +6652,9 @@ fn solve_profile_for_dsf(
         .map(|pts| drag_table_from_profile(pts))
         .transpose()
         .map_err(|e| format!("saved profile's drag curve is invalid: {e}"))?;
-    let bc_reference_standard =
-        Some(parse_bc_reference_profile_field(profile.bc_reference.as_deref())?);
+    let bc_reference_standard = Some(parse_bc_reference_profile_field(
+        profile.bc_reference.as_deref(),
+    )?);
 
     let inputs = ballistics_engine::truing_dsf::DsfSolveInputs {
         muzzle_velocity_fps: velocity_m / 0.3048,
@@ -7142,7 +7160,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             let bc_reference_standard = match bc_reference {
                 Some(v) => v,
                 None if bc_came_from_saved_profile => parse_bc_reference_profile_field(
-                    saved_profile_data.as_ref().and_then(|p| p.bc_reference.as_deref()),
+                    saved_profile_data
+                        .as_ref()
+                        .and_then(|p| p.bc_reference.as_deref()),
                 )?,
                 None => BcReferenceStandard::Icao,
             };
@@ -7313,8 +7333,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
             };
-            if final_density_altitude.is_some() && (pressure.is_some() || pressure_type.is_some())
-            {
+            if final_density_altitude.is_some() && (pressure.is_some() || pressure_type.is_some()) {
                 eprintln!(
                     "note: --density-altitude supersedes --pressure/--pressure-type (station \
                      pressure is derived from density altitude instead)"
@@ -7355,7 +7374,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                             PressureReferenceMode::Absolute,
                         )
                     }
-                    None => (final_temperature, final_pressure, final_altitude, final_pressure_type),
+                    None => (
+                        final_temperature,
+                        final_pressure,
+                        final_altitude,
+                        final_pressure_type,
+                    ),
                 };
 
             // Get zero range: CLI --auto-zero > selected zero set (MBA-1360) > profile
@@ -7482,8 +7506,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             // Parse the optional measured powder-temperature -> velocity curve into
             // canonical SI points. When present it supersedes the linear sensitivity
             // model at solve time (see cli_api::TrajectorySolver::new).
-            let powder_temp_curve_si: Option<Vec<(f64, f64)>> = match powder_temp_curve.as_deref()
-            {
+            let powder_temp_curve_si: Option<Vec<(f64, f64)>> = match powder_temp_curve.as_deref() {
                 Some(s) => Some(parse_powder_temp_curve(s, cli.units)?),
                 None => None,
             };
@@ -7778,7 +7801,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                         Some(trued_velocity_fps),
                         Some(bullet_length_in),
                         length_is_user,
-                        if print_bc_segments { Some(cli.units) } else { None },
+                        if print_bc_segments {
+                            Some(cli.units)
+                        } else {
+                            None
+                        },
                     ) {
                         bc_table_segments = Some(segments);
 
@@ -7868,8 +7895,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             // units as --sight-height and the WASM --muzzle-height flag (previously feet/
             // meters). Defaults are unchanged: 60 in = 5 ft = 1.524 m; 1500 mm = 1.5 m.
             let bore_height_default = match cli.units {
-                UnitSystem::Imperial => 60.0,  // inches
-                UnitSystem::Metric => 1500.0,  // mm
+                UnitSystem::Imperial => 60.0, // inches
+                UnitSystem::Metric => 1500.0, // mm
             };
             let bore_height_value = bore_height.unwrap_or(bore_height_default);
             let bore_height_metric = match cli.units {
@@ -7996,7 +8023,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             // did (no --bc-segment, no --bc-table-dir correction table) — a saved default,
             // not an override of explicit CLI intent.
             if bc_table_segments.is_none() {
-                if let Some(rows) = saved_profile_data.as_ref().and_then(|p| p.bc_segments.as_ref())
+                if let Some(rows) = saved_profile_data
+                    .as_ref()
+                    .and_then(|p| p.bc_segments.as_ref())
                 {
                     bc_table_segments = Some(bc_segments_from_profile(rows));
                 }
@@ -8019,17 +8048,21 @@ fn main() -> Result<(), Box<dyn Error>> {
             // drag curve (MBA-1323 Phase 2: `.a7p` CUSTOM import) is the fallback when
             // --drag-table was not given for THIS run — same "saved default, not an override
             // of explicit CLI intent" precedence as the BC segments above.
-            let custom_drag_table = drag_table.as_deref().map(load_drag_table_or_exit).or_else(|| {
-                saved_profile_data
-                    .as_ref()
-                    .and_then(|p| p.drag_curve.as_ref())
-                    .map(|pts| {
-                        drag_table_from_profile(pts).unwrap_or_else(|e| {
-                            eprintln!("Error: saved profile's drag curve is invalid: {e}");
-                            std::process::exit(1);
-                        })
-                    })
-            });
+            let custom_drag_table =
+                drag_table
+                    .as_deref()
+                    .map(load_drag_table_or_exit)
+                    .or_else(|| {
+                        saved_profile_data
+                            .as_ref()
+                            .and_then(|p| p.drag_curve.as_ref())
+                            .map(|pts| {
+                                drag_table_from_profile(pts).unwrap_or_else(|e| {
+                                    eprintln!("Error: saved profile's drag curve is invalid: {e}");
+                                    std::process::exit(1);
+                                })
+                            })
+                    });
             if custom_drag_table.is_some() && effective_use_bc_segments {
                 eprintln!(
                     "Warning: --drag-table and BC segments were both provided; the drag table takes \
@@ -8047,9 +8080,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             // MBA-1365: --bc-reference army-standard-metro has no effect once a custom
             // drag table replaces the BC-based retardation model entirely.
             if custom_drag_table.is_some()
-                && matches!(bc_reference_standard, BcReferenceStandard::ArmyStandardMetro)
+                && matches!(
+                    bc_reference_standard,
+                    BcReferenceStandard::ArmyStandardMetro
+                )
             {
-                eprintln!("{}", ballistics_engine::cli_api::BC_REFERENCE_STANDARD_INERT_WARNING);
+                eprintln!(
+                    "{}",
+                    ballistics_engine::cli_api::BC_REFERENCE_STANDARD_INERT_WARNING
+                );
             }
 
             // Calculate zero angle if auto-zero is specified (from CLI or profile)
@@ -8517,17 +8556,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                                             UnitSystem::Imperial => l * 0.0254,
                                             UnitSystem::Metric => l * 0.001,
                                         })
-                                        .unwrap_or_else(|| fallback_bullet_length_m(diameter_metric, mass_metric)),
+                                        .unwrap_or_else(|| {
+                                            fallback_bullet_length_m(diameter_metric, mass_metric)
+                                        }),
                                     muzzle_angle: muzzle_angle.to_radians(),
                                     target_distance: max_range_metric,
                                     azimuth_angle: 0.0,
-                                    shot_azimuth: shot_direction.map(|d| d.to_radians()).unwrap_or(0.0),
+                                    shot_azimuth: shot_direction
+                                        .map(|d| d.to_radians())
+                                        .unwrap_or(0.0),
                                     shooting_angle: shooting_angle.to_radians(),
                                     cant_angle: cant.to_radians(),
                                     sight_height: sight_height_metric,
                                     muzzle_height: bore_height_metric,
                                     target_height: 0.0,
-                                    ground_threshold: if ignore_ground_impact { f64::NEG_INFINITY } else { 0.0 },
+                                    ground_threshold: if ignore_ground_impact {
+                                        f64::NEG_INFINITY
+                                    } else {
+                                        0.0
+                                    },
                                     altitude: altitude_metric,
                                     temperature: temperature_metric,
                                     pressure: pressure_metric,
@@ -8559,14 +8606,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     use_powder_sensitivity,
                                     powder_temp_sensitivity: if use_powder_sensitivity {
                                         // Per-degree DELTA conversion, not absolute point (MBA-963).
-                                        UnitConverter::velocity_to_metric(powder_temp_sensitivity, cli.units)
-                                            / UnitConverter::temperature_delta_to_metric(1.0, cli.units)
-                                    } else { 0.0 },
-                                    powder_temp: UnitConverter::temperature_to_metric(powder_temp, cli.units),
+                                        UnitConverter::velocity_to_metric(
+                                            powder_temp_sensitivity,
+                                            cli.units,
+                                        ) / UnitConverter::temperature_delta_to_metric(
+                                            1.0, cli.units,
+                                        )
+                                    } else {
+                                        0.0
+                                    },
+                                    powder_temp: UnitConverter::temperature_to_metric(
+                                        powder_temp,
+                                        cli.units,
+                                    ),
                                     powder_temp_curve: powder_temp_curve_si.clone(),
                                     powder_curve_temp_c,
                                     tipoff_yaw: 0.0,
-        cd_delta2: 7.5,
+                                    cd_delta2: 7.5,
                                     tipoff_decay_distance: 50.0,
                                     use_bc_segments: effective_use_bc_segments,
                                     bc_segments: None,
@@ -8575,7 +8631,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     enable_aerodynamic_jump,
                                     use_form_factor: false,
                                     enable_wind_shear,
-                                    wind_shear_model: if enable_wind_shear { wind_shear_model.as_engine_str().to_string() } else { "none".to_string() },
+                                    wind_shear_model: if enable_wind_shear {
+                                        wind_shear_model.as_engine_str().to_string()
+                                    } else {
+                                        "none".to_string()
+                                    },
                                     enable_trajectory_sampling: sample_trajectory,
                                     sample_interval,
                                     // MBA-1403: mirror the main solve so the local
@@ -8828,7 +8888,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             if custom_drag_table.is_some()
                 && matches!(bc_reference, BcReferenceStandard::ArmyStandardMetro)
             {
-                eprintln!("{}", ballistics_engine::cli_api::BC_REFERENCE_STANDARD_INERT_WARNING);
+                eprintln!(
+                    "{}",
+                    ballistics_engine::cli_api::BC_REFERENCE_STANDARD_INERT_WARNING
+                );
             }
 
             if wez {
@@ -9065,7 +9128,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             if custom_drag_table.is_some()
                 && matches!(bc_reference, BcReferenceStandard::ArmyStandardMetro)
             {
-                eprintln!("{}", ballistics_engine::cli_api::BC_REFERENCE_STANDARD_INERT_WARNING);
+                eprintln!(
+                    "{}",
+                    ballistics_engine::cli_api::BC_REFERENCE_STANDARD_INERT_WARNING
+                );
             }
 
             match from_angle {
@@ -9097,9 +9163,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 None => {
                     // clap enforces exactly one of --target-distance/--from-angle via
                     // required_unless_present + conflicts_with on both fields.
-                    let target_distance = target_distance.expect(
-                        "clap requires --target-distance when --from-angle is absent",
-                    );
+                    let target_distance = target_distance
+                        .expect("clap requires --target-distance when --from-angle is absent");
                     let target_distance_metric =
                         UnitConverter::distance_to_metric(target_distance, cli.units);
                     run_zero_calculation(
@@ -9203,10 +9268,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             };
 
             if drop_raw.is_empty() && vel_raw.is_empty() {
-                return Err("No data provided. Supply drop data (--data \"d,drop;...\" or \
+                return Err(
+                    "No data provided. Supply drop data (--data \"d,drop;...\" or \
                      --distance1/--drop1/--distance2/--drop2) and/or velocity data \
                      (--velocity-data \"d,vel;...\")."
-                    .into());
+                        .into(),
+                );
             }
 
             // Convert both series to metric (distance -> m, drop in -> m, velocity fps -> m/s).
@@ -9249,7 +9316,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                         UnitSystem::Metric => *d,
                     })
                     .unwrap_or(0.0);
-                let unit = if cli.units == UnitSystem::Imperial { "yd" } else { "m" };
+                let unit = if cli.units == UnitSystem::Imperial {
+                    "yd"
+                } else {
+                    "m"
+                };
                 eprintln!(
                     "Warning: your drop data looks zeroed near {zd:.0} {unit} (a point has ~0 drop), \
                      but --zero-range was not given."
@@ -9620,7 +9691,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                             .into(),
                     );
                 }
-                if bc_segments.as_ref().is_some_and(|segments| !segments.is_empty()) {
+                if bc_segments
+                    .as_ref()
+                    .is_some_and(|segments| !segments.is_empty())
+                {
                     return Err(
                         "uncertainty-aware scalar-BC truing does not support velocity-banded BC tables; omit --bc-table-dir/--bc-table-auto or fit an explicit table scale model"
                             .into(),
@@ -9673,9 +9747,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     return Err("--prediction-sigma must be positive and finite".into());
                 }
                 if prediction_sigma.is_some() && predict_range.is_empty() {
-                    return Err(
-                        "--prediction-sigma requires at least one --predict-range".into(),
-                    );
+                    return Err("--prediction-sigma requires at least one --predict-range".into());
                 }
                 let predictions = predict_range
                     .iter()
@@ -9822,9 +9894,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 {
                     // Check TOS acceptance first
                     if !check_tos_accepted() && !prompt_tos_acceptance()? {
-                        eprintln!(
-                            "Cannot use online features without accepting Terms of Service."
-                        );
+                        eprintln!("Cannot use online features without accepting Terms of Service.");
                         std::process::exit(1);
                     }
 
@@ -10063,26 +10133,25 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             // Coriolis needs BOTH halves; one without the other is a mistake, not a
             // partially-usable input (MBA-1425: no silent fallback).
-            let earth = match (latitude, shot_direction) {
-                (Some(latitude_deg), Some(shot_azimuth_deg)) => Some(TruingEarthFrame {
-                    latitude_deg,
-                    shot_azimuth_deg,
-                }),
-                (None, None) => None,
-                (Some(_), None) => {
-                    return Err(
-                        "--latitude also needs --shot-direction before Coriolis can be \
+            let earth =
+                match (latitude, shot_direction) {
+                    (Some(latitude_deg), Some(shot_azimuth_deg)) => Some(TruingEarthFrame {
+                        latitude_deg,
+                        shot_azimuth_deg,
+                    }),
+                    (None, None) => None,
+                    (Some(_), None) => {
+                        return Err(
+                            "--latitude also needs --shot-direction before Coriolis can be \
                          modelled (Earth rotation depends on which way downrange points)"
-                            .into(),
-                    )
-                }
-                (None, Some(_)) => {
-                    return Err(
+                                .into(),
+                        )
+                    }
+                    (None, Some(_)) => return Err(
                         "--shot-direction also needs --latitude before Coriolis can be modelled"
                             .into(),
-                    )
-                }
-            };
+                    ),
+                };
 
             let observations = miss
                 .iter()
@@ -10117,9 +10186,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 OutputFormat::Table => WindTruingOutput::Table,
                 OutputFormat::Pdf => {
                     eprintln!("Error: PDF output is not supported for wind truing results.");
-                    eprintln!(
-                        "Hint: Use --output json, --output csv, or --output table instead."
-                    );
+                    eprintln!("Hint: Use --output json, --output csv, or --output table instead.");
                     std::process::exit(1);
                 }
             };
@@ -10235,11 +10302,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     UnitSystem::Metric => 50.0,
                 });
             let temperature = UnitConverter::resolve_temperature(
-                temperature.or_else(|| {
-                    profile_data
-                        .as_ref()
-                        .map(|profile| profile.temperature)
-                }),
+                temperature.or_else(|| profile_data.as_ref().map(|profile| profile.temperature)),
                 cli.units,
             )?;
             // MBA-1416: honor --pressure-type here too. `altitude` is Option on this command,
@@ -10494,22 +10557,23 @@ fn main() -> Result<(), Box<dyn Error>> {
             // work below — so a missing graduation fails fast with a clear flag name.
             // come-ups has no windage column, so the resolved windage value (which would
             // otherwise just default to the elevation one) is intentionally discarded.
-            let elevation_click: Option<ClickValue> = if matches!(adjustment_unit, AdjustmentUnit::Clicks) {
-                match resolve_click_values(
-                    elevation_click_value.as_deref(),
-                    windage_click_value.as_deref(),
-                    profile_data.as_ref(),
-                ) {
-                    Ok(Some((el, _wi))) => Some(el),
-                    Ok(None) => None,
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                        std::process::exit(1);
+            let elevation_click: Option<ClickValue> =
+                if matches!(adjustment_unit, AdjustmentUnit::Clicks) {
+                    match resolve_click_values(
+                        elevation_click_value.as_deref(),
+                        windage_click_value.as_deref(),
+                        profile_data.as_ref(),
+                    ) {
+                        Ok(Some((el, _wi))) => Some(el),
+                        Ok(None) => None,
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            std::process::exit(1);
+                        }
                     }
-                }
-            } else {
-                None
-            };
+                } else {
+                    None
+                };
 
             let final_velocity = resolve_param(velocity, &profile_data, |p| p.velocity)
                 .unwrap_or_else(|| {
@@ -10546,12 +10610,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .as_ref()
                 .and_then(|p| p.bc_segments.as_ref())
                 .map(|rows| bc_segments_from_profile(rows));
-            let custom_drag_table = profile_data.as_ref().and_then(|p| p.drag_curve.as_ref()).map(|pts| {
-                drag_table_from_profile(pts).unwrap_or_else(|e| {
-                    eprintln!("Error: saved profile's drag curve is invalid: {e}");
-                    std::process::exit(1);
-                })
-            });
+            let custom_drag_table = profile_data
+                .as_ref()
+                .and_then(|p| p.drag_curve.as_ref())
+                .map(|pts| {
+                    drag_table_from_profile(pts).unwrap_or_else(|e| {
+                        eprintln!("Error: saved profile's drag curve is invalid: {e}");
+                        std::process::exit(1);
+                    })
+                });
             // MBA-1357: saved profile's DSF table, if any (come-ups has no --drag-table-style
             // flag of its own for this either — a saved profile is the only source).
             let dsf_table: Option<DsfTable> = profile_data
@@ -10618,8 +10685,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             observed_drop,
             zero_set,
         } => {
-            let (observed_value, drop_unit) = parse_observed_drop(&observed_drop)
-                .unwrap_or_else(|e| {
+            let (observed_value, drop_unit) =
+                parse_observed_drop(&observed_drop).unwrap_or_else(|e| {
                     eprintln!("error: {e}");
                     std::process::exit(1);
                 });
@@ -10629,10 +10696,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 std::process::exit(1);
             }
 
-            let mut profile = load_profile_for_units(&saved_profile, cli.units).unwrap_or_else(|e| {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            });
+            let mut profile =
+                load_profile_for_units(&saved_profile, cli.units).unwrap_or_else(|e| {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                });
 
             let dist_unit = match cli.units {
                 UnitSystem::Imperial => "yd",
@@ -10685,33 +10753,37 @@ fn main() -> Result<(), Box<dyn Error>> {
             // units-aware wording (the service's own text is yard-only, since a bare
             // TruingModelInputsV1 has no metric/imperial distinction) so output stays
             // byte-identical to before this extraction.
-            let derived = derive_dsf_point_from_solve_v1(&result, range_m, observed_value, drop_unit)
-                .unwrap_or_else(|e| {
-                    match e {
-                        DsfServiceErrorV1::Supersonic { mach, .. } => {
-                            eprintln!("{}", dsf_supersonic_error(mach));
-                        }
-                        DsfServiceErrorV1::OutOfRange { .. } => {
-                            let solved_range_display =
-                                UnitConverter::distance_from_metric(result.max_range, cli.units);
-                            eprintln!(
+            let derived =
+                derive_dsf_point_from_solve_v1(&result, range_m, observed_value, drop_unit)
+                    .unwrap_or_else(|e| {
+                        match e {
+                            DsfServiceErrorV1::Supersonic { mach, .. } => {
+                                eprintln!("{}", dsf_supersonic_error(mach));
+                            }
+                            DsfServiceErrorV1::OutOfRange { .. } => {
+                                let solved_range_display = UnitConverter::distance_from_metric(
+                                    result.max_range,
+                                    cli.units,
+                                );
+                                eprintln!(
                                 "error: saved profile '{}' trajectory does not reach {range:.0} \
                                  {dist_unit} (solved to {solved_range_display:.0} {dist_unit})",
                                 profile.name
                             );
-                        }
-                        DsfServiceErrorV1::DegenerateDrop { .. } => {
-                            eprintln!(
-                                "error: predicted drop at {range:.0} {dist_unit} is zero or \
+                            }
+                            DsfServiceErrorV1::DegenerateDrop { .. } => {
+                                eprintln!(
+                                    "error: predicted drop at {range:.0} {dist_unit} is zero or \
                                  non-finite; cannot compute a DSF ratio"
-                            );
+                                );
+                            }
+                            DsfServiceErrorV1::InvalidInput(_)
+                            | DsfServiceErrorV1::ForwardModel(_) => {
+                                eprintln!("error: {e}");
+                            }
                         }
-                        DsfServiceErrorV1::InvalidInput(_) | DsfServiceErrorV1::ForwardModel(_) => {
-                            eprintln!("error: {e}");
-                        }
-                    }
-                    std::process::exit(1);
-                });
+                        std::process::exit(1);
+                    });
 
             // Gate 2's warning (MBA-1357 Task 2 review, Critical #1 — a compound condition,
             // not the 90% ratio alone) is signalled by a non-empty warnings vec; the CLI
@@ -10724,12 +10796,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             let mach = derived.mach;
             let dsf = derived.dsf;
 
-            let mut table =
-                DsfTable::from_points(profile.dsf_points.clone().unwrap_or_default())
-                    .unwrap_or_else(|e| {
-                        eprintln!("error: saved profile's existing DSF table is invalid: {e}");
-                        std::process::exit(1);
-                    });
+            let mut table = DsfTable::from_points(profile.dsf_points.clone().unwrap_or_default())
+                .unwrap_or_else(|e| {
+                    eprintln!("error: saved profile's existing DSF table is invalid: {e}");
+                    std::process::exit(1);
+                });
 
             // MBA-1357 Task 2 review, Important #1: the plan requires the append/supersede
             // outcome on stdout ("say so on stdout"), unlike the WARNINGS above/below
@@ -10775,7 +10846,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             let path = save_profile(&profile)?;
             eprintln!("Profile '{}' saved to {:?}", profile.name, path);
 
-            println!("DSF table for '{}' ({}):", profile.name, dsf_table_summary(table.points()));
+            println!(
+                "DSF table for '{}' ({}):",
+                profile.name,
+                dsf_table_summary(table.points())
+            );
             for p in table.points() {
                 println!("  Mach {:.2}  DSF {:.4}", p.mach, p.dsf);
             }
@@ -10830,18 +10905,21 @@ fn main() -> Result<(), Box<dyn Error>> {
             // MBA-1410: resolve the (windage) click graduation FIRST — before any of the
             // work below — so a missing graduation fails fast with a clear flag name, same
             // shape as trajectory/come-ups's elevation_click resolution.
-            let windage_click: Option<ClickValue> = if matches!(adjustment_unit, AdjustmentUnit::Clicks) {
-                match resolve_single_axis_click_value(windage_click_value.as_deref(), profile_data.as_ref())
-                {
-                    Ok(c) => Some(c),
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                        std::process::exit(1);
+            let windage_click: Option<ClickValue> =
+                if matches!(adjustment_unit, AdjustmentUnit::Clicks) {
+                    match resolve_single_axis_click_value(
+                        windage_click_value.as_deref(),
+                        profile_data.as_ref(),
+                    ) {
+                        Ok(c) => Some(c),
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            std::process::exit(1);
+                        }
                     }
-                }
-            } else {
-                None
-            };
+                } else {
+                    None
+                };
 
             let final_velocity = resolve_param(velocity, &profile_data, |p| p.velocity)
                 .unwrap_or_else(|| {
@@ -10888,8 +10966,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 UnitSystem::Imperial => 1.0,
                 UnitSystem::Metric => 0.3048 / (5.0 / 9.0),
             });
-            let powder_temp_curve_si: Option<Vec<(f64, f64)>> = match powder_temp_curve.as_deref()
-            {
+            let powder_temp_curve_si: Option<Vec<(f64, f64)>> = match powder_temp_curve.as_deref() {
                 Some(s) => Some(parse_powder_temp_curve(s, cli.units)?),
                 None => None,
             };
@@ -10901,12 +10978,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .as_ref()
                 .and_then(|p| p.bc_segments.as_ref())
                 .map(|rows| bc_segments_from_profile(rows));
-            let custom_drag_table = profile_data.as_ref().and_then(|p| p.drag_curve.as_ref()).map(|pts| {
-                drag_table_from_profile(pts).unwrap_or_else(|e| {
-                    eprintln!("Error: saved profile's drag curve is invalid: {e}");
-                    std::process::exit(1);
-                })
-            });
+            let custom_drag_table = profile_data
+                .as_ref()
+                .and_then(|p| p.drag_curve.as_ref())
+                .map(|pts| {
+                    drag_table_from_profile(pts).unwrap_or_else(|e| {
+                        eprintln!("Error: saved profile's drag curve is invalid: {e}");
+                        std::process::exit(1);
+                    })
+                });
 
             // MBA-1358: windage-axis tracking CF (mover lead is a dialed quantity).
             let windage_cf = resolve_tracking_cf(
@@ -10959,8 +11039,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             mass,
             output,
         } => {
-            let powder_temp_curve_si: Option<Vec<(f64, f64)>> = match powder_temp_curve.as_deref()
-            {
+            let powder_temp_curve_si: Option<Vec<(f64, f64)>> = match powder_temp_curve.as_deref() {
                 Some(s) => Some(parse_powder_temp_curve(s, cli.units)?),
                 None => None,
             };
@@ -11056,18 +11135,21 @@ fn main() -> Result<(), Box<dyn Error>> {
 
             // MBA-1410: resolve the (windage) click graduation FIRST — before any of the
             // work below — so a missing graduation fails fast with a clear flag name.
-            let windage_click: Option<ClickValue> = if matches!(adjustment_unit, AdjustmentUnit::Clicks) {
-                match resolve_single_axis_click_value(windage_click_value.as_deref(), profile_data.as_ref())
-                {
-                    Ok(c) => Some(c),
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                        std::process::exit(1);
+            let windage_click: Option<ClickValue> =
+                if matches!(adjustment_unit, AdjustmentUnit::Clicks) {
+                    match resolve_single_axis_click_value(
+                        windage_click_value.as_deref(),
+                        profile_data.as_ref(),
+                    ) {
+                        Ok(c) => Some(c),
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            std::process::exit(1);
+                        }
                     }
-                }
-            } else {
-                None
-            };
+                } else {
+                    None
+                };
 
             let final_velocity = resolve_param(velocity, &profile_data, |p| p.velocity)
                 .unwrap_or_else(|| {
@@ -11111,31 +11193,29 @@ fn main() -> Result<(), Box<dyn Error>> {
             // Resolve wind angle(s): neither flag → legacy full-value 90° card
             // (byte-identical to pre-MBA-727 output); --wind-angle → single
             // angle-aware card; --wind-angles → one card per angle.
-            let (wind_angle_vec, legacy_labels): (Vec<f64>, bool) =
-                if let Some(angle) = wind_angle {
-                    (vec![angle], false)
-                } else if let Some(csv) = wind_angles.as_ref() {
-                    let mut angles = Vec::new();
-                    for tok in csv.split(',') {
-                        let tok = tok.trim();
-                        let angle: f64 = tok.parse().map_err(|_| {
-                            format!("--wind-angles contains an invalid number: '{}'", tok)
-                        })?;
-                        if angle.is_nan() || !(0.0..=360.0).contains(&angle) {
-                            return Err(format!(
-                                "--wind-angles value '{}' must be in [0, 360]",
-                                tok
-                            )
-                            .into());
-                        }
-                        angles.push(angle);
+            let (wind_angle_vec, legacy_labels): (Vec<f64>, bool) = if let Some(angle) = wind_angle
+            {
+                (vec![angle], false)
+            } else if let Some(csv) = wind_angles.as_ref() {
+                let mut angles = Vec::new();
+                for tok in csv.split(',') {
+                    let tok = tok.trim();
+                    let angle: f64 = tok.parse().map_err(|_| {
+                        format!("--wind-angles contains an invalid number: '{}'", tok)
+                    })?;
+                    if angle.is_nan() || !(0.0..=360.0).contains(&angle) {
+                        return Err(
+                            format!("--wind-angles value '{}' must be in [0, 360]", tok).into()
+                        );
                     }
-                    // (no empty-check needed: split(',') yields >=1 token and every
-                    // token either pushes or errors via `?`)
-                    (angles, false)
-                } else {
-                    (vec![90.0], true)
-                };
+                    angles.push(angle);
+                }
+                // (no empty-check needed: split(',') yields >=1 token and every
+                // token either pushes or errors via `?`)
+                (angles, false)
+            } else {
+                (vec![90.0], true)
+            };
 
             // MBA-1359: CLI flags (inches imperial / cm metric) win over the profile's
             // stored SI values.
@@ -11308,8 +11388,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             // MBA-1410: resolve the independent windage unit and, if either axis needs
             // one, the turret click graduations — before any of the work below, so a
             // mismatch or a missing graduation fails fast with a clear message.
-            let windage_unit_resolved =
-                resolve_windage_unit(adjustment_unit, windage_unit).unwrap_or_else(|e| {
+            let windage_unit_resolved = resolve_windage_unit(adjustment_unit, windage_unit)
+                .unwrap_or_else(|e| {
                     eprintln!("error: {e}");
                     std::process::exit(1);
                 });
@@ -11470,8 +11550,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             // one, the turret click graduations — before any of the work below. compare
             // has no single --profile, so the graduations come only from the explicit
             // flags (profile: None).
-            let windage_unit_resolved =
-                resolve_windage_unit(adjustment_unit, windage_unit).unwrap_or_else(|e| {
+            let windage_unit_resolved = resolve_windage_unit(adjustment_unit, windage_unit)
+                .unwrap_or_else(|e| {
                     eprintln!("error: {e}");
                     std::process::exit(1);
                 });
@@ -11661,8 +11741,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     // edit), so a re-save carries any stored values forward.
                     let carried_elevation_cf =
                         existing_profile.as_ref().and_then(|p| p.elevation_cf);
-                    let carried_windage_cf =
-                        existing_profile.as_ref().and_then(|p| p.windage_cf);
+                    let carried_windage_cf = existing_profile.as_ref().and_then(|p| p.windage_cf);
                     // MBA-1360: zero sets are managed by `profile zero-set`, which this
                     // command cannot express — carry them forward like dsf_points.
                     let carried_zero_sets =
@@ -11774,8 +11853,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                         existing_optic.and_then(|p| p.clicks_per_revolution),
                         clear_turret,
                     );
-                    let carried_zero_stop =
-                        carry_turret_field(zero_stop, existing_optic.and_then(|p| p.zero_stop), clear_turret);
+                    let carried_zero_stop = carry_turret_field(
+                        zero_stop,
+                        existing_optic.and_then(|p| p.zero_stop),
+                        clear_turret,
+                    );
                     let carried_elevation_travel_up_mil = carry_turret_field(
                         travel_up,
                         existing_optic.and_then(|p| p.elevation_travel_up_mil),
@@ -11850,12 +11932,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let elevation_click = if clear_click {
                         None
                     } else {
-                        elevation_click.or_else(|| existing_optic.and_then(|p| p.elevation_click.clone()))
+                        elevation_click
+                            .or_else(|| existing_optic.and_then(|p| p.elevation_click.clone()))
                     };
                     let windage_click = if clear_click {
                         None
                     } else {
-                        windage_click.or_else(|| existing_optic.and_then(|p| p.windage_click.clone()))
+                        windage_click
+                            .or_else(|| existing_optic.and_then(|p| p.windage_click.clone()))
                     };
 
                     let profile = ProfileData {
@@ -11956,8 +12040,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         };
                     let bytes = fs::read(&file)
                         .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-                    let doc = parse_a7p(&bytes)
-                        .map_err(|e| format!("not a usable .a7p file: {e}"))?;
+                    let doc =
+                        parse_a7p(&bytes).map_err(|e| format!("not a usable .a7p file: {e}"))?;
                     if strict {
                         if let EnvelopeStatus::Mismatch { expected, actual } = &doc.envelope {
                             return Err(format!(
@@ -11979,8 +12063,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                         sanitized
                     });
-                    let outcome =
-                        map_a7p_to_profile(&doc, sanitized_name.as_deref(), zero_click)?;
+                    let outcome = map_a7p_to_profile(&doc, sanitized_name.as_deref(), zero_click)?;
                     print!("{}", render_import_report(&outcome.report));
                     if dry_run {
                         println!("\nDry run — nothing saved.");
@@ -12222,8 +12305,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
-                        let profile_units = match data.units.trim().to_ascii_lowercase().as_str()
-                        {
+                        let profile_units = match data.units.trim().to_ascii_lowercase().as_str() {
                             "metric" => UnitSystem::Metric,
                             _ => UnitSystem::Imperial,
                         };
@@ -12312,11 +12394,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     parts.push("(empty)".to_string());
                                 }
                                 match &s.notes {
-                                    Some(n) => println!(
-                                        "  {:<20} {} — {n}",
-                                        s.name,
-                                        parts.join(", ")
-                                    ),
+                                    Some(n) => {
+                                        println!("  {:<20} {} — {n}", s.name, parts.join(", "))
+                                    }
                                     None => println!("  {:<20} {}", s.name, parts.join(", ")),
                                 }
                             }
@@ -12430,7 +12510,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             handle_optimal_zero(targets, vital, load, cli.units, output)?;
         }
 
-        Commands::Explain { a, b, ranges, output } => {
+        Commands::Explain {
+            a,
+            b,
+            ranges,
+            output,
+        } => {
             handle_explain(a, b, ranges, output)?;
         }
 
@@ -12633,11 +12718,41 @@ fn dope_card_row_from_sample(
         // as before the fix-round -- only the CardRow's own displayed `range` field
         // above is rounded. The adjustment math has always used the true sample
         // distance, never the display value.
-        drop_adj: Some(adjustment_display(drop_yd, range_yd, elevation_unit, elevation_click, zero_set_elevation_bias_mil, elevation_cf).value),
+        drop_adj: Some(
+            adjustment_display(
+                drop_yd,
+                range_yd,
+                elevation_unit,
+                elevation_click,
+                zero_set_elevation_bias_mil,
+                elevation_cf,
+            )
+            .value,
+        ),
         // Wind: positive = dial right for wind from right
-        wind_adj: Some(windage_adjustment_display(drift_yd, range_yd, windage_unit, windage_click, zero_set_windage_bias_mil, windage_cf).value),
+        wind_adj: Some(
+            windage_adjustment_display(
+                drift_yd,
+                range_yd,
+                windage_unit,
+                windage_click,
+                zero_set_windage_bias_mil,
+                windage_cf,
+            )
+            .value,
+        ),
         // Lead for a moving target (a dialed quantity — the windage CF divides it, MBA-1358)
-        lead_adj: Some(windage_adjustment_display(lead_yd, range_yd, windage_unit, windage_click, 0.0, windage_cf).value),
+        lead_adj: Some(
+            windage_adjustment_display(
+                lead_yd,
+                range_yd,
+                windage_unit,
+                windage_click,
+                0.0,
+                windage_cf,
+            )
+            .value,
+        ),
         drop_linear: None,
         come_up: None,
         wind_linear: None,
@@ -12672,9 +12787,7 @@ fn reject_bc5d_caliber_mismatch(
     caliber_in: f64,
 ) -> Result<(), String> {
     match manager.get_table(caliber_in) {
-        Err(error @ Bc5dError::CaliberMismatch { .. }) => {
-            Err(format!("--bc-table-dir: {error}"))
-        }
+        Err(error @ Bc5dError::CaliberMismatch { .. }) => Err(format!("--bc-table-dir: {error}")),
         _ => Ok(()),
     }
 }
@@ -12804,9 +12917,7 @@ fn generate_bc5d_segments(
                 }
                 eprintln!(
                     "  --bc-segment {}:{}:{:.5}",
-                    display_min,
-                    display_max,
-                    seg.bc_value
+                    display_min, display_max, seg.bc_value
                 );
             }
         }
@@ -13096,7 +13207,12 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
     let (resolved_temperature, resolved_pressure) = if density_altitude_active {
         (temperature, pressure)
     } else {
-        resolve_station_conditions_with_pressure_mode(temperature, pressure, altitude, pressure_type)
+        resolve_station_conditions_with_pressure_mode(
+            temperature,
+            pressure,
+            altitude,
+            pressure_type,
+        )
     };
 
     // Set up atmospheric conditions
@@ -13191,9 +13307,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         if sos.is_finite() && sos > 0.0 {
             let muzzle_mach = velocity / sos;
             let impact_mach = result.impact_velocity / sos;
-            if let (Some(&lo), Some(&hi)) =
-                (table.mach_values.first(), table.mach_values.last())
-            {
+            if let (Some(&lo), Some(&hi)) = (table.mach_values.first(), table.mach_values.last()) {
                 if muzzle_mach > hi || impact_mach < lo {
                     eprintln!(
                         "Warning: shot Mach range [{impact_mach:.2}, {muzzle_mach:.2}] extends beyond \
@@ -13299,8 +13413,11 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                             // --target-speed enabled it; None/None serialize to "absent"
                             // (skip_serializing_if) so JSON without the flag is unchanged.
                             let (mover_ring_m, mover_ring_mil) = if ring_enabled {
-                                let (ring_m, ring_mil) =
-                                    ballistics_engine::mover_ring(target_speed_mps, p.time, p.position.x);
+                                let (ring_m, ring_mil) = ballistics_engine::mover_ring(
+                                    target_speed_mps,
+                                    p.time,
+                                    p.position.x,
+                                );
                                 // MBA-1358: mover lead is a dialed quantity — the mil
                                 // field is divided by the windage CF (scope units);
                                 // ring_m stays raw meters.
@@ -13390,8 +13507,11 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                             distance, drop, drift, vel, energy, s.time_s
                         );
                         if ring_enabled {
-                            let (_, ring_mil) =
-                                ballistics_engine::mover_ring(target_speed_mps, s.time_s, s.distance_m);
+                            let (_, ring_mil) = ballistics_engine::mover_ring(
+                                target_speed_mps,
+                                s.time_s,
+                                s.distance_m,
+                            );
                             match ring_mil {
                                 // MBA-1358: dialed quantity — divided by the windage
                                 // CF (scope units; /1.0 is exact).
@@ -13428,7 +13548,11 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                         if ring_enabled {
                             // Downrange is position.x (McCoy frame) regardless of the CSV's
                             // lateral/downrange column swap above.
-                            let (_, ring_mil) = ballistics_engine::mover_ring(target_speed_mps, p.time, p.position.x);
+                            let (_, ring_mil) = ballistics_engine::mover_ring(
+                                target_speed_mps,
+                                p.time,
+                                p.position.x,
+                            );
                             match ring_mil {
                                 // MBA-1358: dialed quantity — divided by the windage
                                 // CF (scope units; /1.0 is exact).
@@ -13504,10 +13628,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                 height_display, range_unit
             );
             if let Some(zero_deg) = solved_zero_angle_deg {
-                println!(
-                    "║ Zero Angle:        {:>8.4}°          ║",
-                    zero_deg
-                );
+                println!("║ Zero Angle:        {:>8.4}°          ║", zero_deg);
             }
             if reached_time_cap {
                 // Integration stopped at the time cap, not at an impact: the
@@ -13711,13 +13832,19 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
 
                     for (i, p) in result.points.iter().enumerate() {
                         if i % step == 0 || i == result.points.len() - 1 {
-                            let x_display = UnitConverter::distance_from_metric(p.position.x, units); // X column = downrange (position.x; McCoy frame)
-                            let y_display = UnitConverter::distance_from_metric(p.position.y, units);
+                            let x_display =
+                                UnitConverter::distance_from_metric(p.position.x, units); // X column = downrange (position.x; McCoy frame)
+                            let y_display =
+                                UnitConverter::distance_from_metric(p.position.y, units);
                             let vel_display =
                                 UnitConverter::velocity_from_metric(p.velocity_magnitude, units);
                             let energy_display =
                                 UnitConverter::energy_from_metric(p.kinetic_energy, units);
-                            let (_, ring_mil) = ballistics_engine::mover_ring(target_speed_mps, p.time, p.position.x);
+                            let (_, ring_mil) = ballistics_engine::mover_ring(
+                                target_speed_mps,
+                                p.time,
+                                p.position.x,
+                            );
                             // MBA-1358: dialed quantity — divide the mil angle by the
                             // windage CF BEFORE unit/click conversion (/1.0 is exact).
                             let ring_cell = match ring_mil.map(|mil| mil / windage_cf) {
@@ -13737,7 +13864,12 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
 
                             println!(
                                 "│ {:>8.3} │ {:>8.2} │ {:>8.2} │ {:>8.2} │ {:>8.2} │ {} │",
-                                p.time, x_display, y_display, vel_display, energy_display, ring_cell
+                                p.time,
+                                x_display,
+                                y_display,
+                                vel_display,
+                                energy_display,
+                                ring_cell
                             );
                         }
                     }
@@ -13752,8 +13884,10 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
 
                     for (i, p) in result.points.iter().enumerate() {
                         if i % step == 0 || i == result.points.len() - 1 {
-                            let x_display = UnitConverter::distance_from_metric(p.position.x, units); // X column = downrange (position.x; McCoy frame)
-                            let y_display = UnitConverter::distance_from_metric(p.position.y, units);
+                            let x_display =
+                                UnitConverter::distance_from_metric(p.position.x, units); // X column = downrange (position.x; McCoy frame)
+                            let y_display =
+                                UnitConverter::distance_from_metric(p.position.y, units);
                             let vel_display =
                                 UnitConverter::velocity_from_metric(p.velocity_magnitude, units);
                             let energy_display =
@@ -13792,7 +13926,9 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                     // LOS branch prints the historical header byte-identically.
                     let target_drops = drops_reference == DropsReferenceArg::Target;
                     if target_drops {
-                        println!("┌──────────┬───────────────────┬──────────┬──────────┬──────────┐");
+                        println!(
+                            "┌──────────┬───────────────────┬──────────┬──────────┬──────────┐"
+                        );
                         println!(
                             "│ Dist{:4} │ {:>17} │Drift{:4} │ Vel{:5} │  Flags   │",
                             dist_hdr,
@@ -13800,7 +13936,9 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                             drift_hdr,
                             vel_hdr
                         );
-                        println!("├──────────┼───────────────────┼──────────┼──────────┼──────────┤");
+                        println!(
+                            "├──────────┼───────────────────┼──────────┼──────────┼──────────┤"
+                        );
                     } else {
                         println!("┌──────────┬──────────┬──────────┬──────────┬──────────┐");
                         println!(
@@ -13867,7 +14005,9 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                     }
 
                     if target_drops {
-                        println!("└──────────┴───────────────────┴──────────┴──────────┴──────────┘");
+                        println!(
+                            "└──────────┴───────────────────┴──────────┴──────────┴──────────┘"
+                        );
                     } else {
                         println!("└──────────┴──────────┴──────────┴──────────┴──────────┘");
                     }
@@ -14372,15 +14512,11 @@ fn print_wez_summary(result: &WezResult, units: UnitSystem) {
         UnitConverter::wind_from_metric(result.wind_speed_std_mps, units),
         UnitConverter::wind_from_metric(result.combined_wind_speed_std_mps, units),
     );
-    println!(
-        "┌────────────┬──────────┬───────────────┬───────────┬───────────┬───────────┐"
-    );
+    println!("┌────────────┬──────────┬───────────────┬───────────┬───────────┬───────────┐");
     println!(
         "│ Range ({dist_unit:>3}) │  P(hit)  │ Dominant      │ Wind call │  MV SD    │ Other/grp │"
     );
-    println!(
-        "├────────────┼──────────┼───────────────┼───────────┼───────────┼───────────┤"
-    );
+    println!("├────────────┼──────────┼───────────────┼───────────┼───────────┼───────────┤");
     for row in &result.rows {
         println!(
             "│ {:>10.1} │ {:>7.1}% │ {:<13} │ {:>8.1}% │ {:>8.1}% │ {:>8.1}% │",
@@ -14392,9 +14528,7 @@ fn print_wez_summary(result: &WezResult, units: UnitSystem) {
             row.other_share * 100.0,
         );
     }
-    println!(
-        "└────────────┴──────────┴───────────────┴───────────┴───────────┴───────────┘"
-    );
+    println!("└────────────┴──────────┴───────────────┴───────────┴───────────┴───────────┘");
 }
 
 #[allow(
@@ -14664,8 +14798,8 @@ fn run_monte_carlo(
     // `p_hat` is byte-identical to `hit_probability`'s since `hit_probability_wilson` calls the
     // very same `MonteCarloResults::hit_probability` internally (see cli_api.rs). Existing
     // numeric estimates above are computed and printed exactly as before this addition.
-    let hit_probability_ci = target_distance
-        .map(|_target| results.hit_probability_wilson(target_radius, confidence));
+    let hit_probability_ci =
+        target_distance.map(|_target| results.hit_probability_wilson(target_radius, confidence));
 
     match output {
         MonteCarloOutput::Summary => {
@@ -14880,8 +15014,16 @@ fn run_monte_carlo_adaptive(
         };
         return Err(format!(
             "{} must be at least {}",
-            describe("--max-samples", controls.max_samples, DEFAULT_MC_MAX_SAMPLES),
-            describe("--min-samples", controls.min_samples, DEFAULT_MC_MIN_SAMPLES),
+            describe(
+                "--max-samples",
+                controls.max_samples,
+                DEFAULT_MC_MAX_SAMPLES
+            ),
+            describe(
+                "--min-samples",
+                controls.min_samples,
+                DEFAULT_MC_MIN_SAMPLES
+            ),
         )
         .into());
     }
@@ -14922,10 +15064,12 @@ fn run_monte_carlo_adaptive(
             // there is nothing to tabulate the way the fixed-count path's CSV rows do. An
             // honest usage error naming the flag beats either silently falling back to another
             // format or fabricating a single-row CSV out of the summary statistics.
-            return Err("--output statistics is not supported with --adaptive (the adaptive \
+            return Err(
+                "--output statistics is not supported with --adaptive (the adaptive \
                 driver retains no per-trial data to tabulate); use --output summary or \
                 --output full/json instead"
-                .into());
+                    .into(),
+            );
         }
     }
 
@@ -15118,7 +15262,10 @@ fn run_zero_calculation(
                 "zero_angle_moa,{:.2},MOA",
                 zero_angle.to_degrees() * 60.0 / elevation_cf
             );
-            println!("zero_angle_mrad,{:.2},mrad", zero_angle * 1000.0 / elevation_cf);
+            println!(
+                "zero_angle_mrad,{:.2},mrad",
+                zero_angle * 1000.0 / elevation_cf
+            );
             println!("max_ordinate,{:.3},meters", trajectory.max_height);
         }
 
@@ -15347,9 +15494,13 @@ fn run_zero_range_calculation(
     // two crossings has, by construction, turned over.)
     let apex_is_contained = {
         let ys: Vec<f64> = trajectory.points.iter().map(|p| p.position.y).collect();
-        match (ys.iter().cloned().enumerate().max_by(|a, b| {
-            a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
-        }), ys.last()) {
+        match (
+            ys.iter()
+                .cloned()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)),
+            ys.last(),
+        ) {
             (Some((peak_index, peak_y)), Some(&last_y)) => {
                 peak_index + 1 < ys.len() && peak_y > last_y + 1e-9
             }
@@ -15395,9 +15546,10 @@ fn run_zero_range_calculation(
             // solve was still climbing at its envelope. Previously this key carried the height
             // at the truncation point in that case, which is not a max ordinate.
             if apex_is_contained {
-                result["max_ordinate"] = serde_json::json!(
-                    UnitConverter::distance_from_metric(trajectory.max_height, units)
-                );
+                result["max_ordinate"] = serde_json::json!(UnitConverter::distance_from_metric(
+                    trajectory.max_height,
+                    units
+                ));
             }
             // Tier 2 review C2: additive, skip-when-absent keys for both crossings (mirrors
             // MBA-1402's skip_serializing_if pattern) -- a bore angle generally implies two
@@ -15465,7 +15617,9 @@ fn run_zero_range_calculation(
             // Tier 2 review C2: a bore angle generally crosses the line of sight twice --
             // report both, clearly labelled, rather than silently picking one.
             match near_range_display {
-                Some(near) => println!("║ Near Zero (ascending): {:>8.1} {:3}   ║", near, dist_unit),
+                Some(near) => {
+                    println!("║ Near Zero (ascending): {:>8.1} {:3}   ║", near, dist_unit)
+                }
                 None => println!("║ Near Zero:  not in solved range        ║"),
             }
             match far_range_display {
@@ -15634,9 +15788,11 @@ fn parse_data_pairs(s: &str) -> Result<Vec<(f64, f64)>, Box<dyn Error>> {
         }
         let parts: Vec<&str> = pair.split(',').collect();
         if parts.len() != 2 {
-            return Err(
-                format!("Malformed data pair '{}': expected \"distance,value\".", pair).into(),
-            );
+            return Err(format!(
+                "Malformed data pair '{}': expected \"distance,value\".",
+                pair
+            )
+            .into());
         }
         let d: f64 = parts[0]
             .trim()
@@ -15828,7 +15984,11 @@ fn run_bc_estimation_multi(
                     v.bc,
                     v.rms_user,
                     v.rms_unit,
-                    if v.at_bound { " ⚠ UNRELIABLE (hit BC limit)" } else { "" }
+                    if v.at_bound {
+                        " ⚠ UNRELIABLE (hit BC limit)"
+                    } else {
+                        ""
+                    }
                 );
             }
             if variants.iter().any(|v| v.at_bound) {
@@ -16082,7 +16242,6 @@ fn parse_truing_range_grid(token: &str) -> Result<Vec<f64>, String> {
     Ok((0..count).map(|i| start + i as f64 * step).collect())
 }
 
-
 /// Orchestrate the multi-observation joint MV+BC calibration and print the
 /// result. `measured_drop`/`range_yd` are the primary observation (drop already
 /// in `drop_unit`); `observed` holds the additional `RANGE:DROP` tokens.
@@ -16162,7 +16321,8 @@ fn run_multi_observation_truing(
     )?;
     // MBA-1358: dial-unit report values are shown back in scope units (÷CF); the shared
     // helper is a no-op (/1.0 exact) without a CF, keeping output byte-identical.
-    let display_report = ballistics_engine::truing::scale_report_dial_values(&report, observation_cf);
+    let display_report =
+        ballistics_engine::truing::scale_report_dial_values(&report, observation_cf);
     display_multi_truing_result(&display_report, drop_unit, units, chrono_fps, output);
     Ok(())
 }
@@ -16332,10 +16492,7 @@ fn display_multi_truing_result(
             println!();
             println!("=== VELOCITY + BC TRUING (multi-observation) ===");
             println!();
-            println!(
-                "  Fitted muzzle velocity: {:>9.1} {}",
-                mv_display, vel_unit
-            );
+            println!("  Fitted muzzle velocity: {:>9.1} {}", mv_display, vel_unit);
             if report.bc_fitted {
                 println!(
                     "  Fitted BC:              {:>9.4}  (input {:.4})",
@@ -16884,9 +17041,7 @@ fn display_uncertainty_truing_result(
                 value["velocity_adjustment"] =
                     serde_json::json!(velocity(report.map_muzzle_velocity_fps - chrono));
                 value["adjustment_percent"] = if chrono != 0.0 {
-                    serde_json::json!(
-                        (report.map_muzzle_velocity_fps - chrono) / chrono * 100.0
-                    )
+                    serde_json::json!((report.map_muzzle_velocity_fps - chrono) / chrono * 100.0)
                 } else {
                     serde_json::Value::Null
                 };
@@ -16987,32 +17142,20 @@ fn display_uncertainty_truing_result(
                     );
                     println!(
                         "ballistic_coefficient,{:.10},{:.10},{:.10},{:.10},{:.6},dimensionless",
-                        bc.estimate,
-                        bc.standard_deviation,
-                        bc.lower,
-                        bc.upper,
-                        bc.probability,
+                        bc.estimate, bc.standard_deviation, bc.lower, bc.upper, bc.probability,
                     );
                     println!();
                     println!("covariance_component,value");
                     println!(
                         "mv_variance_{velocity_unit}2,{:.12}",
-                        approximation.covariance.mv_variance_fps2
-                            * velocity_scale
-                            * velocity_scale
+                        approximation.covariance.mv_variance_fps2 * velocity_scale * velocity_scale
                     );
                     println!(
                         "mv_bc_covariance_{velocity_unit},{:.12}",
                         approximation.covariance.mv_bc_covariance_fps * velocity_scale
                     );
-                    println!(
-                        "bc_variance,{:.12}",
-                        approximation.covariance.bc_variance
-                    );
-                    println!(
-                        "mv_bc_correlation,{:.12}",
-                        approximation.mv_bc_correlation
-                    );
+                    println!("bc_variance,{:.12}", approximation.covariance.bc_variance);
+                    println!("mv_bc_correlation,{:.12}", approximation.mv_bc_correlation);
                     println!(
                         "scaled_information_condition_number,{:.12}",
                         approximation.scaled_information_condition_number
@@ -17147,7 +17290,9 @@ fn display_uncertainty_truing_result(
                         .unwrap_or_else(|| "unavailable".to_string());
                     let future = band
                         .future_observation_interval_95
-                        .map(|interval| format!("; future [{:.4}, {:.4}]", interval.lower, interval.upper))
+                        .map(|interval| {
+                            format!("; future [{:.4}, {:.4}]", interval.lower, interval.upper)
+                        })
                         .unwrap_or_default();
                     println!(
                         "    {:>8.1} {range_unit}: mean {:.4} {drop_unit}; model {latent}{future}",
@@ -17864,7 +18009,10 @@ fn handle_come_ups(
             come_up: Some(come_up),
             wind_linear: None,
             wind_adj: None,
-            velocity: Some(UnitConverter::velocity_from_metric(sample.velocity_mps, units)),
+            velocity: Some(UnitConverter::velocity_from_metric(
+                sample.velocity_mps,
+                units,
+            )),
             energy: Some(UnitConverter::energy_from_metric(sample.energy_j, units)),
             time: Some(sample.time_s),
             lead_adj: None,
@@ -18000,7 +18148,10 @@ fn come_up_header_line(dist_unit: &str, adj_label: &str, vel_unit: &str) -> Stri
     let w = come_up_drop_label_width(adj_label);
     format!(
         "│Range ({:>2})|Drop ({:>w$})|Come-Up   │ Vel ({:>3})│Energy    │ Time (s) │",
-        dist_unit, adj_label, vel_unit, w = w
+        dist_unit,
+        adj_label,
+        vel_unit,
+        w = w
     )
 }
 
@@ -18094,8 +18245,10 @@ fn handle_powder(
     };
     if sweep_temps.is_none() {
         if !has_curve && temperature.is_none() {
-            return Err("--temperature is required (the shot-day air temperature), or use --sweep"
-                .to_string());
+            return Err(
+                "--temperature is required (the shot-day air temperature), or use --sweep"
+                    .to_string(),
+            );
         }
         if has_curve && powder_temp.is_none() && temperature.is_none() {
             return Err(
@@ -18160,7 +18313,10 @@ fn handle_powder(
                     _ => unreachable!("validated above"),
                 }
             } else {
-                (temperature.expect("validated above"), ambient_c.expect("validated above"))
+                (
+                    temperature.expect("validated above"),
+                    ambient_c.expect("validated above"),
+                )
             };
             vec![row_at(t_display, t_c)]
         }
@@ -18199,7 +18355,11 @@ fn handle_powder(
             println!();
             if rows.len() == 1 {
                 let r = &rows[0];
-                let temp_label = if has_curve { "Powder temp:" } else { "Shot temp:" };
+                let temp_label = if has_curve {
+                    "Powder temp:"
+                } else {
+                    "Shot temp:"
+                };
                 println!("  {:<20}{:.1} {}", temp_label, r.temp_display, temp_unit);
                 match r.shift_display {
                     Some(s) => println!(
@@ -18217,7 +18377,11 @@ fn handle_powder(
             } else {
                 let has_shift = rows.first().is_some_and(|r| r.shift_display.is_some());
                 let has_energy = rows.first().is_some_and(|r| r.energy_display.is_some());
-                print!("  {:>10}  {:>14}", format!("Temp ({})", temp_unit), format!("Velocity ({})", vel_unit));
+                print!(
+                    "  {:>10}  {:>14}",
+                    format!("Temp ({})", temp_unit),
+                    format!("Velocity ({})", vel_unit)
+                );
                 if has_shift {
                     print!("  {:>12}", format!("Shift ({})", vel_unit));
                 }
@@ -18265,8 +18429,9 @@ fn handle_powder(
             });
             if !has_curve {
                 result["sensitivity"] = serde_json::json!(sens_display);
-                result["reference_temp"] =
-                    serde_json::json!(round1(UnitConverter::temperature_from_metric(ref_temp_c, units)));
+                result["reference_temp"] = serde_json::json!(round1(
+                    UnitConverter::temperature_from_metric(ref_temp_c, units)
+                ));
             } else {
                 result["curve_points"] = serde_json::json!(curve_ref.expect("has_curve").len());
             }
@@ -18279,14 +18444,24 @@ fn handle_powder(
             if sweep_temps.is_some() {
                 result["sweep"] = serde_json::json!(rows_json);
             } else {
-                result["resolved"] = rows_json.into_iter().next().unwrap_or(serde_json::json!(null));
+                result["resolved"] = rows_json
+                    .into_iter()
+                    .next()
+                    .unwrap_or(serde_json::json!(null));
             }
-            println!("{}", serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?
+            );
         }
         OutputFormat::Csv => {
             let has_shift = rows.first().is_some_and(|r| r.shift_display.is_some());
             let has_energy = rows.first().is_some_and(|r| r.energy_display.is_some());
-            let mut header = format!("temperature_{},velocity_{}", temp_unit_ascii(units), vel_unit_ascii(units));
+            let mut header = format!(
+                "temperature_{},velocity_{}",
+                temp_unit_ascii(units),
+                vel_unit_ascii(units)
+            );
             if has_shift {
                 header.push_str(&format!(",shift_{}", vel_unit_ascii(units)));
             }
@@ -18425,18 +18600,36 @@ fn handle_recoil(
         OutputFormat::Table => {
             println!("Free Recoil (SAAMI Momentum Balance)");
             println!("=====================================");
-            println!("  Firearm weight:      {:.2} {}", firearm_weight, firearm_weight_unit);
-            println!("  Bullet weight:       {:.1} {}", bullet_weight, weight_unit);
-            println!("  Charge weight:       {:.1} {}", charge_weight, weight_unit);
+            println!(
+                "  Firearm weight:      {:.2} {}",
+                firearm_weight, firearm_weight_unit
+            );
+            println!(
+                "  Bullet weight:       {:.1} {}",
+                bullet_weight, weight_unit
+            );
+            println!(
+                "  Charge weight:       {:.1} {}",
+                charge_weight, weight_unit
+            );
             println!("  Muzzle velocity:     {:.1} {}", velocity, vel_unit);
             println!(
                 "  Gas velocity model:  {}  ({:.1} {})",
                 gas_model_desc, gas_velocity_display, vel_unit
             );
             println!();
-            println!("  Recoil velocity:     {:.2} {}", recoil_velocity_display, vel_unit);
-            println!("  Recoil energy:       {:.2} {}", recoil_energy_display, energy_unit);
-            println!("  Recoil impulse:      {:.3} {}", impulse_display, impulse_unit);
+            println!(
+                "  Recoil velocity:     {:.2} {}",
+                recoil_velocity_display, vel_unit
+            );
+            println!(
+                "  Recoil energy:       {:.2} {}",
+                recoil_energy_display, energy_unit
+            );
+            println!(
+                "  Recoil impulse:      {:.3} {}",
+                impulse_display, impulse_unit
+            );
         }
         OutputFormat::Json => {
             let result_json = serde_json::json!({
@@ -18457,7 +18650,10 @@ fn handle_recoil(
                 "recoil_energy": recoil_energy_display,
                 "impulse": impulse_display,
             });
-            println!("{}", serde_json::to_string_pretty(&result_json).map_err(|e| e.to_string())?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result_json).map_err(|e| e.to_string())?
+            );
         }
         OutputFormat::Csv => {
             println!(
@@ -18534,7 +18730,10 @@ fn handle_power_factor(
             println!("  Power factor (raw):  {:.2}", raw_pf);
             println!("  Power factor (scored): {:.0}", scored_pf);
             println!();
-            println!("  {:<8}  {:<26}  {:>8}  {:>6}  {:>18}", "Org", "Class", "Min PF", "Pass", "Velocity limit");
+            println!(
+                "  {:<8}  {:<26}  {:>8}  {:>6}  {:>18}",
+                "Org", "Class", "Min PF", "Pass", "Velocity limit"
+            );
             for r in &rows {
                 let vel_limit = match (r.min_velocity_fps, r.max_velocity_fps) {
                     (Some(min), Some(max)) => format!("{:.0}-{:.0} fps", min, max),
@@ -18580,7 +18779,10 @@ fn handle_power_factor(
                 "power_factor_scored": scored_pf,
                 "thresholds": rows_json,
             });
-            println!("{}", serde_json::to_string_pretty(&result_json).map_err(|e| e.to_string())?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result_json).map_err(|e| e.to_string())?
+            );
         }
         OutputFormat::Csv => {
             println!("organization,class,min_pf,pf_pass,min_velocity_fps,max_velocity_fps,velocity_pass,pass");
@@ -18591,8 +18793,12 @@ fn handle_power_factor(
                     r.class,
                     r.min_pf,
                     r.pf_pass,
-                    r.min_velocity_fps.map(|v| format!("{v:.0}")).unwrap_or_default(),
-                    r.max_velocity_fps.map(|v| format!("{v:.0}")).unwrap_or_default(),
+                    r.min_velocity_fps
+                        .map(|v| format!("{v:.0}"))
+                        .unwrap_or_default(),
+                    r.max_velocity_fps
+                        .map(|v| format!("{v:.0}"))
+                        .unwrap_or_default(),
                     r.velocity_pass.map(|b| b.to_string()).unwrap_or_default(),
                     r.pass,
                 );
@@ -18825,7 +19031,9 @@ fn handle_lead(
                         let lead_adj = match adjustment_unit {
                             AdjustmentUnit::Mil => sol.lead_mil / windage_cf,
                             AdjustmentUnit::Moa => sol.lead_moa / windage_cf,
-                            AdjustmentUnit::Smoa | AdjustmentUnit::Iphy => sol.lead_mil * smoa_per_mil() / windage_cf,
+                            AdjustmentUnit::Smoa | AdjustmentUnit::Iphy => {
+                                sol.lead_mil * smoa_per_mil() / windage_cf
+                            }
                             AdjustmentUnit::Clicks => windage_click
                                 .map(|c| clicks_for(lead_disp / windage_cf, r.range, &c) as f64)
                                 .unwrap_or(sol.lead_mil / windage_cf),
@@ -19679,7 +19887,15 @@ fn handle_range_table(
         };
 
         let drop_yd = UnitConverter::distance_from_metric(nw.drop_m, units);
-        let drop_adj = adjustment_display(drop_yd, range_display, adjustment_unit, elevation_click, zero_set_elevation_bias_mil, elevation_cf).value;
+        let drop_adj = adjustment_display(
+            drop_yd,
+            range_display,
+            adjustment_unit,
+            elevation_click,
+            zero_set_elevation_bias_mil,
+            elevation_cf,
+        )
+        .value;
 
         let wind_linear = match units {
             UnitSystem::Imperial => w.wind_drift_m / 0.0254,
@@ -19687,7 +19903,15 @@ fn handle_range_table(
         };
 
         let drift_yd = UnitConverter::distance_from_metric(w.wind_drift_m, units);
-        let wind_adj = windage_adjustment_display(drift_yd, range_display, windage_unit, windage_click, zero_set_windage_bias_mil, windage_cf).value;
+        let wind_adj = windage_adjustment_display(
+            drift_yd,
+            range_display,
+            windage_unit,
+            windage_click,
+            zero_set_windage_bias_mil,
+            windage_cf,
+        )
+        .value;
 
         rows.push(CardRow {
             range: current_range,
@@ -19872,7 +20096,10 @@ fn parse_compare_load_spec(
     })?;
     let num = |i: usize, field: &str| -> Result<f64, Box<dyn Error>> {
         let v: f64 = parts[i].trim().parse().map_err(|_| {
-            format!("invalid --load '{spec}': {field} '{}' is not a number", parts[i])
+            format!(
+                "invalid --load '{spec}': {field} '{}' is not a number",
+                parts[i]
+            )
         })?;
         if !v.is_finite() || v <= 0.0 {
             return Err(format!("invalid --load '{spec}': {field} must be finite and > 0").into());
@@ -20102,13 +20329,29 @@ fn handle_compare(
             let drop_yd = UnitConverter::distance_from_metric(nw.drop_m, units);
             // MBA-1360: compare has no --zero-set (multiple loads, no single profile to
             // look a set up in — the MBA-1358 flag-only precedent), so its bias is 0.0.
-            let drop_adj = adjustment_display(drop_yd, range_display, adjustment_unit, elevation_click, 0.0, elevation_cf).value;
+            let drop_adj = adjustment_display(
+                drop_yd,
+                range_display,
+                adjustment_unit,
+                elevation_click,
+                0.0,
+                elevation_cf,
+            )
+            .value;
             let wind_linear = match units {
                 UnitSystem::Imperial => w.wind_drift_m / 0.0254,
                 UnitSystem::Metric => w.wind_drift_m * 1000.0,
             };
             let drift_yd = UnitConverter::distance_from_metric(w.wind_drift_m, units);
-            let wind_adj = windage_adjustment_display(drift_yd, range_display, windage_unit, windage_click, 0.0, windage_cf).value;
+            let wind_adj = windage_adjustment_display(
+                drift_yd,
+                range_display,
+                windage_unit,
+                windage_click,
+                0.0,
+                windage_cf,
+            )
+            .value;
             rows.push(CardRow {
                 range: range_display,
                 drop_linear: Some(drop_linear),
@@ -20245,7 +20488,13 @@ fn handle_compare(
                 .map(|l| {
                     l.name
                         .chars()
-                        .map(|c| if c == ',' || c == '"' || c == '\n' { ' ' } else { c })
+                        .map(|c| {
+                            if c == ',' || c == '"' || c == '\n' {
+                                ' '
+                            } else {
+                                c
+                            }
+                        })
                         .collect()
                 })
                 .collect();
@@ -20332,7 +20581,9 @@ fn handle_compare(
                     let row = &res.rows[ri];
                     line.push_str(&format!(
                         "| {:>8.2} {:>8.2} {:>8.0} ",
-                        row.drop_adj.unwrap(), row.wind_adj.unwrap(), row.velocity.unwrap()
+                        row.drop_adj.unwrap(),
+                        row.wind_adj.unwrap(),
+                        row.velocity.unwrap()
                     ));
                 }
                 println!("{line}");
@@ -20420,9 +20671,18 @@ mod card_row_sentinel_tests {
         // where "333.200" belongs and vice versa -- pin both independently, not just the
         // whole-line equality above (which a future edit could narrow without noticing a
         // value went missing).
-        assert!(line.contains("333.200"), "drop_adj sentinel missing/misplaced: {line}");
-        assert!(line.contains("444.300"), "come_up sentinel missing/misplaced: {line}");
-        assert!(!line.contains("666.5"), "wind_adj has no come-ups column but its sentinel leaked in: {line}");
+        assert!(
+            line.contains("333.200"),
+            "drop_adj sentinel missing/misplaced: {line}"
+        );
+        assert!(
+            line.contains("444.300"),
+            "come_up sentinel missing/misplaced: {line}"
+        );
+        assert!(
+            !line.contains("666.5"),
+            "wind_adj has no come-ups column but its sentinel leaked in: {line}"
+        );
     }
 
     /// The come-ups CLICKS table/CSV numbers are pinned by nothing else: the golden suite
@@ -20443,8 +20703,14 @@ mod card_row_sentinel_tests {
             r.time.unwrap(),
         );
         assert_eq!(line, expected);
-        assert!(line.contains("333"), "drop_adj sentinel missing/misplaced: {line}");
-        assert!(line.contains("444"), "come_up sentinel missing/misplaced: {line}");
+        assert!(
+            line.contains("333"),
+            "drop_adj sentinel missing/misplaced: {line}"
+        );
+        assert!(
+            line.contains("444"),
+            "come_up sentinel missing/misplaced: {line}"
+        );
     }
 
     #[test]
@@ -20466,10 +20732,22 @@ mod card_row_sentinel_tests {
         // A drop_adj<->wind_adj swap (the two dial columns sitting either side of
         // wind_linear) would put "666.50" where "333.200" belongs and vice versa --
         // pin both independently, not just the whole-line equality above.
-        assert!(line.contains("222.1"), "drop_linear sentinel missing/misplaced: {line}");
-        assert!(line.contains("333.200"), "drop_adj sentinel missing/misplaced: {line}");
-        assert!(line.contains("555.4"), "wind_linear sentinel missing/misplaced: {line}");
-        assert!(line.contains("666.50"), "wind_adj sentinel missing/misplaced: {line}");
+        assert!(
+            line.contains("222.1"),
+            "drop_linear sentinel missing/misplaced: {line}"
+        );
+        assert!(
+            line.contains("333.200"),
+            "drop_adj sentinel missing/misplaced: {line}"
+        );
+        assert!(
+            line.contains("555.4"),
+            "wind_linear sentinel missing/misplaced: {line}"
+        );
+        assert!(
+            line.contains("666.50"),
+            "wind_adj sentinel missing/misplaced: {line}"
+        );
     }
 }
 
@@ -20580,9 +20858,9 @@ mod density_altitude_round_trip_tests {
 
             let temp_f = temp_c * 9.0 / 5.0 + 32.0;
             let pressure_inhg = pressure_hpa / 33.863_886_666_667; // matches pdf_dope_card::INHG_TO_HPA exactly
-            // calculate_density_altitude's own `_altitude_ft` parameter is unused (its DA model
-            // depends only on pressure and temperature) -- pass a deliberately wrong value (a
-            // large negative sentinel) to prove that at the same time.
+                                                                   // calculate_density_altitude's own `_altitude_ft` parameter is unused (its DA model
+                                                                   // depends only on pressure and temperature) -- pass a deliberately wrong value (a
+                                                                   // large negative sentinel) to prove that at the same time.
             let round_tripped_ft = calculate_density_altitude(-999_999.0, pressure_inhg, temp_f);
 
             assert!(
@@ -20607,8 +20885,7 @@ mod density_altitude_round_trip_tests {
 
                 let temp_f = temp_c * 9.0 / 5.0 + 32.0;
                 let pressure_inhg = pressure_hpa / 33.863_886_666_667; // matches pdf_dope_card::INHG_TO_HPA exactly
-                let round_tripped_ft =
-                    calculate_density_altitude(0.0, pressure_inhg, temp_f);
+                let round_tripped_ft = calculate_density_altitude(0.0, pressure_inhg, temp_f);
 
                 assert!(
                     (round_tripped_ft - da_ft).abs() < 1e-6,
@@ -20746,9 +21023,18 @@ mod profile_unit_tests {
                 },
             ]),
             drag_curve: Some(vec![
-                ProfileDragPoint { mach: 0.5, cd: 0.23 },
-                ProfileDragPoint { mach: 1.2, cd: 0.45 },
-                ProfileDragPoint { mach: 3.0, cd: 0.28 },
+                ProfileDragPoint {
+                    mach: 0.5,
+                    cd: 0.23,
+                },
+                ProfileDragPoint {
+                    mach: 1.2,
+                    cd: 0.45,
+                },
+                ProfileDragPoint {
+                    mach: 3.0,
+                    cd: 0.28,
+                },
             ]),
             ..base
         };
@@ -20765,7 +21051,10 @@ mod profile_unit_tests {
         assert_eq!(round_trip.drag_curve, with_v2_fields.drag_curve);
 
         // Same-unit short-circuit path (source == target) must also preserve them.
-        let same_unit = with_v2_fields.clone().converted_to(UnitSystem::Metric).unwrap();
+        let same_unit = with_v2_fields
+            .clone()
+            .converted_to(UnitSystem::Metric)
+            .unwrap();
         assert_eq!(same_unit.bc_segments, with_v2_fields.bc_segments);
         assert_eq!(same_unit.drag_curve, with_v2_fields.drag_curve);
     }
@@ -20842,7 +21131,10 @@ mod profile_unit_tests {
         assert!(json.contains("army-standard-metro"));
 
         let reloaded: ProfileData = serde_json::from_str(&json).unwrap();
-        assert_eq!(reloaded.bc_reference.as_deref(), Some("army-standard-metro"));
+        assert_eq!(
+            reloaded.bc_reference.as_deref(),
+            Some("army-standard-metro")
+        );
         assert_eq!(
             parse_bc_reference_profile_field(reloaded.bc_reference.as_deref()).unwrap(),
             BcReferenceStandard::ArmyStandardMetro
@@ -20876,8 +21168,7 @@ mod profile_unit_tests {
         let profile: ProfileData = serde_json::from_str(phase1_json).unwrap();
         assert_eq!(profile.pressure_reference, None);
         assert_eq!(
-            parse_pressure_reference_profile_field(profile.pressure_reference.as_deref())
-                .unwrap(),
+            parse_pressure_reference_profile_field(profile.pressure_reference.as_deref()).unwrap(),
             PressureReferenceMode::Absolute
         );
 
@@ -20899,8 +21190,7 @@ mod profile_unit_tests {
         let reloaded: ProfileData = serde_json::from_str(&json).unwrap();
         assert_eq!(reloaded.pressure_reference.as_deref(), Some("qnh"));
         assert_eq!(
-            parse_pressure_reference_profile_field(reloaded.pressure_reference.as_deref())
-                .unwrap(),
+            parse_pressure_reference_profile_field(reloaded.pressure_reference.as_deref()).unwrap(),
             PressureReferenceMode::Qnh
         );
     }
@@ -21077,7 +21367,10 @@ mod profile_unit_tests {
         assert_eq!(parse_angular_mil("28mil").unwrap(), 28.0);
         // Same expression order as the implementation (adjustment_factor(Mil) /
         // adjustment_factor(base)), so this is a bit-exact pin, not just "close enough".
-        assert_eq!(parse_angular_mil("34.38moa").unwrap(), 34.38 * 1000.0 / 3438.0);
+        assert_eq!(
+            parse_angular_mil("34.38moa").unwrap(),
+            34.38 * 1000.0 / 3438.0
+        );
         assert_eq!(parse_angular_mil("3.5smoa").unwrap(), 3.5 * 1000.0 / 3600.0);
         // iphy aliases smoa exactly, like parse_click_value's suffix set.
         assert_eq!(
@@ -21094,7 +21387,10 @@ mod profile_unit_tests {
     #[test]
     fn parse_angular_mil_requires_a_suffix() {
         let e = parse_angular_mil("5").unwrap_err();
-        assert!(e.contains("mil") && e.contains("moa") && e.contains("smoa"), "{e}");
+        assert!(
+            e.contains("mil") && e.contains("moa") && e.contains("smoa"),
+            "{e}"
+        );
         assert!(parse_angular_mil("").is_err());
         assert!(parse_angular_mil("mil").is_err()); // no numeric part
         assert!(parse_angular_mil("nanmil").is_err()); // must be finite
@@ -21140,27 +21436,53 @@ mod profile_unit_tests {
         assert_eq!(reloaded.hold_bound_left_mil, Some(6.0));
         assert_eq!(reloaded.hold_bound_right_mil, Some(6.5));
 
-        let optic = reloaded.optic_profile().unwrap().expect("elevation_click set");
+        let optic = reloaded
+            .optic_profile()
+            .unwrap()
+            .expect("elevation_click set");
         optic.validate().expect("well-formed optic profile");
         assert_eq!(optic.elevation_click, parse_click_value("0.1mil").unwrap());
         assert_eq!(optic.windage_click, parse_click_value("0.2mil").unwrap());
         assert_eq!(optic.clicks_per_revolution, Some(12));
         assert!(optic.zero_stop);
-        assert_eq!(optic.elevation_travel, Some(TravelLimits { up_mil: 28.0, down_mil: 5.0 }));
-        assert_eq!(optic.windage_travel, Some(TravelLimits { up_mil: 11.0, down_mil: 10.0 }));
+        assert_eq!(
+            optic.elevation_travel,
+            Some(TravelLimits {
+                up_mil: 28.0,
+                down_mil: 5.0
+            })
+        );
+        assert_eq!(
+            optic.windage_travel,
+            Some(TravelLimits {
+                up_mil: 11.0,
+                down_mil: 10.0
+            })
+        );
         assert_eq!(
             optic.turret_state,
-            Some(TurretState { elevation_mil: 3.5, windage_mil: -1.2 })
+            Some(TurretState {
+                elevation_mil: 3.5,
+                windage_mil: -1.2
+            })
         );
         assert_eq!(
             optic.reticle_hold_bounds,
-            Some(HoldBounds { up_mil: 4.0, down_mil: 12.0, left_mil: 6.0, right_mil: 6.5 })
+            Some(HoldBounds {
+                up_mil: 4.0,
+                down_mil: 12.0,
+                left_mil: 6.0,
+                right_mil: 6.5
+            })
         );
 
         // Unit-invariant (angular turret/reticle geometry, not linear) -- converted_to
         // must leave all twelve untouched, like elevation_click/windage_click.
         let imperial = reloaded.clone().converted_to(UnitSystem::Imperial).unwrap();
-        assert_eq!(imperial.elevation_travel_up_mil, reloaded.elevation_travel_up_mil);
+        assert_eq!(
+            imperial.elevation_travel_up_mil,
+            reloaded.elevation_travel_up_mil
+        );
         assert_eq!(imperial.hold_bound_right_mil, reloaded.hold_bound_right_mil);
         assert_eq!(
             imperial.turret_windage_dialed_mil,
@@ -21176,7 +21498,10 @@ mod profile_unit_tests {
             elevation_click: Some("0.25moa".to_string()),
             ..metric_profile()
         };
-        let optic = profile.optic_profile().unwrap().expect("elevation_click set");
+        let optic = profile
+            .optic_profile()
+            .unwrap()
+            .expect("elevation_click set");
         assert_eq!(optic.windage_click, optic.elevation_click); // windage falls back
         assert_eq!(optic.clicks_per_revolution, None);
         assert!(!optic.zero_stop); // absent -> false default
@@ -21184,7 +21509,9 @@ mod profile_unit_tests {
         assert_eq!(optic.windage_travel, None);
         assert_eq!(optic.turret_state, None);
         assert_eq!(optic.reticle_hold_bounds, None);
-        optic.validate().expect("a minimal optic profile is still valid");
+        optic
+            .validate()
+            .expect("a minimal optic profile is still valid");
     }
 
     /// `optic_profile()` returns `Ok(None)` only when NONE of the twelve fields are set
@@ -21246,7 +21573,10 @@ mod profile_unit_tests {
             turret_windage_dialed_mil: Some(0.0),
             ..metric_profile()
         };
-        let optic = profile.optic_profile().unwrap().expect("elevation_click set");
+        let optic = profile
+            .optic_profile()
+            .unwrap()
+            .expect("elevation_click set");
         let err = optic.validate().unwrap_err().to_string();
         assert!(err.contains("elevation"), "{err}");
         assert!(err.contains("outside its travel"), "{err}");
@@ -21297,7 +21627,10 @@ mod profile_unit_tests {
             clicks_per_revolution: Some(0),
             ..metric_profile()
         };
-        let optic = profile.optic_profile().unwrap().expect("elevation_click set");
+        let optic = profile
+            .optic_profile()
+            .unwrap()
+            .expect("elevation_click set");
         let err = optic.validate().unwrap_err().to_string();
         assert!(err.contains("clicks_per_revolution"), "{err}");
     }
@@ -21308,7 +21641,9 @@ mod profile_unit_tests {
     #[test]
     fn zero_sets_roundtrip_and_absent_key_stays_absent() {
         let mut profile = metric_profile();
-        assert!(!serde_json::to_string(&profile).unwrap().contains("zero_sets"));
+        assert!(!serde_json::to_string(&profile)
+            .unwrap()
+            .contains("zero_sets"));
 
         profile.zero_sets = Some(vec![
             ProfileZeroSet {
@@ -21428,8 +21763,8 @@ mod profile_unit_tests {
         assert_eq!(sel.windage_bias_mil, -0.1);
 
         // An explicit CLI zero still wins over the selected set.
-        let sel = resolve_zero_selection(Some("far"), Some(&profile), None, Some(150.0), None)
-            .unwrap();
+        let sel =
+            resolve_zero_selection(Some("far"), Some(&profile), None, Some(150.0), None).unwrap();
         assert_eq!(sel.zero_distance, Some(150.0));
         assert_eq!(sel.elevation_bias_mil, 0.25);
 
@@ -21441,10 +21776,9 @@ mod profile_unit_tests {
         let csv_set = zero_set_from_profile_csv(&csv, Some("R1")).expect("csv set");
         assert_eq!(csv_set.poi_up_mil, Some(0.3));
         assert_eq!(csv_set.poi_right_mil, Some(-0.1));
-        let err =
-            resolve_zero_selection(Some("nope"), Some(&profile), Some(&csv_set), None, None)
-                .map(|_| ())
-                .unwrap_err();
+        let err = resolve_zero_selection(Some("nope"), Some(&profile), Some(&csv_set), None, None)
+            .map(|_| ())
+            .unwrap_err();
         assert!(err.contains("available zero sets: far, R1"), "{err}");
 
         // The CSV set itself is selectable by row name.
@@ -21533,7 +21867,10 @@ mod profile_unit_tests {
                 drop_yd
             };
             let want = clicks_for(biased_drop_yd / cf, range_yd, &click) as f64;
-            assert_eq!(got, want, "drop_yd={drop_yd} range_yd={range_yd} bias_mil={bias_mil} cf={cf}");
+            assert_eq!(
+                got, want,
+                "drop_yd={drop_yd} range_yd={range_yd} bias_mil={bias_mil} cf={cf}"
+            );
         }
     }
 
@@ -21577,18 +21914,26 @@ mod profile_unit_tests {
             cf,
         );
 
-        assert_eq!(result.value, 140.0, "expected the bias-then-CF order's 140 clicks");
+        assert_eq!(
+            result.value, 140.0,
+            "expected the bias-then-CF order's 140 clicks"
+        );
         let wrong_order_clicks = {
             let base = (drop_yd / range_yd) * adjustment_factor(ClickBase::Mil);
             let angle_wrong = base / cf + bias_mil;
             (angle_wrong / click.size).round()
         };
-        assert_eq!(wrong_order_clicks, 130.0, "sanity: the wrong order really does diverge");
+        assert_eq!(
+            wrong_order_clicks, 130.0,
+            "sanity: the wrong order really does diverge"
+        );
         assert_ne!(result.value, wrong_order_clicks);
 
         // Bit-exact reconstruction: clicks*size + residual == the angle actually
         // quantized (recomputed independently here, the same way the boundary derives it).
-        let q = result.quantized.expect("clicks arm always returns Some(Quantized)");
+        let q = result
+            .quantized
+            .expect("clicks arm always returns Some(Quantized)");
         assert_eq!(q.clicks, 140);
         let biased_drop_yd = drop_yd + bias_mil / 1000.0 * range_yd;
         let angle = (biased_drop_yd / cf / range_yd) * adjustment_factor(ClickBase::Mil);
@@ -21705,8 +22050,13 @@ mod a7p_import_mapping_tests {
         assert_eq!(outcome.profile.zero_sets, None);
         assert_eq!(outcome.profile.elevation_click, None);
         assert_eq!(outcome.profile.windage_click, None);
-        assert!(outcome.report.unmapped.iter().any(|(f, msg)| f == "zero_x / zero_y"
-            && msg == "scope zeroing click offsets (-20000, 10000) — device click size not \
+        assert!(outcome
+            .report
+            .unmapped
+            .iter()
+            .any(|(f, msg)| f == "zero_x / zero_y"
+                && msg
+                    == "scope zeroing click offsets (-20000, 10000) — device click size not \
                         supplied; pass --zero-click to record the profile's turret \
                         graduation and convert this offset"));
 
@@ -21736,7 +22086,10 @@ mod a7p_import_mapping_tests {
         // identical supplied click (not via optic_profile()'s windage-falls-back-to-
         // elevation precedent, which only applies when windage_click is left unset) --
         // .a7p exposes only one device click size, for one physical turret.
-        assert_eq!(outcome.profile.elevation_click, outcome.profile.windage_click);
+        assert_eq!(
+            outcome.profile.elevation_click,
+            outcome.profile.windage_click
+        );
         assert_eq!(outcome.profile.elevation_click.as_deref(), Some("0.1mil"));
         assert_eq!(outcome.profile.windage_click.as_deref(), Some("0.1mil"));
         assert!(outcome
@@ -21748,14 +22101,21 @@ mod a7p_import_mapping_tests {
         // MBA-1360: the same click state is ALSO recorded as the "a7p-zero" zero set,
         // in DIAL-CORRECTION convention (negated angular POI offset): zeroed 1.0 mil
         // high / 2.0 mil right => dial corrections -1.0 mil up / -2.0 mil right.
-        let sets = outcome.profile.zero_sets.as_deref().expect("zero set stored");
+        let sets = outcome
+            .profile
+            .zero_sets
+            .as_deref()
+            .expect("zero set stored");
         assert_eq!(sets.len(), 1);
         assert_eq!(sets[0].name, "a7p-zero");
         assert_eq!(sets[0].zero_distance, None);
         let up_mil = sets[0].poi_up_mil.expect("up mil");
         let right_mil = sets[0].poi_right_mil.expect("right mil");
         assert!((up_mil - (-1.0)).abs() < 1e-12, "up_mil = {up_mil}");
-        assert!((right_mil - (-2.0)).abs() < 1e-12, "right_mil = {right_mil}");
+        assert!(
+            (right_mil - (-2.0)).abs() < 1e-12,
+            "right_mil = {right_mil}"
+        );
     }
 
     /// MBA-1348: `c_zero_w_pitch` (base pitch established at zeroing) stays unmapped --
@@ -21800,8 +22160,8 @@ mod a7p_import_mapping_tests {
         assert_eq!(p.drag_model, "G1");
         assert!((p.velocity - 792.0).abs() < 1e-9);
         assert!((p.bc - 0.716).abs() < 1e-9); // highest-velocity row wins
-        // Independent literal (not GRAIN_TO_GRAM) so this assertion still
-        // catches a corrupted grain->gram constant in production code.
+                                              // Independent literal (not GRAIN_TO_GRAM) so this assertion still
+                                              // catches a corrupted grain->gram constant in production code.
         assert!((p.mass - 300.0 * 0.06479891).abs() < 1e-9); // grams
         assert!((p.diameter - 0.338 * 25.4).abs() < 1e-9); // mm
         assert!((p.bullet_length.unwrap() - 1.8 * 25.4).abs() < 1e-9); // mm
@@ -21965,12 +22325,18 @@ mod adjustment_unit_tests {
         // 3.6 inches of drop at 100 yd = 0.1 yd drop over 100 yd... use exact math:
         // drop_yd/range_yd * 3600 == inches per 100 yd.
         let v = drop_to_adjustment(0.1, 100.0, AdjustmentUnit::Smoa);
-        assert!((v - 3.6).abs() < 1e-12, "0.1 yd @ 100 yd = 3.6 IPHY, got {v}");
+        assert!(
+            (v - 3.6).abs() < 1e-12,
+            "0.1 yd @ 100 yd = 3.6 IPHY, got {v}"
+        );
         let i = drop_to_adjustment(0.1, 100.0, AdjustmentUnit::Iphy);
         assert_eq!(v, i, "smoa and iphy are the same unit");
         // sanity vs existing: TMOA value must be larger number x smaller unit
         let t = drop_to_adjustment(0.1, 100.0, AdjustmentUnit::Moa);
-        assert!(t < v && (v / t - 1.047).abs() < 0.005, "tmoa {t} vs smoa {v}");
+        assert!(
+            t < v && (v / t - 1.047).abs() < 0.005,
+            "tmoa {t} vs smoa {v}"
+        );
     }
 
     #[test]
@@ -22036,7 +22402,8 @@ mod adjustment_unit_tests {
             AdjustmentUnit::Moa
         );
         // Windage clicks without elevation clicks: rejected, naming both flags.
-        let e = resolve_windage_unit(AdjustmentUnit::Mil, Some(AdjustmentUnit::Clicks)).unwrap_err();
+        let e =
+            resolve_windage_unit(AdjustmentUnit::Mil, Some(AdjustmentUnit::Clicks)).unwrap_err();
         assert!(e.contains("--windage-unit"), "{e}");
         assert!(e.contains("--adjustment-unit"), "{e}");
     }
@@ -22120,7 +22487,8 @@ mod adjustment_unit_tests {
             "profile windage_click must beat profile elevation_click"
         );
 
-        let flag_beats_profile = resolve_single_axis_click_value(Some("0.3moa"), Some(&profile)).unwrap();
+        let flag_beats_profile =
+            resolve_single_axis_click_value(Some("0.3moa"), Some(&profile)).unwrap();
         assert_eq!(flag_beats_profile, parse_click_value("0.3moa").unwrap());
     }
 
@@ -22144,7 +22512,10 @@ mod drag_model_arg_warning_tests {
     fn drag_model_arg_warning_only_flags_truly_unknown_strings() {
         // Every real family (MBA-1386 gave each one a dedicated table) resolves silently.
         for s in ["g1", "G2", "g5", "G6", "g7", "G8", "gi", "GS", "ra4"] {
-            assert!(drag_model_arg_warning(s).is_none(), "{s} should be recognized");
+            assert!(
+                drag_model_arg_warning(s).is_none(),
+                "{s} should be recognized"
+            );
         }
         let w = drag_model_arg_warning("banana").expect("must warn");
         assert!(w.contains("using G1"), "{w}");
@@ -22229,8 +22600,7 @@ mod cd_scale_tests {
     #[test]
     fn range_warning_fires_outside_the_typical_truing_band() {
         for v in [0.49, 2.01, 0.1, 5.0, 3.0] {
-            let w = cd_scale_range_warning(v)
-                .unwrap_or_else(|| panic!("cd_scale={v} must warn"));
+            let w = cd_scale_range_warning(v).unwrap_or_else(|| panic!("cd_scale={v} must warn"));
             assert!(w.contains("--cd-scale"), "{w}");
             assert!(w.contains("typical truing range (0.90-1.10)"), "{w}");
             assert!(w.contains(&format!("{v}")), "{w}");
@@ -22532,7 +22902,10 @@ mod profile_bc_segments_and_drag_curve_consumption_tests {
                 .iter()
                 .filter(|s| probe >= s.velocity_min && probe < s.velocity_max)
                 .count();
-            assert_eq!(hits, 1, "velocity {probe} fps must be claimed by exactly one band");
+            assert_eq!(
+                hits, 1,
+                "velocity {probe} fps must be claimed by exactly one band"
+            );
         }
     }
 
@@ -22570,9 +22943,18 @@ mod profile_bc_segments_and_drag_curve_consumption_tests {
     #[test]
     fn drag_table_from_profile_builds_a_valid_table() {
         let points = vec![
-            ProfileDragPoint { mach: 0.5, cd: 0.23 },
-            ProfileDragPoint { mach: 1.2, cd: 0.45 },
-            ProfileDragPoint { mach: 3.0, cd: 0.28 },
+            ProfileDragPoint {
+                mach: 0.5,
+                cd: 0.23,
+            },
+            ProfileDragPoint {
+                mach: 1.2,
+                cd: 0.45,
+            },
+            ProfileDragPoint {
+                mach: 3.0,
+                cd: 0.28,
+            },
         ];
         let table = drag_table_from_profile(&points).expect("valid table");
         assert_eq!(table.mach_values, vec![0.5, 1.2, 3.0]);
@@ -22581,7 +22963,10 @@ mod profile_bc_segments_and_drag_curve_consumption_tests {
 
     #[test]
     fn drag_table_from_profile_rejects_degenerate_input() {
-        let points = vec![ProfileDragPoint { mach: 0.5, cd: 0.23 }];
+        let points = vec![ProfileDragPoint {
+            mach: 0.5,
+            cd: 0.23,
+        }];
         assert!(drag_table_from_profile(&points).is_err());
     }
 }
@@ -22734,13 +23119,19 @@ mod dsf_cli_tests {
     #[test]
     fn parse_observed_drop_rejects_missing_suffix() {
         let e = parse_observed_drop("5.1").unwrap_err();
-        assert!(e.contains("mil") && e.contains("moa") && e.contains("in"), "{e}");
+        assert!(
+            e.contains("mil") && e.contains("moa") && e.contains("in"),
+            "{e}"
+        );
     }
 
     #[test]
     fn parse_observed_drop_rejects_garbage_number() {
         for bad in ["mil", "abcmil", "", "5.1.2moa"] {
-            assert!(parse_observed_drop(bad).is_err(), "{bad:?} must be rejected");
+            assert!(
+                parse_observed_drop(bad).is_err(),
+                "{bad:?} must be rejected"
+            );
         }
     }
 
@@ -22797,9 +23188,14 @@ mod dsf_cli_tests {
     fn observation_beyond_90pct_boundary() {
         assert!(!ballistics_engine::truing_dsf::dsf_observation_beyond_90pct(899.9, 1000.0));
         assert!(!ballistics_engine::truing_dsf::dsf_observation_beyond_90pct(900.0, 1000.0)); // exactly 90%: not beyond
-        assert!(ballistics_engine::truing_dsf::dsf_observation_beyond_90pct(900.1, 1000.0));
-        assert!(ballistics_engine::truing_dsf::dsf_observation_beyond_90pct(1000.0, 1000.0));
-        assert!(!ballistics_engine::truing_dsf::dsf_observation_beyond_90pct(500.0, 0.0)); // degenerate solved range
+        assert!(ballistics_engine::truing_dsf::dsf_observation_beyond_90pct(
+            900.1, 1000.0
+        ));
+        assert!(ballistics_engine::truing_dsf::dsf_observation_beyond_90pct(
+            1000.0, 1000.0
+        ));
+        assert!(!ballistics_engine::truing_dsf::dsf_observation_beyond_90pct(500.0, 0.0));
+        // degenerate solved range
     }
 
     // ---- mach_1_crossing_range_m / dsf_observation_warrants_90pct_warning (Critical #1) ----
@@ -22857,8 +23253,12 @@ mod dsf_cli_tests {
             sos,
             500.0,
         );
-        let crossing = ballistics_engine::truing_dsf::mach_1_crossing_range_m(&result).expect("must find a crossing");
-        assert!((crossing - (100.0 + 100.0 / 3.0)).abs() < 1e-6, "{crossing}");
+        let crossing = ballistics_engine::truing_dsf::mach_1_crossing_range_m(&result)
+            .expect("must find a crossing");
+        assert!(
+            (crossing - (100.0 + 100.0 / 3.0)).abs() < 1e-6,
+            "{crossing}"
+        );
     }
 
     #[test]
@@ -22882,14 +23282,36 @@ mod dsf_cli_tests {
     #[test]
     fn warrants_90pct_warning_requires_both_gates() {
         // Beyond 90% of range but still upstream of (or with no) Mach-1.0 crossing: no warning.
-        assert!(!ballistics_engine::truing_dsf::dsf_observation_warrants_90pct_warning(950.0, None, 1000.0));
-        assert!(!ballistics_engine::truing_dsf::dsf_observation_warrants_90pct_warning(950.0, Some(960.0), 1000.0));
+        assert!(
+            !ballistics_engine::truing_dsf::dsf_observation_warrants_90pct_warning(
+                950.0, None, 1000.0
+            )
+        );
+        assert!(
+            !ballistics_engine::truing_dsf::dsf_observation_warrants_90pct_warning(
+                950.0,
+                Some(960.0),
+                1000.0
+            )
+        );
 
         // Beyond the crossing but NOT beyond 90% of range: no warning.
-        assert!(!ballistics_engine::truing_dsf::dsf_observation_warrants_90pct_warning(500.0, Some(400.0), 1000.0));
+        assert!(
+            !ballistics_engine::truing_dsf::dsf_observation_warrants_90pct_warning(
+                500.0,
+                Some(400.0),
+                1000.0
+            )
+        );
 
         // Beyond both: warns.
-        assert!(ballistics_engine::truing_dsf::dsf_observation_warrants_90pct_warning(950.0, Some(400.0), 1000.0));
+        assert!(
+            ballistics_engine::truing_dsf::dsf_observation_warrants_90pct_warning(
+                950.0,
+                Some(400.0),
+                1000.0
+            )
+        );
     }
 
     #[test]
@@ -22900,8 +23322,14 @@ mod dsf_cli_tests {
             dsf: 1.1
         }]));
         assert!(!dsf_table_missing_transonic_coverage(&[
-            DsfPoint { mach: 0.5, dsf: 1.1 },
-            DsfPoint { mach: 0.95, dsf: 1.05 },
+            DsfPoint {
+                mach: 0.5,
+                dsf: 1.1
+            },
+            DsfPoint {
+                mach: 0.95,
+                dsf: 1.05
+            },
         ]));
         // Exactly at the 0.9 boundary counts as covered (< 0.9 is the gate, not <=).
         assert!(!dsf_table_missing_transonic_coverage(&[DsfPoint {
@@ -22915,8 +23343,14 @@ mod dsf_cli_tests {
     #[test]
     fn table_summary_formats_count_and_mach_span() {
         let points = vec![
-            DsfPoint { mach: 0.6, dsf: 1.1 },
-            DsfPoint { mach: 0.85, dsf: 1.02 },
+            DsfPoint {
+                mach: 0.6,
+                dsf: 1.1,
+            },
+            DsfPoint {
+                mach: 0.85,
+                dsf: 1.02,
+            },
         ];
         assert_eq!(dsf_table_summary(&points), "2 points, Mach 0.60-0.85");
     }
@@ -22936,7 +23370,9 @@ mod dsf_cli_tests {
     #[test]
     fn interpolates_linearly_between_bracketing_points() {
         let points = vec![pt(0.0, 1.0, 800.0), pt(100.0, 0.5, 700.0)];
-        let (y, v) = ballistics_engine::truing_dsf::interpolate_position_and_velocity(&points, 50.0).unwrap();
+        let (y, v) =
+            ballistics_engine::truing_dsf::interpolate_position_and_velocity(&points, 50.0)
+                .unwrap();
         assert!((y - 0.75).abs() < 1e-9);
         assert!((v - 750.0).abs() < 1e-9);
     }
@@ -22944,13 +23380,17 @@ mod dsf_cli_tests {
     #[test]
     fn interpolation_returns_none_past_the_last_point() {
         let points = vec![pt(0.0, 1.0, 800.0), pt(100.0, 0.5, 700.0)];
-        assert!(ballistics_engine::truing_dsf::interpolate_position_and_velocity(&points, 200.0).is_none());
+        assert!(
+            ballistics_engine::truing_dsf::interpolate_position_and_velocity(&points, 200.0)
+                .is_none()
+        );
     }
 
     #[test]
     fn interpolation_at_or_before_the_first_point_returns_its_own_values() {
         let points = vec![pt(0.0, 1.0, 800.0), pt(100.0, 0.5, 700.0)];
-        let (y, v) = ballistics_engine::truing_dsf::interpolate_position_and_velocity(&points, 0.0).unwrap();
+        let (y, v) =
+            ballistics_engine::truing_dsf::interpolate_position_and_velocity(&points, 0.0).unwrap();
         assert_eq!(y, 1.0);
         assert_eq!(v, 800.0);
     }
@@ -23018,7 +23458,10 @@ fn handle_hold_corridor(
         .split(',')
         .map(|token| {
             let value: f64 = token.trim().parse().map_err(|_| {
-                format!("invalid --ranges entry '{}': expected a number", token.trim())
+                format!(
+                    "invalid --ranges entry '{}': expected a number",
+                    token.trim()
+                )
             })?;
             Ok::<f64, String>(UnitConverter::distance_to_metric(value, units))
         })
@@ -23351,10 +23794,12 @@ fn parse_bdc_match_pair(token: &str, units: UnitSystem) -> Result<BdcMatchPair, 
             "invalid --mark-range '{token}': expected MIL:RANGE (e.g. 2.0:300)"
         ));
     }
-    let nominal_mil: f64 = parts[0]
-        .trim()
-        .parse()
-        .map_err(|_| format!("invalid --mark-range subtension '{}' in '{token}'", parts[0]))?;
+    let nominal_mil: f64 = parts[0].trim().parse().map_err(|_| {
+        format!(
+            "invalid --mark-range subtension '{}' in '{token}'",
+            parts[0]
+        )
+    })?;
     let range: f64 = parts[1]
         .trim()
         .parse()
@@ -23527,9 +23972,7 @@ fn handle_bdc_match(
                 UnitConverter::distance_from_metric(load.zero_distance_m, units),
                 dist_unit
             );
-            println!(
-                "Mark(mil)  Range({dist_unit})  Apparent(mil)  Drop(mil)  Residual(mil)"
-            );
+            println!("Mark(mil)  Range({dist_unit})  Apparent(mil)  Drop(mil)  Residual(mil)");
             println!("---------  ----------  -------------  ---------  -------------");
             for r in &residuals {
                 println!(
@@ -23558,10 +24001,7 @@ struct OptimalZeroTarget {
     height_m: Option<f64>,
 }
 
-fn parse_optimal_zero_target(
-    token: &str,
-    units: UnitSystem,
-) -> Result<OptimalZeroTarget, String> {
+fn parse_optimal_zero_target(token: &str, units: UnitSystem) -> Result<OptimalZeroTarget, String> {
     let parts: Vec<&str> = token.split(':').collect();
     if parts.len() != 1 && parts.len() != 2 {
         return Err(format!(
@@ -23745,7 +24185,9 @@ fn handle_optimal_zero(
             }
         })
         .collect();
-    let max_hold_mil = rows.iter().fold(0.0_f64, |acc, r| acc.max(r.hold_mil.abs()));
+    let max_hold_mil = rows
+        .iter()
+        .fold(0.0_f64, |acc, r| acc.max(r.hold_mil.abs()));
     let all_fit = rows.iter().all(|r| r.fits);
 
     let (dist_unit, size_unit) = match units {
@@ -23822,12 +24264,8 @@ fn reticle_format(output: OutputFormat) -> Result<ReticleFormat, Box<dyn Error>>
     match output {
         OutputFormat::Table => Ok(ReticleFormat::Table),
         OutputFormat::Json => Ok(ReticleFormat::Json),
-        OutputFormat::Csv => {
-            Err("reticle output has no CSV form; use -o table or -o json".into())
-        }
-        OutputFormat::Pdf => {
-            Err("reticle output has no PDF form; use -o table or -o json".into())
-        }
+        OutputFormat::Csv => Err("reticle output has no CSV form; use -o table or -o json".into()),
+        OutputFormat::Pdf => Err("reticle output has no PDF form; use -o table or -o json".into()),
     }
 }
 
@@ -23901,9 +24339,7 @@ fn print_reticle_import_report(
 
 /// One arc point as `1.20 right / 2.00 up mil` — signed milliradians spelled as directions,
 /// because "down_mil: -2.0" is exactly the sign the user should not have to reason about.
-fn format_reticle_arc_point(
-    point: ballistics_engine::reticle_import::VentumArcPoint,
-) -> String {
+fn format_reticle_arc_point(point: ballistics_engine::reticle_import::VentumArcPoint) -> String {
     format!(
         "{} / {} mil",
         format_reticle_arc_axis(point.right_mil, "left", "right"),
@@ -23971,8 +24407,7 @@ fn handle_reticle(action: ReticleAction, units: UnitSystem) -> Result<(), Box<dy
                     extent,
                     common,
                 } => (
-                    ReticleDescription::mil_grid(spacing, extent)
-                        .map_err(|e| e.to_string())?,
+                    ReticleDescription::mil_grid(spacing, extent).map_err(|e| e.to_string())?,
                     common,
                 ),
                 ReticleLayout::Tree {
@@ -23994,8 +24429,8 @@ fn handle_reticle(action: ReticleAction, units: UnitSystem) -> Result<(), Box<dy
                         .iter()
                         .map(|&(_, range_m, drop_mil)| (range_m, drop_mil))
                         .collect();
-                    let mut description = ReticleDescription::bdc_from_drops(&metric)
-                        .map_err(|e| e.to_string())?;
+                    let mut description =
+                        ReticleDescription::bdc_from_drops(&metric).map_err(|e| e.to_string())?;
                     // The library labels in meters (the schema is SI); this surface knows
                     // the user's display units, so it relabels with what they typed. The
                     // ladder's first mark is the center, hence the 1-offset.
@@ -24128,7 +24563,8 @@ fn handle_reticle(action: ReticleAction, units: UnitSystem) -> Result<(), Box<dy
                         "--diameter",
                     )?;
                     let zero_distance = require(
-                        zero_distance.or_else(|| profile_data.as_ref().and_then(|p| p.zero_distance)),
+                        zero_distance
+                            .or_else(|| profile_data.as_ref().and_then(|p| p.zero_distance)),
                         "--zero-distance",
                     )?;
                     // Same fallback `trajectory --saved-profile`/`come-ups --profile` use.
@@ -24167,10 +24603,7 @@ fn handle_reticle(action: ReticleAction, units: UnitSystem) -> Result<(), Box<dy
                     let point = curve.at_range(range_m).ok_or_else(|| {
                         format!(
                             "the trajectory does not reach {range} — it was sampled only to {:.1}",
-                            UnitConverter::distance_from_metric(
-                                curve.max_sampled_range_m(),
-                                units
-                            )
+                            UnitConverter::distance_from_metric(curve.max_sampled_range_m(), units)
                         )
                     })?;
                     (point.drop_mil, point.wind_mil, Some(point))
@@ -24368,8 +24801,12 @@ fn describe_solve_error(e: &SolveErrorEnvelopeV1) -> String {
 /// only ever described to this CLI surface one way (a solve-json v1 file), never a second
 /// flag-based shape.
 fn load_resolved_request(path: &Path) -> Result<ResolvedSolveRequestV1, Box<dyn Error>> {
-    let text = fs::read_to_string(path)
-        .map_err(|e| format!("could not read solve-json request file {}: {e}", path.display()))?;
+    let text = fs::read_to_string(path).map_err(|e| {
+        format!(
+            "could not read solve-json request file {}: {e}",
+            path.display()
+        )
+    })?;
     // Every failure mode below is prefixed with `path` too (review I2): `explain` reads TWO
     // files, and without this a decode/solve error is indistinguishable between `--a` and
     // `--b` -- `describe_solve_error` alone has no way to know which file it came from.
@@ -24436,9 +24873,16 @@ fn parse_input_axis(s: &str) -> Result<InputAxis, String> {
         .copied()
         .find(|&axis| axis_kebab_name(axis) == s)
         .ok_or_else(|| {
-            let mut names: Vec<&str> = InputAxis::ALL.iter().copied().map(axis_kebab_name).collect();
+            let mut names: Vec<&str> = InputAxis::ALL
+                .iter()
+                .copied()
+                .map(axis_kebab_name)
+                .collect();
             names.sort_unstable();
-            format!("unknown axis '{s}'; accepted axis names are: {}", names.join(", "))
+            format!(
+                "unknown axis '{s}'; accepted axis names are: {}",
+                names.join(", ")
+            )
         })
 }
 
@@ -24456,7 +24900,8 @@ fn axis_unit_suffix(axis: InputAxis) -> &'static str {
 /// the bounds are finite, ordered, and actually bracket the axis's nominal value is
 /// `tolerance_envelope`'s own job (`KernelError::InvalidDomain`).
 fn parse_domain_arg(s: &str) -> Result<(InputAxis, (f64, f64)), String> {
-    let malformed = || format!("invalid --domain '{s}': expected AXIS=LO:HI (e.g. wind-speed=0:20)");
+    let malformed =
+        || format!("invalid --domain '{s}': expected AXIS=LO:HI (e.g. wind-speed=0:20)");
     let (axis_part, range_part) = s.split_once('=').ok_or_else(malformed)?;
     let axis = parse_input_axis(axis_part.trim())?;
     let (lo_str, hi_str) = range_part.split_once(':').ok_or_else(malformed)?;
@@ -24480,9 +24925,9 @@ fn parse_domain_arg(s: &str) -> Result<(InputAxis, (f64, f64)), String> {
 /// non-finite) from "the value you typed after '=' is invalid." Naming the flag and the axis
 /// directly here avoids that misleading reuse.
 fn parse_sigma_arg(s: &str) -> Result<(InputAxis, f64), String> {
-    let (axis_part, value_part) = s
-        .split_once('=')
-        .ok_or_else(|| format!("invalid --sigma '{s}': expected AXIS=VALUE (e.g. wind-speed=1.5)"))?;
+    let (axis_part, value_part) = s.split_once('=').ok_or_else(|| {
+        format!("invalid --sigma '{s}': expected AXIS=VALUE (e.g. wind-speed=1.5)")
+    })?;
     let axis = parse_input_axis(axis_part.trim())?;
     let value_str = value_part.trim();
     let value: f64 = value_str
@@ -24534,7 +24979,10 @@ fn render_explain_table(report: &SolutionDiffReportV1) -> String {
 
     if !report.skipped_axes.is_empty() {
         let _ = writeln!(out);
-        let _ = writeln!(out, "skipped axes (excluded from that group's swap on both directions):");
+        let _ = writeln!(
+            out,
+            "skipped axes (excluded from that group's swap on both directions):"
+        );
         for s in &report.skipped_axes {
             let direction = format!("{:?}", s.direction);
             let group = format!("{:?}", s.group);
@@ -24698,8 +25146,12 @@ fn handle_tolerance(
     output: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
     match output {
-        OutputFormat::Csv => return Err("tolerance has no CSV form; use -o table or -o json".into()),
-        OutputFormat::Pdf => return Err("tolerance has no PDF form; use -o table or -o json".into()),
+        OutputFormat::Csv => {
+            return Err("tolerance has no CSV form; use -o table or -o json".into())
+        }
+        OutputFormat::Pdf => {
+            return Err("tolerance has no PDF form; use -o table or -o json".into())
+        }
         OutputFormat::Table | OutputFormat::Json => {}
     }
 
@@ -24709,7 +25161,9 @@ fn handle_tolerance(
         .collect::<Result<_, _>>()?;
     for (i, &axis) in axes.iter().enumerate() {
         if axes[..i].contains(&axis) {
-            return Err(format!("--axis {} was given more than once", axis_kebab_name(axis)).into());
+            return Err(
+                format!("--axis {} was given more than once", axis_kebab_name(axis)).into(),
+            );
         }
     }
 
@@ -24733,7 +25187,11 @@ fn handle_tolerance(
     for &axis in &axes {
         if !domains.iter().any(|(a, _)| *a == axis) {
             let unit = axis_unit_suffix(axis);
-            let hint = if unit.is_empty() { String::new() } else { format!(" (in {unit})") };
+            let hint = if unit.is_empty() {
+                String::new()
+            } else {
+                format!(" (in {unit})")
+            };
             let name = axis_kebab_name(axis);
             return Err(format!(
                 "--axis {name} has no matching --domain; supply one as --domain {name}=LO:HI{hint}"
@@ -24756,7 +25214,9 @@ fn handle_tolerance(
     let target_spec = parse_target_spec(&target, units).map_err(|e| e.to_string())?;
     let geometry = match target_spec {
         TargetSpec::Rect { width_m, height_m } => TargetGeometryV1::Rect { width_m, height_m },
-        TargetSpec::Circle { diameter_m } => TargetGeometryV1::Circle { radius_m: diameter_m / 2.0 },
+        TargetSpec::Circle { diameter_m } => TargetGeometryV1::Circle {
+            radius_m: diameter_m / 2.0,
+        },
     };
 
     let report = tolerance_envelope(&resolved, &axes, range_m, geometry, &domains)
@@ -24829,7 +25289,11 @@ fn render_error_budget_table(report: &ErrorBudgetReportV1) -> String {
         for u in &report.unavailable_sources {
             let name = axis_kebab_name(u.axis);
             let code = format!("{:?}", u.code);
-            let _ = writeln!(out, "  {name} (sigma {:.6}) [{code}] -- {}", u.sigma, u.reason);
+            let _ = writeln!(
+                out,
+                "  {name} (sigma {:.6}) [{code}] -- {}",
+                u.sigma, u.reason
+            );
         }
     }
 
@@ -24885,10 +25349,12 @@ fn handle_error_budget(
     let geometry = target
         .map(|spec| {
             parse_target_spec(&spec, units).map(|target_spec| match target_spec {
-                TargetSpec::Rect { width_m, height_m } => TargetGeometryV1::Rect { width_m, height_m },
-                TargetSpec::Circle { diameter_m } => {
-                    TargetGeometryV1::Circle { radius_m: diameter_m / 2.0 }
+                TargetSpec::Rect { width_m, height_m } => {
+                    TargetGeometryV1::Rect { width_m, height_m }
                 }
+                TargetSpec::Circle { diameter_m } => TargetGeometryV1::Circle {
+                    radius_m: diameter_m / 2.0,
+                },
             })
         })
         .transpose()
@@ -24929,7 +25395,11 @@ mod decision_support_axis_tests {
     /// CLI spelling and `parse_input_axis` would always return whichever comes first in `ALL`.
     #[test]
     fn every_axis_kebab_name_is_unique() {
-        let mut names: Vec<&str> = InputAxis::ALL.iter().copied().map(axis_kebab_name).collect();
+        let mut names: Vec<&str> = InputAxis::ALL
+            .iter()
+            .copied()
+            .map(axis_kebab_name)
+            .collect();
         let before = names.len();
         names.sort_unstable();
         names.dedup();
@@ -24965,13 +25435,19 @@ mod decision_support_axis_tests {
     fn domain_arg_rejects_malformed_tokens() {
         assert!(parse_domain_arg("wind-speed").is_err(), "missing '='");
         assert!(parse_domain_arg("wind-speed=0").is_err(), "missing ':'");
-        assert!(parse_domain_arg("wind-speed=lo:20").is_err(), "non-numeric lower bound");
+        assert!(
+            parse_domain_arg("wind-speed=lo:20").is_err(),
+            "non-numeric lower bound"
+        );
         assert!(parse_domain_arg("nope=0:20").is_err(), "unknown axis");
     }
 
     #[test]
     fn sigma_arg_parses_axis_and_value() {
-        assert_eq!(parse_sigma_arg("wind-speed=1.5"), Ok((InputAxis::WindSpeed, 1.5)));
+        assert_eq!(
+            parse_sigma_arg("wind-speed=1.5"),
+            Ok((InputAxis::WindSpeed, 1.5))
+        );
         assert_eq!(
             parse_sigma_arg("muzzle-velocity-mps=5.0"),
             Ok((InputAxis::MuzzleVelocityMps, 5.0))
@@ -24985,7 +25461,10 @@ mod decision_support_axis_tests {
     fn sigma_arg_rejects_malformed_unknown_or_invalid_tokens() {
         assert!(parse_sigma_arg("wind-speed").is_err(), "missing '='");
         assert!(parse_sigma_arg("nope=1.5").is_err(), "unknown axis");
-        assert!(parse_sigma_arg("wind-speed=abc").is_err(), "non-numeric value");
+        assert!(
+            parse_sigma_arg("wind-speed=abc").is_err(),
+            "non-numeric value"
+        );
         let negative = parse_sigma_arg("wind-speed=-1.0").unwrap_err();
         assert!(negative.contains("wind-speed"), "{negative}");
         let non_finite = parse_sigma_arg("wind-speed=NaN").unwrap_err();
@@ -25093,12 +25572,18 @@ mod decision_support_render_tests {
         let table = render_tolerance_table(&report);
 
         assert_eq!(table.matches("crosses the Left edge").count(), 1, "{table}");
-        assert_eq!(table.matches("crosses the Right edge").count(), 1, "{table}");
+        assert_eq!(
+            table.matches("crosses the Right edge").count(),
+            1,
+            "{table}"
+        );
         // Each of these fires once per DIRECTION (near and far), both directions being
         // identical in this synthetic fixture -- so 2, not 1, per axis; the point of the count
         // is that it is the SAME 2 either way, never mixed between the two axes below.
         assert_eq!(
-            table.matches("no bound within the configured domain").count(),
+            table
+                .matches("no bound within the configured domain")
+                .count(),
             2,
             "exactly one axis (wind-vertical), both directions, is merely unbounded: {table}"
         );
@@ -25148,8 +25633,7 @@ mod decision_support_render_tests {
     fn error_budget_table_renders_ranked_sources_gain_and_unavailable_sources() {
         let report = ErrorBudgetReportV1 {
             schema_version: 1,
-            method: "central_difference_first_order_propagation_gl20_panelled_pm6sigma"
-                .to_string(),
+            method: "central_difference_first_order_propagation_gl20_panelled_pm6sigma".to_string(),
             assumptions: vec!["Declared sources are treated as independent.".to_string()],
             unavailable_sources: vec![UnavailableSourceV1 {
                 axis: InputAxis::Altitude,
@@ -25217,8 +25701,14 @@ mod decision_support_render_tests {
         // `SourceContributionV1::p_hit_gain_if_perfect`'s own doc comment).
         assert!(table.contains("p_hit: 87.3%"), "{table}");
         assert_eq!(table.matches("gain if perfected").count(), 2, "{table}");
-        assert!(table.contains("44.160%"), "wind-speed's own large gain: {table}");
-        assert!(table.contains("0.008%"), "muzzle-velocity-mps's own tiny gain: {table}");
+        assert!(
+            table.contains("44.160%"),
+            "wind-speed's own large gain: {table}"
+        );
+        assert!(
+            table.contains("0.008%"),
+            "muzzle-velocity-mps's own tiny gain: {table}"
+        );
 
         // The unavailable source is named, with its reason, and never inside the ranked list.
         assert!(table.contains("unavailable sources"), "{table}");
@@ -25347,7 +25837,11 @@ fn render_dial_plan_table(report: &DialPlanReportV1) -> String {
 
     for (i, plan) in report.plans.iter().enumerate() {
         let _ = writeln!(out);
-        let feasible_word = if plan.feasible { "FEASIBLE" } else { "INFEASIBLE" };
+        let feasible_word = if plan.feasible {
+            "FEASIBLE"
+        } else {
+            "INFEASIBLE"
+        };
         let _ = writeln!(
             out,
             "#{} strategy: {} [{feasible_word}]",
@@ -25486,7 +25980,11 @@ fn handle_dial_plan(
                          with `profile save --elevation-click <SIZE><UNIT>`"
                     )
                 })?;
-            (optic, data.elevation_cf.unwrap_or(1.0), data.windage_cf.unwrap_or(1.0))
+            (
+                optic,
+                data.elevation_cf.unwrap_or(1.0),
+                data.windage_cf.unwrap_or(1.0),
+            )
         }
         None => {
             let Some(elev_str) = elevation_click.as_deref() else {
@@ -25502,15 +26000,22 @@ fn handle_dial_plan(
                 None => elevation_click_v,
             };
             let elevation_travel =
-                require_angular_pair("--travel-up", travel_up, "--travel-down", travel_down)?
-                    .map(|(up, down)| TravelLimits { up_mil: up, down_mil: down });
+                require_angular_pair("--travel-up", travel_up, "--travel-down", travel_down)?.map(
+                    |(up, down)| TravelLimits {
+                        up_mil: up,
+                        down_mil: down,
+                    },
+                );
             let windage_travel = require_angular_pair(
                 "--windage-travel-left",
                 windage_travel_left,
                 "--windage-travel-right",
                 windage_travel_right,
             )?
-            .map(|(left, right)| TravelLimits { down_mil: left, up_mil: right });
+            .map(|(left, right)| TravelLimits {
+                down_mil: left,
+                up_mil: right,
+            });
             let turret_state =
                 require_angular_pair("--turret-elev", turret_elev, "--turret-wind", turret_wind)?
                     .map(|(elevation_mil, windage_mil)| TurretState {
@@ -25538,10 +26043,20 @@ fn handle_dial_plan(
         elevation_mil: elevation.unwrap_or(0.0),
         windage_mil: windage.unwrap_or(0.0),
     };
-    let prefs = Preferences { prefer_hold, max_hold_mil: max_hold };
+    let prefs = Preferences {
+        prefer_hold,
+        max_hold_mil: max_hold,
+    };
 
-    let report = plan_corrections(correction, &optic, range_m, elevation_cf, windage_cf, &prefs)
-        .map_err(|e| e.to_string())?;
+    let report = plan_corrections(
+        correction,
+        &optic,
+        range_m,
+        elevation_cf,
+        windage_cf,
+        &prefs,
+    )
+    .map_err(|e| e.to_string())?;
 
     if matches!(output, OutputFormat::Json) {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -25590,8 +26105,12 @@ fn adaptive_card_display_row(r: &CardRow, units: UnitSystem) -> CardRow {
         come_up: r.come_up,
         wind_linear: r.wind_linear.map(linear_from_meters),
         wind_adj: r.wind_adj,
-        velocity: r.velocity.map(|v| UnitConverter::velocity_from_metric(v, units)),
-        energy: r.energy.map(|v| UnitConverter::energy_from_metric(v, units)),
+        velocity: r
+            .velocity
+            .map(|v| UnitConverter::velocity_from_metric(v, units)),
+        energy: r
+            .energy
+            .map(|v| UnitConverter::energy_from_metric(v, units)),
         time: r.time,
         lead_adj: r.lead_adj,
         wind_columns: r.wind_columns.clone(),
@@ -25674,7 +26193,11 @@ fn adaptive_card_error_message(err: CardError, units: UnitSystem) -> String {
             disp(start_m),
             disp(end_m)
         ),
-        CardError::AnchorOutsideDomain { anchor_m, start_m, end_m } => format!(
+        CardError::AnchorOutsideDomain {
+            anchor_m,
+            start_m,
+            end_m,
+        } => format!(
             "--anchor {:.3} {dist_unit} lies outside --start {:.3} {dist_unit} / --end \
              {:.3} {dist_unit}",
             disp(anchor_m),
@@ -25686,7 +26209,10 @@ fn adaptive_card_error_message(err: CardError, units: UnitSystem) -> String {
              --adjustment unit)"
         ),
         CardError::ZeroMaxRows => "--max-rows must be at least 1".to_string(),
-        CardError::DomainOutsideCurve { requested_m, curve_max_m } => format!(
+        CardError::DomainOutsideCurve {
+            requested_m,
+            curve_max_m,
+        } => format!(
             "--end {:.3} {dist_unit} is past the solved trajectory's last reachable point at \
              {:.3} {dist_unit}",
             disp(requested_m),
@@ -25715,8 +26241,16 @@ fn adaptive_card_footer(
     };
     let mut out = String::new();
     let _ = writeln!(out);
-    let _ = writeln!(out, "budget met: {}", if report.budget_met { "yes" } else { "no" });
-    let capped = if report.rows_capped { " (row cap reached)" } else { "" };
+    let _ = writeln!(
+        out,
+        "budget met: {}",
+        if report.budget_met { "yes" } else { "no" }
+    );
+    let capped = if report.rows_capped {
+        " (row cap reached)"
+    } else {
+        ""
+    };
     let _ = writeln!(out, "rows: {} of {max_rows} max{capped}", report.rows.len());
     let _ = writeln!(
         out,
@@ -25771,7 +26305,9 @@ fn handle_adaptive_card(
     // Optic is OPTIONAL here (unlike dial-plan): no --profile, or a --profile with no
     // turret/click data saved, both just mean "print exact, unquantized angles."
     let optic = match &profile_data {
-        Some(p) => p.optic_profile().map_err(|e| format!("profile '{}': {e}", p.name))?,
+        Some(p) => p
+            .optic_profile()
+            .map_err(|e| format!("profile '{}': {e}", p.name))?,
         None => None,
     };
     // elevation_cf/windage_cf live on ProfileData independently of the twelve turret/optic
@@ -25780,8 +26316,14 @@ fn handle_adaptive_card(
     // (MBA-1358), so this is never an out-of-band value in practice -- adaptive_card's own
     // CardError::InvalidTrackingCf check runs anyway, since this is also a public library
     // entry point other callers reach without the CLI's validation.
-    let elevation_cf = profile_data.as_ref().and_then(|p| p.elevation_cf).unwrap_or(1.0);
-    let windage_cf = profile_data.as_ref().and_then(|p| p.windage_cf).unwrap_or(1.0);
+    let elevation_cf = profile_data
+        .as_ref()
+        .and_then(|p| p.elevation_cf)
+        .unwrap_or(1.0);
+    let windage_cf = profile_data
+        .as_ref()
+        .and_then(|p| p.windage_cf)
+        .unwrap_or(1.0);
 
     let unit = adjustment.to_engine();
     let unit_label = adjustment.label();
@@ -25797,7 +26339,8 @@ fn handle_adaptive_card(
     let elevation_budget_printed = match elevation_budget {
         Some(v) => v * unit_factor,
         None => {
-            adaptive_card_default_budget_mil(optic.as_ref().map(|o| &o.elevation_click)) * unit_factor
+            adaptive_card_default_budget_mil(optic.as_ref().map(|o| &o.elevation_click))
+                * unit_factor
         }
     };
     let windage_budget_printed = match windage_budget {
@@ -25809,8 +26352,10 @@ fn handle_adaptive_card(
 
     let start_m = UnitConverter::distance_to_metric(start, units);
     let end_m = UnitConverter::distance_to_metric(end, units);
-    let anchors_m: Vec<f64> =
-        anchors.iter().map(|&a| UnitConverter::distance_to_metric(a, units)).collect();
+    let anchors_m: Vec<f64> = anchors
+        .iter()
+        .map(|&a| UnitConverter::distance_to_metric(a, units))
+        .collect();
 
     // MBA-1478: the SHARED card headroom, `card_sample_max_range_m`, the same one the other
     // four surfaces sample with. It replaces a private `end_m * 1.02`, which left this
@@ -25867,16 +26412,24 @@ fn handle_adaptive_card(
     let (end_m, anchors_m) = match truncation {
         Some(_) => (
             reachable_end_m,
-            anchors_m.into_iter().filter(|&a| a <= reachable_end_m).collect(),
+            anchors_m
+                .into_iter()
+                .filter(|&a| a <= reachable_end_m)
+                .collect(),
         ),
         None => (end_m, anchors_m),
     };
 
-    let click = optic.as_ref().map(|o| (&o.elevation_click, &o.windage_click));
+    let click = optic
+        .as_ref()
+        .map(|o| (&o.elevation_click, &o.windage_click));
     let req = AdaptiveRequest {
         domain_m: (start_m, end_m),
         anchors_m,
-        budget: AdaptiveBudget { elevation: elevation_budget_printed, windage: windage_budget_printed },
+        budget: AdaptiveBudget {
+            elevation: elevation_budget_printed,
+            windage: windage_budget_printed,
+        },
         max_rows,
         click,
         elevation_cf,
@@ -25893,8 +26446,11 @@ fn handle_adaptive_card(
         UnitSystem::Imperial => ("yd", "in", "fps", "ft-lb"),
         UnitSystem::Metric => ("m", "mm", "m/s", "J"),
     };
-    let display_rows: Vec<CardRow> =
-        report.rows.iter().map(|r| adaptive_card_display_row(r, units)).collect();
+    let display_rows: Vec<CardRow> = report
+        .rows
+        .iter()
+        .map(|r| adaptive_card_display_row(r, units))
+        .collect();
 
     match output {
         OutputFormat::Json => {
@@ -25924,9 +26480,7 @@ fn handle_adaptive_card(
                 "{}",
                 serde_json::to_string_pretty(&AdaptiveCardJson {
                     report: &report,
-                    truncated: truncation
-                        .as_ref()
-                        .map(|t| card_truncation_json(t, units)),
+                    truncated: truncation.as_ref().map(|t| card_truncation_json(t, units)),
                 })?
             );
         }
@@ -25948,7 +26502,10 @@ fn handle_adaptive_card(
                     r.time.unwrap()
                 );
             }
-            eprint!("{}", adaptive_card_footer(&report, units, unit_label, max_rows));
+            eprint!(
+                "{}",
+                adaptive_card_footer(&report, units, unit_label, max_rows)
+            );
         }
         OutputFormat::Table => {
             println!();
@@ -25976,11 +26533,16 @@ fn handle_adaptive_card(
             println!(
                 "└───────┴─────────┴─────────┴─────────┴─────────┴─────────┴─────────┴───────┘"
             );
-            print!("{}", adaptive_card_footer(&report, units, unit_label, max_rows));
+            print!(
+                "{}",
+                adaptive_card_footer(&report, units, unit_label, max_rows)
+            );
         }
         #[cfg(feature = "pdf")]
         OutputFormat::Pdf => {
-            let output_path = output_file.as_ref().ok_or("PDF output requires --output-file")?;
+            let output_path = output_file
+                .as_ref()
+                .ok_or("PDF output requires --output-file")?;
             let range_unit = match units {
                 UnitSystem::Imperial => RangeUnit::Yards,
                 UnitSystem::Metric => RangeUnit::Meters,
@@ -25989,12 +26551,14 @@ fn handle_adaptive_card(
             // own PdfMetadata convention -- HoldCurveLoad is already metric-normalized
             // regardless of --units, so this converts unconditionally rather than
             // branching on the run's own unit system.
-            let velocity_fps = UnitConverter::velocity_from_metric(load.velocity_mps, UnitSystem::Imperial);
+            let velocity_fps =
+                UnitConverter::velocity_from_metric(load.velocity_mps, UnitSystem::Imperial);
             let temperature_f =
                 UnitConverter::temperature_from_metric(load.temperature_c, UnitSystem::Imperial);
             let pressure_inhg =
                 UnitConverter::pressure_from_metric(load.pressure_hpa, UnitSystem::Imperial);
-            let altitude_ft = UnitConverter::altitude_from_metric(load.altitude_m, UnitSystem::Imperial);
+            let altitude_ft =
+                UnitConverter::altitude_from_metric(load.altitude_m, UnitSystem::Imperial);
             let wind_speed_mph =
                 UnitConverter::wind_from_metric(load.wind_speed_mps, UnitSystem::Imperial);
             let weight_gr = UnitConverter::mass_from_metric(load.mass_kg, UnitSystem::Imperial);
@@ -26004,7 +26568,10 @@ fn handle_adaptive_card(
                 .as_ref()
                 .map(|p| p.name.clone())
                 .unwrap_or_else(|| "Adaptive Card".to_string());
-            let bullet = profile_data.as_ref().and_then(|p| p.bullet_name.clone()).unwrap_or_default();
+            let bullet = profile_data
+                .as_ref()
+                .and_then(|p| p.bullet_name.clone())
+                .unwrap_or_default();
 
             let pdf_config = DopeCardConfig {
                 rifle_name,
@@ -26016,7 +26583,11 @@ fn handle_adaptive_card(
                 altitude_ft,
                 wind_speed_mph,
                 target_speed_mph: 0.0,
-                solver_mode: if cfg!(feature = "online") { "online".to_string() } else { "offline".to_string() },
+                solver_mode: if cfg!(feature = "online") {
+                    "online".to_string()
+                } else {
+                    "offline".to_string()
+                },
                 powder: String::new(),
                 bullet,
                 weight_gr,
@@ -26044,8 +26615,14 @@ fn handle_adaptive_card(
                 range_unit,
             )?;
             std::fs::write(output_path, &pdf_bytes)?;
-            eprintln!("Adaptive range card PDF written to: {}", output_path.display());
-            eprint!("{}", adaptive_card_footer(&report, units, unit_label, max_rows));
+            eprintln!(
+                "Adaptive range card PDF written to: {}",
+                output_path.display()
+            );
+            eprint!(
+                "{}",
+                adaptive_card_footer(&report, units, unit_label, max_rows)
+            );
         }
         #[cfg(not(feature = "pdf"))]
         OutputFormat::Pdf => {

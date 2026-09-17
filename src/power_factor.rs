@@ -284,14 +284,21 @@ mod tests {
                 .iter()
                 .find(|e| e.organization == "SASS" && e.class == class)
                 .unwrap();
-            assert!(row.velocity_pass == Some(true), "{class} at 400 fps must pass");
+            assert!(
+                row.velocity_pass == Some(true),
+                "{class} at 400 fps must pass"
+            );
             assert!(row.pass, "{class} at 400 fps must pass overall");
 
             let row = below_min
                 .iter()
                 .find(|e| e.organization == "SASS" && e.class == class)
                 .unwrap();
-            assert_eq!(row.velocity_pass, Some(false), "{class} at 399 fps must fail");
+            assert_eq!(
+                row.velocity_pass,
+                Some(false),
+                "{class} at 399 fps must fail"
+            );
             assert!(!row.pass);
         }
 

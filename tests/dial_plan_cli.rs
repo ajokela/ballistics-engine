@@ -23,7 +23,10 @@ fn bin() -> &'static str {
 }
 
 fn run(args: &[&str]) -> (String, String, bool) {
-    let output = Command::new(bin()).args(args).output().expect("run ballistics");
+    let output = Command::new(bin())
+        .args(args)
+        .output()
+        .expect("run ballistics");
     (
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -46,10 +49,15 @@ fn tempfile_dir(tag: &str) -> PathBuf {
 }
 
 fn save_profile(home: &Path, name: &str, extra: &[&str]) {
-    let mut args: Vec<&str> =
-        vec!["profile", "save", name, "-v", "2700", "-b", "0.475", "-m", "175", "-d", "0.308"];
+    let mut args: Vec<&str> = vec![
+        "profile", "save", name, "-v", "2700", "-b", "0.475", "-m", "175", "-d", "0.308",
+    ];
     args.extend_from_slice(extra);
-    let output = Command::new(bin()).env("HOME", home).args(&args).output().expect("profile save");
+    let output = Command::new(bin())
+        .env("HOME", home)
+        .args(&args)
+        .output()
+        .expect("profile save");
     assert!(
         output.status.success(),
         "profile save failed: {}",
@@ -58,11 +66,17 @@ fn save_profile(home: &Path, name: &str, extra: &[&str]) {
 }
 
 fn profile_path(home: &Path, name: &str) -> PathBuf {
-    home.join(".ballistics").join("profiles").join(format!("{name}.json"))
+    home.join(".ballistics")
+        .join("profiles")
+        .join(format!("{name}.json"))
 }
 
 fn run_with_home(home: &Path, args: &[&str]) -> (String, String, bool) {
-    let output = Command::new(bin()).env("HOME", home).args(args).output().expect("run ballistics");
+    let output = Command::new(bin())
+        .env("HOME", home)
+        .args(args)
+        .output()
+        .expect("run ballistics");
     (
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -81,8 +95,19 @@ fn run_with_home(home: &Path, args: &[&str]) -> (String, String, bool) {
 #[test]
 fn exact_click_alignment_ranks_dial_all_first_with_near_zero_residual() {
     let base = [
-        "--units", "metric", "dial-plan", "--elevation", "2.3mil", "--range", "600",
-        "--elevation-click", "0.1mil", "--travel-up", "30mil", "--travel-down", "5mil",
+        "--units",
+        "metric",
+        "dial-plan",
+        "--elevation",
+        "2.3mil",
+        "--range",
+        "600",
+        "--elevation-click",
+        "0.1mil",
+        "--travel-up",
+        "30mil",
+        "--travel-down",
+        "5mil",
     ];
 
     let mut json_args = base.to_vec();
@@ -92,8 +117,13 @@ fn exact_click_alignment_ranks_dial_all_first_with_near_zero_residual() {
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
     assert_eq!(v["plans"][0]["strategy"], "dial_all");
     assert_eq!(v["plans"][0]["feasible"], true);
-    let residual = v["plans"][0]["residual_linear_at_range_m"].as_f64().unwrap();
-    assert!(residual.abs() < 1e-6, "expected ~0 residual, got {residual}");
+    let residual = v["plans"][0]["residual_linear_at_range_m"]
+        .as_f64()
+        .unwrap();
+    assert!(
+        residual.abs() < 1e-6,
+        "expected ~0 residual, got {residual}"
+    );
     let elevation_instr = &v["plans"][0]["instructions"][0];
     assert_eq!(elevation_instr["axis"], "elevation");
     assert_eq!(elevation_instr["direction"], "up");
@@ -112,9 +142,21 @@ fn exact_click_alignment_ranks_dial_all_first_with_near_zero_residual() {
 #[test]
 fn clicks_per_revolution_annotation_shows_rev_phrasing() {
     let (table, stderr, ok) = run(&[
-        "--units", "metric", "dial-plan", "--elevation", "2.3mil", "--range", "600",
-        "--elevation-click", "0.1mil", "--travel-up", "30mil", "--travel-down", "5mil",
-        "--clicks-per-rev", "10",
+        "--units",
+        "metric",
+        "dial-plan",
+        "--elevation",
+        "2.3mil",
+        "--range",
+        "600",
+        "--elevation-click",
+        "0.1mil",
+        "--travel-up",
+        "30mil",
+        "--travel-down",
+        "5mil",
+        "--clicks-per-rev",
+        "10",
     ]);
     assert!(ok, "stderr: {stderr}");
     assert!(
@@ -133,16 +175,39 @@ fn clicks_per_revolution_annotation_shows_rev_phrasing() {
 #[test]
 fn infeasible_travel_still_exits_zero_and_names_the_violation() {
     let base = [
-        "--units", "metric", "dial-plan", "--elevation", "5mil", "--range", "100",
-        "--elevation-click", "0.1mil", "--travel-up", "1mil", "--travel-down", "1mil",
-        "--hold-up", "10mil", "--hold-down", "10mil", "--hold-left", "10mil", "--hold-right",
+        "--units",
+        "metric",
+        "dial-plan",
+        "--elevation",
+        "5mil",
+        "--range",
+        "100",
+        "--elevation-click",
+        "0.1mil",
+        "--travel-up",
+        "1mil",
+        "--travel-down",
+        "1mil",
+        "--hold-up",
+        "10mil",
+        "--hold-down",
+        "10mil",
+        "--hold-left",
+        "10mil",
+        "--hold-right",
         "10mil",
     ];
 
     let (table, stderr, ok) = run(&base);
-    assert!(ok, "an infeasibility analysis must still exit 0: stderr={stderr}");
+    assert!(
+        ok,
+        "an infeasibility analysis must still exit 0: stderr={stderr}"
+    );
     assert!(table.contains("INFEASIBLE"), "{table}");
-    assert!(table.contains("travel_exceeded"), "the violation must be named: {table}");
+    assert!(
+        table.contains("travel_exceeded"),
+        "the violation must be named: {table}"
+    );
 
     let mut json_args = base.to_vec();
     json_args.extend(["-o", "json"]);
@@ -156,8 +221,12 @@ fn infeasible_travel_still_exits_zero_and_names_the_violation() {
         .find(|p| p["strategy"] == "dial_all")
         .expect("a dial_all plan is always present");
     assert_eq!(dial_all["feasible"], false);
-    let kinds: Vec<&str> =
-        dial_all["limits_hit"].as_array().unwrap().iter().map(|l| l["kind"].as_str().unwrap()).collect();
+    let kinds: Vec<&str> = dial_all["limits_hit"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["kind"].as_str().unwrap())
+        .collect();
     assert!(kinds.contains(&"travel_exceeded"), "{kinds:?}");
 }
 
@@ -175,23 +244,47 @@ fn json_output_is_the_verbatim_pretty_printed_report() {
     };
 
     let optic = OpticProfile {
-        elevation_click: ClickValue { size: 0.1, base: ClickBase::Mil },
-        windage_click: ClickValue { size: 0.1, base: ClickBase::Mil },
+        elevation_click: ClickValue {
+            size: 0.1,
+            base: ClickBase::Mil,
+        },
+        windage_click: ClickValue {
+            size: 0.1,
+            base: ClickBase::Mil,
+        },
         clicks_per_revolution: None,
         zero_stop: false,
-        elevation_travel: Some(TravelLimits { up_mil: 30.0, down_mil: 5.0 }),
+        elevation_travel: Some(TravelLimits {
+            up_mil: 30.0,
+            down_mil: 5.0,
+        }),
         windage_travel: None,
         turret_state: None,
         reticle_hold_bounds: None,
     };
-    let correction = AngularCorrection { elevation_mil: 2.3, windage_mil: 0.0 };
+    let correction = AngularCorrection {
+        elevation_mil: 2.3,
+        windage_mil: 0.0,
+    };
     let expected = plan_corrections(correction, &optic, 600.0, 1.0, 1.0, &Preferences::default())
         .expect("valid inputs");
     let expected_json = serde_json::to_string_pretty(&expected).unwrap();
 
     let (stdout, stderr, ok) = run(&[
-        "--units", "metric", "dial-plan", "--elevation", "2.3mil", "--range", "600",
-        "--elevation-click", "0.1mil", "--travel-up", "30mil", "--travel-down", "5mil", "-o",
+        "--units",
+        "metric",
+        "dial-plan",
+        "--elevation",
+        "2.3mil",
+        "--range",
+        "600",
+        "--elevation-click",
+        "0.1mil",
+        "--travel-up",
+        "30mil",
+        "--travel-down",
+        "5mil",
+        "-o",
         "json",
     ]);
     assert!(ok, "stderr: {stderr}");
@@ -236,16 +329,45 @@ fn missing_both_profile_and_elevation_click_names_both_flags() {
 #[test]
 fn three_strategies_render_distinct_instruction_lines() {
     let (table, stderr, ok) = run(&[
-        "--units", "metric", "dial-plan", "--elevation", "2.34mil", "--windage", "1.16mil",
-        "--range", "100", "--elevation-click", "0.1mil", "--travel-up", "30mil", "--travel-down",
-        "5mil", "--windage-travel-left", "10mil", "--windage-travel-right", "10mil", "--hold-up",
-        "10mil", "--hold-down", "10mil", "--hold-left", "10mil", "--hold-right", "10mil",
+        "--units",
+        "metric",
+        "dial-plan",
+        "--elevation",
+        "2.34mil",
+        "--windage",
+        "1.16mil",
+        "--range",
+        "100",
+        "--elevation-click",
+        "0.1mil",
+        "--travel-up",
+        "30mil",
+        "--travel-down",
+        "5mil",
+        "--windage-travel-left",
+        "10mil",
+        "--windage-travel-right",
+        "10mil",
+        "--hold-up",
+        "10mil",
+        "--hold-down",
+        "10mil",
+        "--hold-left",
+        "10mil",
+        "--hold-right",
+        "10mil",
     ]);
     assert!(ok, "stderr: {stderr}");
 
-    let elevation_lines: Vec<&str> =
-        table.lines().filter(|l| l.trim_start().starts_with("elevation: dial")).collect();
-    assert_eq!(elevation_lines.len(), 3, "one elevation instruction line per plan: {table}");
+    let elevation_lines: Vec<&str> = table
+        .lines()
+        .filter(|l| l.trim_start().starts_with("elevation: dial"))
+        .collect();
+    assert_eq!(
+        elevation_lines.len(),
+        3,
+        "one elevation instruction line per plan: {table}"
+    );
     let mut unique = elevation_lines.clone();
     unique.sort_unstable();
     unique.dedup();
@@ -265,9 +387,11 @@ fn three_strategies_render_distinct_instruction_lines() {
 
 #[test]
 fn at_least_one_correction_axis_is_required() {
-    let (_, stderr, ok) =
-        run(&["dial-plan", "--range", "100", "--elevation-click", "0.1mil"]);
-    assert!(!ok, "neither --elevation nor --windage given must be rejected");
+    let (_, stderr, ok) = run(&["dial-plan", "--range", "100", "--elevation-click", "0.1mil"]);
+    assert!(
+        !ok,
+        "neither --elevation nor --windage given must be rejected"
+    );
     assert!(stderr.contains("--elevation"), "{stderr}");
     assert!(stderr.contains("--windage"), "{stderr}");
 }
@@ -276,8 +400,15 @@ fn at_least_one_correction_axis_is_required() {
 fn csv_and_pdf_are_rejected() {
     for format in ["csv", "pdf"] {
         let (_, stderr, ok) = run(&[
-            "dial-plan", "--elevation", "1mil", "--range", "100", "--elevation-click", "0.1mil",
-            "-o", format,
+            "dial-plan",
+            "--elevation",
+            "1mil",
+            "--range",
+            "100",
+            "--elevation-click",
+            "0.1mil",
+            "-o",
+            format,
         ]);
         assert!(!ok, "dial-plan -o {format} was accepted");
         assert!(stderr.contains("no "), "{format}: {stderr}");
@@ -292,11 +423,21 @@ fn profile_and_inline_optic_flags_conflict() {
     let (_, stderr, ok) = run_with_home(
         &home,
         &[
-            "dial-plan", "--profile", "rifle", "--elevation", "1mil", "--range", "100",
-            "--elevation-click", "0.2mil",
+            "dial-plan",
+            "--profile",
+            "rifle",
+            "--elevation",
+            "1mil",
+            "--range",
+            "100",
+            "--elevation-click",
+            "0.2mil",
         ],
     );
-    assert!(!ok, "combining --profile with an inline optic flag must be rejected");
+    assert!(
+        !ok,
+        "combining --profile with an inline optic flag must be rejected"
+    );
     assert!(stderr.contains("--profile"), "{stderr}");
 }
 
@@ -307,9 +448,20 @@ fn profile_without_optic_data_is_a_named_error() {
 
     let (_, stderr, ok) = run_with_home(
         &home,
-        &["dial-plan", "--profile", "bare", "--elevation", "1mil", "--range", "100"],
+        &[
+            "dial-plan",
+            "--profile",
+            "bare",
+            "--elevation",
+            "1mil",
+            "--range",
+            "100",
+        ],
     );
-    assert!(!ok, "a profile with no saved click graduation must be rejected");
+    assert!(
+        !ok,
+        "a profile with no saved click graduation must be rejected"
+    );
     assert!(stderr.contains("bare"), "{stderr}");
     assert!(stderr.contains("--elevation-click"), "{stderr}");
 }
@@ -336,8 +488,17 @@ fn profile_supplies_optic_and_tracking_cf_matches_the_worked_example() {
     let (stdout, stderr, ok) = run_with_home(
         &home,
         &[
-            "--units", "metric", "dial-plan", "--profile", "rifle", "--elevation", "5mil",
-            "--range", "100", "-o", "json",
+            "--units",
+            "metric",
+            "dial-plan",
+            "--profile",
+            "rifle",
+            "--elevation",
+            "5mil",
+            "--range",
+            "100",
+            "-o",
+            "json",
         ],
     );
     assert!(ok, "stderr: {stderr}");
@@ -355,7 +516,10 @@ fn profile_supplies_optic_and_tracking_cf_matches_the_worked_example() {
     let hold_mil = elevation["hold_mil"].as_f64().unwrap();
     assert!((hold_mil - 0.002).abs() < 1e-9, "{hold_mil}");
     let residual_mil = elevation["residual_mil"].as_f64().unwrap();
-    assert!(residual_mil.abs() < 1e-9, "hybrid must reconstruct exactly: {residual_mil}");
+    assert!(
+        residual_mil.abs() < 1e-9,
+        "hybrid must reconstruct exactly: {residual_mil}"
+    );
 }
 
 // ---- Review fix round 1: I1/I2/I3 (task-6-review.md) ----
@@ -407,12 +571,35 @@ fn inline_optic_flags_map_to_their_named_fields_with_distinct_sentinels() {
     const TURRET_WIND_CLICKS: i64 = 20; // 2.0mil / 0.1mil
 
     let base: Vec<&str> = vec![
-        "--units", "metric", "dial-plan", "--elevation-click", "0.1mil",
-        "--travel-up", TRAVEL_UP, "--travel-down", TRAVEL_DOWN,
-        "--windage-travel-left", WINDAGE_LEFT, "--windage-travel-right", WINDAGE_RIGHT,
-        "--hold-up", HOLD_UP, "--hold-down", HOLD_DOWN, "--hold-left", HOLD_LEFT,
-        "--hold-right", HOLD_RIGHT, "--turret-elev", TURRET_ELEV, "--turret-wind", TURRET_WIND,
-        "--range", "100", "-o", "json",
+        "--units",
+        "metric",
+        "dial-plan",
+        "--elevation-click",
+        "0.1mil",
+        "--travel-up",
+        TRAVEL_UP,
+        "--travel-down",
+        TRAVEL_DOWN,
+        "--windage-travel-left",
+        WINDAGE_LEFT,
+        "--windage-travel-right",
+        WINDAGE_RIGHT,
+        "--hold-up",
+        HOLD_UP,
+        "--hold-down",
+        HOLD_DOWN,
+        "--hold-left",
+        HOLD_LEFT,
+        "--hold-right",
+        HOLD_RIGHT,
+        "--turret-elev",
+        TURRET_ELEV,
+        "--turret-wind",
+        TURRET_WIND,
+        "--range",
+        "100",
+        "-o",
+        "json",
     ];
 
     // Runs `base` plus one huge (+-50mil) correction on `axis_flag`, and returns
@@ -429,9 +616,7 @@ fn inline_optic_flags_map_to_their_named_fields_with_distinct_sentinels() {
         let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
 
         let turret_check = |plan: &serde_json::Value| {
-            for (idx, expected_state) in
-                [(0, TURRET_ELEV_CLICKS), (1, TURRET_WIND_CLICKS)]
-            {
+            for (idx, expected_state) in [(0, TURRET_ELEV_CLICKS), (1, TURRET_WIND_CLICKS)] {
                 let instr = &plan["instructions"][idx];
                 let target = instr["target_clicks_from_zero"].as_i64().unwrap();
                 let delta = instr["delta_clicks"].as_i64().unwrap();
@@ -446,9 +631,17 @@ fn inline_optic_flags_map_to_their_named_fields_with_distinct_sentinels() {
             }
         };
 
-        let dial_all = v["plans"].as_array().unwrap().iter().find(|p| p["strategy"] == "dial_all")
+        let dial_all = v["plans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["strategy"] == "dial_all")
             .expect("dial_all plan present");
-        let hold_all = v["plans"].as_array().unwrap().iter().find(|p| p["strategy"] == "hold_all")
+        let hold_all = v["plans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["strategy"] == "hold_all")
             .expect("hold_all plan present");
         turret_check(dial_all);
         turret_check(hold_all);
@@ -478,26 +671,58 @@ fn inline_optic_flags_map_to_their_named_fields_with_distinct_sentinels() {
     // value) via dial_all, and pins --hold-down into the bound a POSITIVE elevation hold
     // consumes (the crossed correction-space/reticle-space rule) via hold_all.
     let a = probe("--elevation", "50mil", "elevation");
-    assert_eq!(a["dial_available_mil"].as_f64().unwrap(), sentinel(TRAVEL_UP), "{a}");
-    assert_eq!(a["hold_available_mil"].as_f64().unwrap(), sentinel(HOLD_DOWN), "{a}");
+    assert_eq!(
+        a["dial_available_mil"].as_f64().unwrap(),
+        sentinel(TRAVEL_UP),
+        "{a}"
+    );
+    assert_eq!(
+        a["hold_available_mil"].as_f64().unwrap(),
+        sentinel(HOLD_DOWN),
+        "{a}"
+    );
 
     // Probe B: elevation DOWN -- pins --travel-down and --hold-up (the negative-correction
     // bound), the opposite pair from probe A.
     let b = probe("--elevation", "-50mil", "elevation");
-    assert_eq!(b["dial_available_mil"].as_f64().unwrap(), sentinel(TRAVEL_DOWN), "{b}");
-    assert_eq!(b["hold_available_mil"].as_f64().unwrap(), sentinel(HOLD_UP), "{b}");
+    assert_eq!(
+        b["dial_available_mil"].as_f64().unwrap(),
+        sentinel(TRAVEL_DOWN),
+        "{b}"
+    );
+    assert_eq!(
+        b["hold_available_mil"].as_f64().unwrap(),
+        sentinel(HOLD_UP),
+        "{b}"
+    );
 
     // Probe C: windage RIGHT -- pins --windage-travel-right into TravelLimits::up_mil (the
     // crossed windage travel mapping I1 specifically calls out) and --hold-left.
     let c = probe("--windage", "50mil", "windage");
-    assert_eq!(c["dial_available_mil"].as_f64().unwrap(), sentinel(WINDAGE_RIGHT), "{c}");
-    assert_eq!(c["hold_available_mil"].as_f64().unwrap(), sentinel(HOLD_LEFT), "{c}");
+    assert_eq!(
+        c["dial_available_mil"].as_f64().unwrap(),
+        sentinel(WINDAGE_RIGHT),
+        "{c}"
+    );
+    assert_eq!(
+        c["hold_available_mil"].as_f64().unwrap(),
+        sentinel(HOLD_LEFT),
+        "{c}"
+    );
 
     // Probe D: windage LEFT -- pins --windage-travel-left into TravelLimits::down_mil and
     // --hold-right, the opposite pair from probe C.
     let d = probe("--windage", "-50mil", "windage");
-    assert_eq!(d["dial_available_mil"].as_f64().unwrap(), sentinel(WINDAGE_LEFT), "{d}");
-    assert_eq!(d["hold_available_mil"].as_f64().unwrap(), sentinel(HOLD_RIGHT), "{d}");
+    assert_eq!(
+        d["dial_available_mil"].as_f64().unwrap(),
+        sentinel(WINDAGE_LEFT),
+        "{d}"
+    );
+    assert_eq!(
+        d["hold_available_mil"].as_f64().unwrap(),
+        sentinel(HOLD_RIGHT),
+        "{d}"
+    );
 }
 
 /// I2a: `--prefer-hold` observably reorders `plans[0]`. `hold_all` and `hybrid` are BOTH
@@ -509,22 +734,44 @@ fn inline_optic_flags_map_to_their_named_fields_with_distinct_sentinels() {
 #[test]
 fn prefer_hold_flips_the_top_ranked_strategy_on_a_tie() {
     let base = [
-        "--units", "metric", "dial-plan", "--elevation-click", "0.1mil", "--elevation", "2.3mil",
-        "--range", "100", "--hold-up", "10mil", "--hold-down", "10mil", "--hold-left", "10mil",
-        "--hold-right", "10mil", "-o", "json",
+        "--units",
+        "metric",
+        "dial-plan",
+        "--elevation-click",
+        "0.1mil",
+        "--elevation",
+        "2.3mil",
+        "--range",
+        "100",
+        "--hold-up",
+        "10mil",
+        "--hold-down",
+        "10mil",
+        "--hold-left",
+        "10mil",
+        "--hold-right",
+        "10mil",
+        "-o",
+        "json",
     ];
 
     let (stdout, stderr, ok) = run(&base);
     assert!(ok, "stderr: {stderr}");
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(v["plans"][0]["strategy"], "hybrid", "default (no --prefer-hold): {v}");
+    assert_eq!(
+        v["plans"][0]["strategy"], "hybrid",
+        "default (no --prefer-hold): {v}"
+    );
 
     let mut with_flag = base.to_vec();
     with_flag.push("--prefer-hold");
     let (stdout, stderr, ok) = run(&with_flag);
     assert!(ok, "stderr: {stderr}");
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(v["plans"][0]["strategy"], "hold_all", "--prefer-hold must flip the tie: {v}");
+    assert_eq!(
+        v["plans"][0]["strategy"], "hold_all",
+        "--prefer-hold must flip the tie: {v}"
+    );
 }
 
 /// I2b: `--max-hold` observably tightens the effective hold bound and can flip `feasible`.
@@ -537,17 +784,44 @@ fn prefer_hold_flips_the_top_ranked_strategy_on_a_tie() {
 #[test]
 fn max_hold_can_force_hold_all_infeasible() {
     let base = [
-        "--units", "metric", "dial-plan", "--elevation-click", "0.1mil", "--elevation", "2.3mil",
-        "--range", "100", "--travel-up", "30mil", "--travel-down", "5mil", "--hold-up", "10mil",
-        "--hold-down", "10mil", "--hold-left", "10mil", "--hold-right", "10mil", "-o", "json",
+        "--units",
+        "metric",
+        "dial-plan",
+        "--elevation-click",
+        "0.1mil",
+        "--elevation",
+        "2.3mil",
+        "--range",
+        "100",
+        "--travel-up",
+        "30mil",
+        "--travel-down",
+        "5mil",
+        "--hold-up",
+        "10mil",
+        "--hold-down",
+        "10mil",
+        "--hold-left",
+        "10mil",
+        "--hold-right",
+        "10mil",
+        "-o",
+        "json",
     ];
 
     let (stdout, stderr, ok) = run(&base);
     assert!(ok, "stderr: {stderr}");
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let hold_all = v["plans"].as_array().unwrap().iter().find(|p| p["strategy"] == "hold_all")
+    let hold_all = v["plans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["strategy"] == "hold_all")
         .expect("hold_all plan present");
-    assert_eq!(hold_all["feasible"], true, "without --max-hold, 10mil covers a 2.3mil hold: {v}");
+    assert_eq!(
+        hold_all["feasible"], true,
+        "without --max-hold, 10mil covers a 2.3mil hold: {v}"
+    );
     assert!(hold_all["limits_hit"].as_array().unwrap().is_empty(), "{v}");
 
     let mut with_cap = base.to_vec();
@@ -555,9 +829,16 @@ fn max_hold_can_force_hold_all_infeasible() {
     let (stdout, stderr, ok) = run(&with_cap);
     assert!(ok, "stderr: {stderr}");
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let hold_all = v["plans"].as_array().unwrap().iter().find(|p| p["strategy"] == "hold_all")
+    let hold_all = v["plans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["strategy"] == "hold_all")
         .expect("hold_all plan present");
-    assert_eq!(hold_all["feasible"], false, "--max-hold 0.05mil must cap below the 2.3mil hold: {v}");
+    assert_eq!(
+        hold_all["feasible"], false,
+        "--max-hold 0.05mil must cap below the 2.3mil hold: {v}"
+    );
     let violation = hold_all["limits_hit"]
         .as_array()
         .unwrap()
@@ -581,20 +862,43 @@ fn max_hold_can_force_hold_all_infeasible() {
 #[test]
 fn imperial_range_converts_to_metres_and_scales_the_linear_residual() {
     let (stdout, stderr, ok) = run(&[
-        "--units", "imperial", "dial-plan", "--elevation-click", "0.1mil", "--elevation",
-        "2.34mil", "--range", "600", "--travel-up", "30mil", "--travel-down", "5mil", "-o",
+        "--units",
+        "imperial",
+        "dial-plan",
+        "--elevation-click",
+        "0.1mil",
+        "--elevation",
+        "2.34mil",
+        "--range",
+        "600",
+        "--travel-up",
+        "30mil",
+        "--travel-down",
+        "5mil",
+        "-o",
         "json",
     ]);
     assert!(ok, "stderr: {stderr}");
     let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
 
     let range_m = v["range_m"].as_f64().unwrap();
-    assert!((range_m - 548.64).abs() < 1e-9, "600 yards must convert to 548.64 m: {range_m}");
+    assert!(
+        (range_m - 548.64).abs() < 1e-9,
+        "600 yards must convert to 548.64 m: {range_m}"
+    );
 
-    let dial_all = v["plans"].as_array().unwrap().iter().find(|p| p["strategy"] == "dial_all")
+    let dial_all = v["plans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["strategy"] == "dial_all")
         .expect("dial_all plan present");
-    let e_res = dial_all["instructions"][0]["residual_mil"].as_f64().unwrap();
-    let w_res = dial_all["instructions"][1]["residual_mil"].as_f64().unwrap();
+    let e_res = dial_all["instructions"][0]["residual_mil"]
+        .as_f64()
+        .unwrap();
+    let w_res = dial_all["instructions"][1]["residual_mil"]
+        .as_f64()
+        .unwrap();
     let expected_linear =
         ((e_res / 1000.0 * range_m).powi(2) + (w_res / 1000.0 * range_m).powi(2)).sqrt();
     let reported_linear = dial_all["residual_linear_at_range_m"].as_f64().unwrap();

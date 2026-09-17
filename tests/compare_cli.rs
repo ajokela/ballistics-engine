@@ -8,7 +8,10 @@ use std::process::{Command, Output};
 const BIN: &str = env!("CARGO_BIN_EXE_ballistics");
 
 fn out(args: &[&str]) -> Output {
-    Command::new(BIN).args(args).output().expect("spawn ballistics")
+    Command::new(BIN)
+        .args(args)
+        .output()
+        .expect("spawn ballistics")
 }
 
 fn ok_stdout(o: &Output) -> String {
@@ -53,9 +56,15 @@ fn base_args<'a>(extra: &[&'a str]) -> Vec<&'a str> {
 #[test]
 fn table_lists_both_loads_and_all_ranges() {
     let stdout = ok_stdout(&out(&base_args(&[])));
-    assert!(stdout.contains("Load Comparison"), "missing title:\n{stdout}");
+    assert!(
+        stdout.contains("Load Comparison"),
+        "missing title:\n{stdout}"
+    );
     assert!(stdout.contains("175 SMK"), "missing load A name:\n{stdout}");
-    assert!(stdout.contains("168 ELD-M"), "missing load B name:\n{stdout}");
+    assert!(
+        stdout.contains("168 ELD-M"),
+        "missing load B name:\n{stdout}"
+    );
     for range in ["100", "200", "300", "400", "500"] {
         assert!(
             stdout.lines().any(|l| l.trim_start().starts_with(range)),
@@ -79,10 +88,18 @@ fn json_has_deltas_and_physical_ordering() {
     assert_eq!(a["delta_drop"].as_f64().unwrap(), 0.0);
     assert_eq!(a["delta_energy"].as_f64().unwrap(), 0.0);
     // Higher-BC load drops and drifts less at 500 and keeps more velocity
-    let (a_drop, b_drop) = (a["drop_adj"].as_f64().unwrap(), b["drop_adj"].as_f64().unwrap());
-    let (a_drift, b_drift) =
-        (a["drift_adj"].as_f64().unwrap(), b["drift_adj"].as_f64().unwrap());
-    assert!(b_drop.abs() < a_drop.abs(), "high BC should drop less: {b_drop} vs {a_drop}");
+    let (a_drop, b_drop) = (
+        a["drop_adj"].as_f64().unwrap(),
+        b["drop_adj"].as_f64().unwrap(),
+    );
+    let (a_drift, b_drift) = (
+        a["drift_adj"].as_f64().unwrap(),
+        b["drift_adj"].as_f64().unwrap(),
+    );
+    assert!(
+        b_drop.abs() < a_drop.abs(),
+        "high BC should drop less: {b_drop} vs {a_drop}"
+    );
     assert!(
         b_drift.abs() < a_drift.abs(),
         "high BC should drift less: {b_drift} vs {a_drift}"
@@ -90,9 +107,16 @@ fn json_has_deltas_and_physical_ordering() {
     assert!(b["velocity"].as_f64().unwrap() > a["velocity"].as_f64().unwrap());
     // Every numeric field is finite
     for load in &last {
-        for key in
-            ["drop", "drop_adj", "drift", "drift_adj", "velocity", "energy", "time", "delta_drop"]
-        {
+        for key in [
+            "drop",
+            "drop_adj",
+            "drift",
+            "drift_adj",
+            "velocity",
+            "energy",
+            "time",
+            "delta_drop",
+        ] {
             assert!(load[key].as_f64().unwrap().is_finite(), "non-finite {key}");
         }
     }
@@ -120,7 +144,10 @@ fn csv_has_sanitized_headers_and_row_per_range() {
     let header = lines.next().unwrap();
     assert!(header.starts_with("range_yd,"), "header: {header}");
     assert!(header.contains("A_drop_in"), "header: {header}");
-    assert!(header.contains("B x_drop_in"), "comma not sanitized: {header}");
+    assert!(
+        header.contains("B x_drop_in"),
+        "comma not sanitized: {header}"
+    );
     // 1 range column + 2 loads x 7 fields
     assert_eq!(header.split(',').count(), 1 + 2 * 7, "header: {header}");
     assert_eq!(lines.count(), 3, "expected 3 data rows");
@@ -153,7 +180,13 @@ fn metric_units_flow_through() {
 
 #[test]
 fn rejects_fewer_than_two_loads() {
-    let text = err_text(&out(&["compare", "--load", LOAD_A, "--zero-distance", "100"]));
+    let text = err_text(&out(&[
+        "compare",
+        "--load",
+        LOAD_A,
+        "--zero-distance",
+        "100",
+    ]));
     assert!(text.contains("at least 2 loads"), "got: {text}");
 }
 
@@ -161,31 +194,67 @@ fn rejects_fewer_than_two_loads() {
 fn rejects_malformed_specs_with_field_names() {
     // wrong field count
     let text = err_text(&out(&[
-        "compare", "--load", "A:g7:0.243", "--load", LOAD_B, "--zero-distance", "100",
+        "compare",
+        "--load",
+        "A:g7:0.243",
+        "--load",
+        LOAD_B,
+        "--zero-distance",
+        "100",
     ]));
     assert!(text.contains("NAME:DRAG:BC:MASS:VELOCITY"), "got: {text}");
     // bad drag model (MBA-1386: compare now accepts the full family, so the error
     // names it rather than the old g1/g7-only message)
     let text = err_text(&out(&[
-        "compare", "--load", "A:g9:0.2:170:2600", "--load", LOAD_B, "--zero-distance", "100",
+        "compare",
+        "--load",
+        "A:g9:0.2:170:2600",
+        "--load",
+        LOAD_B,
+        "--zero-distance",
+        "100",
     ]));
     assert!(text.contains("not a recognized drag model"), "got: {text}");
     // non-numeric BC
     let text = err_text(&out(&[
-        "compare", "--load", "A:g7:abc:170:2600", "--load", LOAD_B, "--zero-distance", "100",
+        "compare",
+        "--load",
+        "A:g7:abc:170:2600",
+        "--load",
+        LOAD_B,
+        "--zero-distance",
+        "100",
     ]));
     assert!(text.contains("BC"), "got: {text}");
     // non-positive velocity
     let text = err_text(&out(&[
-        "compare", "--load", "A:g7:0.2:170:0", "--load", LOAD_B, "--zero-distance", "100",
+        "compare",
+        "--load",
+        "A:g7:0.2:170:0",
+        "--load",
+        LOAD_B,
+        "--zero-distance",
+        "100",
     ]));
     assert!(text.contains("VELOCITY"), "got: {text}");
     // start >= end
     let text = err_text(&out(&[
-        "compare", "--load", LOAD_A, "--load", LOAD_B, "--zero-distance", "100", "--start",
-        "600", "--end", "500",
+        "compare",
+        "--load",
+        LOAD_A,
+        "--load",
+        LOAD_B,
+        "--zero-distance",
+        "100",
+        "--start",
+        "600",
+        "--end",
+        "500",
     ]));
-    assert!(text.contains("--start must be less than --end"), "got: {text}");
+    assert!(
+        text.contains("--start must be less than --end"),
+        "got: {text}"
+    );
 }
 
 #[test]
@@ -208,7 +277,10 @@ fn optional_diameter_field_is_accepted() {
         "--end",
         "300",
     ]));
-    assert!(stdout.contains("dia 0.338"), "explicit diameter not echoed:\n{stdout}");
+    assert!(
+        stdout.contains("dia 0.338"),
+        "explicit diameter not echoed:\n{stdout}"
+    );
 }
 
 #[test]
@@ -225,16 +297,34 @@ fn profile_bc_segments_flow_into_compare() {
     let save = Command::new(BIN)
         .env("HOME", &home)
         .args([
-            "profile", "save", "segtest", "-v", "2650", "-b", "0.243", "-m", "175", "-d",
-            "0.308", "--drag-model", "g7",
+            "profile",
+            "save",
+            "segtest",
+            "-v",
+            "2650",
+            "-b",
+            "0.243",
+            "-m",
+            "175",
+            "-d",
+            "0.308",
+            "--drag-model",
+            "g7",
         ])
         .output()
         .expect("spawn profile save");
-    assert!(save.status.success(), "{}", String::from_utf8_lossy(&save.stderr));
+    assert!(
+        save.status.success(),
+        "{}",
+        String::from_utf8_lossy(&save.stderr)
+    );
 
     // Inject two velocity-BC segments (velocity_mps is always m/s in ProfileData):
     // markedly higher BC than the scalar 0.243 so the trajectories must diverge.
-    let path = home.join(".ballistics").join("profiles").join("segtest.json");
+    let path = home
+        .join(".ballistics")
+        .join("profiles")
+        .join("segtest.json");
     let mut profile: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     profile["bc_segments"] = serde_json::json!([
@@ -267,7 +357,10 @@ fn profile_bc_segments_flow_into_compare() {
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
     let loads = v["compare"]["loads"].as_array().unwrap();
     assert_eq!(loads[0]["bc_segments"], false, "scalar twin mis-flagged");
-    assert_eq!(loads[1]["bc_segments"], true, "profile segments not detected");
+    assert_eq!(
+        loads[1]["bc_segments"], true,
+        "profile segments not detected"
+    );
 
     // Segments (higher BC everywhere) must produce measurably less drop at 600.
     let last = v["compare"]["rows"].as_array().unwrap().last().unwrap()["loads"]
@@ -299,7 +392,10 @@ fn profile_bc_segments_flow_into_compare() {
             .output()
             .expect("spawn compare table"),
     );
-    assert!(table.contains("[BC segments]"), "table legend missing tag:\n{table}");
+    assert!(
+        table.contains("[BC segments]"),
+        "table legend missing tag:\n{table}"
+    );
 
     fs::remove_dir_all(&home).ok();
 }

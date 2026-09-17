@@ -1,11 +1,11 @@
 #![no_main]
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Unstructured;
 use ballistics_engine::{
     AtmosphericConditions as Atmo, BallisticInputs as Inp, TrajectorySolver as Solver,
     WindConditions as Wind,
 };
 use ballistics_engine_fuzz::domain::valid_inputs;
+use libfuzzer_sys::fuzz_target;
 
 use engine_prev::{
     AtmosphericConditions as PAtmo, BallisticInputs as PInp, TrajectorySolver as PSolver,
@@ -31,14 +31,26 @@ fn response_sign_prev(base: &PInp) -> Option<i8> {
     Some(sign(y1 - y0))
 }
 
-fn sign(x: f64) -> i8 { if x > 1e-4 { 1 } else if x < -1e-4 { -1 } else { 0 } }
+fn sign(x: f64) -> i8 {
+    if x > 1e-4 {
+        1
+    } else if x < -1e-4 {
+        -1
+    } else {
+        0
+    }
+}
 
 fn drop_at_current(inputs: &Inp, range: f64) -> Option<f64> {
-    let r = Solver::new(inputs.clone(), Wind::default(), Atmo::default()).solve().ok()?;
+    let r = Solver::new(inputs.clone(), Wind::default(), Atmo::default())
+        .solve()
+        .ok()?;
     interp_y(r.points.iter().map(|p| (p.position.x, p.position.y)), range)
 }
 fn drop_at_prev(inputs: &PInp, range: f64) -> Option<f64> {
-    let r = PSolver::new(inputs.clone(), PWind::default(), PAtmo::default()).solve().ok()?;
+    let r = PSolver::new(inputs.clone(), PWind::default(), PAtmo::default())
+        .solve()
+        .ok()?;
     interp_y(r.points.iter().map(|p| (p.position.x, p.position.y)), range)
 }
 
@@ -49,7 +61,9 @@ fn interp_y<I: Iterator<Item = (f64, f64)>>(pts: I, range: f64) -> Option<f64> {
             let (x1, y1) = v[i - 1];
             let (x2, y2) = v[i];
             let dx = x2 - x1;
-            if dx.abs() < 1e-9 { return Some(y1); }
+            if dx.abs() < 1e-9 {
+                return Some(y1);
+            }
             let t = (range - x1) / dx;
             return Some(y1 + t * (y2 - y1));
         }
@@ -80,7 +94,9 @@ fn to_prev(c: &Inp) -> PInp {
 
 fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
-    let Ok(cur) = valid_inputs(&mut u) else { return };
+    let Ok(cur) = valid_inputs(&mut u) else {
+        return;
+    };
     let prev = to_prev(&cur);
 
     // RELATIONSHIP MODE: both versions must agree on the SIGN of the drop response
@@ -90,8 +106,10 @@ fuzz_target!(|data: &[u8]| {
         // BC->drop response (relationship-mode), not the direction itself.
         // Disagreement on a NON-zero sign is a regression in a qualitative property.
         if sc != 0 && sp != 0 {
-            assert_eq!(sc, sp,
-                "BC->drop response sign diverged: current={sc}, prev(0.21.5)={sp}");
+            assert_eq!(
+                sc, sp,
+                "BC->drop response sign diverged: current={sc}, prev(0.21.5)={sp}"
+            );
         }
     }
 });

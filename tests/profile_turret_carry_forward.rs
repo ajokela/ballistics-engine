@@ -129,7 +129,9 @@ fn save_expect_failure(home: &Path, name: &str, extra: &[&str]) -> String {
 fn stored(home: &Path, name: &str) -> serde_json::Value {
     serde_json::from_str(
         &std::fs::read_to_string(
-            home.join(".ballistics").join("profiles").join(format!("{name}.json")),
+            home.join(".ballistics")
+                .join("profiles")
+                .join(format!("{name}.json")),
         )
         .unwrap(),
     )
@@ -175,7 +177,10 @@ fn one_turret_flag_updates_while_the_rest_carry_forward() {
     save(&home, "rifle", "2700", &["--travel-up", "30mil"]);
     let after = stored(&home, "rifle");
 
-    assert_eq!(after["elevation_travel_up_mil"], 30.0, "the given flag must win");
+    assert_eq!(
+        after["elevation_travel_up_mil"], 30.0,
+        "the given flag must win"
+    );
     for key in TWELVE_KEYS {
         if key == "elevation_travel_up_mil" {
             continue;
@@ -206,7 +211,10 @@ fn clear_turret_removes_all_twelve_but_keeps_the_click() {
             "field {key} should be absent after --clear-turret: {after}"
         );
     }
-    assert_eq!(after["elevation_click"], "0.1mil", "click graduation is not one of the twelve");
+    assert_eq!(
+        after["elevation_click"], "0.1mil",
+        "click graduation is not one of the twelve"
+    );
 
     let output = Command::new(BIN)
         .env("HOME", &home)
@@ -251,7 +259,12 @@ fn clear_turret_conflicts_with_any_turret_flag() {
 #[test]
 fn clear_click_removes_both_clicks_when_nothing_else_needs_them() {
     let home = tempfile_dir("e");
-    save(&home, "rifle", "2700", &["--elevation-click", "0.1mil", "--windage-click", "0.2mil"]);
+    save(
+        &home,
+        "rifle",
+        "2700",
+        &["--elevation-click", "0.1mil", "--windage-click", "0.2mil"],
+    );
     let baseline = stored(&home, "rifle");
     assert_eq!(baseline["elevation_click"], "0.1mil");
     assert_eq!(baseline["windage_click"], "0.2mil");
@@ -281,7 +294,11 @@ fn clear_click_conflicts_with_click_flags() {
     let home = tempfile_dir("f");
     save(&home, "rifle", "2700", &["--elevation-click", "0.1mil"]);
 
-    let err = save_expect_failure(&home, "rifle", &["--clear-click", "--elevation-click", "0.2mil"]);
+    let err = save_expect_failure(
+        &home,
+        "rifle",
+        &["--clear-click", "--elevation-click", "0.2mil"],
+    );
     assert!(err.contains("--clear-click"), "{err}");
     assert!(err.contains("--elevation-click"), "{err}");
 
@@ -289,7 +306,13 @@ fn clear_click_conflicts_with_click_flags() {
     let err = save_expect_failure(
         &home,
         "rifle",
-        &["--clear-click", "--elevation-click", "0.2mil", "--windage-click", "0.3mil"],
+        &[
+            "--clear-click",
+            "--elevation-click",
+            "0.2mil",
+            "--windage-click",
+            "0.3mil",
+        ],
     );
     assert!(err.contains("--clear-click"), "{err}");
     assert!(err.contains("--elevation-click"), "{err}");
@@ -316,7 +339,10 @@ fn clear_click_alone_fails_validation_while_turret_fields_remain() {
     let after = stored(&home, "rifle");
     assert_eq!(after["elevation_click"], "0.1mil");
     for key in TWELVE_KEYS {
-        assert!(after.get(key).is_some(), "field {key} should be untouched: {after}");
+        assert!(
+            after.get(key).is_some(),
+            "field {key} should be untouched: {after}"
+        );
     }
 }
 
@@ -335,7 +361,10 @@ fn clear_click_and_clear_turret_together_clears_everything() {
     assert!(after.get("elevation_click").is_none(), "{after}");
     assert!(after.get("windage_click").is_none(), "{after}");
     for key in TWELVE_KEYS {
-        assert!(after.get(key).is_none(), "field {key} should be absent: {after}");
+        assert!(
+            after.get(key).is_none(),
+            "field {key} should be absent: {after}"
+        );
     }
 
     let output = Command::new(BIN)

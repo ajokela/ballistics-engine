@@ -13,9 +13,9 @@ const TARGET_M: f64 = 731.5; // ~800 yd — long enough that Coriolis deflection
 fn shot(latitude: f64, enable_coriolis: bool) -> BallisticInputs {
     BallisticInputs {
         target_distance: TARGET_M,
-        muzzle_velocity: 823.0,                 // m/s
-        bullet_mass: 168.0 * 0.00006479891,     // kg
-        bullet_diameter: 0.308 * 0.0254,         // m
+        muzzle_velocity: 823.0,             // m/s
+        bullet_mass: 168.0 * 0.00006479891, // kg
+        bullet_diameter: 0.308 * 0.0254,    // m
         bullet_length: 1.215 * 0.0254,
         caliber_inches: 0.308,
         weight_grains: 168.0,
@@ -43,8 +43,11 @@ fn fast_drift(latitude: f64, coriolis: bool) -> f64 {
 /// Lateral (Z) drift at the target from the validated cli_api solver.
 fn cli_drift(latitude: f64, coriolis: bool) -> f64 {
     let i = shot(latitude, coriolis);
-    let mut solver =
-        TrajectorySolver::new(i.clone(), WindConditions::default(), AtmosphericConditions::default());
+    let mut solver = TrajectorySolver::new(
+        i.clone(),
+        WindConditions::default(),
+        AtmosphericConditions::default(),
+    );
     solver.set_max_range(TARGET_M);
     let r = solver.solve().expect("cli_api solve");
     r.points.last().unwrap().position.z
@@ -63,8 +66,14 @@ fn fast_integrate_coriolis_matches_cli_api() {
         "fast_integrate Coriolis deflection should be non-trivial, got {fast_defl:.6} m"
     );
     // 2. Northern hemisphere North shot drifts RIGHT (+Z) in BOTH solvers.
-    assert!(cli_defl > 0.0, "cli Coriolis deflection should be +Z (right), got {cli_defl:.6} m");
-    assert!(fast_defl > 0.0, "fast Coriolis deflection should be +Z (right), got {fast_defl:.6} m");
+    assert!(
+        cli_defl > 0.0,
+        "cli Coriolis deflection should be +Z (right), got {cli_defl:.6} m"
+    );
+    assert!(
+        fast_defl > 0.0,
+        "fast Coriolis deflection should be +Z (right), got {fast_defl:.6} m"
+    );
     // 3. The two independent integrators agree on magnitude (loose tolerance: RK4 fixed-step
     //    fast path vs RK45 adaptive cli path differ slightly in TOF, hence the deflection).
     let rel = (fast_defl - cli_defl).abs() / cli_defl;
@@ -82,6 +91,12 @@ fn fast_integrate_coriolis_flips_with_hemisphere() {
     // Southern hemisphere flips the lateral Coriolis drift to LEFT (-Z).
     let north = fast_drift(45.0, true) - fast_drift(45.0, false);
     let south = fast_drift(-45.0, true) - fast_drift(-45.0, false);
-    assert!(north > 0.0, "N hemisphere should drift right (+Z), got {north:.6} m");
-    assert!(south < 0.0, "S hemisphere should drift left (-Z), got {south:.6} m");
+    assert!(
+        north > 0.0,
+        "N hemisphere should drift right (+Z), got {north:.6} m"
+    );
+    assert!(
+        south < 0.0,
+        "S hemisphere should drift left (-Z), got {south:.6} m"
+    );
 }

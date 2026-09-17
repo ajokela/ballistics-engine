@@ -10,11 +10,11 @@ use ballistics_engine::{
 
 fn base() -> BallisticInputs {
     BallisticInputs {
-        muzzle_velocity: 800.0,                 // m/s
+        muzzle_velocity: 800.0, // m/s
         bc_value: 0.5,
         bc_type: DragModel::G7,
-        bullet_mass: 168.0 * 0.00006479891,     // kg
-        bullet_diameter: 0.308 * 0.0254,         // m
+        bullet_mass: 168.0 * 0.00006479891, // kg
+        bullet_diameter: 0.308 * 0.0254,    // m
         bullet_length: 1.215 * 0.0254,
         caliber_inches: 0.308,
         weight_grains: 168.0,
@@ -170,7 +170,9 @@ fn from_csv_str_rejects_bad_decks() {
 #[test]
 fn sectional_density_denominator_sources() {
     let i = base();
-    let sd = i.sectional_density_lb_in2().expect("SD from imperial fields");
+    let sd = i
+        .sectional_density_lb_in2()
+        .expect("SD from imperial fields");
     assert!((sd - 168.0 / 7000.0 / (0.308 * 0.308)).abs() < 1e-12);
 
     // SI-only caller: imperial mirrors zeroed, SI kg/meters populated.

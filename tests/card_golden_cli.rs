@@ -31,30 +31,80 @@ fn bin() -> &'static str {
 
 fn stdout_of(args: &[&str]) -> String {
     let out = Command::new(bin()).args(args).output().expect("run");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8(out.stdout).expect("utf8")
 }
 
 const COME_UPS: &[&str] = &[
-    "come-ups", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
-    "--zero-distance", "100", "--start", "100", "--end", "300", "--step", "100",
+    "come-ups",
+    "-v",
+    "2700",
+    "-m",
+    "168",
+    "-d",
+    "0.308",
+    "-b",
+    "0.5",
+    "--zero-distance",
+    "100",
+    "--start",
+    "100",
+    "--end",
+    "300",
+    "--step",
+    "100",
 ];
 
 const RANGE_TABLE: &[&str] = &[
-    "range-table", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
-    "--zero-distance", "100", "--end", "300", "--step", "100",
+    "range-table",
+    "-v",
+    "2700",
+    "-m",
+    "168",
+    "-d",
+    "0.308",
+    "-b",
+    "0.5",
+    "--zero-distance",
+    "100",
+    "--end",
+    "300",
+    "--step",
+    "100",
 ];
 
 const WIND_CARD: &[&str] = &[
-    "wind-card", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5",
-    "--zero-distance", "100", "--end", "300",
+    "wind-card",
+    "-v",
+    "2700",
+    "-m",
+    "168",
+    "-d",
+    "0.308",
+    "-b",
+    "0.5",
+    "--zero-distance",
+    "100",
+    "--end",
+    "300",
 ];
 
 const COMPARE: &[&str] = &[
     "compare",
-    "--load", "175 SMK:g7:0.243:175:2650",
-    "--load", "168 ELD-M:g7:0.523:168:2700",
-    "--zero-distance", "100", "--end", "300", "--step", "100",
+    "--load",
+    "175 SMK:g7:0.243:175:2650",
+    "--load",
+    "168 ELD-M:g7:0.523:168:2700",
+    "--zero-distance",
+    "100",
+    "--end",
+    "300",
+    "--step",
+    "100",
 ];
 
 #[test]

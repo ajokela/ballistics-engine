@@ -44,8 +44,10 @@ fn write_temp_csv(name: &str, contents: &str) -> std::path::PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let path =
-        std::env::temp_dir().join(format!("mba1328_parity_{name}_{}_{nonce}.csv", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "mba1328_parity_{name}_{}_{nonce}.csv",
+        std::process::id()
+    ));
     std::fs::File::create(&path)
         .unwrap()
         .write_all(contents.as_bytes())
@@ -67,8 +69,10 @@ fn wasm_style_inputs(table: DragTable) -> BallisticInputs {
     inputs.sight_height = 2.0 * 0.0254; // WASM imperial default: 2 in
     inputs.muzzle_height = 60.0 * 0.0254; // WASM imperial default: 60 in (5 ft)
     inputs.target_height = 0.0;
-    inputs.bullet_length =
-        ballistics_engine::stability::estimate_bullet_length_m(inputs.bullet_diameter, inputs.bullet_mass);
+    inputs.bullet_length = ballistics_engine::stability::estimate_bullet_length_m(
+        inputs.bullet_diameter,
+        inputs.bullet_mass,
+    );
     if inputs.bullet_length <= 0.0 {
         inputs.bullet_length = inputs.bullet_diameter * 4.5;
     }
@@ -97,8 +101,11 @@ fn atmosphere_for_wasm_style() -> AtmosphericConditions {
 
 fn solve(table: DragTable) -> ballistics_engine::TrajectoryResult {
     let inputs = wasm_style_inputs(table);
-    let mut solver =
-        TrajectorySolver::new(inputs, WindConditions::default(), atmosphere_for_wasm_style());
+    let mut solver = TrajectorySolver::new(
+        inputs,
+        WindConditions::default(),
+        atmosphere_for_wasm_style(),
+    );
     solver.set_max_range(300.0 * 0.9144); // 300 yd, matching WASM's yards->meters conversion
     solver.set_time_step(0.001); // WASM default --time-step
     solver.solve().expect("solve")
@@ -111,7 +118,11 @@ fn assert_results_bit_identical(
     assert_eq!(a.points.len(), b.points.len(), "point count diverged");
     assert!(!a.points.is_empty(), "solve produced no points");
     for (i, (pa, pb)) in a.points.iter().zip(b.points.iter()).enumerate() {
-        assert_eq!(pa.time.to_bits(), pb.time.to_bits(), "point {i} time diverged");
+        assert_eq!(
+            pa.time.to_bits(),
+            pb.time.to_bits(),
+            "point {i} time diverged"
+        );
         assert_eq!(
             pa.velocity_magnitude.to_bits(),
             pb.velocity_magnitude.to_bits(),
@@ -185,8 +196,7 @@ fn wasm_and_native_drag_table_assembly_produce_identical_trajectory() {
     // Sanity precondition: DECK_CSV's table must actually be driving the solve (not silently
     // ignored), otherwise the bit-identical assertion above would be vacuous. Compare against a
     // flat, deliberately different low-drag curve.
-    let flat_table =
-        DragTable::from_csv_str("mach,cd\n0.0,0.10\n1.0,0.10\n2.5,0.10\n").unwrap();
+    let flat_table = DragTable::from_csv_str("mach,cd\n0.0,0.10\n1.0,0.10\n2.5,0.10\n").unwrap();
     let flat_result = solve(flat_table);
     assert!(
         (native_result.impact_velocity - flat_result.impact_velocity).abs() > 1.0,
@@ -204,8 +214,8 @@ fn wasm_and_native_loaders_reject_malformed_csv_identically() {
     let native_err = DragTable::from_file(&path).unwrap_err();
     std::fs::remove_file(&path).ok();
 
-    let wasm_err = DragTable::from_csv_str(std::str::from_utf8(bad.as_bytes()).unwrap())
-        .unwrap_err();
+    let wasm_err =
+        DragTable::from_csv_str(std::str::from_utf8(bad.as_bytes()).unwrap()).unwrap_err();
 
     assert_eq!(
         native_err, wasm_err,

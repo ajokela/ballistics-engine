@@ -22,16 +22,40 @@ fn bin() -> &'static str {
 /// The shared load fixture, as CLI args, with `$1` left as a placeholder for the
 /// subcommand-specific tail (domain/budget/output flags).
 const LOAD_ARGS: &[&str] = &[
-    "-v", "800", "-b", "0.223", "-m", "10.9", "-d", "7.82", "--drag-model", "g7",
-    "--sight-height", "45", "--zero-distance", "100", "--temperature", "15",
-    "--pressure", "1013.25", "--humidity", "50", "--wind-speed", "3", "--wind-direction", "90",
+    "-v",
+    "800",
+    "-b",
+    "0.223",
+    "-m",
+    "10.9",
+    "-d",
+    "7.82",
+    "--drag-model",
+    "g7",
+    "--sight-height",
+    "45",
+    "--zero-distance",
+    "100",
+    "--temperature",
+    "15",
+    "--pressure",
+    "1013.25",
+    "--humidity",
+    "50",
+    "--wind-speed",
+    "3",
+    "--wind-direction",
+    "90",
 ];
 
 fn run(tail: &[&str]) -> (String, String, bool) {
     let mut args: Vec<&str> = vec!["--units", "metric", "adaptive-card"];
     args.extend_from_slice(LOAD_ARGS);
     args.extend_from_slice(tail);
-    let output = Command::new(bin()).args(&args).output().expect("run ballistics");
+    let output = Command::new(bin())
+        .args(&args)
+        .output()
+        .expect("run ballistics");
     (
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -57,8 +81,16 @@ fn save_profile(home: &Path, name: &str, extra: &[&str]) {
     let mut args: Vec<&str> = vec!["--units", "metric", "profile", "save", name];
     args.extend_from_slice(LOAD_ARGS);
     args.extend_from_slice(extra);
-    let output = Command::new(bin()).env("HOME", home).args(&args).output().expect("profile save");
-    assert!(output.status.success(), "profile save failed: {}", String::from_utf8_lossy(&output.stderr));
+    let output = Command::new(bin())
+        .env("HOME", home)
+        .args(&args)
+        .output()
+        .expect("profile save");
+    assert!(
+        output.status.success(),
+        "profile save failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn run_with_home(home: &Path, tail: &[&str]) -> (String, String, bool) {
@@ -66,7 +98,11 @@ fn run_with_home(home: &Path, tail: &[&str]) -> (String, String, bool) {
     let output = {
         args.push("fixture");
         args.extend_from_slice(tail);
-        Command::new(bin()).env("HOME", home).args(&args).output().expect("run ballistics")
+        Command::new(bin())
+            .env("HOME", home)
+            .args(&args)
+            .output()
+            .expect("run ballistics")
     };
     (
         String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -83,13 +119,19 @@ fn happy_path_table_states_budget_met_and_worst_error_within_row_cap() {
     assert!(ok, "stderr: {stderr}");
     assert!(table.contains("budget met: yes"), "{table}");
     assert!(table.contains("worst error: elevation"), "{table}");
-    assert!(table.contains("verification grid: 0.9144 m step"), "{table}");
+    assert!(
+        table.contains("verification grid: 0.9144 m step"),
+        "{table}"
+    );
     assert!(table.contains("rows: "), "{table}");
 
     // Row count <= --max-rows (default 25), read back from the footer's own "rows: N of 25
     // max" line rather than re-deriving it, so this assertion fails if that line's shape
     // ever changes out from under it.
-    let rows_line = table.lines().find(|l| l.starts_with("rows: ")).expect("rows line");
+    let rows_line = table
+        .lines()
+        .find(|l| l.starts_with("rows: "))
+        .expect("rows line");
     let n: usize = rows_line
         .trim_start_matches("rows: ")
         .split_whitespace()
@@ -112,8 +154,17 @@ fn json_output_carries_schema_method_assumptions_and_budget_met() {
     assert!(ok, "stderr: {stderr}");
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
     assert_eq!(v["schema_version"], 1);
-    assert_eq!(v["method"], "greedy_worst_point_insertion_on_holdcurve_grid_v1");
-    assert_eq!(v["assumptions"].as_array().expect("assumptions array").len(), 5);
+    assert_eq!(
+        v["method"],
+        "greedy_worst_point_insertion_on_holdcurve_grid_v1"
+    );
+    assert_eq!(
+        v["assumptions"]
+            .as_array()
+            .expect("assumptions array")
+            .len(),
+        5
+    );
     assert_eq!(v["budget_met"], true);
     assert_eq!(v["rows_capped"], false);
     assert!(v["worst_elevation_error"].as_f64().unwrap() >= 0.0);
@@ -148,29 +199,58 @@ fn budget_below_click_floor_reports_not_met_with_the_measured_floor() {
     let (stdout, stderr, ok) = run_with_home(
         &home,
         &[
-            "--start", "300", "--end", "320", "--max-rows", "500",
-            "--elevation-budget", "0.001mil", "--windage-budget", "0.001mil",
-            "-o", "json",
+            "--start",
+            "300",
+            "--end",
+            "320",
+            "--max-rows",
+            "500",
+            "--elevation-budget",
+            "0.001mil",
+            "--windage-budget",
+            "0.001mil",
+            "-o",
+            "json",
         ],
     );
-    assert!(ok, "an honest budget-not-met report is still exit 0; stderr: {stderr}");
+    assert!(
+        ok,
+        "an honest budget-not-met report is still exit 0; stderr: {stderr}"
+    );
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
     assert_eq!(v["budget_met"], false);
-    assert_eq!(v["rows_capped"], false, "the row cap must not be what stopped this search");
+    assert_eq!(
+        v["rows_capped"], false,
+        "the row cap must not be what stopped this search"
+    );
     let worst = v["worst_elevation_error"].as_f64().unwrap();
     // Half of 0.1mil, measured -- close to but never over the floor Task 11's engine pins.
-    assert!((0.04..=0.0500001).contains(&worst), "worst_elevation_error {worst} not at the half-click floor");
+    assert!(
+        (0.04..=0.0500001).contains(&worst),
+        "worst_elevation_error {worst} not at the half-click floor"
+    );
 
     let (table, stderr, ok) = run_with_home(
         &home,
         &[
-            "--start", "300", "--end", "320", "--max-rows", "500",
-            "--elevation-budget", "0.001mil", "--windage-budget", "0.001mil",
+            "--start",
+            "300",
+            "--end",
+            "320",
+            "--max-rows",
+            "500",
+            "--elevation-budget",
+            "0.001mil",
+            "--windage-budget",
+            "0.001mil",
         ],
     );
     assert!(ok, "stderr: {stderr}");
     assert!(table.contains("budget met: no"), "{table}");
-    assert!(table.contains("worst error: elevation 0.05"), "footer must show the measured floor: {table}");
+    assert!(
+        table.contains("worst error: elevation 0.05"),
+        "footer must show the measured floor: {table}"
+    );
 
     let _ = std::fs::remove_dir_all(&home);
 }
@@ -179,9 +259,11 @@ fn budget_below_click_floor_reports_not_met_with_the_measured_floor() {
 
 #[test]
 fn anchor_outside_domain_is_a_usage_error_naming_the_flag() {
-    let (_stdout, stderr, ok) =
-        run(&["--start", "200", "--end", "500", "--anchor", "100"]);
-    assert!(!ok, "an out-of-domain anchor must be a usage error, not a silent drop");
+    let (_stdout, stderr, ok) = run(&["--start", "200", "--end", "500", "--anchor", "100"]);
+    assert!(
+        !ok,
+        "an out-of-domain anchor must be a usage error, not a silent drop"
+    );
     assert!(stderr.contains("--anchor"), "{stderr}");
     assert!(stderr.contains("--start"), "{stderr}");
     assert!(stderr.contains("--end"), "{stderr}");
@@ -194,16 +276,21 @@ fn anchor_outside_domain_is_a_usage_error_naming_the_flag() {
 
 #[test]
 fn elevation_budget_without_a_unit_suffix_is_a_usage_error_naming_the_flag() {
-    let (_stdout, stderr, ok) =
-        run(&["--start", "200", "--end", "500", "--elevation-budget", "0.1"]);
+    let (_stdout, stderr, ok) = run(&[
+        "--start",
+        "200",
+        "--end",
+        "500",
+        "--elevation-budget",
+        "0.1",
+    ]);
     assert!(!ok, "a budget with no unit suffix must be a usage error");
     assert!(stderr.contains("--elevation-budget"), "{stderr}");
 }
 
 #[test]
 fn windage_budget_without_a_unit_suffix_is_a_usage_error_naming_the_flag() {
-    let (_stdout, stderr, ok) =
-        run(&["--start", "200", "--end", "500", "--windage-budget", "0.1"]);
+    let (_stdout, stderr, ok) = run(&["--start", "200", "--end", "500", "--windage-budget", "0.1"]);
     assert!(!ok, "a budget with no unit suffix must be a usage error");
     assert!(stderr.contains("--windage-budget"), "{stderr}");
 }
@@ -222,8 +309,14 @@ fn pdf_output_writes_a_non_empty_file() {
             .as_nanos()
     ));
     let (_stdout, stderr, ok) = run(&[
-        "--start", "200", "--end", "500", "-o", "pdf",
-        "--output-file", out_path.to_str().unwrap(),
+        "--start",
+        "200",
+        "--end",
+        "500",
+        "-o",
+        "pdf",
+        "--output-file",
+        out_path.to_str().unwrap(),
     ]);
     assert!(ok, "stderr: {stderr}");
     let bytes = std::fs::read(&out_path).expect("PDF written");
@@ -286,7 +379,11 @@ fn csv_output_is_clean_and_the_footer_goes_to_stderr() {
 #[test]
 fn default_budget_matches_half_the_profiles_click_exactly() {
     let home = tempfile_dir("default-budget");
-    save_profile(&home, "fixture", &["--elevation-click", "0.1mil", "--windage-click", "0.2mil"]);
+    save_profile(
+        &home,
+        "fixture",
+        &["--elevation-click", "0.1mil", "--windage-click", "0.2mil"],
+    );
 
     let (default_json, stderr, ok) =
         run_with_home(&home, &["--start", "200", "--end", "500", "-o", "json"]);
@@ -294,16 +391,26 @@ fn default_budget_matches_half_the_profiles_click_exactly() {
     let (explicit_json, stderr, ok) = run_with_home(
         &home,
         &[
-            "--start", "200", "--end", "500",
-            "--elevation-budget", "0.05mil", "--windage-budget", "0.1mil",
-            "-o", "json",
+            "--start",
+            "200",
+            "--end",
+            "500",
+            "--elevation-budget",
+            "0.05mil",
+            "--windage-budget",
+            "0.1mil",
+            "-o",
+            "json",
         ],
     );
     assert!(ok, "stderr: {stderr}");
 
     let default_v: serde_json::Value = serde_json::from_str(&default_json).unwrap();
     let explicit_v: serde_json::Value = serde_json::from_str(&explicit_json).unwrap();
-    assert_eq!(default_v["rows"].as_array().unwrap().len(), explicit_v["rows"].as_array().unwrap().len());
+    assert_eq!(
+        default_v["rows"].as_array().unwrap().len(),
+        explicit_v["rows"].as_array().unwrap().len()
+    );
     assert_eq!(
         default_v["worst_elevation_error"].as_f64().unwrap(),
         explicit_v["worst_elevation_error"].as_f64().unwrap()
@@ -324,12 +431,26 @@ fn default_budget_matches_half_the_profiles_click_exactly() {
 #[test]
 fn max_rows_caps_and_the_footer_admits_it() {
     let (table, stderr, ok) = run(&[
-        "--start", "200", "--end", "500", "--max-rows", "2",
-        "--elevation-budget", "0.001mil", "--windage-budget", "0.001mil",
+        "--start",
+        "200",
+        "--end",
+        "500",
+        "--max-rows",
+        "2",
+        "--elevation-budget",
+        "0.001mil",
+        "--windage-budget",
+        "0.001mil",
     ]);
-    assert!(ok, "an honest capped report is still exit 0; stderr: {stderr}");
+    assert!(
+        ok,
+        "an honest capped report is still exit 0; stderr: {stderr}"
+    );
     assert!(table.contains("budget met: no"), "{table}");
-    assert!(table.contains("rows: 2 of 2 max (row cap reached)"), "{table}");
+    assert!(
+        table.contains("rows: 2 of 2 max (row cap reached)"),
+        "{table}"
+    );
 }
 
 // ---- review fix I-1: a fractional row range must print the SAME value on every format,
@@ -347,8 +468,16 @@ fn fractional_anchor_range_agrees_across_json_table_and_csv() {
     };
     assert!(ok, "stderr: {stderr}");
     let v: serde_json::Value = serde_json::from_str(&json_out).expect("json");
-    let ranges: Vec<f64> = v["rows"].as_array().unwrap().iter().map(|r| r["range"].as_f64().unwrap()).collect();
-    assert!(ranges.contains(&412.5), "json must carry the exact anchor: {ranges:?}");
+    let ranges: Vec<f64> = v["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["range"].as_f64().unwrap())
+        .collect();
+    assert!(
+        ranges.contains(&412.5),
+        "json must carry the exact anchor: {ranges:?}"
+    );
 
     let (table, stderr, ok) = run(&tail);
     assert!(ok, "stderr: {stderr}");
@@ -387,8 +516,14 @@ fn whole_unit_ranges_still_print_as_bare_integers() {
     // A range cell formatted as "200.0" would render "│ 200.0 │" (6-wide, one decimal), not
     // "│   200 │" (6-wide, bare integer) -- the positive match below is mutually exclusive
     // with the regression this test guards against, so no separate negative check is needed.
-    assert!(table.contains("│   200 │"), "domain start must print as a bare integer: {table}");
-    assert!(table.contains("│   500 │"), "domain end must print as a bare integer: {table}");
+    assert!(
+        table.contains("│   200 │"),
+        "domain start must print as a bare integer: {table}"
+    );
+    assert!(
+        table.contains("│   500 │"),
+        "domain end must print as a bare integer: {table}"
+    );
 
     let (csv, stderr, ok) = run(&["--start", "200", "--end", "500", "-o", "csv"]);
     assert!(ok, "stderr: {stderr}");

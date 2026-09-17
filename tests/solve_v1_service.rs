@@ -620,7 +620,10 @@ fn resolved_request_echoes_every_consumed_raw_field() {
     assert_eq!(r.rifle.sight_offset_lateral_m, Some(0.012));
     assert_eq!(r.shot.zero_poi_up_m, Some(0.01));
     assert_eq!(r.shot.zero_poi_right_m, Some(-0.005));
-    assert!(r.shot.drops_reference.is_some(), "drops_reference must be echoed");
+    assert!(
+        r.shot.drops_reference.is_some(),
+        "drops_reference must be echoed"
+    );
     assert!(
         r.atmosphere.pressure_reference.is_some(),
         "pressure_reference must be echoed"

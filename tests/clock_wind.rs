@@ -85,8 +85,20 @@ fn clock_forms_match_their_degree_equivalents() {
         let mut args = vec!["come-ups"];
         args.extend_from_slice(LOAD);
         args.extend_from_slice(&[
-            "--zero-distance", "100", "--start", "200", "--end", "400", "--step", "100",
-            "--wind-speed", "10", "--wind-direction", dir, "-o", "json",
+            "--zero-distance",
+            "100",
+            "--start",
+            "200",
+            "--end",
+            "400",
+            "--step",
+            "100",
+            "--wind-speed",
+            "10",
+            "--wind-direction",
+            dir,
+            "-o",
+            "json",
         ]);
         run_ok(&home, &args)
     };
@@ -164,17 +176,30 @@ fn explicit_zero_direction_beats_the_location_csv() {
     std::fs::write(&csv, "SITE,WIND_DIR\nS1,270\n").unwrap();
     let csv = csv.to_str().unwrap();
 
-    let with_csv =
-        |extra: &[&str]| trajectory_json(&home, &[&["--location", csv, "--site", "S1"], extra].concat());
+    let with_csv = |extra: &[&str]| {
+        trajectory_json(
+            &home,
+            &[&["--location", csv, "--site", "S1"], extra].concat(),
+        )
+    };
 
     // Omitted flag: CSV wind direction still inherited (byte-identical to explicit 270).
-    assert_eq!(with_csv(&[]), trajectory_json(&home, &["--wind-direction", "270"]));
+    assert_eq!(
+        with_csv(&[]),
+        trajectory_json(&home, &["--wind-direction", "270"])
+    );
 
     // Explicit 0 now wins over the CSV: identical to a CSV-less headwind run...
     let explicit_zero = with_csv(&["--wind-direction", "0"]);
-    assert_eq!(explicit_zero, trajectory_json(&home, &["--wind-direction", "0"]));
+    assert_eq!(
+        explicit_zero,
+        trajectory_json(&home, &["--wind-direction", "0"])
+    );
     // ...and demonstrably NOT the CSV's 270.
-    assert_ne!(explicit_zero, trajectory_json(&home, &["--wind-direction", "270"]));
+    assert_ne!(
+        explicit_zero,
+        trajectory_json(&home, &["--wind-direction", "270"])
+    );
 
     // 12 o'clock == 0 degrees survives the same path (the sentinel would have
     // silently dropped it).
@@ -189,10 +214,13 @@ fn profile_save_stores_clock_entry_as_degrees() {
     args.extend_from_slice(LOAD);
     args.extend_from_slice(&["--wind-speed", "10", "--wind-direction", "6oc"]);
     let out = run(&home, &args);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
-    let stored =
-        std::fs::read_to_string(home.join(".ballistics/profiles/clocked.json")).unwrap();
+    let stored = std::fs::read_to_string(home.join(".ballistics/profiles/clocked.json")).unwrap();
     let v: serde_json::Value = serde_json::from_str(&stored).unwrap();
     assert_eq!(v["wind_direction"].as_f64(), Some(180.0));
 }

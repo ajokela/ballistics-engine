@@ -98,9 +98,9 @@ fn round_trip_recovers_a_known_crosswind_through_the_cli() {
     let misses: Vec<String> = [500.0_f64, 700.0]
         .iter()
         .map(|range_yd| {
-            let miss_in =
-                modeled_miss_right_m(&model, known_mph, range_yd * 0.9144).expect("forward model")
-                    / 0.0254;
+            let miss_in = modeled_miss_right_m(&model, known_mph, range_yd * 0.9144)
+                .expect("forward model")
+                / 0.0254;
             format!("{range_yd}:{miss_in}")
         })
         .collect();
@@ -175,7 +175,9 @@ fn spin_drift_is_subtracted_and_twist_rate_is_required() {
     );
 
     let spin_only = wind_json(&["--miss", &format!("800:{spin_in}")]);
-    let solved = spin_only["effective_crosswind"].as_f64().expect("crosswind");
+    let solved = spin_only["effective_crosswind"]
+        .as_f64()
+        .expect("crosswind");
     assert!(
         solved.abs() < 0.05,
         "pure spin drift must solve to ~0 wind, got {solved} mph"
@@ -229,20 +231,14 @@ fn coriolis_needs_both_latitude_and_azimuth() {
         "modelling Coriolis must change the solved wind: {a} vs {b}"
     );
 
-    for half in [
-        vec!["--latitude", "45"],
-        vec!["--shot-direction", "90"],
-    ] {
+    for half in [vec!["--latitude", "45"], vec!["--shot-direction", "90"]] {
         let mut args: Vec<&str> = vec!["true-wind", "--miss", "1000:30.0"];
         args.extend_from_slice(LOAD);
         args.extend_from_slice(&half);
         let output = run(&args);
         assert!(!output.status.success(), "half an earth frame must fail");
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("Coriolis can be modelled"),
-            "{stderr}"
-        );
+        assert!(stderr.contains("Coriolis can be modelled"), "{stderr}");
     }
 }
 
@@ -279,7 +275,10 @@ fn native_stdout_is_exactly_the_shared_formatter_output() {
         args.extend(["-o", flag]);
         let stdout = String::from_utf8(run_ok(&args).stdout).expect("utf8");
         let shared = format_wind_truing_report(&report, UnitSystem::Imperial, kind);
-        assert_eq!(stdout, shared, "native {flag} output must be the shared bytes");
+        assert_eq!(
+            stdout, shared,
+            "native {flag} output must be the shared bytes"
+        );
     }
 }
 
@@ -299,7 +298,8 @@ fn no_tracking_cf_flag_exists_on_true_wind() {
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("unexpected argument") || stderr.contains("--windage-cf")
+            stderr.contains("unexpected argument")
+                || stderr.contains("--windage-cf")
                 || stderr.contains("--elevation-cf"),
             "{stderr}"
         );
@@ -322,7 +322,7 @@ fn metric_reports_the_same_wind_in_metres_per_second() {
         "-b",
         "0.475",
         "-m",
-        "10.8862",  // 168 gr in grams
+        "10.8862", // 168 gr in grams
         "-d",
         "7.8232", // 0.308 in in mm
         "--drag-model",
@@ -420,7 +420,10 @@ fn existing_drop_truing_output_is_unchanged_by_the_forward_model_extension() {
         multi["fitted_muzzle_velocity"].as_f64().expect("f64"),
         2751.8600017612553
     );
-    assert_eq!(multi["fitted_bc"].as_f64().expect("f64"), 0.3137211864942836);
+    assert_eq!(
+        multi["fitted_bc"].as_f64().expect("f64"),
+        0.3137211864942836
+    );
     assert_eq!(
         multi["condition_number"].as_f64().expect("f64"),
         164.60013117624405

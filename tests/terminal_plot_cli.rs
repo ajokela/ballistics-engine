@@ -19,13 +19,26 @@ const BIN: &str = env!("CARGO_BIN_EXE_ballistics");
 /// A short, deterministic, flat-fire shot: short --max-range keeps the solve (and thus
 /// this file's golden) small, per the ticket's "keep goldens small".
 const BASE_ARGS: &[&str] = &[
-    "trajectory", "-v", "2700", "-m", "168", "-d", "0.308", "-b", "0.5", "--max-range", "100",
+    "trajectory",
+    "-v",
+    "2700",
+    "-m",
+    "168",
+    "-d",
+    "0.308",
+    "-b",
+    "0.5",
+    "--max-range",
+    "100",
 ];
 
 const CHART_MARKER: &str = "Drop vs Range:";
 
 fn run(args: &[&str]) -> Output {
-    Command::new(BIN).args(args).output().expect("run ballistics")
+    Command::new(BIN)
+        .args(args)
+        .output()
+        .expect("run ballistics")
 }
 
 fn run_ok(args: &[&str]) -> String {
@@ -131,7 +144,9 @@ fn bare_plot_defaults_to_braille() {
     // A braille canvas necessarily contains non-ASCII glyphs (U+2800..=U+28FF);
     // the ASCII fallback never does.
     assert!(
-        chart_section.chars().any(|c| c as u32 >= 0x2800 && c as u32 <= 0x28FF),
+        chart_section
+            .chars()
+            .any(|c| c as u32 >= 0x2800 && c as u32 <= 0x28FF),
         "bare --plot should render braille dots:\n{chart_section}"
     );
 }
@@ -231,9 +246,15 @@ fn plot_adds_velocity_and_energy_panels_imperial() {
     let stdout = run_ok(&args);
 
     let drop_idx = stdout.find("Drop vs Range:").expect("drop panel present");
-    let drift_idx = stdout.find("Lateral Drift vs Range:").expect("drift panel present");
-    let vel_idx = stdout.find("Velocity vs Range:").expect("velocity panel present");
-    let energy_idx = stdout.find("Energy vs Range:").expect("energy panel present");
+    let drift_idx = stdout
+        .find("Lateral Drift vs Range:")
+        .expect("drift panel present");
+    let vel_idx = stdout
+        .find("Velocity vs Range:")
+        .expect("velocity panel present");
+    let energy_idx = stdout
+        .find("Energy vs Range:")
+        .expect("energy panel present");
     assert!(
         drop_idx < drift_idx && drift_idx < vel_idx && vel_idx < energy_idx,
         "panels must appear in order drop, drift, velocity, energy:\n{stdout}"

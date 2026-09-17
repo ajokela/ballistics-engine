@@ -642,9 +642,7 @@ pub(crate) fn shot_frame_altitude(
     shot_y_m: f64,
     shooting_angle_rad: f64,
 ) -> f64 {
-    base_altitude_m
-        + downrange_m * shooting_angle_rad.sin()
-        + shot_y_m * shooting_angle_rad.cos()
+    base_altitude_m + downrange_m * shooting_angle_rad.sin() + shot_y_m * shooting_angle_rad.cos()
 }
 
 /// Enhanced local atmospheric calculation with variable lapse rates.
@@ -665,8 +663,13 @@ pub fn get_local_atmosphere(
     base_press_hpa: f64,
     base_ratio: f64,
 ) -> (f64, f64) {
-    let (temp_k, _pressure_pa, density) =
-        local_temp_pressure_density(altitude_m, base_alt, base_temp_c, base_press_hpa, base_ratio);
+    let (temp_k, _pressure_pa, density) = local_temp_pressure_density(
+        altitude_m,
+        base_alt,
+        base_temp_c,
+        base_press_hpa,
+        base_ratio,
+    );
 
     // Dry speed of sound. 401.874 ~ gamma * R_air; kept exactly for back-compat with existing
     // callers (get_local_atmosphere_humid uses the precise moist formula instead).
@@ -700,9 +703,17 @@ pub fn get_local_atmosphere_humid(
     base_ratio: f64,
     humidity_percent: f64,
 ) -> (f64, f64) {
-    let (temp_k, pressure_pa, density) =
-        local_temp_pressure_density(altitude_m, base_alt, base_temp_c, base_press_hpa, base_ratio);
-    (density, moist_speed_of_sound(temp_k, pressure_pa, humidity_percent))
+    let (temp_k, pressure_pa, density) = local_temp_pressure_density(
+        altitude_m,
+        base_alt,
+        base_temp_c,
+        base_press_hpa,
+        base_ratio,
+    );
+    (
+        density,
+        moist_speed_of_sound(temp_k, pressure_pa, humidity_percent),
+    )
 }
 
 /// Shared local temperature / pressure / density computation for [`get_local_atmosphere`] and
@@ -1179,10 +1190,8 @@ mod tests {
             );
         }
 
-        let (density_below, sound_below) =
-            get_local_atmosphere(10999.0, 0.0, 15.0, 1013.25, 1.0);
-        let (density_above, sound_above) =
-            get_local_atmosphere(11001.0, 0.0, 15.0, 1013.25, 1.0);
+        let (density_below, sound_below) = get_local_atmosphere(10999.0, 0.0, 15.0, 1013.25, 1.0);
+        let (density_above, sound_above) = get_local_atmosphere(11001.0, 0.0, 15.0, 1013.25, 1.0);
         assert!(
             (density_below - density_above).abs() < 0.001,
             "density jumped across 11 km: below={density_below}, above={density_above}"
@@ -1289,9 +1298,12 @@ mod tests {
     fn resolve_station_pressure_with_mode_absolute_matches_resolve_station_pressure() {
         // PressureReferenceMode::Absolute must be byte-identical to resolve_station_pressure
         // for every case that function's own contract test exercises.
-        for (pressure_hpa, altitude_m) in
-            [(1013.25, 2000.0), (1013.21, 2000.0), (850.0, 2000.0), (1013.25, 0.0)]
-        {
+        for (pressure_hpa, altitude_m) in [
+            (1013.25, 2000.0),
+            (1013.21, 2000.0),
+            (850.0, 2000.0),
+            (1013.25, 0.0),
+        ] {
             assert_eq!(
                 resolve_station_pressure_with_mode(
                     pressure_hpa,
@@ -1337,11 +1349,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_station_conditions_with_pressure_mode_absolute_matches_resolve_station_conditions()
-    {
-        for (temp_c, pressure_hpa, altitude_m) in
-            [(15.0, 1013.25, 2000.0), (-5.0, 850.0, 2000.0), (15.0, 1013.25, 0.0)]
-        {
+    fn resolve_station_conditions_with_pressure_mode_absolute_matches_resolve_station_conditions() {
+        for (temp_c, pressure_hpa, altitude_m) in [
+            (15.0, 1013.25, 2000.0),
+            (-5.0, 850.0, 2000.0),
+            (15.0, 1013.25, 0.0),
+        ] {
             assert_eq!(
                 resolve_station_conditions_with_pressure_mode(
                     temp_c,
@@ -1643,7 +1656,10 @@ mod tests {
         let hot_temp_c = default_temp_c + 20.0;
         let (hot_alt_m, hot_temp_out, hot_pressure_hpa) =
             resolve_atmosphere_for_density_altitude(da_m, Some(hot_temp_c));
-        assert_eq!(hot_temp_out, hot_temp_c, "explicit temperature must be honored exactly");
+        assert_eq!(
+            hot_temp_out, hot_temp_c,
+            "explicit temperature must be honored exactly"
+        );
         assert!(
             hot_alt_m < default_alt_m,
             "hotter station temp at same DA should imply a lower pressure altitude: \
@@ -1669,8 +1685,7 @@ mod tests {
     #[test]
     fn density_altitude_round_trips_through_hand_derived_forward_formula() {
         fn forward_density_altitude_ft(pressure_hpa: f64, temp_c: f64) -> f64 {
-            let pressure_alt_ft =
-                145_366.45 * (1.0 - (pressure_hpa / 1013.25).powf(0.190_284));
+            let pressure_alt_ft = 145_366.45 * (1.0 - (pressure_hpa / 1013.25).powf(0.190_284));
             let isa_temp_f = 59.0 - (pressure_alt_ft / 1000.0) * 3.57;
             let temp_f = temp_c * 9.0 / 5.0 + 32.0;
             pressure_alt_ft + (120.0 * 5.0 / 9.0) * (temp_f - isa_temp_f)

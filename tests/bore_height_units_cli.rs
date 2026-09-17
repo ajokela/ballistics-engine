@@ -8,7 +8,10 @@ use std::process::{Command, Output};
 const BIN: &str = env!("CARGO_BIN_EXE_ballistics");
 
 fn out(args: &[&str]) -> Output {
-    Command::new(BIN).args(args).output().expect("spawn ballistics")
+    Command::new(BIN)
+        .args(args)
+        .output()
+        .expect("spawn ballistics")
 }
 
 fn ok_stdout(o: &Output) -> String {
@@ -21,7 +24,17 @@ fn ok_stdout(o: &Output) -> String {
 }
 
 const IMPERIAL: &[&str] = &[
-    "trajectory", "-v", "2700", "-b", "0.475", "-m", "168", "-d", "0.308", "--max-range", "300",
+    "trajectory",
+    "-v",
+    "2700",
+    "-b",
+    "0.475",
+    "-m",
+    "168",
+    "-d",
+    "0.308",
+    "--max-range",
+    "300",
 ];
 
 /// Imperial `--bore-height` is inches: 10000 in = 254 m (below the >1000 m warning). Under the
@@ -46,8 +59,19 @@ fn imperial_bore_height_is_inches() {
 #[test]
 fn metric_bore_height_is_mm() {
     const METRIC: &[&str] = &[
-        "--units", "metric", "trajectory", "-v", "823", "-b", "0.475", "-m", "10.9", "-d", "7.82",
-        "--max-range", "300",
+        "--units",
+        "metric",
+        "trajectory",
+        "-v",
+        "823",
+        "-b",
+        "0.475",
+        "-m",
+        "10.9",
+        "-d",
+        "7.82",
+        "--max-range",
+        "300",
     ];
     let o = out(&[METRIC, &["--bore-height", "1500"]].concat());
     assert!(o.status.success());

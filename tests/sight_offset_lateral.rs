@@ -164,7 +164,7 @@ fn cant_rotates_the_offset_rigidly_into_both_axes() {
     let d_lat = lateral_at(&cant_and_offset, near) - lateral_at(&cant_only, near);
 
     let s = std::f64::consts::FRAC_1_SQRT_2; // sin(45) == cos(45)
-    // Vertical coupling MUST be present (the old code left it at 0).
+                                             // Vertical coupling MUST be present (the old code left it at 0).
     assert!(
         (d_vert - OFFSET_YD * s).abs() < OFFSET_YD * 0.1,
         "cant must lift the muzzle by offset*sin(cant) ~= {}, got {d_vert}",
@@ -181,7 +181,8 @@ fn cant_rotates_the_offset_rigidly_into_both_axes() {
 #[test]
 fn offset_composes_with_cant() {
     let cant_only = full_json(&["--auto-zero", "100", "--cant", "5"]);
-    let cant_and_offset = full_json(&["--auto-zero", "100", "--cant", "5", "--sight-offset", "0.5"]);
+    let cant_and_offset =
+        full_json(&["--auto-zero", "100", "--cant", "5", "--sight-offset", "0.5"]);
 
     let d_100 = lateral_at(&cant_and_offset, 100.0) - lateral_at(&cant_only, 100.0);
     let d_muzzle = lateral_at(&cant_and_offset, 2.0) - lateral_at(&cant_only, 2.0);
@@ -310,7 +311,11 @@ fn solve_json_wire_field_decodes_and_applies() {
     // echo of `sight_offset_lateral_m` itself, present only when the caller actually
     // supplied it.
     let mut explicit_zero = solve(&request_json(Some(0.0)));
-    assert!(baseline.resolved_request.rifle.sight_offset_lateral_m.is_none());
+    assert!(baseline
+        .resolved_request
+        .rifle
+        .sight_offset_lateral_m
+        .is_none());
     assert_eq!(
         explicit_zero.resolved_request.rifle.sight_offset_lateral_m,
         Some(0.0)

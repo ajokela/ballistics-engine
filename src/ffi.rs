@@ -63,26 +63,26 @@ pub struct FFIBallisticInputs {
     pub bc_value: c_double,                // ballistic coefficient
     pub bullet_mass: c_double,             // kg
     pub bullet_diameter: c_double,         // meters
-    pub bc_type: c_int,                    // 0=G1, 1=G7, 2=G2, 3=G5, 4=G6, 5=G8, 6=GI, 7=GS, 8=RA4 (MBA-1386; unrecognized -> G1)
-    pub sight_height: c_double,            // meters
-    pub target_distance: c_double,         // meters
-    pub temperature: c_double,             // Celsius
-    pub twist_rate: c_double,              // inches per turn
-    pub is_twist_right: c_int,             // 0=false, 1=true
-    pub shooting_angle: c_double,          // uphill/downhill angle in radians
-    pub altitude: c_double,                // meters
-    pub latitude: c_double,                // degrees (use NAN if not provided)
-    pub azimuth_angle: c_double,           // horizontal aiming angle in radians
-    pub use_rk4: c_int,                    // 0=Euler, 1=RK4
-    pub use_adaptive_rk45: c_int,          // 0=false, 1=true (adaptive RK45)
-    pub enable_wind_shear: c_int,          // 0=false, 1=true
+    pub bc_type: c_int, // 0=G1, 1=G7, 2=G2, 3=G5, 4=G6, 5=G8, 6=GI, 7=GS, 8=RA4 (MBA-1386; unrecognized -> G1)
+    pub sight_height: c_double, // meters
+    pub target_distance: c_double, // meters
+    pub temperature: c_double, // Celsius
+    pub twist_rate: c_double, // inches per turn
+    pub is_twist_right: c_int, // 0=false, 1=true
+    pub shooting_angle: c_double, // uphill/downhill angle in radians
+    pub altitude: c_double, // meters
+    pub latitude: c_double, // degrees (use NAN if not provided)
+    pub azimuth_angle: c_double, // horizontal aiming angle in radians
+    pub use_rk4: c_int, // 0=Euler, 1=RK4
+    pub use_adaptive_rk45: c_int, // 0=false, 1=true (adaptive RK45)
+    pub enable_wind_shear: c_int, // 0=false, 1=true
     pub enable_trajectory_sampling: c_int, // 0=false, 1=true
-    pub sample_interval: c_double,         // meters
-    pub enable_pitch_damping: c_int,       // 0=false, 1=true
+    pub sample_interval: c_double, // meters
+    pub enable_pitch_damping: c_int, // 0=false, 1=true
     pub enable_precession_nutation: c_int, // 0=false, 1=true
-    pub enable_spin_drift: c_int,          // 0=false, 1=true
-    pub enable_magnus: c_int,              // 0=false, 1=true
-    pub enable_coriolis: c_int,            // 0=false, 1=true
+    pub enable_spin_drift: c_int, // 0=false, 1=true
+    pub enable_magnus: c_int, // 0=false, 1=true
+    pub enable_coriolis: c_int, // 0=false, 1=true
     // Appended (keeps existing field offsets): compass bearing the shot is fired
     // along, radians, 0=North, PI/2=East. Drives the Coriolis Eötvös/drift azimuth.
     // Distinct from azimuth_angle (the small aiming offset). 0.0 if unset.
@@ -636,7 +636,13 @@ pub unsafe extern "C" fn ballistics_calculate_trajectory_with_drag_table(
     };
     unsafe {
         calculate_trajectory_impl(
-            inputs, wind, atmosphere, max_range, step_size, Some(table), 1.0,
+            inputs,
+            wind,
+            atmosphere,
+            max_range,
+            step_size,
+            Some(table),
+            1.0,
         )
     }
 }
@@ -678,7 +684,13 @@ pub unsafe extern "C" fn ballistics_calculate_trajectory_with_drag_table_scaled(
     };
     unsafe {
         calculate_trajectory_impl(
-            inputs, wind, atmosphere, max_range, step_size, Some(table), cd_scale,
+            inputs,
+            wind,
+            atmosphere,
+            max_range,
+            step_size,
+            Some(table),
+            cd_scale,
         )
     }
 }
@@ -862,9 +874,7 @@ pub unsafe extern "C" fn ballistics_calculate_zero_angle_with_drag_table(
         Ok(t) => t,
         Err(()) => return f64::NAN,
     };
-    unsafe {
-        calculate_zero_angle_impl(inputs, wind, atmosphere, zero_distance, Some(table), 1.0)
-    }
+    unsafe { calculate_zero_angle_impl(inputs, wind, atmosphere, zero_distance, Some(table), 1.0) }
 }
 
 /// [`ballistics_calculate_zero_angle_with_drag_table`] with an additional whole-curve
@@ -1767,14 +1777,26 @@ mod tests {
             )
         };
 
-        assert_eq!(call(0, marks.as_ptr(), &mut out), FFI_RETICLE_ERR_INVALID_ARGUMENT);
-        assert_eq!(call(-1, marks.as_ptr(), &mut out), FFI_RETICLE_ERR_INVALID_ARGUMENT);
+        assert_eq!(
+            call(0, marks.as_ptr(), &mut out),
+            FFI_RETICLE_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            call(-1, marks.as_ptr(), &mut out),
+            FFI_RETICLE_ERR_INVALID_ARGUMENT
+        );
         assert_eq!(
             call(MAX_FFI_RETICLE_MARKS + 1, marks.as_ptr(), &mut out),
             FFI_RETICLE_ERR_INVALID_ARGUMENT
         );
-        assert_eq!(call(c_int::MAX, marks.as_ptr(), &mut out), FFI_RETICLE_ERR_INVALID_ARGUMENT);
-        assert_eq!(call(2, std::ptr::null(), &mut out), FFI_RETICLE_ERR_INVALID_ARGUMENT);
+        assert_eq!(
+            call(c_int::MAX, marks.as_ptr(), &mut out),
+            FFI_RETICLE_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            call(2, std::ptr::null(), &mut out),
+            FFI_RETICLE_ERR_INVALID_ARGUMENT
+        );
         // `out` is untouched on every rejection.
         assert_eq!(out.nearest_mark, -99);
 
@@ -1801,8 +1823,12 @@ mod tests {
         let marks: [c_double; 4] = [0.0, 0.0, 2.0, 0.0];
         let bad_marks: [c_double; 4] = [0.0, 0.0, f64::NAN, 0.0];
         let mut out = zeroed_hold();
-        let call = |drop: c_double, mag: c_double, plane: c_int, ref_mag: c_double,
-                    m: &[c_double], out: &mut FFIReticleHold| unsafe {
+        let call = |drop: c_double,
+                    mag: c_double,
+                    plane: c_int,
+                    ref_mag: c_double,
+                    m: &[c_double],
+                    out: &mut FFIReticleHold| unsafe {
             ballistics_hold_point_in_reticle(
                 drop,
                 0.0,
@@ -1816,19 +1842,47 @@ mod tests {
         };
 
         assert_eq!(
-            call(1.0, 0.0, FFI_RETICLE_FIRST_FOCAL_PLANE, 0.0, &marks, &mut out),
+            call(
+                1.0,
+                0.0,
+                FFI_RETICLE_FIRST_FOCAL_PLANE,
+                0.0,
+                &marks,
+                &mut out
+            ),
             FFI_RETICLE_ERR_MAGNIFICATION
         );
         assert_eq!(
-            call(1.0, 10.0, FFI_RETICLE_SECOND_FOCAL_PLANE, 0.0, &marks, &mut out),
+            call(
+                1.0,
+                10.0,
+                FFI_RETICLE_SECOND_FOCAL_PLANE,
+                0.0,
+                &marks,
+                &mut out
+            ),
             FFI_RETICLE_ERR_REFERENCE_MAGNIFICATION
         );
         assert_eq!(
-            call(f64::NAN, 10.0, FFI_RETICLE_FIRST_FOCAL_PLANE, 0.0, &marks, &mut out),
+            call(
+                f64::NAN,
+                10.0,
+                FFI_RETICLE_FIRST_FOCAL_PLANE,
+                0.0,
+                &marks,
+                &mut out
+            ),
             FFI_RETICLE_ERR_NON_FINITE
         );
         assert_eq!(
-            call(1.0, 10.0, FFI_RETICLE_FIRST_FOCAL_PLANE, 0.0, &bad_marks, &mut out),
+            call(
+                1.0,
+                10.0,
+                FFI_RETICLE_FIRST_FOCAL_PLANE,
+                0.0,
+                &bad_marks,
+                &mut out
+            ),
             FFI_RETICLE_ERR_NON_FINITE
         );
         assert_eq!(out.nearest_mark, -99, "out stays untouched on every error");
@@ -1865,7 +1919,11 @@ mod tests {
         for code in [9, 42, -1] {
             let mut inputs = valid_trajectory_inputs();
             inputs.bc_type = code;
-            assert_eq!(convert_inputs(&inputs).bc_type, DragModel::G1, "code {code}");
+            assert_eq!(
+                convert_inputs(&inputs).bc_type,
+                DragModel::G1,
+                "code {code}"
+            );
         }
     }
 
@@ -2282,12 +2340,33 @@ mod tests {
         canted.muzzle_angle = 0.003;
         canted.cant_angle = 10f64.to_radians();
         unsafe {
-            let a = ballistics_calculate_trajectory(&level, std::ptr::null(), std::ptr::null(), 400.0, 1.0);
-            let b = ballistics_calculate_trajectory(&canted, std::ptr::null(), std::ptr::null(), 400.0, 1.0);
+            let a = ballistics_calculate_trajectory(
+                &level,
+                std::ptr::null(),
+                std::ptr::null(),
+                400.0,
+                1.0,
+            );
+            let b = ballistics_calculate_trajectory(
+                &canted,
+                std::ptr::null(),
+                std::ptr::null(),
+                400.0,
+                1.0,
+            );
             assert!(!a.is_null() && !b.is_null());
-            let za = std::slice::from_raw_parts((*a).points, (*a).point_count as usize).last().unwrap().position_z;
-            let zb = std::slice::from_raw_parts((*b).points, (*b).point_count as usize).last().unwrap().position_z;
-            assert!(zb > za + 0.005, "FFI cant must deflect right: level={za} canted={zb}");
+            let za = std::slice::from_raw_parts((*a).points, (*a).point_count as usize)
+                .last()
+                .unwrap()
+                .position_z;
+            let zb = std::slice::from_raw_parts((*b).points, (*b).point_count as usize)
+                .last()
+                .unwrap()
+                .position_z;
+            assert!(
+                zb > za + 0.005,
+                "FFI cant must deflect right: level={za} canted={zb}"
+            );
             ballistics_free_trajectory_result(a);
             ballistics_free_trajectory_result(b);
         }
@@ -2307,12 +2386,23 @@ mod tests {
             vertical_speed: 5.0,
         };
         unsafe {
-            let a = ballistics_calculate_trajectory(&inputs, &no_wind, std::ptr::null(), 400.0, 1.0);
-            let b = ballistics_calculate_trajectory(&inputs, &updraft, std::ptr::null(), 400.0, 1.0);
+            let a =
+                ballistics_calculate_trajectory(&inputs, &no_wind, std::ptr::null(), 400.0, 1.0);
+            let b =
+                ballistics_calculate_trajectory(&inputs, &updraft, std::ptr::null(), 400.0, 1.0);
             assert!(!a.is_null() && !b.is_null());
-            let ya = std::slice::from_raw_parts((*a).points, (*a).point_count as usize).last().unwrap().position_y;
-            let yb = std::slice::from_raw_parts((*b).points, (*b).point_count as usize).last().unwrap().position_y;
-            assert!(yb > ya + 0.01, "FFI updraft must raise the trajectory: no_wind={ya} updraft={yb}");
+            let ya = std::slice::from_raw_parts((*a).points, (*a).point_count as usize)
+                .last()
+                .unwrap()
+                .position_y;
+            let yb = std::slice::from_raw_parts((*b).points, (*b).point_count as usize)
+                .last()
+                .unwrap()
+                .position_y;
+            assert!(
+                yb > ya + 0.01,
+                "FFI updraft must raise the trajectory: no_wind={ya} updraft={yb}"
+            );
             ballistics_free_trajectory_result(a);
             ballistics_free_trajectory_result(b);
         }
@@ -2412,7 +2502,10 @@ mod tests {
                     DECK_MACH.len() as c_int,
                     bad,
                 );
-                assert!(r.is_null(), "cd_scale={bad} must be rejected (null sentinel)");
+                assert!(
+                    r.is_null(),
+                    "cd_scale={bad} must be rejected (null sentinel)"
+                );
             }
         }
     }
@@ -2497,7 +2590,10 @@ mod tests {
                     DECK_MACH.len() as c_int,
                     bad,
                 );
-                assert!(angle.is_nan(), "cd_scale={bad} must be rejected (NaN sentinel)");
+                assert!(
+                    angle.is_nan(),
+                    "cd_scale={bad} must be rejected (NaN sentinel)"
+                );
             }
         }
     }
@@ -2530,7 +2626,10 @@ mod tests {
                 DECK_MACH.len() as c_int,
             );
             assert!(!a.is_null() && !b.is_null());
-            assert_eq!((*a).impact_velocity.to_bits(), (*b).impact_velocity.to_bits());
+            assert_eq!(
+                (*a).impact_velocity.to_bits(),
+                (*b).impact_velocity.to_bits()
+            );
             ballistics_free_trajectory_result(a);
             ballistics_free_trajectory_result(b);
 
@@ -2604,7 +2703,10 @@ mod tests {
     #[test]
     fn reduce_qnh_pressure_passes_through_non_finite_inputs() {
         assert!(ballistics_reduce_qnh_pressure(f64::NAN, 1500.0).is_nan());
-        assert_eq!(ballistics_reduce_qnh_pressure(1030.0, f64::INFINITY), 1030.0);
+        assert_eq!(
+            ballistics_reduce_qnh_pressure(1030.0, f64::INFINITY),
+            1030.0
+        );
     }
 
     /// The FFI trajectory/Monte Carlo exports have always treated
@@ -2739,7 +2841,11 @@ mod tests {
         );
 
         // With no explicit temperature the resolved altitude must equal the input exactly.
-        assert!((ballistics_density_altitude_altitude_m(da_m, FFI_NO_EXPLICIT_TEMPERATURE) - da_m).abs() < 1e-6);
+        assert!(
+            (ballistics_density_altitude_altitude_m(da_m, FFI_NO_EXPLICIT_TEMPERATURE) - da_m)
+                .abs()
+                < 1e-6
+        );
     }
 
     #[test]
@@ -2768,17 +2874,20 @@ mod tests {
 
     #[test]
     fn density_altitude_ffi_non_finite_input_returns_nan() {
+        assert!(ballistics_density_altitude_temperature_c(
+            f64::INFINITY,
+            FFI_NO_EXPLICIT_TEMPERATURE
+        )
+        .is_nan());
         assert!(
-            ballistics_density_altitude_temperature_c(f64::INFINITY, FFI_NO_EXPLICIT_TEMPERATURE)
+            ballistics_density_altitude_pressure_hpa(f64::NAN, FFI_NO_EXPLICIT_TEMPERATURE)
                 .is_nan()
         );
-        assert!(
-            ballistics_density_altitude_pressure_hpa(f64::NAN, FFI_NO_EXPLICIT_TEMPERATURE).is_nan()
-        );
-        assert!(
-            ballistics_density_altitude_altitude_m(f64::NEG_INFINITY, FFI_NO_EXPLICIT_TEMPERATURE)
-                .is_nan()
-        );
+        assert!(ballistics_density_altitude_altitude_m(
+            f64::NEG_INFINITY,
+            FFI_NO_EXPLICIT_TEMPERATURE
+        )
+        .is_nan());
     }
 
     /// Same proof shape as the QNH FFI tests above: writing the density-altitude-derived
@@ -2789,8 +2898,7 @@ mod tests {
     fn ffi_trajectory_uses_the_density_altitude_derived_station_values() {
         let inputs = valid_trajectory_inputs();
         let da_m = 3000.0 * 0.3048; // 3000 ft density altitude
-        let altitude_m =
-            ballistics_density_altitude_altitude_m(da_m, FFI_NO_EXPLICIT_TEMPERATURE);
+        let altitude_m = ballistics_density_altitude_altitude_m(da_m, FFI_NO_EXPLICIT_TEMPERATURE);
         let temperature_c =
             ballistics_density_altitude_temperature_c(da_m, FFI_NO_EXPLICIT_TEMPERATURE);
         let pressure_hpa =
@@ -2810,13 +2918,8 @@ mod tests {
         };
 
         unsafe {
-            let a = ballistics_calculate_trajectory(
-                &inputs,
-                std::ptr::null(),
-                &atmo_da,
-                400.0,
-                1.0,
-            );
+            let a =
+                ballistics_calculate_trajectory(&inputs, std::ptr::null(), &atmo_da, 400.0, 1.0);
             let b = ballistics_calculate_trajectory(
                 &inputs,
                 std::ptr::null(),

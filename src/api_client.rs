@@ -299,7 +299,10 @@ impl ApiClient {
             .timeout_global(Some(self.timeout))
             .build()
             .header("Accept", "application/json")
-            .header("User-Agent", &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")))
+            .header(
+                "User-Agent",
+                &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")),
+            )
             .query("bc_value", request.bc_value.to_string())
             .query("bc_type", &request.bc_type)
             .query("bullet_mass", format!("{:.1}", mass_grains))
@@ -370,7 +373,10 @@ impl ApiClient {
             }
         }
         if let Some(enable) = request.enable_weather_zones {
-            req = req.query("enable_weather_zones", if enable { "true" } else { "false" });
+            req = req.query(
+                "enable_weather_zones",
+                if enable { "true" } else { "false" },
+            );
         }
         if let Some(enable) = request.enable_3d_weather {
             req = req.query("enable_3d_weather", if enable { "true" } else { "false" });
@@ -421,13 +427,17 @@ impl ApiClient {
     }
 
     #[cfg(feature = "online")]
-    fn convert_api_response(&self, api_response: &serde_json::Value) -> Result<TrajectoryResponse, ApiError> {
+    fn convert_api_response(
+        &self,
+        api_response: &serde_json::Value,
+    ) -> Result<TrajectoryResponse, ApiError> {
         // Get results object
         let results = api_response.get("results");
 
         // Extract trajectory points from Flask API response
         // The Flask API returns trajectory in "trajectory" array with nested value objects
-        let trajectory_array = api_response.get("trajectory")
+        let trajectory_array = api_response
+            .get("trajectory")
             .and_then(|t| t.as_array())
             .ok_or_else(|| ApiError::InvalidResponse("Missing trajectory array".to_string()))?;
 
@@ -435,29 +445,31 @@ impl ApiClient {
             .iter()
             .filter_map(|point| {
                 // Flask API returns nested {value: x, unit: y} objects in imperial units
-                let range_yards = point.get("distance")
-                    .and_then(Self::extract_value)?;
-                let drop_inches = point.get("drop")
+                let range_yards = point.get("distance").and_then(Self::extract_value)?;
+                let drop_inches = point
+                    .get("drop")
                     .and_then(Self::extract_value)
                     .unwrap_or(0.0);
-                let drift_inches = point.get("wind_drift")
+                let drift_inches = point
+                    .get("wind_drift")
                     .and_then(Self::extract_value)
                     .unwrap_or(0.0);
-                let velocity_fps = point.get("velocity")
-                    .and_then(Self::extract_value)?;
-                let energy_ftlbs = point.get("energy")
+                let velocity_fps = point.get("velocity").and_then(Self::extract_value)?;
+                let energy_ftlbs = point
+                    .get("energy")
                     .and_then(Self::extract_value)
                     .unwrap_or(0.0);
-                let time = point.get("time")
+                let time = point
+                    .get("time")
                     .and_then(Self::extract_value)
                     .unwrap_or(0.0);
 
                 Some(ApiTrajectoryPoint {
-                    range: range_yards * 0.9144,        // yards to meters
-                    drop: drop_inches * 0.0254,          // inches to meters
-                    drift: drift_inches * 0.0254,        // inches to meters
-                    velocity: velocity_fps * 0.3048,     // fps to m/s
-                    energy: energy_ftlbs * 1.35582,      // ft-lbs to Joules
+                    range: range_yards * 0.9144,     // yards to meters
+                    drop: drop_inches * 0.0254,      // inches to meters
+                    drift: drift_inches * 0.0254,    // inches to meters
+                    velocity: velocity_fps * 0.3048, // fps to m/s
+                    energy: energy_ftlbs * 1.35582,  // ft-lbs to Joules
                     time,
                 })
             })
@@ -475,10 +487,10 @@ impl ApiClient {
             .and_then(Self::extract_value)
             .unwrap_or_else(|| trajectory.last().map(|p| p.time).unwrap_or(0.0));
 
-        let bc_confidence = api_response.get("bc_confidence")
-            .and_then(|v| v.as_f64());
+        let bc_confidence = api_response.get("bc_confidence").and_then(|v| v.as_f64());
 
-        let ml_corrections = api_response.get("ml_corrections_applied")
+        let ml_corrections = api_response
+            .get("ml_corrections_applied")
             .or_else(|| api_response.get("corrections_applied"))
             .and_then(|v| v.as_array())
             .map(|arr| {
@@ -554,7 +566,10 @@ impl ApiClient {
             .build()
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
-            .header("User-Agent", &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")));
+            .header(
+                "User-Agent",
+                &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")),
+            );
         if let Some((name, value)) = self.auth_header() {
             req = req.header(name, &value);
         }
@@ -593,7 +608,10 @@ impl ApiClient {
             .build()
             .header("Content-Type", "application/json")
             .header("Accept", "application/json")
-            .header("User-Agent", &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")));
+            .header(
+                "User-Agent",
+                &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")),
+            );
         if let Some((name, value)) = self.auth_header() {
             req = req.header(name, &value);
         }
@@ -624,7 +642,10 @@ impl ApiClient {
             .timeout_global(Some(self.timeout))
             .build()
             .header("Accept", "application/json")
-            .header("User-Agent", &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")));
+            .header(
+                "User-Agent",
+                &format!("ballistics-cli/{}", env!("CARGO_PKG_VERSION")),
+            );
         for (k, v) in params {
             req = req.query(k.as_str(), v.as_str());
         }
@@ -893,9 +914,7 @@ mod tests {
 
     #[test]
     fn test_request_builder_missing_fields() {
-        let result = TrajectoryRequestBuilder::new()
-            .bc_value(0.238)
-            .build();
+        let result = TrajectoryRequestBuilder::new().bc_value(0.238).build();
 
         assert!(result.is_err());
     }
@@ -941,12 +960,18 @@ mod tests {
     #[test]
     fn test_api_error_display() {
         assert_eq!(
-            format!("{}", ApiError::NetworkError("connection refused".to_string())),
+            format!(
+                "{}",
+                ApiError::NetworkError("connection refused".to_string())
+            ),
             "Network error: connection refused"
         );
         assert_eq!(format!("{}", ApiError::Timeout), "Request timed out");
         assert_eq!(
-            format!("{}", ApiError::ServerError(500, "Internal error".to_string())),
+            format!(
+                "{}",
+                ApiError::ServerError(500, "Internal error".to_string())
+            ),
             "Server error 500: Internal error"
         );
     }
@@ -970,7 +995,10 @@ mod tests {
 
     #[test]
     fn cli_hint_maps_auth_errors() {
-        assert!(ApiError::ServerError(401, "x".into()).cli_hint().unwrap().contains("login"));
+        assert!(ApiError::ServerError(401, "x".into())
+            .cli_hint()
+            .unwrap()
+            .contains("login"));
         assert!(ApiError::ServerError(402, "x".into())
             .cli_hint()
             .unwrap()

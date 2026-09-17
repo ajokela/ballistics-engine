@@ -320,7 +320,13 @@ pub fn render_chart(
     let bottom_text = format!(" x:[{:.2}, {:.2}] ", xmin, xmax);
 
     let mut out = String::new();
-    out.push_str(&frame_line('\u{250C}', '\u{2500}', '\u{2510}', &top_text, width_cells));
+    out.push_str(&frame_line(
+        '\u{250C}',
+        '\u{2500}',
+        '\u{2510}',
+        &top_text,
+        width_cells,
+    ));
     out.push('\n');
     for line in canvas.render().lines() {
         out.push('\u{2502}');

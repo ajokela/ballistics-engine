@@ -195,7 +195,9 @@ use serde::{Deserialize, Serialize};
 use crate::perturbation::access::{read_axis, with_axis, KernelError};
 use crate::perturbation::taxonomy::{axes_in_group, InputAxis, InputGroup};
 use crate::perturbation::{evaluate, kernel_solve_error, Observation};
-use crate::solve_json::{PressureReferenceV1, ResolvedSolveRequestV1, SolveRequestV1, WindReferenceV1};
+use crate::solve_json::{
+    PressureReferenceV1, ResolvedSolveRequestV1, SolveRequestV1, WindReferenceV1,
+};
 
 /// Schema version for [`SolutionDiffReportV1`].
 pub const EXPLAIN_SCHEMA_VERSION_V1: u32 = 1;
@@ -311,7 +313,11 @@ pub struct SolutionDiffReportV1 {
 /// normally. `own_refusal` is this DIRECTION's own refusal (if any); `other_refusal` is the
 /// OTHER direction's, used to explain a "sympathetic" exclusion -- one leg that would not have
 /// refused on its own, excluded anyway to keep both legs measuring the same counterfactual.
-fn describe_refusal(axis: InputAxis, own_refusal: &Option<String>, other_refusal: &Option<String>) -> String {
+fn describe_refusal(
+    axis: InputAxis,
+    own_refusal: &Option<String>,
+    other_refusal: &Option<String>,
+) -> String {
     let context = match axis {
         InputAxis::Altitude => {
             "altitude is tied to pressure under a QNH-referenced atmosphere; this group swap \
@@ -331,11 +337,13 @@ fn describe_refusal(axis: InputAxis, own_refusal: &Option<String>, other_refusal
     };
     match own_refusal {
         Some(reason) => format!("{context} ({reason})"),
-        None => format!(
+        None => {
+            format!(
             "excluded to match the other swap direction, which cannot swap this axis: {context} \
              ({})",
             other_refusal.as_deref().unwrap_or("no further detail available")
-        ),
+        )
+        }
     }
 }
 
@@ -556,9 +564,10 @@ fn plan_exclusions(
                           a conflict, so both effects are excluded together rather than aborting \
                           the comparison"
                 .to_string();
-            for excluded_axis in
-                [InputAxis::MagnusEnabled, InputAxis::EnhancedSpinDriftEnabled]
-            {
+            for excluded_axis in [
+                InputAxis::MagnusEnabled,
+                InputAxis::EnhancedSpinDriftEnabled,
+            ] {
                 excluded.push(excluded_axis);
                 skipped.push(SkippedAxisV1 {
                     group,
@@ -928,7 +937,11 @@ mod tests {
             rep.skipped_axes
         );
         for row in &rep.rows {
-            assert!(row.total.drop_m.abs() < 1e-9, "total drop {}", row.total.drop_m);
+            assert!(
+                row.total.drop_m.abs() < 1e-9,
+                "total drop {}",
+                row.total.drop_m
+            );
             assert!(row.interaction_remainder.drop_m.abs() < 1e-9);
             for c in &row.contributions {
                 assert!(
@@ -1026,8 +1039,7 @@ mod tests {
 
         let obs_a = evaluate(&(&a).into(), &ranges).unwrap();
         let obs_b = evaluate(&(&b).into(), &ranges).unwrap();
-        let (excluded, _skipped) =
-            plan_exclusions(&a, &b, InputGroup::MuzzleVelocity).unwrap();
+        let (excluded, _skipped) = plan_exclusions(&a, &b, InputGroup::MuzzleVelocity).unwrap();
         let fwd_req = swap_group(&a, &b, InputGroup::MuzzleVelocity, &excluded).unwrap();
         let bwd_req = swap_group(&b, &a, InputGroup::MuzzleVelocity, &excluded).unwrap();
         let fwd_obs = evaluate(&fwd_req, &ranges).unwrap();
@@ -1478,8 +1490,14 @@ mod tests {
         .resolved_request;
         // Fixture assumption: NEITHER b variant's altitude may equal a's 500 -- see the doc
         // comment above for why that specific coincidence would confound this test.
-        assert_ne!(b_altitude_1200.atmosphere.altitude_m, a.atmosphere.altitude_m);
-        assert_ne!(b_altitude_900.atmosphere.altitude_m, a.atmosphere.altitude_m);
+        assert_ne!(
+            b_altitude_1200.atmosphere.altitude_m,
+            a.atmosphere.altitude_m
+        );
+        assert_ne!(
+            b_altitude_900.atmosphere.altitude_m,
+            a.atmosphere.altitude_m
+        );
 
         let rep_1200 = explain_difference(&a, &b_altitude_1200, &[300.0]).unwrap();
         let rep_900 = explain_difference(&a, &b_altitude_900, &[300.0]).unwrap();
@@ -1491,9 +1509,11 @@ mod tests {
         for rep in [&rep_1200, &rep_900] {
             for direction in [SwapDirectionV1::Forward, SwapDirectionV1::Backward] {
                 assert!(
-                    rep.skipped_axes.iter().any(|s| s.group == InputGroup::Atmosphere
-                        && s.axis == InputAxis::Altitude
-                        && s.direction == direction),
+                    rep.skipped_axes
+                        .iter()
+                        .any(|s| s.group == InputGroup::Atmosphere
+                            && s.axis == InputAxis::Altitude
+                            && s.direction == direction),
                     "expected Altitude excluded on {direction:?} in both comparisons"
                 );
             }
@@ -1578,8 +1598,7 @@ mod tests {
             .to_string()
         };
         let a = crate::solve_v1::solve_v1(
-            crate::solve_json::decode_solve_request_v1(&qnh_json(500.0, 288.0, 101_325.0))
-                .unwrap(),
+            crate::solve_json::decode_solve_request_v1(&qnh_json(500.0, 288.0, 101_325.0)).unwrap(),
         )
         .unwrap()
         .resolved_request;
@@ -1600,7 +1619,10 @@ mod tests {
         // NOT equal a's (500 m) -- see the doc comment above -- and their resolved pressure_pa
         // must differ, purely from the raw QNH value, confirming this fixture actually
         // exercises "does the specific excluded Pressure value leak."
-        assert_eq!(b_qnh_101325.atmosphere.altitude_m, b_qnh_105000.atmosphere.altitude_m);
+        assert_eq!(
+            b_qnh_101325.atmosphere.altitude_m,
+            b_qnh_105000.atmosphere.altitude_m
+        );
         assert_ne!(b_qnh_101325.atmosphere.altitude_m, a.atmosphere.altitude_m);
         assert_ne!(
             b_qnh_101325.atmosphere.pressure_pa, b_qnh_105000.atmosphere.pressure_pa,
@@ -1614,9 +1636,11 @@ mod tests {
         for rep in [&rep_101325, &rep_105000] {
             for direction in [SwapDirectionV1::Forward, SwapDirectionV1::Backward] {
                 assert!(
-                    rep.skipped_axes.iter().any(|s| s.group == InputGroup::Atmosphere
-                        && s.axis == InputAxis::Pressure
-                        && s.direction == direction),
+                    rep.skipped_axes
+                        .iter()
+                        .any(|s| s.group == InputGroup::Atmosphere
+                            && s.axis == InputAxis::Pressure
+                            && s.direction == direction),
                     "expected Pressure excluded on {direction:?} under QNH-vs-QNH; got {:?}",
                     rep.skipped_axes
                 );
@@ -1687,7 +1711,10 @@ mod tests {
         )
         .unwrap()
         .resolved_request;
-        assert_ne!(a.atmosphere.altitude_m, b.atmosphere.altitude_m, "fixture assumption");
+        assert_ne!(
+            a.atmosphere.altitude_m, b.atmosphere.altitude_m,
+            "fixture assumption"
+        );
         assert_eq!(
             a.atmosphere.temperature_k, b.atmosphere.temperature_k,
             "fixture assumption: temperature must be identical, or Atmosphere would have a \
@@ -1723,9 +1750,11 @@ mod tests {
         for direction in [SwapDirectionV1::Forward, SwapDirectionV1::Backward] {
             for axis in [InputAxis::Altitude, InputAxis::Pressure] {
                 assert!(
-                    rep.skipped_axes.iter().any(|s| s.group == InputGroup::Atmosphere
-                        && s.axis == axis
-                        && s.direction == direction),
+                    rep.skipped_axes
+                        .iter()
+                        .any(|s| s.group == InputGroup::Atmosphere
+                            && s.axis == axis
+                            && s.direction == direction),
                     "expected {axis:?} excluded on {direction:?}; got {:?}",
                     rep.skipped_axes
                 );
@@ -1778,14 +1807,14 @@ mod tests {
         let rep = explain_difference(&a, &b, &[300.0]).unwrap();
 
         assert!(
-            !rep.skipped_axes.iter().any(|s| s.group == InputGroup::Atmosphere
-                && s.axis == InputAxis::Pressure),
+            !rep.skipped_axes
+                .iter()
+                .any(|s| s.group == InputGroup::Atmosphere && s.axis == InputAxis::Pressure),
             "Pressure must not be excluded when altitude matches on both sides; got {:?}",
             rep.skipped_axes
         );
 
-        let atmosphere = rep
-            .rows[0]
+        let atmosphere = rep.rows[0]
             .contributions
             .iter()
             .find(|c| c.group == InputGroup::Atmosphere)
@@ -1840,9 +1869,11 @@ mod tests {
 
         for direction in [SwapDirectionV1::Forward, SwapDirectionV1::Backward] {
             assert!(
-                rep.skipped_axes.iter().any(|s| s.group == InputGroup::Atmosphere
-                    && s.axis == InputAxis::Latitude
-                    && s.direction == direction),
+                rep.skipped_axes
+                    .iter()
+                    .any(|s| s.group == InputGroup::Atmosphere
+                        && s.axis == InputAxis::Latitude
+                        && s.direction == direction),
                 "expected a {direction:?} Latitude skip when it is present on only one side; \
                  got {:?}",
                 rep.skipped_axes
@@ -1877,7 +1908,10 @@ mod tests {
         )
         .unwrap()
         .resolved_request;
-        assert!(a.effects.coriolis, "fixture assumption: a has coriolis enabled");
+        assert!(
+            a.effects.coriolis,
+            "fixture assumption: a has coriolis enabled"
+        );
         assert_eq!(
             a.atmosphere.latitude_rad,
             Some(0.7),
@@ -1885,7 +1919,10 @@ mod tests {
         );
 
         let b = resolved(823.0, 288.0);
-        assert!(!b.effects.coriolis, "fixture assumption: b has coriolis disabled");
+        assert!(
+            !b.effects.coriolis,
+            "fixture assumption: b has coriolis disabled"
+        );
         assert_eq!(
             b.atmosphere.latitude_rad, None,
             "fixture assumption: b omits latitude_rad entirely"
@@ -1897,9 +1934,11 @@ mod tests {
 
         for direction in [SwapDirectionV1::Forward, SwapDirectionV1::Backward] {
             assert!(
-                rep.skipped_axes.iter().any(|s| s.group == InputGroup::Effects
-                    && s.axis == InputAxis::CoriolisEnabled
-                    && s.direction == direction),
+                rep.skipped_axes
+                    .iter()
+                    .any(|s| s.group == InputGroup::Effects
+                        && s.axis == InputAxis::CoriolisEnabled
+                        && s.direction == direction),
                 "expected a {direction:?} CoriolisEnabled skip when the flags differ and one \
                  side lacks latitude_rad; got {:?}",
                 rep.skipped_axes
@@ -1952,20 +1991,23 @@ mod tests {
             a.atmosphere.latitude_rad, b.atmosphere.latitude_rad,
             "fixture assumption: identical latitude_rad on both sides"
         );
-        assert_ne!(a.effects.coriolis, b.effects.coriolis, "fixture assumption: flags differ");
+        assert_ne!(
+            a.effects.coriolis, b.effects.coriolis,
+            "fixture assumption: flags differ"
+        );
 
         let rep = explain_difference(&a, &b, &[600.0]).unwrap();
 
         assert!(
-            !rep.skipped_axes.iter().any(|s| s.group == InputGroup::Effects
-                && s.axis == InputAxis::CoriolisEnabled),
+            !rep.skipped_axes
+                .iter()
+                .any(|s| s.group == InputGroup::Effects && s.axis == InputAxis::CoriolisEnabled),
             "CoriolisEnabled must not be excluded when both sides supply the same latitude_rad; \
              got {:?}",
             rep.skipped_axes
         );
 
-        let effects = rep
-            .rows[0]
+        let effects = rep.rows[0]
             .contributions
             .iter()
             .find(|c| c.group == InputGroup::Effects)
@@ -2067,9 +2109,11 @@ mod tests {
         let backward_hit = rep
             .skipped_axes
             .iter()
-            .find(|s| s.group == InputGroup::ShotGeometry
-                && s.axis == InputAxis::ShotAzimuth
-                && s.direction == SwapDirectionV1::Backward)
+            .find(|s| {
+                s.group == InputGroup::ShotGeometry
+                    && s.axis == InputAxis::ShotAzimuth
+                    && s.direction == SwapDirectionV1::Backward
+            })
             .unwrap_or_else(|| {
                 panic!(
                     "expected a Backward-direction ShotAzimuth skip too (review I1: symmetric \
@@ -2155,8 +2199,7 @@ mod tests {
             rep.rows[0].total.windage_m
         );
 
-        let wind = rep
-            .rows[0]
+        let wind = rep.rows[0]
             .contributions
             .iter()
             .find(|c| c.group == InputGroup::Wind)
@@ -2241,15 +2284,15 @@ mod tests {
         let rep = explain_difference(&a, &b, &[300.0]).unwrap();
 
         assert!(
-            !rep.skipped_axes.iter().any(|s| s.group == InputGroup::Wind
-                && s.axis == InputAxis::WindDirection),
+            !rep.skipped_axes
+                .iter()
+                .any(|s| s.group == InputGroup::Wind && s.axis == InputAxis::WindDirection),
             "WindDirection must not be excluded when the shot azimuth matches on both sides; \
              got {:?}",
             rep.skipped_axes
         );
 
-        let wind = rep
-            .rows[0]
+        let wind = rep.rows[0]
             .contributions
             .iter()
             .find(|c| c.group == InputGroup::Wind)
@@ -2336,12 +2379,17 @@ mod tests {
             "a magnus/enhanced_spin_drift conflict must be excluded, not abort the whole report",
         );
 
-        for axis in [InputAxis::MagnusEnabled, InputAxis::EnhancedSpinDriftEnabled] {
+        for axis in [
+            InputAxis::MagnusEnabled,
+            InputAxis::EnhancedSpinDriftEnabled,
+        ] {
             for direction in [SwapDirectionV1::Forward, SwapDirectionV1::Backward] {
                 assert!(
-                    rep.skipped_axes.iter().any(|s| s.group == InputGroup::Effects
-                        && s.axis == axis
-                        && s.direction == direction),
+                    rep.skipped_axes
+                        .iter()
+                        .any(|s| s.group == InputGroup::Effects
+                            && s.axis == axis
+                            && s.direction == direction),
                     "{axis:?} {direction:?}: expected a skip naming the magnus/\
                      enhanced_spin_drift conflict; got {:?}",
                     rep.skipped_axes
