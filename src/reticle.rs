@@ -23,7 +23,10 @@
 //!   already solved, in milliradians, exactly like elevation;
 //! * **no vendor reticle catalog.** Manufacturer subtension sheets are published facts and
 //!   are a legally viable catalog source, but curating one is a separate, per-vendor
-//!   IP-reviewed data project (a tracked follow-up), not this module.
+//!   IP-reviewed data project, not this module. That project now exists as
+//!   [`crate::reticle_catalog`] (MBA-1545) and is deliberately a DIFFERENT module, so this
+//!   statement stays true of the one it was made about. It inherits both exclusions above:
+//!   no TREMOR-family or Horus geometry, and no wind-dot calibration.
 //!
 //! # Angular conventions (the whole set, in one place)
 //!

@@ -52,11 +52,20 @@
 //! - `reticle.import` reads the two third-party formats the crate already parses (Ventum
 //!   JSON, `.reticle` XML), each with its report. Both are TEXT and travel inline, so
 //!   unlike `profile.import_a7p` there is no base64 step.
+//! - `reticle.catalog` lists the NAMED reticles this build can produce
+//!   (`crate::reticle_catalog`, MBA-1545), which is what an app picker is populated from —
+//!   hardcoding ids in an app means a picker that offers what a pinned engine refuses. Each
+//!   entry carries its `source`, and that provenance reaches the wire on purpose: a wrong
+//!   subtension is a hold wrong by a mark and looks entirely normal, so what makes it
+//!   traceable belongs where the person reading the reticle can see it.
 //!
 //! Two shapes are shared across the family and are worth stating once. A reticle is named
-//! EITHER by `reticle` (a full description) or by `generator`, never both — a request
-//! carrying both is refused rather than resolved by precedence, because supplying both is
-//! a caller bug and picking a winner hides it. And because every generator returns FFP,
+//! by EXACTLY ONE of `reticle` (a full description), `generator`, or `catalog` (an id from
+//! `reticle.catalog`) — a request naming more than one is refused rather than resolved by
+//! precedence, because supplying more than one is a caller bug and picking a winner hides
+//! it. An unknown catalog id is refused for the same reason and never substituted: a
+//! shooter handed a different reticle is being shown holds for glass they are not looking
+//! through. And because every generator returns FFP,
 //! `focal_plane` / `reference_magnification` may be supplied ALONGSIDE a generator to make
 //! an SFP reticle; the same keys beside a full `reticle` are refused, since that
 //! description already carries its own.
@@ -141,7 +150,12 @@ fn command_names() -> Vec<&'static str> {
     names.push("profile.import_a7p");
     // Unconditional: the reticle stack is pure geometry with no filesystem access, so all
     // three are present on wasm32 like the `true.*` family.
-    names.extend(["reticle.describe", "reticle.hold", "reticle.import"]);
+    names.extend([
+        "reticle.catalog",
+        "reticle.describe",
+        "reticle.hold",
+        "reticle.import",
+    ]);
     names.extend([
         "true.fit",
         "true.wind",
@@ -306,6 +320,7 @@ fn dispatch(request_json: &str) -> String {
         "profile.normalize" => run_profile_normalize(&request.request),
         #[cfg(feature = "profile-import")]
         "profile.import_a7p" => run_profile_import_a7p(&request.request),
+        "reticle.catalog" => run_reticle_catalog(),
         "reticle.describe" => run_reticle_describe(&request.request),
         "reticle.hold" => run_reticle_hold(&request.request),
         "reticle.import" => run_reticle_import(&request.request),
@@ -1107,25 +1122,58 @@ fn resolve_reticle(
     command: &'static str,
     reticle: Option<crate::reticle::ReticleDescription>,
     generator: Option<ReticleGenerator>,
+    catalog: Option<String>,
     plane: &ReticlePlaneOverride,
 ) -> Result<crate::reticle::ReticleDescription, String> {
     use crate::reticle::ReticleDescription;
 
+    // Exactly one source. Counted rather than matched pair-by-pair, so adding a fourth
+    // source later cannot quietly reintroduce a precedence rule.
+    let named = [reticle.is_some(), generator.is_some(), catalog.is_some()]
+        .iter()
+        .filter(|named| **named)
+        .count();
+    if named > 1 {
+        return Err(error(
+            BridgeErrorCode::InvalidRequest,
+            format!(
+                "{command} takes exactly one of 'reticle', 'generator' or 'catalog' — \
+                 supplying more than one is a caller bug rather than a preference"
+            ),
+            None,
+        ));
+    }
+
+    // Resolved before the match below so a catalog id reaches it as a full description.
+    let reticle = match (reticle, catalog) {
+        (reticle, None) => reticle,
+        (_, Some(id)) => match crate::reticle_catalog::by_id(&id) {
+            Some(Ok(built)) => Some(built),
+            Some(Err(err)) => return Err(reticle_error_envelope(command, &err)),
+            // Not a default: a caller asking for a specific reticle and silently getting a
+            // different one would be shown holds for glass they are not looking through.
+            None => {
+                return Err(error(
+                    BridgeErrorCode::InvalidRequest,
+                    format!(
+                        "{command}: no catalog reticle with id {id:?}; \
+                         'reticle.catalog' lists what this build has"
+                    ),
+                    None,
+                ))
+            }
+        },
+    };
+
     let mut described = match (reticle, generator) {
-        (Some(_), Some(_)) => {
-            return Err(error(
-                BridgeErrorCode::InvalidRequest,
-                format!(
-                    "{command} takes either 'reticle' or 'generator', not both — \
-                     supplying both is a caller bug rather than a preference"
-                ),
-                None,
-            ))
-        }
+        (Some(_), Some(_)) => unreachable!("the count above rejected more than one source"),
         (None, None) => {
             return Err(error(
                 BridgeErrorCode::InvalidRequest,
-                format!("{command} requires either 'reticle' (a full description) or 'generator'"),
+                format!(
+                    "{command} requires one of 'reticle' (a full description), \
+                     'generator' or 'catalog'"
+                ),
                 None,
             ))
         }
@@ -1135,7 +1183,7 @@ fn resolve_reticle(
                     BridgeErrorCode::InvalidRequest,
                     format!(
                         "{command}: 'focal_plane' and 'reference_magnification' override a \
-                         GENERATED reticle; a supplied 'reticle' already carries its own"
+                         GENERATED reticle; a 'reticle' or 'catalog' one already carries its own"
                     ),
                     None,
                 ));
@@ -1263,6 +1311,38 @@ fn nearest_mark_value(
     }
 }
 
+/// `reticle.catalog`: the named reticles this build can produce.
+///
+/// Result: `{ "reticles": [{ "id", "display_name", "source", "notes", "mark_count" }, ..] }`.
+/// An app populates a picker from this rather than hardcoding ids, so a reticle added to a
+/// later engine appears without an app release — and one REMOVED does not leave a picker
+/// offering something the engine will refuse.
+///
+/// `source` is carried onto the wire deliberately. A wrong subtension is a hold that is
+/// wrong by a mark and looks entirely normal, so the provenance that makes it traceable
+/// belongs where the person looking at the reticle can see it, not only in the crate.
+fn run_reticle_catalog() -> String {
+    let reticles: Vec<Value> = crate::reticle_catalog::catalog()
+        .into_iter()
+        .map(|entry| {
+            // Listed entries are built by `by_id` under test, so this cannot be the place a
+            // caller learns an entry is broken; report what is known rather than failing the
+            // whole listing over one bad row.
+            let mark_count = crate::reticle_catalog::by_id(entry.id)
+                .and_then(|built| built.ok())
+                .map(|reticle| reticle.marks.len());
+            json!({
+                "id": entry.id,
+                "display_name": entry.display_name,
+                "source": entry.source,
+                "notes": entry.notes,
+                "mark_count": mark_count,
+            })
+        })
+        .collect();
+    success("reticle.catalog", json!({ "reticles": reticles }))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReticleDescribeRequest {
@@ -1270,6 +1350,10 @@ struct ReticleDescribeRequest {
     reticle: Option<crate::reticle::ReticleDescription>,
     #[serde(default)]
     generator: Option<ReticleGenerator>,
+    /// A `reticle.catalog` id. The third and simplest way to name a reticle,
+    /// and the one an app picker uses.
+    #[serde(default)]
+    catalog: Option<String>,
     #[serde(default)]
     focal_plane: Option<crate::reticle::FocalPlane>,
     #[serde(default)]
@@ -1316,6 +1400,7 @@ fn run_reticle_describe(inner: &Value) -> String {
         "reticle.describe",
         request.reticle,
         request.generator,
+        request.catalog,
         &plane,
     ) {
         Ok(reticle) => reticle,
@@ -1372,6 +1457,10 @@ struct ReticleHoldRequest {
     reticle: Option<crate::reticle::ReticleDescription>,
     #[serde(default)]
     generator: Option<ReticleGenerator>,
+    /// A `reticle.catalog` id. The third and simplest way to name a reticle,
+    /// and the one an app picker uses.
+    #[serde(default)]
+    catalog: Option<String>,
     #[serde(default)]
     focal_plane: Option<crate::reticle::FocalPlane>,
     #[serde(default)]
@@ -1426,8 +1515,13 @@ fn run_reticle_hold(inner: &Value) -> String {
         focal_plane: request.focal_plane,
         reference_magnification: request.reference_magnification,
     };
-    let reticle = match resolve_reticle("reticle.hold", request.reticle, request.generator, &plane)
-    {
+    let reticle = match resolve_reticle(
+        "reticle.hold",
+        request.reticle,
+        request.generator,
+        request.catalog,
+        &plane,
+    ) {
         Ok(reticle) => reticle,
         Err(envelope) => return envelope,
     };
@@ -2101,7 +2195,90 @@ mod tests {
         assert!(out["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("not both"));
+            .contains("exactly one"));
+    }
+
+    #[test]
+    fn a_catalog_id_is_the_third_way_to_name_a_reticle() {
+        let out = call(json!({
+            "api_version": 1, "command": "reticle.hold",
+            "request": {"catalog": "mil-dot", "drop_mil": 3.0, "magnification": 10.0},
+        }));
+        assert_eq!(out["ok"], true, "{out}");
+        // A mil-dot has a dot exactly 3 mil down, so the hold lands on it.
+        assert_eq!(out["result"]["hold"]["nearest_mark_distance_mil"], 0.0);
+        assert_eq!(out["result"]["nearest_mark"]["nominal"]["down_mil"], 3.0);
+        assert_eq!(out["result"]["nearest_mark"]["label"], "3 mil down");
+    }
+
+    #[test]
+    fn an_unknown_catalog_id_is_refused_rather_than_substituted() {
+        // Handing back a different reticle would show a shooter holds for glass they are
+        // not looking through.
+        let out = call(json!({
+            "api_version": 1, "command": "reticle.hold",
+            "request": {"catalog": "tremor-9000", "drop_mil": 3.0, "magnification": 10.0},
+        }));
+        assert_eq!(out["ok"], false);
+        assert_eq!(out["error"]["code"], "invalid_request");
+        assert!(out["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("reticle.catalog"));
+    }
+
+    #[test]
+    fn naming_a_reticle_three_ways_is_refused_too() {
+        // The count-based check exists so a third source could not reintroduce precedence.
+        let out = call(json!({
+            "api_version": 1, "command": "reticle.describe",
+            "request": {
+                "catalog": "mil-dot",
+                "generator": {"kind": "mil_grid", "spacing_mil": 1.0, "extent_mil": 5.0},
+            },
+        }));
+        assert_eq!(out["ok"], false);
+        assert_eq!(out["error"]["code"], "invalid_request");
+    }
+
+    #[test]
+    fn the_catalog_lists_what_the_other_commands_will_accept() {
+        // The contract an app picker is built on: every listed id must resolve, or the
+        // picker offers something the engine refuses.
+        let out = call(json!({"api_version": 1, "command": "reticle.catalog"}));
+        assert_eq!(out["ok"], true, "{out}");
+        let reticles = out["result"]["reticles"].as_array().unwrap().clone();
+        assert!(!reticles.is_empty());
+        for entry in reticles {
+            let id = entry["id"].as_str().unwrap();
+            // Provenance travels to the wire on purpose — see reticle_catalog's header.
+            assert!(
+                !entry["source"].as_str().unwrap().is_empty(),
+                "{id} has no source"
+            );
+            assert!(
+                !entry["notes"].as_str().unwrap().is_empty(),
+                "{id} has no notes"
+            );
+            assert!(
+                entry["mark_count"].as_u64().unwrap() > 0,
+                "{id} has no marks"
+            );
+
+            let held = call(json!({
+                "api_version": 1, "command": "reticle.hold",
+                "request": {"catalog": id, "drop_mil": 1.0, "magnification": 10.0},
+            }));
+            assert_eq!(held["ok"], true, "listed id {id} does not resolve: {held}");
+        }
+    }
+
+    #[test]
+    fn capabilities_lists_the_catalog_command() {
+        let out = call(json!({"api_version": 1, "command": "meta.capabilities"}));
+        let commands: Vec<String> =
+            serde_json::from_value(out["result"]["commands"].clone()).unwrap();
+        assert!(commands.contains(&"reticle.catalog".to_string()));
     }
 
     #[test]

@@ -5,6 +5,37 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **A named reticle catalog, reachable from the bridge (MBA-1545).** `reticle.catalog`
+  lists the reticles a build can produce by id, and `reticle.describe` / `reticle.hold`
+  now take a `catalog` id as a third way to name one, alongside a full `reticle` and a
+  `generator`. Exactly one source per request: naming more than one is refused rather
+  than resolved by precedence, and an unknown id is refused rather than substituted,
+  because a shooter handed a different reticle is being shown holds for glass they are
+  not looking through.
+
+  This is the piece that makes a holdover display worth building. A hold against a
+  generic mil grid reads "hold 4.2 mil down", which is what a range card already prints;
+  the value is "hold on the third dot down", and that needs the marks actually etched in
+  the shooter's glass. Nothing public supplies those — the open `.reticle` format ships a
+  designer and worked examples rather than commercial designs, and the one open generator
+  in this space emits 1-bit bitmaps, which carry no coordinates and cannot drive hold
+  math. The real source is manufacturer subtension sheets, transcribed by hand.
+
+  So `reticle_catalog` is a separate module from `reticle`, which keeps that module's
+  "no vendor reticle catalog" statement true of the module it was made about, and it
+  inherits both of that module's exclusions: no TREMOR-family or Horus geometry, which
+  are patented layouts, and no wind-dot calibration. Every entry carries a mandatory
+  `source` naming where its geometry came from, and that provenance reaches the wire: a
+  mistyped subtension is a hold wrong by a mark that looks entirely normal, with no
+  downstream check able to catch it, so what makes it traceable has to travel with it.
+
+  It opens with the mil-dot, which is a public standard rather than a vendor's design —
+  dots on 1 mil centres, 0.2 mil subtension. Vendor reticles arrive one change at a time,
+  each citing the sheet it was transcribed from.
+
 ## [0.41.0] - 2026-09-17
 
 ### Added
