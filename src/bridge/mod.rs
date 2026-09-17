@@ -154,6 +154,7 @@ fn command_names() -> Vec<&'static str> {
         "reticle.catalog",
         "reticle.describe",
         "reticle.hold",
+        "reticle.holds",
         "reticle.import",
     ]);
     names.extend([
@@ -323,6 +324,7 @@ fn dispatch(request_json: &str) -> String {
         "reticle.catalog" => run_reticle_catalog(),
         "reticle.describe" => run_reticle_describe(&request.request),
         "reticle.hold" => run_reticle_hold(&request.request),
+        "reticle.holds" => run_reticle_holds(&request.request),
         "reticle.import" => run_reticle_import(&request.request),
         "true.fit" => run_service(
             &request.request,
@@ -1553,6 +1555,144 @@ fn run_reticle_hold(inner: &Value) -> String {
     }
 }
 
+/// Most holds `reticle.holds` will place in one call.
+///
+/// A sampled trajectory is the thing this exists for and runs to a hundred-odd rows; the
+/// cap is far above that and exists so a malformed request cannot ask for unbounded work.
+pub const MAX_RETICLE_HOLDS: usize = 4096;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReticleHoldsEntry {
+    drop_mil: f64,
+    #[serde(default)]
+    wind_mil: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReticleHoldsRequest {
+    #[serde(default)]
+    reticle: Option<crate::reticle::ReticleDescription>,
+    #[serde(default)]
+    generator: Option<ReticleGenerator>,
+    #[serde(default)]
+    catalog: Option<String>,
+    #[serde(default)]
+    focal_plane: Option<crate::reticle::FocalPlane>,
+    #[serde(default)]
+    reference_magnification: Option<f64>,
+    magnification: f64,
+    /// The firing solutions to place, in the caller's own order, which the result
+    /// preserves.
+    holds: Vec<ReticleHoldsEntry>,
+}
+
+/// `reticle.holds`: [`run_reticle_hold`] for a whole table, in one call.
+///
+/// A holdover COLUMN needs a hold per row, and a sampled trajectory is a hundred-odd rows.
+/// Done one at a time that is a hundred round trips through the FFI with a JSON encode and
+/// decode each; done in the app it is the nearest-mark search re-implemented on two
+/// platforms, which is the second spelling `AdjustmentConversion` exists to argue against.
+/// So it is one call: the reticle is resolved and validated ONCE, and the search runs per
+/// row inside the engine.
+///
+/// Result: `{ "mark_scale": s, "holds": [ <the same shape reticle.hold returns>, .. ] }`,
+/// in request order. `mark_scale` is hoisted because it is a property of the reticle and
+/// the magnification, identical for every row, and repeating it per row would invite a
+/// caller to wonder when it might differ.
+///
+/// The whole request fails on the first unusable hold rather than returning a list with a
+/// hole in it: a column that silently skips a row is worse than one that does not draw.
+fn run_reticle_holds(inner: &Value) -> String {
+    if inner.is_null() {
+        return error(
+            BridgeErrorCode::InvalidRequest,
+            "'reticle.holds' requires a request payload ({reticle|generator|catalog, magnification, holds})",
+            None,
+        );
+    }
+    let request: ReticleHoldsRequest = match serde_json::from_value(inner.clone()) {
+        Ok(request) => request,
+        Err(err) => {
+            return error(
+                BridgeErrorCode::InvalidRequest,
+                format!("reticle.holds request rejected: {err}"),
+                None,
+            )
+        }
+    };
+
+    if request.holds.len() > MAX_RETICLE_HOLDS {
+        return error(
+            BridgeErrorCode::ResourceLimit,
+            format!(
+                "reticle.holds was given {} holds; the limit is {MAX_RETICLE_HOLDS}",
+                request.holds.len()
+            ),
+            None,
+        );
+    }
+
+    let plane = ReticlePlaneOverride {
+        focal_plane: request.focal_plane,
+        reference_magnification: request.reference_magnification,
+    };
+    let reticle = match resolve_reticle(
+        "reticle.holds",
+        request.reticle,
+        request.generator,
+        request.catalog,
+        &plane,
+    ) {
+        Ok(reticle) => reticle,
+        Err(envelope) => return envelope,
+    };
+
+    let mut placed = Vec::with_capacity(request.holds.len());
+    let mut scale = 1.0;
+    for entry in &request.holds {
+        let hold = match crate::reticle::hold_point_in_reticle(
+            entry.drop_mil,
+            entry.wind_mil,
+            request.magnification,
+            &reticle,
+        ) {
+            Ok(hold) => hold,
+            // Defensive, and unreachable from the wire: a bad reticle and a non-positive
+            // magnification are both settled before this loop, and the only error left is
+            // a non-finite hold, which JSON cannot carry (serde_json refuses an
+            // out-of-range literal, and infinity encodes as null). Kept because this is
+            // also reachable from the Rust API, and because a silently skipped row would
+            // be worse than a refused request.
+            Err(err) => return reticle_error_envelope("reticle.holds", &err),
+        };
+        scale = hold.mark_scale;
+        let nearest = nearest_mark_value(&reticle, &hold);
+        match serde_json::to_value(&hold) {
+            Ok(mut value) => {
+                // Hoisted to the top level; see the doc comment.
+                if let Some(object) = value.as_object_mut() {
+                    object.remove("mark_scale");
+                }
+                placed.push(json!({ "hold": value, "nearest_mark": nearest }));
+            }
+            Err(err) => {
+                return error(
+                    BridgeErrorCode::InternalError,
+                    format!("failed to serialize reticle hold: {err}"),
+                    None,
+                )
+            }
+        }
+    }
+
+    success(
+        "reticle.holds",
+        json!({ "mark_scale": scale, "holds": placed }),
+    )
+}
+
 /// Largest reticle document `reticle.import` will parse.
 ///
 /// The envelope cap ([`MAX_REQUEST_BYTES`]) already bounds the whole request, but a
@@ -2274,11 +2414,144 @@ mod tests {
     }
 
     #[test]
+    fn a_batch_of_holds_comes_back_in_request_order() {
+        // The column this exists for: one call per table, not one per row.
+        let out = call(json!({
+            "api_version": 1, "command": "reticle.holds",
+            "request": {
+                "catalog": "mil-dot",
+                "magnification": 10.0,
+                "holds": [
+                    {"drop_mil": 1.0},
+                    {"drop_mil": 3.0, "wind_mil": 0.0},
+                    {"drop_mil": 2.0},
+                ],
+            },
+        }));
+        assert_eq!(out["ok"], true, "{out}");
+        let holds = out["holds"].clone();
+        assert!(holds.is_null(), "holds live under result, not the envelope");
+        let holds = out["result"]["holds"].as_array().unwrap().clone();
+        assert_eq!(holds.len(), 3);
+        // Order is the caller's, NOT sorted — a table row must line up with its hold.
+        assert_eq!(holds[0]["nearest_mark"]["nominal"]["down_mil"], 1.0);
+        assert_eq!(holds[1]["nearest_mark"]["nominal"]["down_mil"], 3.0);
+        assert_eq!(holds[2]["nearest_mark"]["nominal"]["down_mil"], 2.0);
+        // mark_scale is hoisted: one reticle at one magnification has exactly one.
+        assert_eq!(out["result"]["mark_scale"], 1.0);
+        assert!(holds[0]["hold"]["mark_scale"].is_null());
+    }
+
+    #[test]
+    fn a_batch_agrees_with_the_single_hold_command() {
+        // The batch must not be a second implementation. If these ever disagree, one of
+        // them is doing its own mark search.
+        let single = call(json!({
+            "api_version": 1, "command": "reticle.hold",
+            "request": {"catalog": "mil-dot", "drop_mil": 2.4, "wind_mil": 0.7, "magnification": 10.0},
+        }));
+        let batch = call(json!({
+            "api_version": 1, "command": "reticle.holds",
+            "request": {
+                "catalog": "mil-dot", "magnification": 10.0,
+                "holds": [{"drop_mil": 2.4, "wind_mil": 0.7}],
+            },
+        }));
+        assert_eq!(single["ok"], true);
+        assert_eq!(batch["ok"], true);
+        assert_eq!(
+            single["result"]["nearest_mark"],
+            batch["result"]["holds"][0]["nearest_mark"]
+        );
+        assert_eq!(
+            single["result"]["hold"]["off_reticle"],
+            batch["result"]["holds"][0]["hold"]["off_reticle"]
+        );
+        assert_eq!(
+            single["result"]["hold"]["nearest_mark_distance_mil"],
+            batch["result"]["holds"][0]["hold"]["nearest_mark_distance_mil"]
+        );
+    }
+
+    #[test]
+    fn a_malformed_hold_entry_refuses_the_whole_batch() {
+        // A column that silently skips a row is worse than one that does not draw, so the
+        // request fails rather than returning a list with a hole in it.
+        //
+        // Note WHICH failure this is. The per-row arm in run_reticle_holds is defensive
+        // and unreachable from the wire: `hold_point_in_reticle` rejects a bad reticle and
+        // a non-positive magnification, both of which are settled before the loop, and its
+        // only remaining error is a non-finite hold — which JSON cannot deliver.
+        // serde_json refuses an out-of-range literal outright ("number out of range" for
+        // 1e999) and `json!(f64::INFINITY)` encodes as null, so a non-finite drop is
+        // stopped by the transport. `NonFiniteHold` is reachable from the Rust API and not
+        // from here; an earlier version of this test asserted that reason and failed,
+        // which is how the unreachability was found.
+        for bad in [
+            json!(null),
+            json!("3.0"),
+            json!({"drop_mil": 1.0, "nonsense": 2}),
+        ] {
+            let out = call(json!({
+                "api_version": 1, "command": "reticle.holds",
+                "request": {
+                    "catalog": "mil-dot", "magnification": 10.0,
+                    "holds": [{"drop_mil": 1.0}, bad],
+                },
+            }));
+            assert_eq!(out["ok"], false, "accepted a malformed entry: {out}");
+            assert_eq!(out["error"]["code"], "invalid_request");
+        }
+    }
+
+    #[test]
+    fn a_bad_magnification_fails_the_batch_before_any_row() {
+        // The reachable whole-batch failure: settled once, up front, not per row.
+        let out = call(json!({
+            "api_version": 1, "command": "reticle.holds",
+            "request": {
+                "catalog": "mil-dot", "magnification": 0.0,
+                "holds": [{"drop_mil": 1.0}, {"drop_mil": 2.0}],
+            },
+        }));
+        assert_eq!(out["ok"], false);
+        assert_eq!(
+            out["error"]["details"]["reason"],
+            "non_positive_magnification"
+        );
+    }
+
+    #[test]
+    fn an_empty_batch_is_an_empty_list_not_an_error() {
+        // A trajectory with no samples is a legitimate thing to ask about.
+        let out = call(json!({
+            "api_version": 1, "command": "reticle.holds",
+            "request": {"catalog": "mil-dot", "magnification": 10.0, "holds": []},
+        }));
+        assert_eq!(out["ok"], true, "{out}");
+        assert_eq!(out["result"]["holds"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn too_many_holds_is_a_resource_limit() {
+        let holds: Vec<Value> = (0..MAX_RETICLE_HOLDS + 1)
+            .map(|i| json!({"drop_mil": (i % 5) as f64}))
+            .collect();
+        let out = call(json!({
+            "api_version": 1, "command": "reticle.holds",
+            "request": {"catalog": "mil-dot", "magnification": 10.0, "holds": holds},
+        }));
+        assert_eq!(out["ok"], false);
+        assert_eq!(out["error"]["code"], "resource_limit");
+    }
+
+    #[test]
     fn capabilities_lists_the_catalog_command() {
         let out = call(json!({"api_version": 1, "command": "meta.capabilities"}));
         let commands: Vec<String> =
             serde_json::from_value(out["result"]["commands"].clone()).unwrap();
         assert!(commands.contains(&"reticle.catalog".to_string()));
+        assert!(commands.contains(&"reticle.holds".to_string()));
     }
 
     #[test]

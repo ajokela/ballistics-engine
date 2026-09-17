@@ -36,6 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dots on 1 mil centres, 0.2 mil subtension. Vendor reticles arrive one change at a time,
   each citing the sheet it was transcribed from.
 
+- **`reticle.holds`, the batch form, for a holdover COLUMN.** A sampled trajectory is a
+  hundred-odd rows, and a hold per row done one call at a time is a hundred round trips
+  through the FFI with a JSON encode and decode each. Done in the app instead it is the
+  nearest-mark search re-implemented on two platforms, which is the second spelling
+  `AdjustmentConversion` exists to argue against. So the reticle is resolved and validated
+  once and the search runs per row inside the engine, returning holds in request order —
+  a table row has to line up with its hold. `mark_scale` is hoisted out of the rows
+  because one reticle at one magnification has exactly one.
+
 ## [0.41.0] - 2026-09-17
 
 ### Added
