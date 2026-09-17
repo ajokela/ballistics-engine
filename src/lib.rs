@@ -99,6 +99,10 @@ pub mod reticle;
 // transform + serde, no I/O; must compile for wasm32. Deliberately NOT wired into the
 // CLI / solve-json / WASM / FFI surfaces yet (that exposure is held for review).
 pub mod reticle_import;
+// MBA-1545: named reticles by id — the per-vendor catalog `reticle`'s header defers
+// to, kept in its own module so that module's "no vendor reticle catalog" statement
+// stays true of the module it was made about. Provenance per entry is mandatory.
+pub mod reticle_catalog;
 // Cleanroom import of the third-party `.reticle` XML drawing format into
 // `reticle::ReticleDescription`, the sibling of `reticle_import` for a format that is a
 // picture rather than a mark list: its `<bdc>` entries are the holds, its `<elements>`
