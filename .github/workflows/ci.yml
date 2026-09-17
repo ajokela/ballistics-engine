@@ -25,8 +25,21 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
           targets: wasm32-unknown-unknown
+
+      # The gate that keeps the tree formatted. Without it the formatting is
+      # undefined in practice: this repo went its whole life un-checked, and
+      # `cargo fmt` consequently rewrote 150 files the first time anyone ran it
+      # mid-change, which makes the standard formatter unusable here.
+      #
+      # BOTH manifests. `fuzz/` is excluded from the workspace, so a plain
+      # `cargo fmt --check` at the root does not see it and it would drift back
+      # out on its own.
+      - name: Formatting
+        run: |
+          cargo fmt --check
+          cargo fmt --manifest-path fuzz/Cargo.toml --check
 
       - name: Check changed-file whitespace
         shell: bash

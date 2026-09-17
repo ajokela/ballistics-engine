@@ -1,0 +1,14 @@
+# Revisions that changed formatting only, and should be stepped over by
+# `git blame`. Nothing in here changed behaviour.
+#
+# Enable it for your clone with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# GitHub reads this file automatically; local git does not, which is why the
+# line above exists. A sha added here must be a whole-tree formatting commit
+# with nothing else in it, or blame will step over real changes too.
+
+# Format the tree with rustfmt (2026-09-17). The repo had never been
+# rustfmt-clean and CI never checked, so the standard formatter rewrote 150
+# files whenever anyone ran it.
+b75b3a9c899d027aeb9c637c0358da5c24bfae13
