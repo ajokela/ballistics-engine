@@ -5,7 +5,8 @@
 //! MD5 over the remainder, then a proto3 `Payload { Profile profile = 1; }`
 //! message), the field numbers, and the fixed-point scale factors are the same
 //! interoperability facts the parser was written from; nothing is vendored from
-//! the upstream a7p project (LGPL-3.0; this crate is MIT OR Apache-2.0).
+//! the upstream a7p package (GPL-3.0 as distributed; this crate is MIT OR
+//! Apache-2.0).
 //!
 //! # The not-carried list is the point
 //!
@@ -42,6 +43,21 @@
 //! both names stay in [`CARRIED_FIELDS`] because either one CAN travel — so the
 //! warning names the dropped half instead of the list claiming the format has no
 //! room for it.
+//!
+//! # `switches` is in neither list, on purpose
+//!
+//! The partition above is over `ProfileData` fields — things a shooter has that
+//! may or may not reach the file. `.a7p`'s `switches` (device zoom/range presets)
+//! runs the other way: a DESTINATION field with no source on our side. It is not
+//! carried and it is not dropped, because there was never anything of the
+//! shooter's in it, so putting it in either list would answer a question nobody
+//! asked and crowd out the fields that really did lose data.
+//!
+//! It still cannot be skipped. The ecosystem refuses a file with fewer than
+//! [`MIN_SWITCHES`] of them, so every export writes that many placeholders and
+//! names them as placeholders in [`A7pExport::warnings`] — see
+//! [`PLACEHOLDER_SWITCHES`] for why they are the upstream tool's own factory
+//! values rather than anything computed from the profile.
 //!
 //! # Do not extend the format
 //!
@@ -86,13 +102,80 @@ const F_BULLET_WEIGHT: u32 = 21;
 const F_BULLET_LENGTH: u32 = 22;
 const F_TWIST_DIR: u32 = 23;
 const F_BC_TYPE: u32 = 24;
+const F_SWITCHES: u32 = 25;
 const F_DISTANCES: u32 = 26;
 const F_COEF_ROWS: u32 = 27;
 // Sub-message field numbers inside one coef row.
 const F_ROW_BC_CD: u32 = 1;
 const F_ROW_MV: u32 = 2;
+// Sub-message field numbers inside one switch position. Confirmed black-box:
+// the upstream package's public factory API was asked for files with known
+// switch values and the resulting BYTES were decoded here — no schema file was
+// read and nothing from that package is vendored. Same footing as the field
+// numbers and scale factors the importer documents.
+const F_SW_C_IDX: u32 = 1;
+const F_SW_ZOOM: u32 = 3;
+const F_SW_DISTANCE: u32 = 4;
+// Fields 2 (reticle_idx) and 5 (distance_from) are identified and deliberately
+// unused: both placeholder values are the proto3 default, so they are omitted
+// like every other default. Named here so a later reader does not have to
+// re-derive them.
 // Payload wrapper.
 const F_PAYLOAD_PROFILE: u32 = 1;
+
+/// `.a7p` REQUIRES at least four switch positions. This is not a stylistic
+/// preference of the ecosystem's: the upstream validator refuses a file with
+/// three or fewer outright (`'[] is too short'`), so canonical proto3
+/// default-omission — correct for every other field here — produces a file
+/// nothing in the Archer world will open.
+///
+/// Verified black-box by bisection against the upstream package: 0, 1, 2 and 3
+/// switches are all refused; 4 and 5 are accepted.
+///
+/// DO NOT "clean up" the placeholders below back to an empty list. That silently
+/// makes every file this crate writes invalid, and nothing in our own round trip
+/// would notice, because our parser is happy either way.
+const MIN_SWITCHES: usize = 4;
+
+/// The four placeholder switch positions, as `(zoom, distance)` in the file's
+/// own `SCALE_DISTANCE` fixed point — 100 m, 200 m, 300 m, 1000 m.
+///
+/// PLACEHOLDERS, NOT DATA. A switch position is a device UI preset: a zoom level
+/// and the range the reticle is set up for. `ProfileData` has no such concept,
+/// so there is nothing of the shooter's to put here and nothing is derived from
+/// their profile. These are the values the upstream package's OWN factory
+/// writes, chosen precisely so that what we emit is the ecosystem's neutral
+/// default rather than a range card we invented and presented as theirs — a
+/// fabricated preset at a range the shooter never shot would look exactly like
+/// one they had. Every export says so in [`A7pExport::warnings`].
+const PLACEHOLDER_SWITCHES: [(i32, i32); MIN_SWITCHES] =
+    [(1, 10_000), (2, 20_000), (3, 30_000), (4, 100_000)];
+
+/// The `c_idx` the upstream factory writes on every placeholder position: the
+/// sentinel for "no distance-list index selected", which is what makes these
+/// positions inert rather than pointing at a range-card entry.
+const PLACEHOLDER_SWITCH_C_IDX: i32 = 255;
+
+// Value ranges the ArcherBC2 ecosystem enforces, in the FILE's own integer
+// units. Derived black-box by bisecting the upstream validator (its public API
+// in, accept/refuse out); nothing from that package is vendored. These are
+// REFUSALS here rather than warnings, because a file outside them is one the
+// recipient cannot open at all — that is not a lossy export, it is no export,
+// and reporting it as a success with a warning would be the worst of both.
+const BOUND_SIGHT_HEIGHT: (i32, i32) = (-5_000, 5_000); // mm
+const BOUND_TWIST: (i32, i32) = (0, 10_000); // in/turn x100
+const BOUND_VELOCITY: (i32, i32) = (100, 30_000); // m/s x10
+const BOUND_TEMPERATURE: (i32, i32) = (-100, 100); // C
+const BOUND_PRESSURE: (i32, i32) = (3_000, 15_000); // hPa x10
+const BOUND_HUMIDITY: (i32, i32) = (0, 100); // %
+const BOUND_DIAMETER: (i32, i32) = (1, 50_000); // in x1000
+const BOUND_WEIGHT: (i32, i32) = (10, 65_535); // gr x10
+const BOUND_LENGTH: (i32, i32) = (10, 200_000); // in x1000
+const BOUND_DISTANCE: (i32, i32) = (100, 300_000); // m x100
+                                                   // Deliberately unbounded here: coef rows carry no per-value limits the validator
+                                                   // enforces, and the 200-entry cap on the distances list cannot be reached by an
+                                                   // exporter that writes exactly one distance.
+const BOUND_NONE: (i32, i32) = (i32::MIN, i32::MAX);
 
 // Unit factors. Deliberately a local copy of the handful of factors the CLI's
 // `UnitConverter` (main.rs) uses for the same quantities: this module must
@@ -232,6 +315,7 @@ impl Lossy {
         value: f64,
         scale: f64,
         unit: &str,
+        bound: (i32, i32),
     ) -> Result<i32, A7pExportError> {
         if !value.is_finite() {
             return Err(A7pExportError::Field {
@@ -251,6 +335,19 @@ impl Lossy {
         }
         let rounded = raw.round();
         let stored = rounded as i32;
+        // The ecosystem's own limits, checked on the STORED integer because that
+        // is the number the recipient's validator sees.
+        let (min, max) = bound;
+        if stored < min || stored > max {
+            return Err(A7pExportError::Field {
+                field,
+                message: format!(
+                    "{value} {unit} is outside what .a7p accepts: the format stores \
+                     {unit} x {scale} and the ecosystem's validator requires that \
+                     integer to be between {min} and {max} (this would be {stored})"
+                ),
+            });
+        }
         let recovered = f64::from(stored) / scale;
         // Relative tolerance: the conversions above (mm -> inches, grams ->
         // grains) do not produce exact binary values even when the underlying
@@ -326,10 +423,27 @@ pub fn export_a7p(profile: &ProfileData) -> Result<A7pExport, A7pExportError> {
     };
     let diameter_in = require_positive("diameter", diameter_in)?;
 
-    let length_in = profile.bullet_length.map(|v| match units {
-        UnitSystem::Metric => v / MM_PER_INCH,
-        UnitSystem::Imperial => v,
-    });
+    // REQUIRED, not optional: the ecosystem's validator enforces a minimum
+    // b_length, so a file written without one is refused outright. There is
+    // nothing honest to substitute — a bullet length drives the recipient's own
+    // stability and spin-drift model, and a plausible-looking invented one would
+    // be indistinguishable from a measured one — so this refuses by name and
+    // tells the caller to set the field.
+    let length_in = match profile.bullet_length {
+        Some(v) => match units {
+            UnitSystem::Metric => v / MM_PER_INCH,
+            UnitSystem::Imperial => v,
+        },
+        None => {
+            return Err(A7pExportError::Field {
+                field: "bullet_length",
+                message: "the .a7p format requires a bullet length and this profile has \
+                          none; set bullet_length (a length cannot be invented — it drives \
+                          the recipient's stability model)"
+                    .to_string(),
+            })
+        }
+    };
     let twist_in = profile.twist_rate.map(|v| match units {
         UnitSystem::Metric => v / MM_PER_INCH,
         UnitSystem::Imperial => v,
@@ -404,8 +518,8 @@ pub fn export_a7p(profile: &ProfileData) -> Result<A7pExport, A7pExportError> {
                     "bc_segments.velocity_mps"
                 };
                 rows.push((
-                    lossy.quantize(bc_field, bc, SCALE_COEF, "BC")?,
-                    lossy.quantize(velocity_field, mps, SCALE_VELOCITY, "m/s")?,
+                    lossy.quantize(bc_field, bc, SCALE_COEF, "BC", BOUND_NONE)?,
+                    lossy.quantize(velocity_field, mps, SCALE_VELOCITY, "m/s", BOUND_NONE)?,
                 ));
             }
             (bc_type, rows)
@@ -430,8 +544,14 @@ pub fn export_a7p(profile: &ProfileData) -> Result<A7pExport, A7pExportError> {
             let mut rows = Vec::with_capacity(curve.len());
             for point in curve {
                 rows.push((
-                    lossy.quantize("drag_curve.cd", point.cd, SCALE_COEF, "Cd")?,
-                    lossy.quantize("drag_curve.mach", point.mach, SCALE_MACH, "Mach")?,
+                    lossy.quantize("drag_curve.cd", point.cd, SCALE_COEF, "Cd", BOUND_NONE)?,
+                    lossy.quantize(
+                        "drag_curve.mach",
+                        point.mach,
+                        SCALE_MACH,
+                        "Mach",
+                        BOUND_NONE,
+                    )?,
                 ));
             }
             (2, rows)
@@ -456,17 +576,23 @@ pub fn export_a7p(profile: &ProfileData) -> Result<A7pExport, A7pExportError> {
     // .a7p keeps a list of range-card distances and zeroes at one INDEX into it.
     // A ProfileData has one zero distance and no card, so the list is that one
     // distance at index 0 (the index is then the proto3 default and is omitted).
-    let distances: Vec<i32> = match zero_distance_m {
-        Some(d) => vec![lossy.quantize("zero_distance", d, SCALE_DISTANCE, "m")?],
-        None => Vec::new(),
-    };
-    if zero_distance_m.is_none() {
-        lossy.warnings.push(
-            "zero_distance: unset, so the file carries no distances list and the recipient's \
-             device will zero at whatever its own default is"
-                .to_string(),
-        );
-    }
+    // REQUIRED for the same reason as `bullet_length` above: the ecosystem's
+    // validator refuses an empty distances list, and the one distance we have to
+    // put in it is the zero distance. Guessing one would hand the recipient a
+    // rifle zeroed somewhere its owner never zeroed it.
+    let zero_distance_m = zero_distance_m.ok_or(A7pExportError::Field {
+        field: "zero_distance",
+        message: "the .a7p format requires at least one range-card distance and this \
+                  profile has no zero distance to supply it; set zero_distance"
+            .to_string(),
+    })?;
+    let distances: Vec<i32> = vec![lossy.quantize(
+        "zero_distance",
+        zero_distance_m,
+        SCALE_DISTANCE,
+        "m",
+        BOUND_DISTANCE,
+    )?];
     // `auto_zero` shares the file's single zero distance with `zero_distance`.
     // When they disagree there is only one slot, and `zero_distance` wins.
     if let (Some(auto), Some(zero)) = (profile.auto_zero, profile.zero_distance) {
@@ -476,12 +602,6 @@ pub fn export_a7p(profile: &ProfileData) -> Result<A7pExport, A7pExportError> {
                  distance, and zero_distance is what was written"
             ));
         }
-    } else if profile.auto_zero.is_some() && profile.zero_distance.is_none() {
-        lossy.warnings.push(
-            "auto_zero: set while zero_distance is not; .a7p's single zero distance is \
-             written from zero_distance, so this value is not carried"
-                .to_string(),
-        );
     }
 
     // Destination fields with no ProfileData source. Named for the same reason
@@ -490,11 +610,22 @@ pub fn export_a7p(profile: &ProfileData) -> Result<A7pExport, A7pExportError> {
     lossy.warnings.push(
         "the file's cartridge_name, short_name_top, short_name_bot, user_note, caliber and \
          device_uuid are left empty, and its c_zero_temperature, c_zero_p_temperature, \
-         c_t_coeff, c_zero_w_pitch, zero_x/zero_y and switches stay at the format default: \
-         a saved profile has no equivalent for any of them, and filling them in would be \
-         fabrication"
+         c_t_coeff, c_zero_w_pitch and zero_x/zero_y stay at the format default: a saved \
+         profile has no equivalent for any of them, and filling them in would be fabrication"
             .to_string(),
     );
+    // `switches` is the one destination field that could NOT be left at its
+    // default, because the ecosystem refuses a file with fewer than four. It is
+    // therefore filled with placeholders, and the caller is told so in the same
+    // breath — the alternative to saying it out loud is a shooter's friend seeing
+    // four range presets that look like the shooter's own.
+    lossy.warnings.push(format!(
+        "the file's {MIN_SWITCHES} switch positions (device zoom/range presets at 100, 200, \
+         300 and 1000 m) are PLACEHOLDERS, not this shooter's: a saved profile has no such \
+         concept, and .a7p is refused by the ecosystem with fewer than {MIN_SWITCHES} of \
+         them. They are the upstream tool's own factory values, so nothing here was derived \
+         from the profile or invented as range data"
+    ));
 
     // --- encode --------------------------------------------------------------
     // proto3 canonical form omits scalar fields equal to their default, which is
@@ -509,51 +640,75 @@ pub fn export_a7p(profile: &ProfileData) -> Result<A7pExport, A7pExportError> {
         write_string_field(F_BULLET_NAME, bullet_name, &mut body);
     }
     if let Some(mm) = sight_height_mm {
-        let raw = lossy.quantize("sight_height", mm, 1.0, "mm")?;
+        let raw = lossy.quantize("sight_height", mm, 1.0, "mm", BOUND_SIGHT_HEIGHT)?;
         if raw != 0 {
             write_i32_field(F_SIGHT_HEIGHT, raw, &mut body);
         }
     }
     if let Some(inches) = twist_in {
-        let raw = lossy.quantize("twist_rate", inches, SCALE_TWIST, "in/turn")?;
+        let raw = lossy.quantize("twist_rate", inches, SCALE_TWIST, "in/turn", BOUND_TWIST)?;
         if raw != 0 {
             write_i32_field(F_TWIST, raw, &mut body);
         }
     }
     write_i32_field(
         F_MUZZLE_VELOCITY,
-        lossy.quantize("velocity", velocity_mps, SCALE_VELOCITY, "m/s")?,
+        lossy.quantize(
+            "velocity",
+            velocity_mps,
+            SCALE_VELOCITY,
+            "m/s",
+            BOUND_VELOCITY,
+        )?,
         &mut body,
     );
-    let temperature_raw = lossy.quantize("temperature", temperature_c, 1.0, "C")?;
+    let temperature_raw =
+        lossy.quantize("temperature", temperature_c, 1.0, "C", BOUND_TEMPERATURE)?;
     if temperature_raw != 0 {
         write_i32_field(F_AIR_TEMPERATURE, temperature_raw, &mut body);
     }
     write_i32_field(
         F_AIR_PRESSURE,
-        lossy.quantize("pressure", pressure_hpa, SCALE_PRESSURE, "hPa")?,
+        lossy.quantize(
+            "pressure",
+            pressure_hpa,
+            SCALE_PRESSURE,
+            "hPa",
+            BOUND_PRESSURE,
+        )?,
         &mut body,
     );
-    let humidity_raw = lossy.quantize("humidity", profile.humidity, 1.0, "%")?;
+    let humidity_raw = lossy.quantize("humidity", profile.humidity, 1.0, "%", BOUND_HUMIDITY)?;
     if humidity_raw != 0 {
         write_i32_field(F_AIR_HUMIDITY, humidity_raw, &mut body);
     }
     write_i32_field(
         F_BULLET_DIAMETER,
-        lossy.quantize("diameter", diameter_in, SCALE_DIMENSION, "in")?,
+        lossy.quantize(
+            "diameter",
+            diameter_in,
+            SCALE_DIMENSION,
+            "in",
+            BOUND_DIAMETER,
+        )?,
         &mut body,
     );
     write_i32_field(
         F_BULLET_WEIGHT,
-        lossy.quantize("mass", weight_grains, SCALE_WEIGHT, "gr")?,
+        lossy.quantize("mass", weight_grains, SCALE_WEIGHT, "gr", BOUND_WEIGHT)?,
         &mut body,
     );
-    if let Some(inches) = length_in {
-        let raw = lossy.quantize("bullet_length", inches, SCALE_DIMENSION, "in")?;
-        if raw != 0 {
-            write_i32_field(F_BULLET_LENGTH, raw, &mut body);
-        }
-    }
+    write_i32_field(
+        F_BULLET_LENGTH,
+        lossy.quantize(
+            "bullet_length",
+            length_in,
+            SCALE_DIMENSION,
+            "in",
+            BOUND_LENGTH,
+        )?,
+        &mut body,
+    );
     // TwistDir: RIGHT = 0 (the proto3 default, omitted), LEFT = 1. An unset
     // `twist_right` means the profile never recorded a direction; the format has
     // no way to say that, so it becomes the format's own default of RIGHT and
@@ -569,6 +724,18 @@ pub fn export_a7p(profile: &ProfileData) -> Result<A7pExport, A7pExportError> {
     }
     if bc_type != 0 {
         write_i32_field(F_BC_TYPE, bc_type, &mut body);
+    }
+    // Switch positions (field 25) precede the distances list so the message stays
+    // in ascending field order, which is what a canonical serializer emits.
+    for (zoom, distance) in PLACEHOLDER_SWITCHES {
+        let mut switch = Vec::new();
+        write_i32_field(F_SW_C_IDX, PLACEHOLDER_SWITCH_C_IDX, &mut switch);
+        // reticle_idx (field 2) and distance_from (field 5) are both 0 here — the
+        // first reticle, and "distance is a value rather than an index into the
+        // distances list" — so they are omitted like every other proto3 default.
+        write_i32_field(F_SW_ZOOM, zoom, &mut switch);
+        write_i32_field(F_SW_DISTANCE, distance, &mut switch);
+        write_bytes_field(F_SWITCHES, &switch, &mut body);
     }
     if !distances.is_empty() {
         write_packed_i32_field(F_DISTANCES, &distances, &mut body);
@@ -990,11 +1157,12 @@ mod tests {
         }
         assert!(back.drag_curve.is_none());
 
-        // A clean profile must not generate rounding warnings; the only warning
-        // is the standing note about destination fields with no source.
+        // A clean profile must not generate rounding warnings. The only two are the
+        // standing notes about destination fields with no source: the ones left at
+        // the format default, and the placeholder switch positions.
         assert_eq!(
             export.warnings.len(),
-            1,
+            2,
             "unexpected warnings: {:?}",
             export.warnings
         );
@@ -1036,6 +1204,16 @@ mod tests {
         assert!(
             invented.is_empty(),
             "listed names that are not ProfileData fields: {invented:?}"
+        );
+
+        // `switches` is a DESTINATION field with no ProfileData source, so it
+        // belongs to neither half of this partition — see the module doc. Pinned
+        // because the obvious "fix" when someone meets the placeholder warning is
+        // to add it to the not-carried list, where it would claim a shooter lost
+        // something they never had.
+        assert!(
+            !accounted.contains("switches"),
+            "switches is not a ProfileData field and must not appear in either list"
         );
     }
 
@@ -1218,6 +1396,165 @@ mod tests {
         match export_a7p(&profile) {
             Err(A7pExportError::Field { field, .. }) => assert_eq!(field, "drag_curve"),
             other => panic!("expected a drag_curve error, got {other:?}"),
+        }
+    }
+
+    /// Count the switch positions (field 25) in an exported file, using a reader
+    /// written here rather than the importer's — the importer only COUNTS
+    /// switches, and this test has to be able to see inside one.
+    fn switch_entries(bytes: &[u8]) -> Vec<Vec<(u32, u64)>> {
+        fn varint(b: &[u8], i: &mut usize) -> u64 {
+            let (mut v, mut shift) = (0u64, 0u32);
+            loop {
+                let byte = b[*i];
+                *i += 1;
+                v |= u64::from(byte & 0x7f) << shift;
+                if byte & 0x80 == 0 {
+                    return v;
+                }
+                shift += 7;
+            }
+        }
+        fn fields(b: &[u8]) -> Vec<(u32, u64, &[u8])> {
+            let mut i = 0usize;
+            let mut out = Vec::new();
+            while i < b.len() {
+                let key = varint(b, &mut i);
+                let (number, wire) = ((key >> 3) as u32, key & 7);
+                match wire {
+                    0 => {
+                        let v = varint(b, &mut i);
+                        out.push((number, v, &b[0..0]));
+                    }
+                    2 => {
+                        let n = varint(b, &mut i) as usize;
+                        out.push((number, 0, &b[i..i + n]));
+                        i += n;
+                    }
+                    other => panic!("unexpected wire type {other}"),
+                }
+            }
+            out
+        }
+        let payload = &bytes[32..];
+        let profile = fields(payload)
+            .into_iter()
+            .find(|(n, _, _)| *n == F_PAYLOAD_PROFILE)
+            .expect("payload carries a profile")
+            .2;
+        fields(profile)
+            .into_iter()
+            .filter(|(n, _, _)| *n == F_SWITCHES)
+            .map(|(_, _, body)| {
+                fields(body)
+                    .into_iter()
+                    .map(|(n, v, _)| (n, v))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// THE REGRESSION GUARD. `.a7p` is refused outright by the ecosystem's own
+    /// validator when it carries fewer than four switch positions — verified
+    /// black-box against the upstream package by bisection (0/1/2/3 refused,
+    /// 4/5 accepted). Our own parser is happy either way, so nothing in the round
+    /// trip above would catch it: without this test, "cleaning up" the
+    /// placeholders back to canonical proto3 default-omission would silently make
+    /// every file this crate writes unopenable, and every test would still pass.
+    #[test]
+    fn every_export_carries_the_minimum_four_switch_positions() {
+        for profile in [carryable_profile(), full_profile()] {
+            let export = export_a7p(&profile).expect("export");
+            let switches = switch_entries(&export.bytes);
+            assert!(
+                switches.len() >= MIN_SWITCHES,
+                "exported {} switch positions; the ecosystem refuses fewer than \
+                 {MIN_SWITCHES}",
+                switches.len()
+            );
+            for (i, entry) in switches.iter().enumerate() {
+                let (zoom, distance) = PLACEHOLDER_SWITCHES[i];
+                assert_eq!(
+                    entry,
+                    &vec![
+                        (F_SW_C_IDX, PLACEHOLDER_SWITCH_C_IDX as u64),
+                        (F_SW_ZOOM, zoom as u64),
+                        (F_SW_DISTANCE, distance as u64),
+                    ],
+                    "switch {i}"
+                );
+            }
+            // And they are declared as placeholders rather than passed off as the
+            // shooter's own presets.
+            assert!(
+                export
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("PLACEHOLDERS") && w.contains("switch")),
+                "the placeholder switches must be declared: {:?}",
+                export.warnings
+            );
+        }
+    }
+
+    /// The two fields the format makes mandatory that `ProfileData` leaves
+    /// optional. Refused by name rather than filled in: a bullet length drives the
+    /// recipient's stability model and a zero distance is where their rifle will
+    /// shoot, and a plausible invention of either is indistinguishable from a
+    /// measurement.
+    #[test]
+    fn fields_the_format_requires_are_refused_when_absent_not_invented() {
+        let mut no_length = carryable_profile();
+        no_length.bullet_length = None;
+        match export_a7p(&no_length) {
+            Err(A7pExportError::Field { field, .. }) => assert_eq!(field, "bullet_length"),
+            other => panic!("expected a bullet_length refusal, got {other:?}"),
+        }
+
+        let mut no_zero = carryable_profile();
+        no_zero.zero_distance = None;
+        match export_a7p(&no_zero) {
+            Err(A7pExportError::Field { field, .. }) => assert_eq!(field, "zero_distance"),
+            other => panic!("expected a zero_distance refusal, got {other:?}"),
+        }
+    }
+
+    /// Values our own arithmetic accepts but the ecosystem's validator does not
+    /// are refused here rather than written into a file the recipient cannot
+    /// open. Ranges derived black-box from the upstream validator.
+    #[test]
+    fn values_outside_what_the_ecosystem_accepts_are_refused_by_name() {
+        // Each of these is a number our own arithmetic encodes without complaint —
+        // finite, positive, well inside an i32 — and each lands outside a limit the
+        // recipient's validator enforces.
+        for (field, mutate) in [
+            (
+                "velocity",
+                Box::new(|p: &mut ProfileData| p.velocity = 5.0) as Box<dyn Fn(&mut ProfileData)>,
+            ),
+            (
+                "pressure",
+                Box::new(|p: &mut ProfileData| p.pressure = 100.0),
+            ),
+            (
+                "temperature",
+                Box::new(|p: &mut ProfileData| p.temperature = 250.0),
+            ),
+            (
+                "zero_distance",
+                Box::new(|p: &mut ProfileData| p.zero_distance = Some(5000.0)),
+            ),
+            (
+                "sight_height",
+                Box::new(|p: &mut ProfileData| p.sight_height = Some(9000.0)),
+            ),
+        ] {
+            let mut profile = carryable_profile();
+            mutate(&mut profile);
+            match export_a7p(&profile) {
+                Err(A7pExportError::Field { field: got, .. }) => assert_eq!(got, field),
+                other => panic!("{field}: expected a refusal, got {other:?}"),
+            }
         }
     }
 }

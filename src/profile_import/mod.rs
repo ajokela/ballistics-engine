@@ -3,7 +3,8 @@
 //! Currently supports the ArcherBC2 `.a7p` format (MD5-hex envelope + proto3
 //! payload). The wire format is implemented here from the protobuf wire
 //! specification for interoperability; no upstream schema files or code are
-//! vendored (the a7p project is LGPL-3.0, this crate is MIT OR Apache-2.0).
+//! vendored (the a7p package as distributed is GPL-3.0, this crate is MIT OR
+//! Apache-2.0).
 
 mod a7p;
 mod map;

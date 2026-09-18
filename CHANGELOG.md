@@ -17,8 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Written from the same protobuf wire specification the parser was, with its own encoder
   rather than a mirror of the reader's — so the round-trip test is two independently
   derived implementations checking each other rather than one function undoing itself.
-  Nothing is vendored from the upstream a7p project (LGPL-3.0; this crate is MIT OR
-  Apache-2.0).
+  Nothing is vendored from the upstream a7p package (GPL-3.0 as distributed; this crate
+  is MIT OR Apache-2.0).
 
   THE EXPORT IS LOSSY, AND SAYS SO BY NAME. `.a7p` describes one rifle, one load and one
   device; a saved profile holds a great deal it has no slot for. Every export returns
@@ -55,6 +55,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   The format is NOT extended. Smuggling our fields into unused field numbers would produce
   files Archer's own tools misread and undo the reason the parser was written cleanroom.
+
+  VALIDATED BLACK-BOX against the upstream `a7p` package's own validator (its public API
+  in, verdicts out; nothing from it vendored or committed), which turned an assumption
+  into three real defects and fixed them:
+
+  - **At least four `switches` entries are mandatory.** A file with fewer is refused
+    outright (`'[] is too short'`), confirmed by bisection: 0/1/2/3 refused, 4/5 accepted.
+    Canonical proto3 default-omission — right for every other field here — made every file
+    this crate wrote unopenable. Exports now carry four switch positions, and they are
+    PLACEHOLDERS: a saved profile has no device zoom/range-preset concept, so they are the
+    upstream tool's own factory values rather than anything derived from the profile or
+    invented as range data, and every export says so in its warnings. A test pins the
+    minimum and the reason, because our own parser accepts either and nothing else would
+    have caught a "cleanup" back to zero.
+  - **`bullet_length` and `zero_distance` are now required to export.** The format enforces
+    a minimum `b_length` and a non-empty `distances` list, so a profile missing either
+    produced an invalid file. Refused by name rather than filled in: a bullet length drives
+    the recipient's stability model and a zero distance is where their rifle will shoot.
+  - **Value ranges the ecosystem enforces are now refusals, not silent output.** Sight
+    height, twist, muzzle velocity, temperature, pressure, humidity, diameter, weight,
+    length and range-card distance each have limits the upstream validator applies; a file
+    outside them cannot be opened at all, which is no export rather than a lossy one.
+
+  Six exported files — metric, imperial, CUSTOM curve, fully-populated, minimal, and a
+  plain .308 at a 200 yd zero — are ACCEPTED by the upstream validator and read back with
+  the right numbers.
+
+### Fixed
+- **The `.a7p` licence note was wrong (MBA-1556).** `profile_import` claimed the upstream
+  a7p project is LGPL-3.0. The distributed package's own bundled LICENSE is the GNU General
+  Public License v3 — GPL-3.0, which is stricter. Corrected wherever it appeared. The
+  substance is unchanged and was never in doubt: nothing from that project is copied here,
+  both directions of the format are implemented from the protobuf wire specification, and
+  this crate remains MIT OR Apache-2.0.
 
 ## [0.43.0] - 2026-09-17
 

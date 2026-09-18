@@ -4,7 +4,9 @@
 //! proto3 `Payload { Profile profile = 1; }` message. Field numbers and
 //! fixed-point scale factors below were confirmed empirically against a real
 //! ArcherBC2 export; they are interoperability facts, not vendored schema
-//! (the upstream a7p project is LGPL-3.0; nothing from it is copied here).
+//! (the upstream a7p package as distributed is GPL-3.0 — its own bundled LICENSE is
+//! the GNU General Public License v3, not the LGPL an earlier version of this note
+//! claimed; nothing from it is copied here).
 
 use super::md5::md5_hex;
 use super::wire::{collect_repeated_i32, parse_message, varint_to_i32, WireError, WireValue};

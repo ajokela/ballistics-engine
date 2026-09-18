@@ -2,8 +2,8 @@
 //!
 //! Currently the ArcherBC2 `.a7p` format — the outbound half of
 //! [`crate::profile_import`], written from the same protobuf wire specification
-//! with no upstream schema files or code vendored (the a7p project is LGPL-3.0,
-//! this crate is MIT OR Apache-2.0).
+//! with no upstream schema files or code vendored (the a7p package as distributed
+//! is GPL-3.0, this crate is MIT OR Apache-2.0).
 //!
 //! Export is LOSSY in one direction the importer never had to worry about: a
 //! saved profile holds a good deal the format has no slot for. Every export
