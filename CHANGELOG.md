@@ -5,6 +5,57 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **`.a7p` EXPORT, and the name of every field it cannot carry (MBA-1556).** The engine
+  could read ArcherBC2 `.a7p` files since MBA-1323 and could not write one; a shooter had
+  no way to hand a rifle and a load to somebody in the Archer ecosystem. `profile_export`
+  encodes a `ProfileData` into the format, and the bridge exposes it as
+  `profile.export_a7p` (feature `profile-export`, default-on, implying `profile-import`).
+
+  Written from the same protobuf wire specification the parser was, with its own encoder
+  rather than a mirror of the reader's — so the round-trip test is two independently
+  derived implementations checking each other rather than one function undoing itself.
+  Nothing is vendored from the upstream a7p project (LGPL-3.0; this crate is MIT OR
+  Apache-2.0).
+
+  THE EXPORT IS LOSSY, AND SAYS SO BY NAME. `.a7p` describes one rifle, one load and one
+  device; a saved profile holds a great deal it has no slot for. Every export returns
+  `not_carried` beside the bytes: all 31 `ProfileData` fields the format cannot take,
+  spelled exactly as the saved-profile JSON spells them, each with a reason and a
+  `populated` flag saying whether THIS profile actually lost something there — because a
+  caller that only ever hears about populated fields cannot tell "this rifle had no scope
+  tracking factor" from "the tracking factor was thrown away". `dropped_fields` is the
+  pre-filtered subset that really did lose data, and the one to put in front of a person.
+  The fields are `altitude`, `density_altitude`, `pressure_reference`, `bc_reference`,
+  `created`, `wind_speed`, `wind_direction`, `shooting_angle`, `use_bc_segments`,
+  `dsf_points`, `elevation_cf`, `windage_cf`, `elevation_click`, `windage_click`,
+  `zero_poi_up_m`, `zero_poi_right_m`, `sight_offset_lateral_m`, `zero_sets`, `reticle`,
+  `clicks_per_revolution`, `zero_stop`, the four turret-travel fields, the two dialed
+  turret fields and the four reticle hold bounds.
+
+  `CARRIED_FIELDS` names the other half of the same partition, and a test asserts the two
+  together account for every serialized `ProfileData` key. A field added to the struct
+  later cannot quietly join the drop set: the test fails until somebody decides which side
+  it belongs on.
+
+  Losses INSIDE a carried field are warnings rather than silence — a value that does not
+  land on the format's fixed-point grid (sight height is whole millimetres, so a 2-inch
+  mount cannot survive), a scalar `bc` that disagrees with the fastest `bc_segments` row,
+  an `auto_zero` that disagrees with `zero_distance` when the file has one zero-distance
+  slot, and the destination fields left at their format default because a saved profile
+  has no equivalent to put there.
+
+  Refused rather than approximated: a drag model `.a7p` cannot name (G2/G5/G6/G8/GI/RA4 —
+  writing one out as G1 would hand the recipient different physics under a familiar
+  label), a CUSTOM profile with no drag curve, and any measurement that is not finite,
+  positive and inside the int32 the format stores it in. Bridge errors carry the `true.*`
+  family's structured `reason` in `error.details`.
+
+  The format is NOT extended. Smuggling our fields into unused field numbers would produce
+  files Archer's own tools misread and undo the reason the parser was written cleanroom.
+
 ## [0.43.0] - 2026-09-17
 
 ### Added

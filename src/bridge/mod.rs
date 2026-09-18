@@ -33,6 +33,24 @@
 //! would break an existing well-formed caller bumps `BRIDGE_API_VERSION`. Callers
 //! feature-detect with `meta.capabilities` instead of sniffing versions.
 //!
+//! ## `.a7p` interop: `profile.import_a7p` and `profile.export_a7p`
+//!
+//! Both directions of the ArcherBC2 format, and both are LOSSY in a way the caller is
+//! required to surface. Import reports `unmapped` — what the file held that a
+//! `ProfileData` cannot. Export (MBA-1556) reports `not_carried` — every `ProfileData`
+//! field the file cannot hold, listed unconditionally with a `populated` flag, plus the
+//! pre-filtered `dropped_fields` for the ones this profile really did lose.
+//!
+//! The asymmetry is deliberate. On import the user is gaining a profile and can see what
+//! arrived; on export they are handing a rifle to somebody else and cannot see what
+//! arrives at the far end. An app that renders "exported" without rendering the drop list
+//! has told a shooter something untrue, so the list travels in the result rather than
+//! being something a caller has to ask for.
+//!
+//! Export never extends the format to make room: `.a7p` belongs to somebody else, and
+//! smuggling our fields into unused field numbers would produce files Archer's own tools
+//! misread.
+//!
 //! ## The `reticle.*` family
 //!
 //! `reticle.describe`, `reticle.hold` and `reticle.import` put the engine's reticle stack
@@ -148,6 +166,8 @@ fn command_names() -> Vec<&'static str> {
     names.extend(["profile.validate", "profile.normalize"]);
     #[cfg(feature = "profile-import")]
     names.push("profile.import_a7p");
+    #[cfg(feature = "profile-export")]
+    names.push("profile.export_a7p");
     // Unconditional: the reticle stack is pure geometry with no filesystem access, so all
     // three are present on wasm32 like the `true.*` family.
     names.extend([
@@ -176,6 +196,7 @@ fn compiled_features() -> Vec<&'static str> {
     [
         ("pdf", cfg!(feature = "pdf")),
         ("profile-import", cfg!(feature = "profile-import")),
+        ("profile-export", cfg!(feature = "profile-export")),
         ("online", cfg!(feature = "online")),
     ]
     .iter()
@@ -321,6 +342,8 @@ fn dispatch(request_json: &str) -> String {
         "profile.normalize" => run_profile_normalize(&request.request),
         #[cfg(feature = "profile-import")]
         "profile.import_a7p" => run_profile_import_a7p(&request.request),
+        #[cfg(feature = "profile-export")]
+        "profile.export_a7p" => run_profile_export_a7p(&request.request),
         "reticle.catalog" => run_reticle_catalog(),
         "reticle.describe" => run_reticle_describe(&request.request),
         "reticle.hold" => run_reticle_hold(&request.request),
@@ -688,14 +711,17 @@ fn run_card_pdf(inner: &Value) -> String {
     success("card.pdf", response)
 }
 
-/// RFC 4648 standard-alphabet base64 encoder with padding, for `card.pdf`.
+/// RFC 4648 standard-alphabet base64 encoder with padding, for `card.pdf` and
+/// `profile.export_a7p` — hence the two-feature gate, which must list every feature that
+/// has a binary to hand out or the function goes missing from exactly the build that
+/// needs it.
 ///
 /// Hand-rolled for the same reason as `decode_base64` below (plain text, not a doc link:
 /// that function is gated on `profile-import`, which a pdf-only build need not enable): no
 /// direct base64 dependency
 /// exists in `Cargo.toml`, and adding one for twenty lines of arithmetic would ride along on
 /// all thirteen release targets.
-#[cfg(feature = "pdf")]
+#[cfg(any(feature = "pdf", feature = "profile-export"))]
 fn encode_base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -1027,6 +1053,77 @@ fn run_profile_import_a7p(inner: &Value) -> String {
             None,
         ),
     }
+}
+
+/// `profile.export_a7p`: encode a ProfileData document as an ArcherBC2 `.a7p` file,
+/// with the full account of what could not travel. Request payload is the ProfileData
+/// document itself, exactly like `profile.validate`/`profile.normalize`.
+///
+/// Result: `{ "a7p_base64": "..", "byte_length": N, "carried_fields": [..],
+/// "not_carried": [{field, populated, value, reason}, ..], "dropped_fields": [..],
+/// "warnings": [..] }`.
+///
+/// `not_carried` is the reason this command has a shape of its own rather than
+/// returning bare bytes, and it is NOT optional output. `.a7p` is a third-party format
+/// built around one rifle, one load and one device; a saved profile holds a good deal it
+/// has no slot for, and an app that shows a shooter "exported" without showing them what
+/// their friend will not receive has told them something untrue. `not_carried` lists
+/// every unsupported field unconditionally, with `populated` saying whether THIS profile
+/// actually lost anything there, and `dropped_fields` is the pre-filtered subset that
+/// did — the list to put in front of a person. `carried_fields` is the other half of the
+/// same partition, so a caller can account for the whole document.
+///
+/// Errors carry a structured `reason` in `error.details` under the `true.*` convention
+/// (`error.code` stays `command_failed`): `units`, `drag_model`, or `field` plus the
+/// offending field name.
+#[cfg(feature = "profile-export")]
+fn run_profile_export_a7p(inner: &Value) -> String {
+    use crate::profile_export::{export_a7p, A7pExportError, CARRIED_FIELDS};
+
+    let profile = match decode_profile_document(inner, "profile.export_a7p") {
+        Ok(profile) => profile,
+        Err(envelope) => return envelope,
+    };
+    let export = match export_a7p(&profile) {
+        Ok(export) => export,
+        Err(err) => {
+            let details = match &err {
+                A7pExportError::Units(_) => json!({ "reason": "units" }),
+                A7pExportError::DragModel(model) => {
+                    json!({ "reason": "drag_model", "drag_model": model })
+                }
+                A7pExportError::Field { field, .. } => {
+                    json!({ "reason": "field", "field": field })
+                }
+            };
+            return error(
+                BridgeErrorCode::CommandFailed,
+                err.to_string(),
+                Some(details),
+            );
+        }
+    };
+    let not_carried = match serde_json::to_value(&export.not_carried) {
+        Ok(value) => value,
+        Err(err) => {
+            return error(
+                BridgeErrorCode::InternalError,
+                format!("failed to serialize the not-carried list: {err}"),
+                None,
+            )
+        }
+    };
+    success(
+        "profile.export_a7p",
+        json!({
+            "a7p_base64": encode_base64(&export.bytes),
+            "byte_length": export.bytes.len(),
+            "carried_fields": CARRIED_FIELDS,
+            "not_carried": not_carried,
+            "dropped_fields": export.dropped_fields(),
+            "warnings": export.warnings,
+        }),
+    )
 }
 
 /// Minimal strict RFC 4648 standard-alphabet base64 decoder for `profile.import_a7p`.
@@ -1941,6 +2038,11 @@ mod tests {
             "profile.import_a7p must be listed exactly when compiled in"
         );
         assert_eq!(
+            commands.contains(&"profile.export_a7p".to_string()),
+            cfg!(feature = "profile-export"),
+            "profile.export_a7p must be listed exactly when compiled in"
+        );
+        assert_eq!(
             commands.contains(&"bc5d.info".to_string()),
             cfg!(not(target_arch = "wasm32")),
             "bc5d.info must be listed exactly when the build has filesystem access"
@@ -2714,5 +2816,104 @@ mod tests {
             assert_eq!(out["ok"], false, "{command} accepted a null payload");
             assert_eq!(out["error"]["code"], "invalid_request", "{command}");
         }
+    }
+
+    /// The bridge's own end-to-end proof: a ProfileData in, a real `.a7p` out, and the
+    /// file it hands back is one `profile.import_a7p` accepts. Round-trip fidelity of the
+    /// individual fields is the encoder's own test; what is proved here is that the two
+    /// bridge commands are actually inverse over the wire, base64 and all.
+    #[cfg(all(feature = "profile-export", feature = "profile-import"))]
+    #[test]
+    fn export_a7p_produces_a_file_import_a7p_reads_back() {
+        let profile = json!({
+            "name": "bridge-export",
+            "velocity": 792.0,
+            "bc": 0.381,
+            "mass": 19.439673,
+            "diameter": 8.5852,
+            "drag_model": "G7",
+            "twist_rate": 254.0,
+            "sight_height": 90.0,
+            "zero_distance": 100.0,
+            "units": "metric",
+            "temperature": 15.0,
+            "pressure": 1000.0,
+            "humidity": 50.0,
+            "altitude": 0.0,
+            "bullet_name": "300GR OTM",
+            "twist_right": false,
+            "bullet_length": 45.72,
+            "elevation_cf": 0.97,
+            "dsf_points": [{"mach": 0.9, "dsf": 1.04}]
+        });
+
+        let out = call(json!({
+            "api_version": 1, "command": "profile.export_a7p", "request": profile
+        }));
+        assert_eq!(out["ok"], true, "{out}");
+        let result = &out["result"];
+        assert!(result["byte_length"].as_u64().unwrap() > 32);
+
+        // The honesty contract: the two fields this profile set that .a7p cannot take
+        // are named, and nothing that DID travel is named alongside them.
+        let dropped: Vec<String> =
+            serde_json::from_value(result["dropped_fields"].clone()).unwrap();
+        assert!(dropped.contains(&"elevation_cf".to_string()), "{out}");
+        assert!(dropped.contains(&"dsf_points".to_string()), "{out}");
+        assert!(!dropped.contains(&"velocity".to_string()), "{out}");
+        // ...and the full list names the unsupported fields this profile left empty too,
+        // so a caller can tell "had none" from "lost it".
+        let not_carried = result["not_carried"].as_array().unwrap();
+        let reticle = not_carried
+            .iter()
+            .find(|e| e["field"] == "reticle")
+            .expect("reticle is listed even though this profile has none");
+        assert_eq!(reticle["populated"], false, "{out}");
+        assert!(reticle["reason"].as_str().unwrap().len() > 10, "{out}");
+
+        let back = call(json!({
+            "api_version": 1,
+            "command": "profile.import_a7p",
+            "request": { "a7p_base64": result["a7p_base64"].clone(), "strict": true }
+        }));
+        // `strict` refuses on an envelope mismatch, so this passing is also the proof
+        // that the MD5 prefix the encoder wrote is correct.
+        assert_eq!(back["ok"], true, "{back}");
+        let reimported = &back["result"]["profile"];
+        assert_eq!(reimported["name"], "bridge-export", "{back}");
+        assert_eq!(reimported["drag_model"], "G7", "{back}");
+        assert_eq!(reimported["twist_right"], false, "{back}");
+    }
+
+    /// A drag model the format cannot name is refused with the structured `reason` the
+    /// `true.*` family established, not written out as something else.
+    #[cfg(feature = "profile-export")]
+    #[test]
+    fn export_a7p_refuses_an_unrepresentable_drag_model_with_a_reason() {
+        let out = call(json!({
+            "api_version": 1,
+            "command": "profile.export_a7p",
+            "request": {
+                "name": "g5-load", "velocity": 792.0, "bc": 0.3, "mass": 19.4,
+                "diameter": 8.5852, "drag_model": "G5", "units": "metric"
+            }
+        }));
+        assert_eq!(out["error"]["code"], "command_failed", "{out}");
+        assert_eq!(out["error"]["details"]["reason"], "drag_model", "{out}");
+        assert_eq!(out["error"]["details"]["drag_model"], "G5", "{out}");
+    }
+
+    #[cfg(feature = "profile-export")]
+    #[test]
+    fn export_a7p_without_a_payload_is_an_invalid_request() {
+        let out = call(json!({"api_version": 1, "command": "profile.export_a7p"}));
+        assert_eq!(out["error"]["code"], "invalid_request", "{out}");
+        assert!(
+            out["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("ProfileData"),
+            "{out}"
+        );
     }
 }

@@ -53,7 +53,7 @@ exclude = [
 ]
 
 [features]
-default = ["online", "pdf", "profile-import", "ffi", "cli", "bridge"]
+default = ["online", "pdf", "profile-import", "profile-export", "ffi", "cli", "bridge"]
 # dirs is shared: the CLI (config/profile paths), the online BC-table cache, and the
 # PDF dope card's font lookup all resolve user directories.
 online = ["dep:ureq", "dep:dirs"]
@@ -66,6 +66,10 @@ cli = ["dep:clap", "dep:clap_complete", "dep:csv", "dep:dirs", "dep:strsim"]
 jemalloc = ["dep:tikv-jemallocator"]
 mimalloc = ["dep:mimalloc"]
 profile-import = []
+# MBA-1556: ProfileData -> .a7p export. Implies `profile-import`: the two directions
+# share the MD5 envelope helper, and the export's round-trip test is what keeps their
+# fixed-point scale tables in lockstep.
+profile-export = ["profile-import"]
 # Versioned JSON command bridge (src/bridge/) — the mobile embedding surface.
 # Pure serde/serde_json (already core deps). Its C ABI (src/bridge/ffi.rs) is
 # additionally gated on `ffi`, so a no-ffi build keeps the pure-Rust bridge.

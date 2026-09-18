@@ -254,6 +254,14 @@ pub mod profile;
 #[cfg(feature = "profile-import")]
 pub mod profile_import;
 
+// MBA-1556: the outbound direction — ProfileData -> .a7p — with the list of every
+// ProfileData field the format cannot carry. Its own feature because writing a
+// third-party format is a separate capability from reading one; it implies
+// `profile-import`, whose MD5 envelope helper (`wrap_payload`) it shares so both
+// directions agree on the envelope by construction rather than by review.
+#[cfg(feature = "profile-export")]
+pub mod profile_export;
+
 // Versioned JSON command bridge for embedded (mobile/FFI) consumers
 #[cfg(feature = "bridge")]
 pub mod bridge;
