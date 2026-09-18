@@ -141,6 +141,48 @@ pub const MIL_DOT_DEFAULT_DOTS_PER_SIDE: usize = 5;
 /// Wire id of the mil-dot entry.
 pub const MIL_DOT_ID: &str = "mil-dot";
 
+/// A plain hash ladder: marks every `spacing` along both stadia out to `extent`.
+///
+/// GENERIC GEOMETRY, and that is the whole point of these entries. A hash ladder
+/// is not anybody's design — it is what a reticle looks like when it is just a
+/// ruler, and a great many scopes carry exactly that under a vendor's name. So
+/// these can be stated exactly, from the spacing alone, without transcribing
+/// anyone's subtension sheet and without reproducing anyone's layout.
+///
+/// `unit_label` names the angular unit the spacing is quoted in, for the display
+/// name only. The geometry is milliradians either way, because
+/// [`ReticleMark`] is milliradians — an MOA ladder is a ladder whose marks
+/// happen to fall on MOA multiples, not a different kind of object.
+fn hash_ladder(
+    name: String,
+    spacing_mil: f64,
+    extent_mil: f64,
+) -> Result<ReticleDescription, ReticleError> {
+    let mut description = ReticleDescription::mil_grid(spacing_mil, extent_mil)?;
+    description.name = name;
+    Ok(description)
+}
+
+/// One MOA in milliradians, on the engine's locked printed-table constant.
+///
+/// `adjustment.rs` pins MOA at 3438 rather than the exact-angle 3437.7467 and
+/// prints every MOA column on it (MBA-724), so an MOA ladder built here has to
+/// use the same number or its marks sit a hair off the dial column beside them.
+/// 1 MOA = 1000/3438 mil.
+const MIL_PER_MOA: f64 = 1000.0 / 3438.0;
+
+/// Wire id of the half-mil hash ladder.
+pub const MIL_HASH_HALF_ID: &str = "mil-hash-0.5";
+
+/// Wire id of the fine two-tenth mil hash ladder.
+pub const MIL_HASH_FINE_ID: &str = "mil-hash-0.2";
+
+/// Wire id of the one-MOA hash ladder.
+pub const MOA_HASH_1_ID: &str = "moa-hash-1";
+
+/// Wire id of the two-MOA hash ladder.
+pub const MOA_HASH_2_ID: &str = "moa-hash-2";
+
 /// Every named reticle in this build.
 ///
 /// Deliberately short. It holds what can be stated EXACTLY from a public standard; vendor
@@ -148,18 +190,59 @@ pub const MIL_DOT_ID: &str = "mil-dot";
 /// that a bad subtension is traceable. An entry whose `source` would have to read "from
 /// memory" does not belong here at all — see the module header.
 pub fn catalog() -> Vec<CatalogEntry> {
-    vec![CatalogEntry {
-        id: MIL_DOT_ID,
-        display_name: "Mil-Dot",
-        source: "US military mil-dot standard: dots on 1 mil centres, 0.2 mil dot \
+    vec![
+        CatalogEntry {
+            id: MIL_DOT_ID,
+            display_name: "Mil-Dot",
+            source: "US military mil-dot standard: dots on 1 mil centres, 0.2 mil dot \
                  subtension. Long-published and carried unchanged by every scope that \
                  names the reticle; no vendor sheet is involved.",
-        notes: "The 1 mil spacing is the standard and does not vary. How many dots are \
+            notes: "The 1 mil spacing is the standard and does not vary. How many dots are \
                 etched on each arm DOES vary between scopes (four and five are both \
                 common); this builds five, and a hold inside the ladder reads the same \
                 either way. Dots subtend 0.2 mil, which this model does not draw — marks \
                 are positions, and a hold is measured to a mark's centre.",
-    }]
+        },
+        CatalogEntry {
+            id: MIL_HASH_HALF_ID,
+            display_name: "Mil hash, 0.5 mil",
+            source: "Generic geometry, not a vendor design: hash marks on 0.5 mil \
+                 centres along both stadia. Stated from the spacing alone — \
+                 nothing here is transcribed from anyone's subtension sheet.",
+            notes: "Many scopes carry a plain half-mil ladder under a vendor name. \
+                Use this when yours is simply a ruler; if it has a tree, \
+                irregular windage marks or labelled BDC marks, it is not this \
+                and the holds will name the wrong mark.",
+        },
+        CatalogEntry {
+            id: MIL_HASH_FINE_ID,
+            display_name: "Mil hash, 0.2 mil",
+            source: "Generic geometry, not a vendor design: hash marks on 0.2 mil \
+                 centres along both stadia.",
+            notes: "A fine ladder, typical of a first-focal-plane target reticle at \
+                high magnification. Same caveat as the half-mil ladder: this is \
+                a ruler, not a tree.",
+        },
+        CatalogEntry {
+            id: MOA_HASH_1_ID,
+            display_name: "MOA hash, 1 MOA",
+            source: "Generic geometry, not a vendor design: hash marks on 1 MOA \
+                 centres along both stadia, converted at the engine's locked \
+                 printed-table 3438 MOA per radian (adjustment.rs, MBA-724) so \
+                 the marks agree with the MOA column beside them.",
+            notes: "An MOA ladder is a ladder whose marks fall on MOA multiples; \
+                the model is milliradians either way. 1 MOA is about 0.29 mil, \
+                so these sit closer together than a mil ladder's.",
+        },
+        CatalogEntry {
+            id: MOA_HASH_2_ID,
+            display_name: "MOA hash, 2 MOA",
+            source: "Generic geometry, not a vendor design: hash marks on 2 MOA \
+                 centres along both stadia, on the same locked 3438 constant.",
+            notes: "The coarser of the two MOA ladders, and the commoner one on a \
+                hunting scope.",
+        },
+    ]
 }
 
 /// Build the reticle named by `id`, or `None` when this build has no such entry.
@@ -169,6 +252,21 @@ pub fn catalog() -> Vec<CatalogEntry> {
 pub fn by_id(id: &str) -> Option<Result<ReticleDescription, ReticleError>> {
     match id {
         MIL_DOT_ID => Some(mil_dot(MIL_DOT_DEFAULT_DOTS_PER_SIDE)),
+        // Ten mils of ladder, which reaches past any hold a shooter takes on a
+        // reticle rather than a dial, and matches what mil_grid's own extent
+        // means: marks out TO this, not beyond it.
+        MIL_HASH_HALF_ID => Some(hash_ladder("Mil hash 0.5".into(), 0.5, 10.0)),
+        MIL_HASH_FINE_ID => Some(hash_ladder("Mil hash 0.2".into(), 0.2, 5.0)),
+        MOA_HASH_1_ID => Some(hash_ladder(
+            "MOA hash 1".into(),
+            MIL_PER_MOA,
+            MIL_PER_MOA * 30.0,
+        )),
+        MOA_HASH_2_ID => Some(hash_ladder(
+            "MOA hash 2".into(),
+            MIL_PER_MOA * 2.0,
+            MIL_PER_MOA * 30.0,
+        )),
         _ => None,
     }
 }
@@ -247,6 +345,83 @@ mod tests {
             built
                 .validate()
                 .unwrap_or_else(|e| panic!("{} builds an invalid reticle: {e}", entry.id));
+        }
+    }
+
+    #[test]
+    fn a_moa_ladder_falls_on_moa_multiples() {
+        // An MOA ladder is a ladder whose marks fall on MOA multiples; the model
+        // is milliradians either way. The constant is the engine's LOCKED 3438,
+        // not the exact-angle 3437.7467, so these marks agree with the MOA
+        // column printed beside them (MBA-724).
+        let reticle = by_id(MOA_HASH_1_ID).unwrap().unwrap();
+        let one_moa = 1000.0 / 3438.0;
+        let mut down: Vec<f64> = reticle
+            .marks
+            .iter()
+            .filter(|m| m.right_mil == 0.0 && m.down_mil > 0.0)
+            .map(|m| m.down_mil)
+            .collect();
+        down.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        for (index, mil) in down.iter().enumerate() {
+            let expected = one_moa * (index + 1) as f64;
+            assert!(
+                (mil - expected).abs() < 1e-9,
+                "mark {index} at {mil} mil is not {} MOA",
+                index + 1
+            );
+        }
+        assert!(
+            down.len() >= 20,
+            "a 30 MOA ladder should carry 30 marks a side"
+        );
+    }
+
+    #[test]
+    fn every_ladder_is_a_cross_and_carries_its_centre() {
+        // The IP line, restated for every entry rather than only the mil-dot: a
+        // filled two-dimensional grid is patented geometry, and nothing here
+        // may drift into one.
+        for entry in catalog() {
+            let reticle = by_id(entry.id).unwrap().unwrap();
+            assert!(
+                reticle
+                    .marks
+                    .iter()
+                    .any(|m| m.kind == MarkKind::Center && m.down_mil == 0.0 && m.right_mil == 0.0),
+                "{} has no centre",
+                entry.id
+            );
+            for mark in &reticle.marks {
+                assert!(
+                    mark.down_mil == 0.0 || mark.right_mil == 0.0,
+                    "{}: mark at ({}, {}) is off both stadia — that is a grid",
+                    entry.id,
+                    mark.down_mil,
+                    mark.right_mil
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_generic_ladders_say_they_are_generic() {
+        // These are stated from a spacing, not transcribed from a sheet, and
+        // the entry has to say so — a shooter comparing this against their own
+        // glass needs to know it is a ruler and not their vendor's design.
+        for id in [
+            MIL_HASH_HALF_ID,
+            MIL_HASH_FINE_ID,
+            MOA_HASH_1_ID,
+            MOA_HASH_2_ID,
+        ] {
+            let entry = catalog().into_iter().find(|e| e.id == id).unwrap();
+            assert!(
+                entry
+                    .source
+                    .contains("Generic geometry, not a vendor design"),
+                "{id} does not say it is generic"
+            );
         }
     }
 

@@ -5,6 +5,28 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Four generic hash-ladder reticles in the catalog (MBA-1562).** `mil-hash-0.5`,
+  `mil-hash-0.2`, `moa-hash-1` and `moa-hash-2`, beside the mil-dot.
+
+  GENERIC GEOMETRY, which is what makes them statable at all. A hash ladder is not
+  anybody's design — it is what a reticle looks like when it is just a ruler, and a great
+  many scopes carry exactly that under a vendor's name. So these follow from a spacing
+  alone: nothing is transcribed from a subtension sheet, no vendor layout is reproduced,
+  and each entry's `source` says so in as many words, because a shooter comparing one
+  against their own glass needs to know it is a ruler rather than their vendor's design.
+
+  The MOA ladders convert at the engine's LOCKED printed-table 3438 MOA per radian
+  (`adjustment.rs`, MBA-724) rather than the exact-angle 3437.7467, so their marks agree
+  with the MOA column printed beside them. An MOA ladder is a ladder whose marks fall on
+  MOA multiples; the model is milliradians either way.
+
+  Every entry is still a CROSS and not a grid, now tested across the whole catalog rather
+  than for the mil-dot alone — a filled two-dimensional grid is patented geometry and
+  nothing here may drift into one.
+
 ## [0.42.0] - 2026-09-17
 
 ### Added
