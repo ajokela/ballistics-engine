@@ -69,18 +69,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     invented as range data, and every export says so in its warnings. A test pins the
     minimum and the reason, because our own parser accepts either and nothing else would
     have caught a "cleanup" back to zero.
-  - **`bullet_length` and `zero_distance` are now required to export.** The format enforces
-    a minimum `b_length` and a non-empty `distances` list, so a profile missing either
-    produced an invalid file. Refused by name rather than filled in: a bullet length drives
-    the recipient's stability model and a zero distance is where their rifle will shoot.
+  - **`bullet_length`, `zero_distance` and `sight_height` are now required to export.** The
+    format enforces a minimum `b_length` and a non-empty `distances` list, so a profile
+    missing either produced an invalid file; a missing sight height produced a VALID file
+    claiming a 0 mm mount, which no rifle has. All three are refused by name rather than
+    filled in: a bullet length drives the recipient's stability model, a zero distance is
+    where their rifle will shoot, and each would arrive as a number the recipient cannot
+    tell from a measurement — the export's warnings stay with the sender and never travel
+    in the file.
+
+    `twist_rate` is the deliberate exception and stays a warning: `r_twist` = 0 may be how
+    the format says "twist unknown", in which case refusing would reject profiles the
+    ecosystem handles fine. We have the ecosystem's validator, which accepts 0, and not the
+    device that interprets it. The asymmetry, and the observation that would settle it, are
+    recorded at the conversion site and pinned by a test so the four cases do not get tidied
+    into one rule.
   - **Value ranges the ecosystem enforces are now refusals, not silent output.** Sight
     height, twist, muzzle velocity, temperature, pressure, humidity, diameter, weight,
     length and range-card distance each have limits the upstream validator applies; a file
     outside them cannot be opened at all, which is no export rather than a lossy one.
 
-  Six exported files — metric, imperial, CUSTOM curve, fully-populated, minimal, and a
-  plain .308 at a 200 yd zero — are ACCEPTED by the upstream validator and read back with
-  the right numbers.
+  Exported files across metric, imperial, CUSTOM curve, fully-populated, unknown-twist and
+  a plain .308 (G1, right twist, 200 yd zero) are ACCEPTED by the upstream validator and
+  read back with the right numbers, unit conversions and proto3-default fields included.
+
+  These limits are the upstream VALIDATOR's, established black-box against it; the
+  ArcherBC2 device itself may be stricter, and the module doc says so.
 
 ### Fixed
 - **The `.a7p` licence note was wrong (MBA-1556).** `profile_import` claimed the upstream

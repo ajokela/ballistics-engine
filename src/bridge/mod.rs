@@ -2894,12 +2894,13 @@ mod tests {
             "api_version": 1,
             "command": "profile.export_a7p",
             // Complete in every other respect, so the refusal can only be about the
-            // drag model: the format also REQUIRES a bullet length and a zero
-            // distance, and those refusals are checked in the encoder's own tests.
+            // drag model: the format also REQUIRES a bullet length, a zero distance
+            // and a sight height, and those refusals are checked in the encoder's
+            // own tests.
             "request": {
                 "name": "g5-load", "velocity": 792.0, "bc": 0.3, "mass": 19.4,
                 "diameter": 8.5852, "drag_model": "G5", "units": "metric",
-                "bullet_length": 45.72, "zero_distance": 100.0,
+                "bullet_length": 45.72, "zero_distance": 100.0, "sight_height": 90.0,
                 "temperature": 15.0, "pressure": 1000.0, "humidity": 50.0
             }
         }));

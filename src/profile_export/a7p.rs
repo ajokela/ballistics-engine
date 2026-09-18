@@ -44,6 +44,13 @@
 //! warning names the dropped half instead of the list claiming the format has no
 //! room for it.
 //!
+//! # What "valid" means here
+//!
+//! The minimum switch count, the value ranges and the mandatory fields enforced
+//! below are the upstream `a7p` package's VALIDATOR's rules, established
+//! black-box against it; the ArcherBC2 device itself may well be stricter, so
+//! nothing here should be read as the full set of what a device will accept.
+//!
 //! # `switches` is in neither list, on purpose
 //!
 //! The partition above is over `ProfileData` fields — things a shooter has that
@@ -444,14 +451,55 @@ pub fn export_a7p(profile: &ProfileData) -> Result<A7pExport, A7pExportError> {
             })
         }
     };
+    // `twist_rate` and `sight_height` are DELIBERATELY handled differently, and
+    // the difference is decided rather than missed. Both are `Option` here, both
+    // become 0 in the file when absent, and the validator accepts 0 for both — so
+    // no rule derived from the validator alone separates them. What separates
+    // them is what a 0 MEANS to the recipient:
+    //
+    //   * `sc_height` = 0 is a 0 mm mount, which no rifle has. It is an absence
+    //     encoded as a number the recipient cannot tell from a measurement, and it
+    //     moves every solution they compute. Refused below, like `bullet_length`.
+    //   * `r_twist` = 0 may legitimately be this format's way of saying "twist
+    //     unknown", in which case refusing would reject profiles the ecosystem
+    //     handles perfectly well. We do not know that it is. We have the
+    //     ecosystem's VALIDATOR, which accepts 0, and not the device, so this
+    //     warns and writes nothing rather than refusing.
+    //
+    // What would settle it: observing how ArcherBC2 itself treats a profile with
+    // r_twist = 0 — whether it presents the twist as unknown or silently solves
+    // with a zero. If it is the latter, `twist_rate` should join `sight_height`
+    // and `bullet_length` as a refusal. Until somebody can watch the device do it,
+    // this asymmetry stands on a stated unknown, not on an oversight.
     let twist_in = profile.twist_rate.map(|v| match units {
         UnitSystem::Metric => v / MM_PER_INCH,
         UnitSystem::Imperial => v,
     });
-    let sight_height_mm = profile.sight_height.map(|v| match units {
-        UnitSystem::Metric => v,
-        UnitSystem::Imperial => v * MM_PER_INCH,
-    });
+    if twist_in.is_none() {
+        lossy.warnings.push(
+            "twist_rate: unset, so the file's r_twist stays 0. The format may read that as \
+             \"twist unknown\" or as a zero twist, and which it is decides whether the \
+             recipient gets spin drift at all — set twist_rate if the rifle's twist is \
+             known"
+                .to_string(),
+        );
+    }
+    let sight_height_mm = match profile.sight_height {
+        Some(v) => match units {
+            UnitSystem::Metric => v,
+            UnitSystem::Imperial => v * MM_PER_INCH,
+        },
+        None => {
+            return Err(A7pExportError::Field {
+                field: "sight_height",
+                message: "the .a7p format has no way to say a sight height is unknown, and \
+                          the 0 mm it would otherwise carry is a mount no rifle has — the \
+                          recipient cannot tell it from a measurement and every solution \
+                          they compute moves. Set sight_height"
+                    .to_string(),
+            })
+        }
+    };
     let zero_distance_m = profile.zero_distance.map(|v| match units {
         UnitSystem::Metric => v,
         UnitSystem::Imperial => v * METERS_PER_YARD,
@@ -639,12 +687,23 @@ pub fn export_a7p(profile: &ProfileData) -> Result<A7pExport, A7pExportError> {
     if let Some(bullet_name) = profile.bullet_name.as_deref().filter(|s| !s.is_empty()) {
         write_string_field(F_BULLET_NAME, bullet_name, &mut body);
     }
-    if let Some(mm) = sight_height_mm {
-        let raw = lossy.quantize("sight_height", mm, 1.0, "mm", BOUND_SIGHT_HEIGHT)?;
-        if raw != 0 {
-            write_i32_field(F_SIGHT_HEIGHT, raw, &mut body);
-        }
-    }
+    // Unconditional, unlike the optional fields above: a sight height is required
+    // to get this far, so there is no "absent" case left to omit, and writing an
+    // explicit 0 for a mount that rounds to nothing keeps this field's presence
+    // in the file matching its presence in the profile. A present-and-zero
+    // scalar reads identically to an omitted one, so this costs a byte and no
+    // compatibility.
+    write_i32_field(
+        F_SIGHT_HEIGHT,
+        lossy.quantize(
+            "sight_height",
+            sight_height_mm,
+            1.0,
+            "mm",
+            BOUND_SIGHT_HEIGHT,
+        )?,
+        &mut body,
+    );
     if let Some(inches) = twist_in {
         let raw = lossy.quantize("twist_rate", inches, SCALE_TWIST, "in/turn", BOUND_TWIST)?;
         if raw != 0 {
@@ -1497,26 +1556,64 @@ mod tests {
         }
     }
 
-    /// The two fields the format makes mandatory that `ProfileData` leaves
-    /// optional. Refused by name rather than filled in: a bullet length drives the
-    /// recipient's stability model and a zero distance is where their rifle will
-    /// shoot, and a plausible invention of either is indistinguishable from a
-    /// measurement.
+    /// The three fields `ProfileData` leaves optional that this export refuses to
+    /// write without. Refused by name rather than filled in: each would otherwise
+    /// reach the recipient as a number they cannot tell from a measurement — a
+    /// bullet length drives their stability model, a zero distance is where their
+    /// rifle will shoot, and a 0 mm mount is one no rifle has.
     #[test]
     fn fields_the_format_requires_are_refused_when_absent_not_invented() {
-        let mut no_length = carryable_profile();
-        no_length.bullet_length = None;
-        match export_a7p(&no_length) {
-            Err(A7pExportError::Field { field, .. }) => assert_eq!(field, "bullet_length"),
-            other => panic!("expected a bullet_length refusal, got {other:?}"),
+        for (field, clear) in [
+            (
+                "bullet_length",
+                Box::new(|p: &mut ProfileData| p.bullet_length = None)
+                    as Box<dyn Fn(&mut ProfileData)>,
+            ),
+            (
+                "zero_distance",
+                Box::new(|p: &mut ProfileData| p.zero_distance = None),
+            ),
+            (
+                "sight_height",
+                Box::new(|p: &mut ProfileData| p.sight_height = None),
+            ),
+        ] {
+            let mut profile = carryable_profile();
+            clear(&mut profile);
+            match export_a7p(&profile) {
+                Err(A7pExportError::Field { field: got, .. }) => assert_eq!(got, field),
+                other => panic!("{field}: expected a refusal, got {other:?}"),
+            }
         }
+    }
 
-        let mut no_zero = carryable_profile();
-        no_zero.zero_distance = None;
-        match export_a7p(&no_zero) {
-            Err(A7pExportError::Field { field, .. }) => assert_eq!(field, "zero_distance"),
-            other => panic!("expected a zero_distance refusal, got {other:?}"),
-        }
+    /// `twist_rate` is the DELIBERATE exception to the rule above, and this test
+    /// exists to stop the three refusals and this one warning being tidied into a
+    /// single shared rule.
+    ///
+    /// An absent twist still exports, with a warning. The reason is not that a
+    /// zero twist matters less than a zero mount — it is that `r_twist` = 0 may be
+    /// how this format says "twist unknown", which would make a refusal reject
+    /// profiles the ecosystem handles fine. We have the ecosystem's validator,
+    /// which accepts 0, and not the device that interprets it. See the comment at
+    /// the conversion site for what observation would settle it and let this
+    /// become a refusal.
+    #[test]
+    fn an_absent_twist_rate_warns_rather_than_refusing_and_that_is_deliberate() {
+        let mut profile = carryable_profile();
+        profile.twist_rate = None;
+        let export = export_a7p(&profile).expect("an unknown twist must still export");
+        assert!(
+            export
+                .warnings
+                .iter()
+                .any(|w| w.starts_with("twist_rate:") && w.contains("r_twist")),
+            "an absent twist must be reported: {:?}",
+            export.warnings
+        );
+        // ...and the file really does carry no twist, rather than a fabricated one.
+        let back = reimport(&export);
+        assert_eq!(back.twist_rate, Some(0.0));
     }
 
     /// Values our own arithmetic accepts but the ecosystem's validator does not
