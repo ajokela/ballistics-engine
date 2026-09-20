@@ -9090,7 +9090,9 @@ impl Calculator {
     // Calculation method
 
     /// Calculate trajectory and return result as JavaScript object
-    /// Returns: { range_yards, drop_inches, windage_inches, velocity_fps, energy_ftlb, time_sec }
+    /// Returns: { range_yards, drop_inches, drift_inches, velocity_fps, energy_ftlb, time_seconds }
+    /// (`drift_inches`, not `windage_inches` -- the wrong name here is what a wasm test was
+    /// written against, and it failed on a field that has never existed. MBA-1535.)
     #[wasm_bindgen(js_name = calculateTrajectory)]
     pub fn calculate_trajectory(&self, range_yards: f64) -> Result<JsValue, JsValue> {
         // Build CLI command from parameters
@@ -9259,6 +9261,10 @@ impl Calculator {
 
     /// Get full trajectory table as array of points
     /// Returns array of: [{ range_yards, drop_inches, windage_inches, velocity_fps, energy_ftlb, time_sec }, ...]
+    ///
+    /// ⚠️ DIFFERENT KEYS FROM [`Self::calculate_trajectory`], which answers `drift_inches`
+    /// and `time_seconds`. The two have never agreed and the difference is load-bearing for
+    /// existing embedders, so it is documented here rather than quietly unified (MBA-1535).
     #[wasm_bindgen(js_name = getFullTrajectory)]
     pub fn get_full_trajectory(&self) -> Result<JsValue, JsValue> {
         // Build CLI command (similar to calculate_trajectory but get full table)
