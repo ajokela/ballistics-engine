@@ -1365,6 +1365,7 @@ mod tests {
   "lead": 1.267051911310233,
   "lead_mil": 3.1676393318758076,
   "lead_moa": 10.890344022989026,
+  "lead_smoa": 11.403501594752907,
   "range": 400.0,
   "target_angle_deg": 90.0,
   "target_speed": 5.0,
@@ -1379,6 +1380,7 @@ mod tests {
   "lead": 1.4774105669002737,
   "lead_mil": 4.221173048286496,
   "lead_moa": 14.512392940008974,
+  "lead_smoa": 15.196222973831386,
   "range": 350.0,
   "target_angle_deg": 90.0,
   "target_speed": 3.0,
@@ -2171,12 +2173,22 @@ Impact Velocity: 2510 fps\n";
             "zero -v 2700 -b 0.475 -m 168 -d 0.308 --target-distance 300 --cd-scale 1.1";
         let mc_cmd_neutral = "monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 -n 50 --cd-scale 1.0";
         let mc_cmd_scaled = "monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 -n 50 --cd-scale 1.1";
+        // ⚠️ THE WEZ CASE NEEDS ENOUGH RESOLUTION TO SEE WHAT IT ASSERTS. At `-n 20` the
+        // P(hit) column can only take multiples of 5%, and a 1.1x Cd at 200-300 yd does
+        // not move a .308 far enough to cross one -- so this pair printed identical
+        // tables while `--cd-scale` was working perfectly, and the assertion failed on
+        // the test's own choice of numbers rather than on the engine. Measured during
+        // MBA-1535: at 1.0 vs 3.0 over 600-800 yd with -n 200 the tables differ, which
+        // is what proves the flag reaches the WEZ path.
+        //
+        // Scaled up rather than deleted: the property is worth holding, and a case that
+        // cannot fail when the feature breaks is not holding it.
         let wez_cmd_neutral = "monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 --wez \
-             --target-size 18x30 -n 20 --wez-start 200 --wez-end 300 --wez-step 100 \
+             --target-size 18x30 -n 200 --wez-start 600 --wez-end 800 --wez-step 200 \
              --cd-scale 1.0";
         let wez_cmd_scaled = "monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 --wez \
-             --target-size 18x30 -n 20 --wez-start 200 --wez-end 300 --wez-step 100 \
-             --cd-scale 1.1";
+             --target-size 18x30 -n 200 --wez-start 600 --wez-end 800 --wez-step 200 \
+             --cd-scale 3.0";
 
         for (neutral_cmd, scaled_cmd) in [
             (zero_cmd_neutral, zero_cmd_scaled),
@@ -3840,6 +3852,30 @@ Impact Velocity: 2510 fps\n";
 
     // ---- MBA-1397: --pressure-type <absolute|qnh> / --zero-pressure-type ------------------
 
+    /// A scalar from the trajectory JSON's `summary` envelope.
+    ///
+    /// The browser terminal answers `trajectory -o json` with
+    /// `{legend, summary, trajectory}` -- the scalars are NOT at the top level. Panicking
+    /// with the key and the available keys turns "unwrap on None" into a sentence, which
+    /// is the difference between a five-minute fix and the state MBA-1535 found these in.
+    fn summary_f64(v: &serde_json::Value, key: &str) -> f64 {
+        let summary = v.get("summary").unwrap_or_else(|| {
+            panic!(
+                "trajectory JSON has no `summary`; top-level keys: {:?}",
+                v.as_object().map(|o| o.keys().collect::<Vec<_>>())
+            )
+        });
+        summary
+            .get(key)
+            .and_then(|x| x.as_f64())
+            .unwrap_or_else(|| {
+                panic!(
+                    "`summary.{key}` is missing or not a number; summary keys: {:?}",
+                    summary.as_object().map(|o| o.keys().collect::<Vec<_>>())
+                )
+            })
+    }
+
     const QNH_TRAJECTORY_BASE: &str = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
          --units metric --max-range 300 --ignore-ground-impact --altitude 1500 \
          --pressure 1030.0 -o json";
@@ -3866,8 +3902,15 @@ Impact Velocity: 2510 fps\n";
             .unwrap();
         let absolute: serde_json::Value = serde_json::from_str(&absolute_out).unwrap();
         let qnh: serde_json::Value = serde_json::from_str(&qnh_out).unwrap();
-        let v_absolute = absolute["impact_velocity"].as_f64().unwrap();
-        let v_qnh = qnh["impact_velocity"].as_f64().unwrap();
+        // MBA-1535: the browser terminal's trajectory JSON is {legend, summary, trajectory};
+        // the scalars live under `summary`. Read through a helper that SAYS SO on a miss,
+        // because `["impact_velocity"].as_f64().unwrap()` on the wrong level is an
+        // unwrap-on-None whose panic names neither the key nor the shape.
+        // `_mps`, because both commands are `--units metric` and the browser terminal puts
+        // the unit in the key name (see the note on `WasmBallistics`). An unsuffixed
+        // `impact_velocity` exists only in the imperial answer.
+        let v_absolute = summary_f64(&absolute, "impact_velocity_mps");
+        let v_qnh = summary_f64(&qnh, "impact_velocity_mps");
         assert!(
             v_qnh > v_absolute + 10.0,
             "QNH-reduced (lower) pressure must retain velocity better than treating the same \
@@ -3878,8 +3921,15 @@ Impact Velocity: 2510 fps\n";
     #[wasm_bindgen_test]
     fn zero_omitted_pressure_type_is_identical_to_explicit_absolute() {
         let wasm = WasmBallistics::new();
+        // NO `-o json`, deliberately. The browser terminal's `zero` has no --output flag
+        // at all (the native CLI does), so this asked for something that has never
+        // existed here and died on "Unknown flag: -o" before testing anything. The
+        // invariant is that omitting --pressure-type equals asking for `absolute`, and
+        // the table output carries that just as well as JSON would. The native/browser
+        // gap is real but separate; it is recorded on its own ticket rather than
+        // smuggled in as a test expectation.
         let base = "zero -v 2700 -b 0.475 -m 168 -d 0.308 --units metric \
-             --target-distance 300 --altitude 1500 --pressure 1030.0 -o json";
+             --target-distance 300 --altitude 1500 --pressure 1030.0";
         let omitted = wasm.run_command(base).unwrap();
         let explicit = wasm
             .run_command(&format!("{base} --pressure-type absolute"))
@@ -3930,8 +3980,8 @@ Impact Velocity: 2510 fps\n";
             .unwrap();
         let sea_level: serde_json::Value = serde_json::from_str(&sea_level).unwrap();
         let with_da: serde_json::Value = serde_json::from_str(&with_da).unwrap();
-        let v_sea = sea_level["impact_velocity"].as_f64().unwrap();
-        let v_da = with_da["impact_velocity"].as_f64().unwrap();
+        let v_sea = summary_f64(&sea_level, "impact_velocity_mps");
+        let v_da = summary_f64(&with_da, "impact_velocity_mps");
         // Thinner air at altitude -> less drag -> higher retained velocity.
         assert!(
             v_da > v_sea,
@@ -4105,7 +4155,16 @@ mod minimal_surface_tests {
             velocity > 1200.0 && velocity < 2700.0,
             "implausible retained velocity: {velocity}"
         );
-        assert!(field(&result, "drop_inches") < 0.0);
+        // POSITIVE IS DOWN. `drop_inches` is built as `los_height - y` (src/wasm.rs), so it
+        // is drop BELOW the line of sight and a dropping bullet gives a positive number.
+        // The `< 0.0` this replaces encoded the opposite convention and could never have
+        // passed -- measured at +47.4 in at 500 yd, which agrees with the native CLI's
+        // impact velocity to the digit.
+        let drop = field(&result, "drop_inches");
+        assert!(
+            drop > 10.0 && drop < 120.0,
+            "500 yd drop below the line of sight should be tens of inches, got {drop}"
+        );
         assert!(field(&result, "time_seconds") > 0.0);
     }
 
@@ -4122,7 +4181,7 @@ mod minimal_surface_tests {
             .calculate_trajectory(800.0)
             .expect("wind solves");
         assert!(
-            (field(&windy, "windage_inches") - field(&plain, "windage_inches")).abs() > 1.0,
+            (field(&windy, "drift_inches") - field(&plain, "drift_inches")).abs() > 1.0,
             "a 10 mph full-value crosswind must move windage"
         );
 
@@ -4132,7 +4191,7 @@ mod minimal_surface_tests {
             .calculate_trajectory(800.0)
             .expect("spin drift solves");
         assert!(
-            (field(&spun, "windage_inches") - field(&plain, "windage_inches")).abs() > 0.1,
+            (field(&spun, "drift_inches") - field(&plain, "drift_inches")).abs() > 0.1,
             "spin drift must move windage"
         );
 
@@ -4143,8 +4202,7 @@ mod minimal_surface_tests {
             .expect("coriolis solves");
         assert!(
             (field(&coriolis, "drop_inches") - field(&plain, "drop_inches")).abs() > 0.001
-                || (field(&coriolis, "windage_inches") - field(&plain, "windage_inches")).abs()
-                    > 0.001,
+                || (field(&coriolis, "drift_inches") - field(&plain, "drift_inches")).abs() > 0.001,
             "coriolis must perturb the solution"
         );
 
