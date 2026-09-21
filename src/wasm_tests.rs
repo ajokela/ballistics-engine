@@ -3876,6 +3876,56 @@ Impact Velocity: 2510 fps\n";
             })
     }
 
+    /// The browser terminal's trajectory JSON answers the NATIVE key names too,
+    /// with the native meaning (MBA-1575).
+    ///
+    /// Not a cosmetic check. Before this, native answered `max_height` 1.6666666667
+    /// for arguments where this surface answered `max_height_inches` 60.0000324 --
+    /// yards against inches, a factor of 36, with nothing on the wire to say which
+    /// you were holding. `impact_energy` was missing here entirely. The numbers
+    /// below are the native binary's own output for the same command line.
+    #[wasm_bindgen_test]
+    fn the_trajectory_json_answers_the_native_key_names_too() {
+        let wasm = WasmBallistics::new();
+        let out = wasm
+            .run_command(
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --units imperial \
+                 --max-range 500 --ignore-ground-impact -o json",
+            )
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+
+        assert_eq!(v["units"].as_str(), Some("imperial"));
+
+        // Height in the RANGE unit, exactly as native converts it -- 1.667 yd, not
+        // the 60.0 in that `summary.max_height_inches` reports. Both are in the
+        // document; only one of them matches native's `max_height`.
+        let height = v["max_height"].as_f64().expect("max_height is a number");
+        assert!(
+            (height - 1.6666666666666667).abs() < 1e-6,
+            "max_height must be yards like native's, got {height}"
+        );
+        let inches = v["summary"]["max_height_inches"]
+            .as_f64()
+            .expect("the summary envelope is untouched");
+        assert!(
+            (inches / height - 36.0).abs() < 1e-3,
+            "the two spellings must differ by exactly the yard, got {inches} vs {height}"
+        );
+
+        let velocity = v["impact_velocity"].as_f64().expect("impact_velocity");
+        assert!((velocity - 1828.39).abs() < 0.1, "got {velocity}");
+
+        // Absent from this surface until MBA-1575; native has always carried it.
+        let energy = v["impact_energy"]
+            .as_f64()
+            .expect("impact_energy is present");
+        assert!((energy - 1246.85).abs() < 0.5, "got {energy}");
+
+        assert!((v["max_range"].as_f64().unwrap() - 500.0).abs() < 0.01);
+        assert!((v["time_of_flight"].as_f64().unwrap() - 0.6757329).abs() < 1e-5);
+    }
+
     const QNH_TRAJECTORY_BASE: &str = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
          --units metric --max-range 300 --ignore-ground-impact --altitude 1500 \
          --pressure 1030.0 -o json";

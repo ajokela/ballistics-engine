@@ -6962,10 +6962,50 @@ impl WasmBallistics {
             }
         };
 
+        // MBA-1575: THE SAME KEYS NATIVE EMITS, MEANING THE SAME THING.
+        //
+        // `summary` above is this surface's own shape and stays exactly as it was --
+        // unit-suffixed, which is the better-documented form and what existing
+        // embedders read. What it is NOT is a rearrangement of native's document:
+        // measured on identical arguments, native answers `max_height` 1.6666666667
+        // where this answers `max_height_inches` 60.0000324. Both are right; they are
+        // yards and inches. A consumer moving between the two surfaces was therefore
+        // wrong by a factor of 36 with nothing on the wire to say so, and this one
+        // omitted `impact_energy` altogether.
+        //
+        // So the flat keys are added ALONGSIDE, never replacing: nothing that reads
+        // `summary` breaks, and anything written against the native CLI now reads this
+        // document correctly. Converters are the same inlined native ones the CSV
+        // branch below already uses -- native converts the HEIGHT with its distance
+        // converter, so `max_height` is in the range unit here too, however odd that
+        // looks beside `max_height_inches`. Matching native is the entire point; the
+        // two disagreeing is the bug.
+        let flat_distance = |v: f64| match units {
+            UnitSystem::Metric => v,
+            UnitSystem::Imperial => v / 0.9144,
+        };
+        let flat_velocity = |v: f64| match units {
+            UnitSystem::Metric => v,
+            UnitSystem::Imperial => v / 0.3048,
+        };
+        let flat_energy = |v: f64| match units {
+            UnitSystem::Metric => v,
+            UnitSystem::Imperial => v * 0.737562,
+        };
+
         let mut output = serde_json::json!({
             "trajectory": points,
             "summary": summary,
             "legend": trajectory_json_legend(units, target_drops_cos.is_some()),
+            "units": match units {
+                UnitSystem::Metric => "metric",
+                UnitSystem::Imperial => "imperial",
+            },
+            "max_range": flat_distance(result.max_range),
+            "max_height": flat_distance(result.max_height),
+            "time_of_flight": result.time_of_flight,
+            "impact_velocity": flat_velocity(result.impact_velocity),
+            "impact_energy": flat_energy(result.impact_energy),
         });
         // MBA-1402 parity: top-level and present only when auto-zero actually ran, matching
         // native's `skip_serializing_if` shape. Absent — not null — on a bare --angle run, so a
