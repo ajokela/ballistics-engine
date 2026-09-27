@@ -308,15 +308,25 @@ pub fn resolve_station_conditions_with_pressure_mode(
 // MBA-1366: density altitude as a direct atmosphere input
 // ---------------------------------------------------------------------------------------
 
-/// NWS/FAA published pressure-altitude constants. Duplicated here (not imported) because the
-/// forward density-altitude formula this inverts,
-/// `pdf_dope_card::calculate_density_altitude(_altitude_ft, pressure_inhg, temp_f)`, lives in
-/// the `ballistics` BINARY crate's CLI-only `pdf_dope_card` module (`src/pdf_dope_card.rs`) —
-/// this LIBRARY crate has no dependency on it and cannot call it. `src/main.rs`'s
-/// `density_altitude_round_trips_through_the_dope_card_formula` test is the cross-crate proof
-/// that the two stay numerically consistent; these constants must match that function's
-/// literals exactly (145_366.45, 0.190_284, 3.57, 59.0, and the "120 ft/degC" correction) for
-/// that round trip to hold.
+/// NWS/FAA published pressure-altitude constants. Duplicated here (not imported), and the
+/// duplication has to stay.
+///
+/// ⚠️ THE ORIGINAL REASON IS NOW STALE — DO NOT "FIX" IT BY IMPORTING. This comment used to
+/// say the forward formula lived in the `ballistics` BINARY crate and was therefore
+/// unreachable. It no longer does: 0.33.0's Task 10 promoted `pdf_dope_card` into this
+/// library (`pub mod pdf_dope_card` in `lib.rs`). What keeps the duplication necessary is the
+/// FEATURE GATE, not a crate boundary — `pdf_dope_card` is `#[cfg(feature = "pdf")]` because
+/// it pulls in `printpdf` and `dirs`, neither wasm32-safe, while this module is
+/// unconditional. The wasm32 build always passes `--no-default-features`, so an import here
+/// would fail to compile exactly where CI type-checks wasm32. Density altitude as an
+/// atmosphere INPUT must keep working in a build that has no PDF card at all.
+///
+/// `pdf_dope_card::calculate_density_altitude(_altitude_ft, pressure_inhg, temp_f)` is the
+/// forward function this inverts. `src/main.rs`'s
+/// `density_altitude_round_trips_through_the_dope_card_formula` test is the proof that the
+/// two stay numerically consistent; these constants must match that function's literals
+/// exactly (145_366.45, 0.190_284, 3.57, 59.0, and the "120 ft/degC" correction) for that
+/// round trip to hold.
 const DA_NWS_SEA_LEVEL_HPA: f64 = 1013.25;
 const DA_NWS_PRESSURE_ALT_FT: f64 = 145_366.45;
 const DA_NWS_EXPONENT: f64 = 0.190_284;

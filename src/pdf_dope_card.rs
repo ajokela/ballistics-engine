@@ -182,6 +182,40 @@ const INHG_TO_HPA: f64 = 33.863_886_666_667;
 /// ```text
 /// DA = PA + 66.7 * (OAT_F - ISA_temp_F)
 /// ```
+///
+/// # `_altitude_ft` is ignored, deliberately
+///
+/// The first parameter is unused and has been since MBA-643 made `pressure_inhg`
+/// a station pressure: station pressure already encodes the altitude, so taking one
+/// again would be taking it twice. The parameter survives only because removing it
+/// is source-breaking for callers. **Passing a different altitude changes nothing**,
+/// which is worth knowing before spending time on a discrepancy it cannot explain.
+///
+/// # Humidity is not an input, and that is structural
+///
+/// ⚠️ NOT AN OVERSIGHT, AND NOT MERELY "the NWS convention". Omitting humidity is
+/// what keeps this function INVERTIBLE, and the engine relies on that:
+/// [`crate::atmosphere::resolve_atmosphere_for_density_altitude`] (MBA-1366) is its
+/// exact algebraic inverse, letting a shooter type a single density altitude
+/// instead of altitude + pressure + temperature. Relative humidity cannot be
+/// recovered from one density-altitude number, so a humidity term here would leave
+/// that inverse with nothing to undo. `main.rs`'s
+/// `density_altitude_round_trips_through_the_dope_card_formula*` tests are what pin
+/// the pair together; a change to the maths here must keep them passing.
+///
+/// The TRAJECTORY is unaffected by this: the solver's air density comes from
+/// [`crate::atmosphere::calculate_air_density_cimp`] (CIPM-2007) and its speed of
+/// sound from [`crate::atmosphere::moist_speed_of_sound`], both of which do take
+/// humidity. This function feeds a READOUT, never the integrator.
+///
+/// # Why it disagrees with some other tools
+///
+/// Tools that fold humidity into the reported figure answer a different question —
+/// "which ISA altitude has the air density I actually have" rather than "what does
+/// the NWS/FAA model say" — and will read HIGHER here. At 15 °C and 1013.25 hPa,
+/// 50% RH makes the air about 0.32% less dense than dry air, which is roughly 33 m
+/// (110 ft) of ISA altitude; this function reports 0 there, by construction. Both
+/// quantities get called "density altitude" in the field. Reported externally 2026-09.
 pub fn calculate_density_altitude(_altitude_ft: f64, pressure_inhg: f64, temp_f: f64) -> f64 {
     // The NWS equation is defined in hPa (equivalently millibars), so convert before
     // applying its matched coefficient, reference pressure, and exponent.
