@@ -7303,7 +7303,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             // MBA-1366: --density-altitude supersedes --altitude and --pressure/--pressure-type
             // entirely (a CLI flag always wins over a --location/CSV DA/DENSITY_ALTITUDE column,
             // matching every other CSV-backed field above). An explicit --temperature still wins
-            // over the ISA-at-density-altitude default; density is honored either way (see
+            // over the ISA-at-density-altitude default; the FAA-rule DA is honored either way (see
             // `atmosphere::resolve_atmosphere_for_density_altitude`'s doc comment for the
             // back-solve). Values here are in DISPLAY units (feet/meters per --units), like
             // final_altitude above; the actual back-solve runs in metric further down.

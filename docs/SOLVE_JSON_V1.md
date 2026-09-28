@@ -363,7 +363,9 @@ then appears where an omitted-field response leaves it absent.
 | `latitude_rad` | no | absent | Geodetic latitude; needed when Coriolis is enabled. |
 
 An empty atmosphere object selects ICAO standard conditions at the resolved altitude (sea level
-when `altitude_m` is also omitted). Enabling Coriolis without a latitude is an `invalid_value`
+when `altitude_m` is also omitted). The same object, sent to the bridge's
+`atmosphere.density_altitude` command, reports the pressure altitude, density altitude and air
+density of the air it resolves to — see [ATMOSPHERE_DENSITY_ALTITUDE.md](ATMOSPHERE_DENSITY_ALTITUDE.md). Enabling Coriolis without a latitude is an `invalid_value`
 error rather than a silently chosen latitude.
 
 Explicit temperature and pressure values are authoritative station conditions, including values

@@ -38,8 +38,8 @@ const MAX_ICAO_ALTITUDE_M: f64 = 84_000.0;
 const METERS_PER_INCH: f64 = 0.0254;
 const KILOMETRES_PER_METRE: f64 = 0.001;
 const SECONDS_PER_HOUR: f64 = 3_600.0;
-const PASCALS_PER_HECTOPASCAL: f64 = 100.0;
-const KELVIN_OFFSET_C: f64 = 273.15;
+pub(crate) const PASCALS_PER_HECTOPASCAL: f64 = 100.0;
+pub(crate) const KELVIN_OFFSET_C: f64 = 273.15;
 const KG_PER_GRAIN: f64 = 0.000_064_798_91;
 
 /// Stable assumption code emitted for a literal protocol default.
@@ -1169,7 +1169,11 @@ fn resolve_shot(
     })
 }
 
-fn resolve_atmosphere(
+/// Resolve a solve-json v1 atmosphere exactly as a solve does: validate with `$.atmosphere.*`
+/// paths, default what was omitted (announcing each default in `assumptions`), and reduce a
+/// QNH to station pressure. Shared with `atmosphere.density_altitude` so that command
+/// describes precisely the air a solve with the same `atmosphere` object would fly through.
+pub(crate) fn resolve_atmosphere(
     atmosphere: &AtmosphereV1,
     assumptions: &mut Vec<SolveNoticeV1>,
 ) -> Result<ResolvedAtmosphereV1, SolveErrorEnvelopeV1> {

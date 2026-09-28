@@ -1325,8 +1325,10 @@ pub const FFI_NO_EXPLICIT_TEMPERATURE: c_double = f64::NAN;
 /// addition to the C ABI requiring no recompile for existing callers.
 ///
 /// `explicit_temperature_c`: pass [`FFI_NO_EXPLICIT_TEMPERATURE`] (NaN) for the ISA-at-density-
-/// altitude default, or a real Celsius value to have it honored exactly (density is still
-/// honored either way — only the implied pressure/altitude differ; see the Rust doc comment).
+/// altitude default, or a real Celsius value to have it honored exactly. The FAA-rule density
+/// altitude is reproduced either way, but the air matches the real air only when the real
+/// temperature is passed: the ISA default rebuilds a different temperature, and with it a
+/// slightly different density and speed of sound (see the Rust doc comment).
 /// A non-finite `density_altitude_m` returns NaN for all three exports (there is no plausible
 /// station value to fall back to, unlike the QNH/BC conversions above, which return their input
 /// unchanged).

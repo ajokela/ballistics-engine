@@ -115,3 +115,89 @@ fn error_envelopes_always_carry_versions() {
         assert!(out["engine_version"].is_string(), "input: {bad}");
     }
 }
+
+fn density_altitude(atmosphere: Value) -> Value {
+    call(json!({
+        "api_version": BRIDGE_API_VERSION,
+        "command": "atmosphere.density_altitude",
+        "request": {"atmosphere": atmosphere},
+    }))
+}
+
+fn solve_with(atmosphere: Value) -> Value {
+    let mut request = solve_request_v1();
+    request["atmosphere"] = atmosphere;
+    call(json!({
+        "api_version": BRIDGE_API_VERSION,
+        "command": "solve",
+        "request": request,
+    }))
+}
+
+/// The density-altitude command promises the solve's validation for the same `atmosphere`
+/// object: an app that highlights the bad field from `solve`'s `error.details` must be able
+/// to do the same here with no new code.
+#[test]
+fn density_altitude_rejects_an_atmosphere_exactly_as_solve_does() {
+    for atmosphere in [
+        json!({"temperature_c": 30.0}),
+        json!({"temperature_k": null}),
+        json!({"pressure_pa": "101325"}),
+        json!({"pressure_reference": "altimeter"}),
+        json!({"relative_humidity": 50.0}),
+        json!({"altitude_m": 90000.0}),
+        json!({"temperature_k": -1.0}),
+        json!({"latitude_rad": 45.0}),
+        json!([]),
+    ] {
+        let solve = solve_with(atmosphere.clone());
+        let da = density_altitude(atmosphere.clone());
+        assert_eq!(solve["ok"], false, "{atmosphere}: solve {solve}");
+        assert_eq!(da["ok"], false, "{atmosphere}: {da}");
+        assert_eq!(da["error"]["code"], solve["error"]["code"], "{atmosphere}");
+        assert_eq!(
+            da["error"]["details"], solve["error"]["details"],
+            "{atmosphere}: density altitude and solve disagree"
+        );
+    }
+}
+
+/// ... and resolves an accepted one exactly as solve does: the same resolved atmosphere, and
+/// the same `$.atmosphere.*` assumptions.
+#[test]
+fn density_altitude_resolves_an_atmosphere_exactly_as_solve_does() {
+    for atmosphere in [
+        json!({}),
+        json!({"altitude_m": 1500.0}),
+        json!({"altitude_m": 1500.0, "temperature_k": 288.15, "pressure_pa": 101325.0,
+               "pressure_reference": "qnh", "relative_humidity": 0.3}),
+        json!({"altitude_m": -400.0, "temperature_k": 303.15, "pressure_pa": 102000.0,
+               "pressure_reference": "qnh"}),
+        json!({"temperature_k": 268.15, "relative_humidity": 0.9, "latitude_rad": 0.8}),
+    ] {
+        let solve = solve_with(atmosphere.clone());
+        let da = density_altitude(atmosphere.clone());
+        assert_eq!(solve["ok"], true, "{atmosphere}: solve {solve}");
+        assert_eq!(da["ok"], true, "{atmosphere}: {da}");
+        assert_eq!(
+            da["result"]["atmosphere"], solve["result"]["resolved_request"]["atmosphere"],
+            "{atmosphere}"
+        );
+        let solve_atmosphere_assumptions: Vec<&Value> = solve["result"]["assumptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|notice| {
+                notice["path"]
+                    .as_str()
+                    .is_some_and(|path| path.starts_with("$.atmosphere"))
+            })
+            .collect();
+        let da_assumptions: Vec<&Value> = da["result"]["assumptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .collect();
+        assert_eq!(da_assumptions, solve_atmosphere_assumptions, "{atmosphere}");
+    }
+}

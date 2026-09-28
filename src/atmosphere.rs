@@ -308,40 +308,169 @@ pub fn resolve_station_conditions_with_pressure_mode(
 // MBA-1366: density altitude as a direct atmosphere input
 // ---------------------------------------------------------------------------------------
 
-/// NWS/FAA published pressure-altitude constants. Duplicated here (not imported), and the
-/// duplication has to stay.
+/// NWS pressure-altitude and FAA-rule constants — the ONE copy.
 ///
-/// ⚠️ THE ORIGINAL REASON IS NOW STALE — DO NOT "FIX" IT BY IMPORTING. This comment used to
-/// say the forward formula lived in the `ballistics` BINARY crate and was therefore
-/// unreachable. It no longer does: 0.33.0's Task 10 promoted `pdf_dope_card` into this
-/// library (`pub mod pdf_dope_card` in `lib.rs`). What keeps the duplication necessary is the
-/// FEATURE GATE, not a crate boundary — `pdf_dope_card` is `#[cfg(feature = "pdf")]` because
-/// it pulls in `printpdf` and `dirs`, neither wasm32-safe, while this module is
-/// unconditional. The wasm32 build always passes `--no-default-features`, so an import here
-/// would fail to compile exactly where CI type-checks wasm32. Density altitude as an
-/// atmosphere INPUT must keep working in a build that has no PDF card at all.
+/// Both directions of the density-altitude model now live in this module: the forward
+/// [`faa_rule_density_altitude_ft`] (the engine's reported density altitude) and its exact
+/// inverse [`resolve_atmosphere_for_density_altitude`] (MBA-1366, the DA entry mode). They
+/// used to live apart, with these constants duplicated here because the forward formula sat
+/// in `pdf_dope_card` — first in the `ballistics` binary, then (from 0.33.0's Task 10) in
+/// this library but behind `#[cfg(feature = "pdf")]`, which this unconditional module could
+/// not import across without breaking the `--no-default-features` wasm32 build CI
+/// type-checks.
 ///
-/// `pdf_dope_card::calculate_density_altitude(_altitude_ft, pressure_inhg, temp_f)` is the
-/// forward function this inverts. `src/main.rs`'s
-/// `density_altitude_round_trips_through_the_dope_card_formula` test is the proof that the
-/// two stay numerically consistent; these constants must match that function's literals
-/// exactly (145_366.45, 0.190_284, 3.57, 59.0, and the "120 ft/degC" correction) for that
-/// round trip to hold.
+/// The fix was to move the formula DOWN rather than import it UP: `atmosphere` is
+/// unconditional, so the forward function lives here and
+/// `pdf_dope_card::calculate_density_altitude` now delegates to it, bit for bit. That leaves
+/// no second copy to drift, and it is what lets the `atmosphere.density_altitude` bridge
+/// command exist in every build with the bridge — including wasm32, which has no PDF card.
+///
+/// `src/main.rs`'s `density_altitude_round_trips_through_the_dope_card_formula*` tests still
+/// pin forward and inverse together, now through a single set of constants.
 const DA_NWS_SEA_LEVEL_HPA: f64 = 1013.25;
 const DA_NWS_PRESSURE_ALT_FT: f64 = 145_366.45;
 const DA_NWS_EXPONENT: f64 = 0.190_284;
 const DA_NWS_SEA_LEVEL_TEMP_F: f64 = 59.0;
 const DA_NWS_LAPSE_F_PER_1000FT: f64 = 3.57;
+/// The FAA rule of thumb, "120 ft of density altitude per °C away from standard", expressed
+/// per °F because the NWS constants above are Fahrenheit.
+const DA_FAA_RULE_FT_PER_DEG_F: f64 = 120.0 * 5.0 / 9.0;
 const DA_FT_TO_M: f64 = 0.3048;
+
+/// NWS pressure altitude, feet, from STATION pressure in hPa.
+///
+/// The published NWS station-pressure equation
+/// (<https://www.weather.gov/media/epz/wxcalc/pressureAltitude.pdf>):
+///
+/// ```text
+/// PA_ft = 145366.45 * (1 - (P_hPa / 1013.25)^0.190284)
+/// ```
+///
+/// Station pressure, never an altimeter setting (MBA-643): a QNH already corrects to sea
+/// level and would report the pressure altitude of the sea rather than of the firing point.
+pub fn nws_pressure_altitude_ft(station_pressure_hpa: f64) -> f64 {
+    DA_NWS_PRESSURE_ALT_FT
+        * (1.0 - (station_pressure_hpa / DA_NWS_SEA_LEVEL_HPA).powf(DA_NWS_EXPONENT))
+}
+
+/// Density altitude by the FAA rule of thumb, feet: NWS pressure altitude plus 120 ft for
+/// every °C the station is away from ISA temperature at that pressure altitude. **Humidity is
+/// not an input.**
+///
+/// ```text
+/// DA_ft = PA_ft + (120 * 5/9) * (T_F - ISA_T_F(PA))      ISA_T_F(PA) = 59 - 3.57 * PA_ft/1000
+/// ```
+///
+/// This is the density altitude the engine has always reported —
+/// `pdf_dope_card::calculate_density_altitude` delegates to it — and the one
+/// [`resolve_atmosphere_for_density_altitude`], the density-altitude ENTRY mode, inverts
+/// exactly.
+///
+/// It stays humidity-free for compatibility, not out of necessity. Every card printed to date
+/// shows this figure, and the entry mode that inverts it has shipped since MBA-1366 taking a
+/// temperature but no humidity (the run's humidity is applied separately, afterwards). A
+/// humidity-aware forward could be inverted just as well given the run's humidity, the way
+/// temperature already is; it would change every printed card and what an entered density
+/// altitude resolves to.
+///
+/// It is not the National Weather Service's density altitude either, despite the NWS pressure
+/// altitude inside it: the NWS calculator uses virtual temperature, so it includes humidity
+/// and tracks [`density_matched_altitude_m`] to within a few meters.
+///
+/// And it is an approximation. The rule is a straight line where the real dependence curves,
+/// and 120 ft/°C is slightly steeper than the exact slope at sea level (118.6 ft/°C for an
+/// ideal gas, 119.0 for the CIPM density [`density_matched_altitude_m`] uses), so
+/// it drifts from the exact figure as the temperature moves away from standard FOR THE
+/// PRESSURE ALTITUDE: about +22 m at 30 °C and 1013.25 hPa in completely dry air. See
+/// [`density_matched_altitude_m`] for the exact, humidity-inclusive figure, and why the bridge
+/// reports both.
+pub fn faa_rule_density_altitude_ft(station_pressure_hpa: f64, temperature_f: f64) -> f64 {
+    let pressure_alt = nws_pressure_altitude_ft(station_pressure_hpa);
+
+    // ISA temperature at pressure altitude (lapse rate: 3.57°F per 1000 ft)
+    let isa_temp_f = DA_NWS_SEA_LEVEL_TEMP_F - (pressure_alt / 1000.0) * DA_NWS_LAPSE_F_PER_1000FT;
+
+    pressure_alt + DA_FAA_RULE_FT_PER_DEG_F * (temperature_f - isa_temp_f)
+}
+
+/// ISA troposphere constants for [`density_matched_altitude_m`].
+const ISA_SEA_LEVEL_TEMP_K: f64 = 288.15;
+const ISA_LAPSE_K_PER_M: f64 = 0.0065;
+
+/// The reference air that [`density_matched_altitude_m`] calls sea level: ICAO standard sea
+/// level, perfectly dry, evaluated with the SAME CIPM-2007 model as the air being described.
+const DENSITY_MATCH_REFERENCE_TEMP_C: f64 = 15.0;
+const DENSITY_MATCH_REFERENCE_PRESSURE_HPA: f64 = 1013.25;
+
+/// The altitude in the ICAO Standard Atmosphere whose standard density equals the ACTUAL
+/// density of this air, humidity included — density altitude by its textbook definition.
+///
+/// ```text
+/// ratio = rho_CIPM(T, P, RH) / rho_CIPM(15 C, 1013.25 hPa, 0%)
+/// h_m   = (T0 / L) * (1 - ratio^(1/n))      T0 = 288.15 K, L = 0.0065 K/m,
+///                                            n  = g0 / (R L) - 1  (= 4.25588)
+/// ```
+///
+/// # Why this exists alongside [`faa_rule_density_altitude_ft`]
+///
+/// Two different quantities are both called "density altitude" in the field, and reporting
+/// them under one name is how an external user came to ask why the engine read 0 m where
+/// another tool read 36 m at ICAO standard with 50% humidity (2026-09). The FAA-rule figure
+/// is humidity-free for compatibility (see its docs). This one answers the question a shooter
+/// usually means — "which ISA altitude has the air density I actually have" — and so it must
+/// include humidity: water vapor (18 g/mol) is lighter than dry air (~29 g/mol), so humid air
+/// is thinner.
+///
+/// At 15 °C, 1013.25 hPa and 50% RH this reads 33.1 m where the FAA-rule figure reads 0. But
+/// the difference is NOT purely humidity, and callers must not present it that way: the FAA
+/// rule also drifts from this exact figure whenever the temperature is not standard for the
+/// pressure altitude, so the two disagree by about 22 m at 30 °C in perfectly dry air.
+///
+/// # Anchoring
+///
+/// Density comes from [`calculate_atmosphere`] — the one CIPM-2007 path every solver uses —
+/// and the ratio is taken against that SAME model's density for ICAO standard dry sea level,
+/// not against the textbook 1.225 kg/m³. The model is accurate, but it is not built to
+/// reproduce 1.225 exactly (its own anchor test allows ±0.002), and at sea level 0.002 kg/m³
+/// is roughly 17 m of altitude. Anchoring to the model makes ICAO standard dry air read
+/// exactly 0 and makes the humidity effect the model's own.
+///
+/// # Scope
+///
+/// The closed-form troposphere, with no geopotential correction — the same plain-height
+/// convention as the FAA-rule figure and the DA entry mode. That covers every shooting
+/// condition on Earth, but the arithmetic does not know where it stops: above 11 km it keeps
+/// answering, wrongly. Callers bound it; the bridge command refuses conditions outside
+/// -5 km..11 km (`crate::atmosphere_service`).
+pub fn density_matched_altitude_m(
+    temperature_c: f64,
+    station_pressure_hpa: f64,
+    humidity_percent: f64,
+) -> f64 {
+    let (density, _) = calculate_atmosphere(
+        0.0,
+        Some(temperature_c),
+        Some(station_pressure_hpa),
+        humidity_percent,
+    );
+    let (reference, _) = calculate_atmosphere(
+        0.0,
+        Some(DENSITY_MATCH_REFERENCE_TEMP_C),
+        Some(DENSITY_MATCH_REFERENCE_PRESSURE_HPA),
+        0.0,
+    );
+    let exponent = G_ACCEL_MPS2 / (R_AIR * ISA_LAPSE_K_PER_M) - 1.0;
+    (ISA_SEA_LEVEL_TEMP_K / ISA_LAPSE_K_PER_M) * (1.0 - (density / reference).powf(1.0 / exponent))
+}
 
 /// Back-solve an ISA-equivalent station altitude/temperature/pressure from a directly-declared
 /// density altitude (MBA-1366) — the single-value atmosphere entry mode Shooter, Nosler, AB
 /// Analytics, Ballistic AE, and TRASOL all support as an alternative to altitude + pressure +
 /// temperature.
 ///
-/// This is the exact algebraic inverse of the published NWS/FAA density-altitude model this
-/// engine already uses to REPORT density altitude
-/// (`pdf_dope_card::calculate_density_altitude`):
+/// This is the exact algebraic inverse of the FAA-rule density-altitude model this engine
+/// already uses to REPORT density altitude ([`faa_rule_density_altitude_ft`], which
+/// `pdf_dope_card::calculate_density_altitude` delegates to):
 ///
 /// ```text
 /// pressure_alt_ft = 145366.45 * (1 - (station_hpa / 1013.25)^0.190284)
@@ -366,14 +495,16 @@ const DA_FT_TO_M: f64 = 0.3048;
 ///   with no `--temperature`/`--pressure` override.
 /// * `explicit_temperature_c == Some(t)`: `t` wins outright (returned unchanged as
 ///   `temperature_c`, never re-derived) and the station pressure is re-solved so the resulting
-///   density altitude still reproduces the input exactly — density is honored either way; only
-///   the implied pressure (and therefore station altitude) differs from the ISA-default case.
+///   density altitude still reproduces the input exactly. The FAA-rule density altitude is
+///   honored either way, but the DENSITY is not: the rule is a straight-line approximation, not
+///   a curve of equal density, so the ISA-default case rebuilds different air — at 30 °C and
+///   1013.25 hPa, a rebuilt 11.4 °C / 949 hPa, 0.3% denser, with a speed of sound 3% lower. Only
+///   the real temperature reproduces the real air.
 ///
 /// # Height convention
-/// The NWS/FAA formula being inverted performs no geopotential correction — it treats its
-/// altitude as a plain height, exactly like `pdf_dope_card::calculate_density_altitude` does
-/// (whose own `_altitude_ft` parameter is unused and undocumented as geometric-vs-geopotential
-/// for that reason). Consistent with that, the `altitude_m` this returns is GEOMETRIC altitude
+/// The FAA-rule formula being inverted ([`faa_rule_density_altitude_ft`]) performs no
+/// geopotential correction — it treats its altitude as a plain height (the DOPE card, which
+/// delegates to it, leaves its own `_altitude_ft` parameter unused for that reason). Consistent with that, the `altitude_m` this returns is GEOMETRIC altitude
 /// — the same convention every other engine altitude input uses (`--altitude`,
 /// [`AtmosphericConditions::altitude`](crate::cli_api::AtmosphericConditions::altitude)) —
 /// rather than being run through `geometric_to_geopotential_height_m` a second time here; that
@@ -399,7 +530,7 @@ pub fn resolve_atmosphere_for_density_altitude(
     explicit_temperature_c: Option<f64>,
 ) -> (f64, f64, f64) {
     let density_altitude_ft = density_altitude_m / DA_FT_TO_M;
-    const K: f64 = 120.0 * 5.0 / 9.0; // ft of density-altitude correction per °F station-vs-ISA delta
+    const K: f64 = DA_FAA_RULE_FT_PER_DEG_F;
 
     let (pressure_alt_ft, temperature_c) = match explicit_temperature_c {
         Some(temp_c) => {
@@ -548,23 +679,15 @@ pub fn calculate_air_density_cimp(temp_c: f64, pressure_hpa: f64, humidity_perce
     // Enhanced enhancement factor with temperature dependence. CIPM constants use Pa.
     let f = enhanced_enhancement_factor(pressure_pa, temp_c);
 
-    // Vapor pressure with clamping. p_sv is in hPa (enhanced_saturation_vapor_pressure
-    // returns hPa — its critical-pressure constant is 220640 hPa), so p_v is in hPa too.
-    let p_v = humidity_percent.clamp(0.0, 100.0) / 100.0 * f * p_sv;
-
-    // Convert the vapor pressure to Pa BEFORE forming the mole fraction: the divisor below
-    // is in Pa. Dividing the hPa p_v by the Pa total made x_v 100x too small, which erased
-    // the humidity term and returned essentially dry-air density (e.g. 15 C / 1013.25 hPa /
-    // 50% RH gave ~1.2254 instead of the CIPM-2007 moist value ~1.2211 — moist air is
-    // LIGHTER than dry air).
-    let p_v_pa = p_v * 100.0;
-
     // Floor the pressure divisor (mirrors calculate_atmosphere): a 0 hPa pressure would
     // otherwise make x_v = +Inf -> NaN density. No-op for all valid (>0) pressures.
     let p_pa = pressure_pa.max(f64::MIN_POSITIVE);
 
-    // Mole fraction of water vapor (capped at the physical maximum of 1)
-    let x_v = (p_v_pa / p_pa).min(1.0);
+    // Mole fraction of water vapor, capped at the physical maximum of 1. The cap is silent:
+    // air whose vapor pressure would exceed its total pressure does not exist, and callers
+    // that must refuse it rather than compute pure steam test
+    // `water_vapor_mole_fraction_uncapped` first (the bridge's `atmosphere.density_altitude`).
+    let x_v = vapor_mole_fraction(p_sv, f, humidity_percent, p_pa).min(1.0);
 
     // Enhanced compressibility factor. CIPM virial constants use Pa.
     let z = enhanced_compressibility_factor(p_pa, t_k, x_v);
@@ -572,6 +695,41 @@ pub fn calculate_air_density_cimp(temp_c: f64, pressure_hpa: f64, humidity_perce
     // Calculate density with enhanced precision
     // Note: parentheses are important here for correct operator precedence
     ((p_pa * M_A) / (z * R * t_k)) * (1.0 - x_v * (1.0 - M_V / M_A))
+}
+
+/// CIPM-2007 mole fraction of water vapor, `x_v = RH * f * p_sv / p`, UNCAPPED: the one
+/// formula [`calculate_air_density_cimp`] uses (it caps the result at 1). A value at or above 1
+/// means the stated humidity would need more vapor pressure than the air has total pressure.
+pub(crate) fn water_vapor_mole_fraction_uncapped(
+    temp_c: f64,
+    pressure_hpa: f64,
+    humidity_percent: f64,
+) -> f64 {
+    let t_k = temp_c + 273.15;
+    let p_sv = enhanced_saturation_vapor_pressure(t_k);
+    let pressure_pa = pressure_hpa * 100.0;
+    let f = enhanced_enhancement_factor(pressure_pa, temp_c);
+    vapor_mole_fraction(
+        p_sv,
+        f,
+        humidity_percent,
+        pressure_pa.max(f64::MIN_POSITIVE),
+    )
+}
+
+#[inline(always)]
+fn vapor_mole_fraction(p_sv_hpa: f64, f: f64, humidity_percent: f64, p_pa: f64) -> f64 {
+    // Vapor pressure with clamping. p_sv is in hPa (enhanced_saturation_vapor_pressure
+    // returns hPa — its critical-pressure constant is 220640 hPa), so p_v is in hPa too.
+    let p_v = humidity_percent.clamp(0.0, 100.0) / 100.0 * f * p_sv_hpa;
+
+    // Convert the vapor pressure to Pa BEFORE forming the mole fraction: the divisor below
+    // is in Pa. Dividing the hPa p_v by the Pa total made x_v 100x too small, which erased
+    // the humidity term and returned essentially dry-air density (e.g. 15 C / 1013.25 hPa /
+    // 50% RH gave ~1.2254 instead of the CIPM-2007 moist value ~1.2216 — moist air is
+    // LIGHTER than dry air).
+    let p_v_pa = p_v * 100.0;
+    p_v_pa / p_pa
 }
 
 /// Enhanced saturation vapor pressure calculation.

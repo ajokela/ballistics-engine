@@ -2179,7 +2179,7 @@ impl WasmBallistics {
         // MBA-1366: --density-altitude supersedes altitude/pressure/pressure-type entirely,
         // back-solving an ISA-equivalent atmosphere (NOT the direct-density bypass) exactly
         // like the native CLI's --density-altitude. An explicit --temperature still wins over
-        // the ISA-at-density-altitude default; density is honored either way (see
+        // the ISA-at-density-altitude default; the FAA-rule DA is honored either way (see
         // `atmosphere::resolve_atmosphere_for_density_altitude`'s doc comment).
         let mut density_altitude_active = false;
         let mut density_altitude_warning: Option<String> = None;

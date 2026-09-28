@@ -33,6 +33,34 @@
 //! would break an existing well-formed caller bumps `BRIDGE_API_VERSION`. Callers
 //! feature-detect with `meta.capabilities` instead of sniffing versions.
 //!
+//! ## The `atmosphere.*` family
+//!
+//! `atmosphere.density_altitude` describes the air a solve would fly through, without
+//! solving anything (`crate::atmosphere_service`). Its request is `{"atmosphere": {...}}`
+//! where the inner object is EXACTLY solve-json v1's `atmosphere` — SI units, humidity as a
+//! fraction, optional `pressure_reference` — decoded by the solve's own shape validator and
+//! resolved by the solve's own `resolve_atmosphere`. Validation errors, ICAO defaults
+//! (announced in `assumptions`) and the QNH reduction are therefore the solve's: the air
+//! described is the air solved through. On top of that it refuses air the solve does not yet
+//! refuse — a temperature outside −100..100 °C, a pressure or density altitude outside the
+//! troposphere, a humidity beyond the total pressure — which is what °C sent as kelvin or hPa
+//! sent as pascals looks like.
+//!
+//! The result reports pressure altitude, the CIPM-2007 air density the solver uses, and
+//! density altitude under TWO names, never one: `faa_rule` (NWS pressure altitude plus the
+//! FAA 120 ft/°C rule; humidity-free, the formula the DOPE card header uses, the exact
+//! inverse of density-altitude entry) and `density_matched` (the ISA altitude of equal actual
+//! density, humidity included — what humidity-aware tools, the NWS's own calculator among
+//! them, report). They differ for reasons other than humidity — the FAA rule is a straight
+//! line — so an app must pick one by name and must not label their difference a humidity
+//! correction. Every altitude carries both `m` and `ft`.
+//!
+//! Errors are shaped like `solve`'s: a missing payload is `invalid_request`; anything wrong
+//! with the payload — a malformed or unit-suffixed field, an out-of-range value, impossible
+//! air — is `command_failed` with the solve-json error envelope (`$.atmosphere.*` path) in
+//! `error.details`. Unconditional — present on every target including wasm32 — and additive
+//! within api_version 1.
+//!
 //! ## `.a7p` interop: `profile.import_a7p` and `profile.export_a7p`
 //!
 //! Both directions of the ArcherBC2 format, and both are LOSSY in a way the caller is
@@ -154,6 +182,7 @@ fn command_names() -> Vec<&'static str> {
         "meta.capabilities",
         "meta.version",
         "solve",
+        "atmosphere.density_altitude",
         "card.come_ups",
         "card.range_table",
         "card.wind",
@@ -321,6 +350,7 @@ fn dispatch(request_json: &str) -> String {
         ),
         "meta.version" => success("meta.version", json!({ "engine_version": ENGINE_VERSION })),
         "solve" => run_solve(&request.request),
+        "atmosphere.density_altitude" => run_atmosphere_density_altitude(&request.request),
         "card.come_ups" => run_service(
             &request.request,
             "card.come_ups",
@@ -433,6 +463,35 @@ fn run_solve(inner: &Value) -> String {
             ),
         },
         Err(envelope) => command_error("solve failed", &envelope),
+    }
+}
+
+/// `atmosphere.density_altitude`: decode and resolve an atmosphere exactly as `solve` does and
+/// report its pressure altitude, both density altitudes, and its air density
+/// (`crate::atmosphere_service`). Shaped like `run_solve` rather than `run_service` so every
+/// rejection of the payload comes back as the solve's own path-located envelope in `details`,
+/// under the same `command_failed` code `solve` uses.
+fn run_atmosphere_density_altitude(inner: &Value) -> String {
+    const COMMAND: &str = "atmosphere.density_altitude";
+    if inner.is_null() {
+        return error(
+            BridgeErrorCode::InvalidRequest,
+            "'atmosphere.density_altitude' requires a request payload ({\"atmosphere\": {...}})",
+            None,
+        );
+    }
+    let outcome = crate::atmosphere_service::decode_density_altitude_request_v1(inner)
+        .and_then(|request| crate::atmosphere_service::density_altitude_v1(&request));
+    match outcome {
+        Ok(response) => match serde_json::to_value(&response) {
+            Ok(result) => success(COMMAND, result),
+            Err(err) => error(
+                BridgeErrorCode::InternalError,
+                format!("failed to serialize {COMMAND} result: {err}"),
+                None,
+            ),
+        },
+        Err(envelope) => command_error("atmosphere.density_altitude request rejected", &envelope),
     }
 }
 
@@ -1960,6 +2019,131 @@ mod tests {
             serde_json::from_value(out["result"]["commands"].clone()).unwrap();
         assert!(commands.contains(&"solve".to_string()));
         assert!(commands.contains(&"meta.capabilities".to_string()));
+    }
+
+    #[test]
+    fn density_altitude_is_listed_right_after_solve() {
+        let out = call(json!({"api_version": 1, "command": "meta.capabilities"}));
+        let commands: Vec<String> =
+            serde_json::from_value(out["result"]["commands"].clone()).unwrap();
+        let solve = commands.iter().position(|c| c == "solve").unwrap();
+        assert_eq!(
+            commands.get(solve + 1).map(String::as_str),
+            Some("atmosphere.density_altitude"),
+            "{commands:?}"
+        );
+    }
+
+    #[test]
+    fn density_altitude_reports_both_definitions_at_icao_standard_humid_air() {
+        let out = call(json!({
+            "api_version": 1,
+            "command": "atmosphere.density_altitude",
+            "request": {"atmosphere": {
+                "altitude_m": 0.0,
+                "temperature_k": 288.15,
+                "pressure_pa": 101325.0,
+                "relative_humidity": 0.5,
+            }},
+        }));
+        assert_eq!(out["ok"], true, "{out}");
+        assert_eq!(out["command"], "atmosphere.density_altitude");
+        let result = &out["result"];
+        let faa = result["density_altitude"]["faa_rule"]["m"]
+            .as_f64()
+            .unwrap();
+        let matched = result["density_altitude"]["density_matched"]["m"]
+            .as_f64()
+            .unwrap();
+        assert!(faa.abs() < 1e-9, "{result}");
+        assert!((matched - 33.10).abs() < 0.2, "{result}");
+        let ft = result["density_altitude"]["density_matched"]["ft"]
+            .as_f64()
+            .unwrap();
+        assert!((ft * 0.3048 - matched).abs() < 1e-9, "{result}");
+        assert!(result["air_density_kg_m3"].as_f64().unwrap() > 1.2);
+        // Everything was supplied, so nothing was assumed.
+        assert_eq!(result["assumptions"], json!([]), "{result}");
+        assert_eq!(result["atmosphere"]["pressure_pa"], 101325.0);
+    }
+
+    #[test]
+    fn density_altitude_empty_atmosphere_resolves_to_announced_icao_defaults() {
+        let out = call(json!({
+            "api_version": 1,
+            "command": "atmosphere.density_altitude",
+            "request": {"atmosphere": {}},
+        }));
+        assert_eq!(out["ok"], true, "{out}");
+        let assumptions = out["result"]["assumptions"].as_array().unwrap();
+        assert!(!assumptions.is_empty(), "{out}");
+        for notice in assumptions {
+            assert!(
+                notice["path"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with("$.atmosphere."),
+                "{notice}"
+            );
+        }
+    }
+
+    #[test]
+    fn density_altitude_without_payload_is_invalid_request() {
+        let out = call(json!({"api_version": 1, "command": "atmosphere.density_altitude"}));
+        assert_eq!(out["ok"], false);
+        assert_eq!(out["error"]["code"], "invalid_request");
+    }
+
+    #[test]
+    fn density_altitude_rejects_a_unit_suffixed_field_at_its_path() {
+        // `temperature_c` is the likeliest mistake from a caller used to the imperial/metric
+        // card commands; the SI schema must refuse it rather than silently default to 15 C,
+        // and say where, exactly as `solve` would.
+        let out = call(json!({
+            "api_version": 1,
+            "command": "atmosphere.density_altitude",
+            "request": {"atmosphere": {"temperature_c": 30.0}},
+        }));
+        assert_eq!(out["ok"], false, "{out}");
+        assert_eq!(out["error"]["code"], "command_failed");
+        assert_eq!(out["error"]["details"]["error"]["code"], "unknown_field");
+        assert_eq!(
+            out["error"]["details"]["error"]["path"],
+            "$.atmosphere.temperature_c"
+        );
+    }
+
+    #[test]
+    fn density_altitude_refuses_celsius_sent_as_kelvin() {
+        let out = call(json!({
+            "api_version": 1,
+            "command": "atmosphere.density_altitude",
+            "request": {"atmosphere": {"temperature_k": 15.0}},
+        }));
+        assert_eq!(out["ok"], false, "{out}");
+        assert_eq!(out["error"]["code"], "command_failed");
+        assert_eq!(
+            out["error"]["details"]["error"]["path"],
+            "$.atmosphere.temperature_k"
+        );
+    }
+
+    #[test]
+    fn density_altitude_humidity_as_percent_is_located_in_the_solve_envelope() {
+        let out = call(json!({
+            "api_version": 1,
+            "command": "atmosphere.density_altitude",
+            "request": {"atmosphere": {"relative_humidity": 50.0}},
+        }));
+        assert_eq!(out["ok"], false, "{out}");
+        assert_eq!(out["error"]["code"], "command_failed");
+        assert!(
+            out["error"]["details"]
+                .to_string()
+                .contains("$.atmosphere.relative_humidity"),
+            "{out}"
+        );
     }
 
     #[test]

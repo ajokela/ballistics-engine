@@ -1703,7 +1703,7 @@ fn validate_shot(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
     Ok(())
 }
 
-fn validate_atmosphere(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
+pub(crate) fn validate_atmosphere(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
     let path = "$.atmosphere";
     let object = require_object(value, path)?;
     validate_members(
@@ -1881,7 +1881,7 @@ fn validate_sampling(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
     validate_optional_number(object, path, "interval_m")
 }
 
-fn require_object<'a>(
+pub(crate) fn require_object<'a>(
     value: &'a Value,
     path: &str,
 ) -> Result<&'a Map<String, Value>, SolveErrorEnvelopeV1> {
@@ -1904,7 +1904,7 @@ fn required_value<'a>(
     })
 }
 
-fn validate_members(
+pub(crate) fn validate_members(
     object: &Map<String, Value>,
     path: &str,
     allowed: &[&str],
