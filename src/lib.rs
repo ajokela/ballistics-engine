@@ -133,6 +133,10 @@ pub mod wasm;
 mod wasm_tests;
 // MBA-154: Make constants public for ballistics_rust wrapping
 pub mod atmosphere;
+// `atmosphere.density_altitude`: describe an atmosphere the way a solve resolves it.
+// Unconditional -- pure arithmetic over the solve-json schema, so it exists on every
+// target the bridge does, including wasm32, which has no PDF card.
+pub mod atmosphere_service;
 pub mod constants;
 pub mod drag;
 pub mod wind;

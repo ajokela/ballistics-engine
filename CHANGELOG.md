@@ -8,6 +8,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`atmosphere.density_altitude` bridge command: density altitude for an app, from the
+  engine rather than a copy of it.** Density altitude was reachable only as one field on the
+  PDF DOPE card, so an app wanting to show it had to reimplement the formula — and one did,
+  then maintained its copy by hand. The new command takes `{"atmosphere": {...}}`, where the
+  inner object is exactly solve-json v1's `atmosphere` (SI, humidity as a fraction, optional
+  `pressure_reference: "qnh"`), decoded by the solve's own shape validator and resolved by the
+  solve's own resolver: an object `solve` rejects is rejected here with the same error
+  `details`, and an accepted one gets the same ICAO defaults announced in `assumptions` and the
+  same QNH reduction. The air it
+  describes is the air a solve with that object flies through; integration tests pin both.
+
+  It reports DENSITY ALTITUDE UNDER TWO NAMES, NEVER ONE. `faa_rule` is NWS pressure altitude
+  plus the FAA's 120 ft/°C rule of thumb — humidity-free, the formula the DOPE card header uses,
+  and the exact inverse of density-altitude entry. `density_matched` is the ISA altitude whose
+  standard density equals this air's actual CIPM-2007 density, humidity included — the textbook
+  definition, and what humidity-aware tools report, the National Weather Service's own
+  calculator among them. At 15 °C, 1013.25 hPa and 50% RH they read 0 m and 33.1 m. They are
+  not "with and without humidity" versions of one figure: in perfectly dry air at 30 °C they
+  still differ by 21.7 m (548.6 m against 526.9 m), because the FAA rule is a straight line. So
+  neither is labeled "density altitude", and the gap between them must not be shown as a
+  humidity correction.
+
+  Also reported: the NWS pressure altitude and the CIPM-2007 air density the solver itself uses
+  at the muzzle. Every altitude carries both `m` and `ft`.
+
+  UNLIKE `solve`, it refuses air that cannot exist, because that is what the two likeliest unit
+  mistakes produce: a temperature outside 173.15–373.15 K (°C sent as `temperature_k` would
+  otherwise come back `ok` with a density of 23 kg/m³, as it still does from `solve`), a
+  pressure or density altitude outside −5 km to 11 km (hPa sent as `pressure_pa`), and a
+  humidity that would need more vapor pressure than the total pressure. Each is `invalid_value`
+  at the path of the field to blame, or at `$.atmosphere` when only the combination is out of
+  range. `solve` does not make these checks yet (MBA-1594).
+
+  In every build with the `bridge` feature — mobile and wasm32 included — additive within
+  bridge api_version 1, and listed by `meta.capabilities` directly after `solve`. See
+  [docs/ATMOSPHERE_DENSITY_ALTITUDE.md](docs/ATMOSPHERE_DENSITY_ALTITUDE.md).
+
+  Library: the service is public as `atmosphere_service` (`decode_density_altitude_request_v1`,
+  `density_altitude_v1` and their types), and `atmosphere::nws_pressure_altitude_ft`,
+  `atmosphere::faa_rule_density_altitude_ft` and `atmosphere::density_matched_altitude_m` are
+  public. The FAA-rule forward formula now lives once, in `atmosphere.rs` beside its inverse;
+  the DOPE card's `calculate_density_altitude` delegates to it and is unchanged to the bit.
+
 - **`.a7p` EXPORT, and the name of every field it cannot carry (MBA-1556).** The engine
   could read ArcherBC2 `.a7p` files since MBA-1323 and could not write one; a shooter had
   no way to hand a rifle and a load to somebody in the Archer ecosystem. `profile_export`

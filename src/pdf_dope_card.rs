@@ -182,18 +182,53 @@ const INHG_TO_HPA: f64 = 33.863_886_666_667;
 /// ```text
 /// DA = PA + 66.7 * (OAT_F - ISA_temp_F)
 /// ```
+///
+/// # `_altitude_ft` is ignored, deliberately
+///
+/// The first parameter is unused and has been since MBA-643 made `pressure_inhg`
+/// a station pressure: station pressure already encodes the altitude, so taking one
+/// again would be taking it twice. The parameter survives only because removing it
+/// is source-breaking for callers. **Passing a different altitude changes nothing**,
+/// which is worth knowing before spending time on a discrepancy it cannot explain.
+///
+/// # Humidity is not an input, for compatibility
+///
+/// ⚠️ NOT AN OVERSIGHT. This is the FAA-rule figure the engine has always printed, and
+/// [`crate::atmosphere::resolve_atmosphere_for_density_altitude`] (MBA-1366) is its exact
+/// algebraic inverse — the entry mode that lets a shooter type a single density altitude
+/// instead of altitude + pressure + temperature. That entry mode takes a temperature but no
+/// humidity (the run's humidity is applied separately), so a humidity term here would change
+/// what every previously entered density altitude resolves to, as well as every printed card.
+/// It is not a mathematical necessity: a humidity-aware forward could be inverted given the
+/// run's humidity, the way temperature already is. `main.rs`'s
+/// `density_altitude_round_trips_through_the_dope_card_formula*` tests are what pin the pair
+/// together; a change to the maths here must keep them passing.
+///
+/// The TRAJECTORY is unaffected by this: the solver's air density comes from
+/// [`crate::atmosphere::calculate_air_density_cimp`] (CIPM-2007) and its speed of
+/// sound from [`crate::atmosphere::moist_speed_of_sound`], both of which do take
+/// humidity. This function feeds a READOUT, never the integrator.
+///
+/// # Why it disagrees with some other tools
+///
+/// Tools that fold humidity into the reported figure — the National Weather Service's own
+/// density-altitude calculator among them — answer a different question: "which ISA altitude
+/// has the air density I actually have" rather than "what does the FAA rule say". On a humid
+/// day they read HIGHER. At 15 °C and 1013.25 hPa, 50% RH makes the air about 0.32% less
+/// dense than dry air, which is 33.1 m (109 ft) of ISA altitude; this function reports 0
+/// there, by construction. Both quantities get called "density altitude" in the field.
+/// Reported externally 2026-09.
+///
+/// The engine computes that second quantity too, as
+/// [`crate::atmosphere::density_matched_altitude_m`], and the `atmosphere.density_altitude`
+/// bridge command reports the two side by side under separate names.
 pub fn calculate_density_altitude(_altitude_ft: f64, pressure_inhg: f64, temp_f: f64) -> f64 {
     // The NWS equation is defined in hPa (equivalently millibars), so convert before
-    // applying its matched coefficient, reference pressure, and exponent.
-    let pressure_hpa = pressure_inhg * INHG_TO_HPA;
-    let pressure_alt = 145_366.45 * (1.0 - (pressure_hpa / 1013.25).powf(0.190_284));
-
-    // ISA temperature at pressure altitude (lapse rate: 3.57°F per 1000 ft)
-    let isa_temp_f = 59.0 - (pressure_alt / 1000.0) * 3.57;
-
-    // Density altitude = pressure altitude + temperature correction.
-    // The common 120 ft/degree rule is per degree Celsius; these values are Fahrenheit.
-    pressure_alt + (120.0 * 5.0 / 9.0) * (temp_f - isa_temp_f)
+    // applying its matched coefficient, reference pressure, and exponent. The formula itself
+    // lives in the unconditional `atmosphere` module so a build without the `pdf` feature
+    // (wasm32, or any build that leaves it out) can still report density altitude; this is
+    // bit-identical to the arithmetic that used to be written out here.
+    crate::atmosphere::faa_rule_density_altitude_ft(pressure_inhg * INHG_TO_HPA, temp_f)
 }
 
 /// Find font file - tries external locations first (for user overrides),

@@ -177,3 +177,7 @@ SONAME` says whether it has one.
   envelope shapes, ownership, and the guarantees the example leans on.
 - [`docs/SOLVE_JSON_V1.md`](SOLVE_JSON_V1.md) — the request and result contract carried inside
   the envelope's `request` and `result`.
+- [`docs/ATMOSPHERE_DENSITY_ALTITUDE.md`](ATMOSPHERE_DENSITY_ALTITUDE.md) — the
+  `atmosphere.density_altitude` command: density altitude, pressure altitude and air density for
+  an atmosphere, computed by the engine rather than by a copy of its formula, with a Kotlin
+  example.
