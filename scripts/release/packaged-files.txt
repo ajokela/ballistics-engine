@@ -1,5 +1,6 @@
 .cargo_vcs_info.json
 .coderabbit.yaml
+.git-blame-ignore-revs
 .gitattributes
 .githooks/pre-commit
 .gitignore
@@ -36,6 +37,8 @@ data/validation/xref_g7_spin_drift_off.json
 data/validation/xref_g7_spin_drift_on.json
 data/validation/xref_g7_supersonic_308.json
 data/validation/xref_g7_transonic_reach.json
+docs/ANDROID_JNI_BRIDGE.md
+docs/ATMOSPHERE_DENSITY_ALTITUDE.md
 docs/embedded-no-std-spike-2026-07.md
 docs/SOLVE_JSON_V1.md
 fonts/AUTHORS
@@ -65,6 +68,7 @@ src/adjustment.rs
 src/aerodynamic_jump.rs
 src/angle_calculations.rs
 src/api_client.rs
+src/atmosphere_service.rs
 src/atmosphere.rs
 src/bc_conversion.rs
 src/bc_estimation.rs
@@ -105,6 +109,9 @@ src/perturbation/taxonomy.rs
 src/pitch_damping.rs
 src/power_factor.rs
 src/precession_nutation.rs
+src/profile_export/a7p.rs
+src/profile_export/mod.rs
+src/profile_export/wire.rs
 src/profile_import/a7p.rs
 src/profile_import/map.rs
 src/profile_import/md5.rs
@@ -113,6 +120,8 @@ src/profile_import/wire.rs
 src/profile.rs
 src/recoil.rs
 src/request_roundtrip.rs
+src/reticle_catalog.rs
+src/reticle_document_import.rs
 src/reticle_import.rs
 src/reticle.rs
 src/reynolds.rs
