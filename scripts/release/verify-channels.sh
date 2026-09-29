@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The release IS NOT DONE until this passes. Every check uses a cache-proof
-# endpoint (registry front-page APIs lag; the sparse index and /simple/ do not).
+# endpoint (registry front-page APIs lag; the sparse index and the JSON form of
+# PyPI's /simple/ do not -- its HTML form DOES, see the PyPI check below).
 set -euo pipefail
 V="${1:?usage: verify-channels.sh VERSION}"
 fail=0
@@ -8,10 +9,27 @@ chk() { local name="$1" got="$2" want="$3"
   if [ "$got" = "$want" ]; then echo "ok   $name: $got"; else echo "FAIL $name: got '$got' want '$want'"; fail=1; fi; }
 
 chk "crates.io sparse index" "$(curl -s https://index.crates.io/ba/ll/ballistics-engine | tail -1 | python3 -c 'import json,sys;print(json.load(sys.stdin)["vers"])')" "$V"
-# Fixed-string, filename-anchored: a bare grep for the version matched ANY sha256
-# hex digest (the dots are regex wildcards), so this passed for versions that were
-# never published.
-chk "PyPI /simple/ has wheels" "$(curl -s https://pypi.org/simple/ballistics-engine/ | grep -cF "ballistics_engine-$V-" | awk '{print ($1>0)?"yes":"no"}')" "yes"
+# PyPI: the JSON form of /simple/ (PEP 691), which is what pip itself requests. The
+# HTML form of the SAME URL is cached separately at the CDN edge, and for 0.44.0 an
+# edge kept serving a page that ended at 0.43.0 for more than an hour after the
+# upload -- while `pip install ballistics-engine==0.44.0` worked -- so this check
+# failed a release that had shipped. Filenames are compared as fixed strings,
+# anchored at both ends: a bare grep for the version once matched ANY sha256 hex
+# digest (the dots are regex wildcards), passing for versions never published.
+pypi_wheels() {
+  curl -s -H 'Accept: application/vnd.pypi.simple.v1+json' https://pypi.org/simple/ballistics-engine/ \
+    | python3 -c '
+import json, sys
+prefix = "ballistics_engine-" + sys.argv[1] + "-"
+try:
+    files = json.load(sys.stdin)["files"]
+except (ValueError, KeyError):
+    print("unreadable")  # e.g. the CDN answered HTML despite the Accept header
+    sys.exit()
+print("yes" if any(f["filename"].startswith(prefix) and f["filename"].endswith(".whl") for f in files) else "no")
+' "$V"
+}
+chk "PyPI simple index (JSON, what pip reads) has wheels" "$(pypi_wheels)" "yes"
 chk "RubyGems" "$(curl -s https://rubygems.org/api/v1/gems/ballistics-engine.json | python3 -c 'import json,sys;print(json.load(sys.stdin)["version"])')" "$V"
 # npm was invisible here until MBA-1434, and it is exactly the channel that went missing:
 # ten releases between 0.25.0 and 0.36.3 never reached npm and nothing said so. Reads the
