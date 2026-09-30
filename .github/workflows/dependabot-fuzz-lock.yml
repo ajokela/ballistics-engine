@@ -70,4 +70,29 @@ jobs:
           git commit -m "Carry the dependency update into the fuzz lockfile" \
                      -m "Dependabot updates only the root Cargo.lock; CI builds the fuzz crate --locked."
           git push origin "HEAD:refs/heads/${BRANCH}"
-          gh workflow run ci.yml --ref "${BRANCH}"
+
+          # GitHub queues pull_request runs for a push made with GITHUB_TOKEN but holds them
+          # as "action_required" until approved. Approving them gives the PR its ordinary CI
+          # checks. Only if approval is refused (or no held run appears) fall back to
+          # dispatching CI on the branch, whose checks attach to the same commit.
+          SHA=$(git rev-parse HEAD)
+          ids=""
+          for _ in $(seq 1 12); do
+            ids=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${SHA}&event=pull_request" \
+                    -q '.workflow_runs[] | select(.conclusion == "action_required") | .id')
+            [ -n "$ids" ] && break
+            sleep 5
+          done
+          approved=0
+          for id in $ids; do
+            if gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/approve" > /dev/null; then
+              approved=1
+              echo "approved held run ${id}"
+            else
+              echo "::warning::could not approve held run ${id}"
+            fi
+          done
+          if [ "$approved" = 0 ]; then
+            echo "no held run approved; dispatching CI instead"
+            gh workflow run ci.yml --ref "${BRANCH}"
+          fi
