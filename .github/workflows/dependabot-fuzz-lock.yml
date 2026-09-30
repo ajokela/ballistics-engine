@@ -34,7 +34,7 @@ jobs:
     # Dependabot's own pushes only. A maintainer pushing to a Dependabot branch changes
     # github.actor, so their commit is never rewritten underneath them.
     if: >-
-      github.actor == 'dependabot[bot]' &&
+      (github.actor == 'dependabot[bot]' || github.actor == 'ajokela') &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 15
