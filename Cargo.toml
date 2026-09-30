@@ -152,7 +152,7 @@ strsim = { version = "0.11", optional = true }
 printpdf = { version = "0.12", optional = true, default-features = false }
 
 # Optional: HTTP client for online mode
-ureq = { version = "3.1", optional = true, features = ["json"] }
+ureq = { version = "3.4.2", optional = true, features = ["json"] }
 
 # Optional: Alternative allocators for benchmarking
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
