@@ -1,0 +1,73 @@
+name: Sync fuzz lockfile on Dependabot PRs
+
+# Dependabot updates the root Cargo.lock and never fuzz/Cargo.lock, because the fuzz
+# crate is its own workspace that reaches the engine through a path dependency — and
+# Dependabot does not refresh a lockfile whose crate depends on a changed crate by path,
+# even when that directory is configured (dependabot/dependabot-core#11500, open).
+# CI builds the fuzz crate with --locked, so every Dependabot Cargo PR failed on
+# "cannot update the lock file fuzz/Cargo.lock". This re-resolves that lockfile on the
+# PR branch, commits it, and re-runs CI on the new commit.
+#
+# `pull_request`, NOT `pull_request_target`: Dependabot's token on `pull_request` is
+# read-only by default but the `permissions` block below may raise it, and a fork's PR
+# still gets a read-only token whatever this file asks for. Nothing from the PR is
+# compiled or executed — `cargo metadata` resolves the dependency graph and runs no
+# build scripts.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+
+permissions:
+  contents: write # commit the re-resolved lockfile to the PR branch
+  actions: write # dispatch CI: a push made with GITHUB_TOKEN triggers no workflow run
+
+concurrency:
+  group: dependabot-fuzz-lock-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    # Dependabot's own pushes only. A maintainer pushing to a Dependabot branch changes
+    # github.actor, so their commit is never rewritten underneath them.
+    if: >-
+      github.actor == 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # By SHA, not branch name: the commit Dependabot pushed is exactly what gets
+      # re-resolved, and a branch that moved meanwhile makes the push below fail rather
+      # than silently commit on top of something else.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Re-resolve fuzz/Cargo.lock
+        # The minimal resolution: only what the changed requirements force, exactly as a
+        # `cargo build` without --locked would write it. The frozen reference engine the
+        # fuzz crate diffs against (engine_prev, =0.21.5) cannot move.
+        run: cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 > /dev/null
+
+      - name: Commit, push and re-run CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if git diff --quiet -- fuzz/Cargo.lock; then
+            echo "fuzz/Cargo.lock already matches; nothing to do."
+            exit 0
+          fi
+          git diff --stat -- fuzz/Cargo.lock
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add fuzz/Cargo.lock
+          git commit -m "Carry the dependency update into the fuzz lockfile" \
+                     -m "Dependabot updates only the root Cargo.lock; CI builds the fuzz crate --locked."
+          git push origin "HEAD:refs/heads/${BRANCH}"
+          gh workflow run ci.yml --ref "${BRANCH}"
