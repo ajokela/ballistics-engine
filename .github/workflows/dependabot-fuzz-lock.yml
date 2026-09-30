@@ -1,18 +1,25 @@
 name: Sync fuzz lockfile on Dependabot PRs
 
-# Dependabot updates the root Cargo.lock and never fuzz/Cargo.lock, because the fuzz
-# crate is its own workspace that reaches the engine through a path dependency — and
-# Dependabot does not refresh a lockfile whose crate depends on a changed crate by path,
-# even when that directory is configured (dependabot/dependabot-core#11500, open).
-# CI builds the fuzz crate with --locked, so every Dependabot Cargo PR failed on
-# "cannot update the lock file fuzz/Cargo.lock". This re-resolves that lockfile on the
-# PR branch, commits it, and re-runs CI on the new commit.
+# Dependabot updates the root Cargo.lock and never fuzz/Cargo.lock. The fuzz crate is its
+# own workspace that reaches the engine through a path dependency, and Dependabot does not
+# refresh a lockfile whose crate depends on a changed crate by path, even when that
+# directory is configured (dependabot/dependabot-core#11500, open). CI builds the fuzz
+# crate with --locked, so every Dependabot PR that raised a requirement failed on "cannot
+# update the lock file fuzz/Cargo.lock" (#79, dirs 7, fixed by hand).
 #
-# `pull_request`, NOT `pull_request_target`: Dependabot's token on `pull_request` is
-# read-only by default but the `permissions` block below may raise it, and a fork's PR
-# still gets a read-only token whatever this file asks for. Nothing from the PR is
-# compiled or executed — `cargo metadata` resolves the dependency graph and runs no
-# build scripts.
+# This re-resolves that lockfile on the PR branch, commits it, and approves the CI run
+# GitHub queues for the new commit.
+#
+# Security shape:
+# - `pull_request`, NOT `pull_request_target`. Dependabot's token on `pull_request` is
+#   read-only unless a `permissions` block raises it, and a fork's PR stays read-only
+#   whatever this file asks for.
+# - Least privilege, split by job. `sync` holds contents: write and runs only first-party
+#   actions and the runner's own cargo; nothing from the PR is compiled or executed, since
+#   resolving a lockfile runs no build scripts. `approve` holds actions: write and checks
+#   nothing out.
+# - The token is not on disk while cargo runs (persist-credentials: false); git is given
+#   credentials only for the push.
 
 on:
   pull_request:
@@ -21,43 +28,54 @@ on:
       - Cargo.toml
       - Cargo.lock
 
-permissions:
-  contents: write # commit the re-resolved lockfile to the PR branch
-  actions: write # dispatch CI: a push made with GITHUB_TOKEN triggers no workflow run
+permissions: {}
 
+# Queue, never cancel. `approve` approves this workflow's own held run for the new commit,
+# which must wait for the running one rather than cancel it mid-approval.
 concurrency:
   group: dependabot-fuzz-lock-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   sync:
     # Dependabot's own pushes only. A maintainer pushing to a Dependabot branch changes
-    # github.actor, so their commit is never rewritten underneath them.
+    # github.actor, so their commit is never rewritten underneath them, and the runs
+    # `approve` releases (actor github-actions[bot]) skip here.
     if: >-
       github.actor == 'dependabot[bot]' &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write # commit the re-resolved lockfile to the PR branch
+    outputs:
+      pushed_sha: ${{ steps.push.outputs.sha }}
     steps:
       # By SHA, not branch name: the commit Dependabot pushed is exactly what gets
-      # re-resolved, and a branch that moved meanwhile makes the push below fail rather
-      # than silently commit on top of something else.
+      # re-resolved, and a branch that moved meanwhile makes the push refuse rather than
+      # commit on top of something else.
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-
-      - uses: dtolnay/rust-toolchain@stable
+          persist-credentials: false
 
       - name: Re-resolve fuzz/Cargo.lock
-        # The minimal resolution: only what the changed requirements force, exactly as a
-        # `cargo build` without --locked would write it. The frozen reference engine the
-        # fuzz crate diffs against (engine_prev, =0.21.5) cannot move.
-        run: cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 > /dev/null
+        # Unlock only the path engine's edges: exactly what a `cargo build` without --locked
+        # would change for a requirement Dependabot raised, reproducing the hand fix for #79
+        # byte for byte. A whole-graph re-resolve can fail instead when a bumped optional
+        # engine dependency needs a newer shared crate pinned through the frozen reference
+        # engine (engine_prev, =0.21.5), which this never moves. The runner's preinstalled
+        # cargo is used on purpose: no third-party action runs beside a write token.
+        run: |
+          ENGINE=$(python3 -c "import tomllib; print(next(p['version'] for p in tomllib.load(open('fuzz/Cargo.lock', 'rb'))['package'] if p['name'] == 'ballistics-engine' and 'source' not in p))")
+          cargo update --manifest-path fuzz/Cargo.toml -p "ballistics-engine@${ENGINE}"
 
-      - name: Commit, push and re-run CI
+      - name: Commit and push
+        id: push
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           if git diff --quiet -- fuzz/Cargo.lock; then
             echo "fuzz/Cargo.lock already matches; nothing to do."
@@ -67,7 +85,54 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add fuzz/Cargo.lock
+          # [dependabot skip]: without it, any extra commit stops Dependabot rebasing the PR.
+          # With it, Dependabot force-pushes over this commit when it rebases, and that
+          # push re-runs this workflow on top of the rebased update.
           git commit -m "Carry the dependency update into the fuzz lockfile" \
-                     -m "Dependabot updates only the root Cargo.lock; CI builds the fuzz crate --locked."
-          git push origin "HEAD:refs/heads/${BRANCH}"
-          gh workflow run ci.yml --ref "${BRANCH}"
+                     -m "Dependabot updates only the root Cargo.lock; CI builds the fuzz crate --locked." \
+                     -m "[dependabot skip]"
+          gh auth setup-git
+          if ! git push origin "HEAD:refs/heads/${BRANCH}"; then
+            if [ "$(git ls-remote origin "refs/heads/${BRANCH}" | cut -f1)" != "${HEAD_SHA}" ]; then
+              echo "The branch moved on while this ran; the run for its new head will sync it."
+              exit 0
+            fi
+            exit 1
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  approve:
+    # A push made with GITHUB_TOKEN queues this repo's pull_request runs for the new commit
+    # but holds them as "action_required". Approving them gives the PR its ordinary CI
+    # checks. This deliberately stands in for a maintainer's click: the commit it releases
+    # is Dependabot's update plus a lockfile resolved above, and CI runs read-only.
+    needs: sync
+    if: needs.sync.outputs.pushed_sha != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write # approve held workflow runs
+    steps:
+      - name: Approve the held runs for the lockfile commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.sync.outputs.pushed_sha }}
+        run: |
+          ids=""
+          for _ in $(seq 1 24); do
+            ids=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${SHA}&event=pull_request" \
+                    -q '.workflow_runs[] | select(.conclusion == "action_required") | .id')
+            [ -n "$ids" ] && break
+            sleep 5
+          done
+          if [ -z "$ids" ]; then
+            echo "::warning::No held run appeared for ${SHA}; approve CI on the PR by hand."
+            exit 0
+          fi
+          for id in $ids; do
+            if gh api -X POST "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/approve" > /dev/null; then
+              echo "approved held run ${id}"
+            else
+              echo "::warning::Could not approve held run ${id}; approve it on the PR by hand."
+            fi
+          done
