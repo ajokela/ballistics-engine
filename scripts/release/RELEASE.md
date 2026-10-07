@@ -12,10 +12,10 @@ or a CI job. Codified from the 0.29.0/0.30.0 releases, which were driven by hand
 3. **Approve/triage**: watch the pipeline; re-run red jobs (netbsd guest-net flake
    clears on retry); run `verify-channels.sh X.Y.Z` last. Red verify = not released.
 
-Asset count alone is not proof: 29 can hide a duplicate plus a gap. Check each of
-the 13 platforms is present exactly once.
+Asset count alone is not proof: 38 can hide a duplicate plus a gap. Check each of
+the 16 platforms is present exactly once (16 binaries, 16 checksums, 6 provenance files).
 
-## Platform matrix (13)
+## Platform matrix (16)
 
 | Where | Platforms | How |
 |---|---|---|
@@ -23,6 +23,7 @@ the 13 platforms is present exactly once.
 | **build** 10.1.1.27 cross (`CROSS_HOST`) + **validate** ARM KVM node (`VALIDATE_NODE`, default nanopct6) | 3x BSD aarch64 (+provenance) | `build-bsd-aarch64-cross.sh` **then** `validate-bsd-aarch64.sh` |
 | K3S cluster (`BSD_NODE`, default nanopct6) | 3x BSD aarch64 — *fallback* | `build-k3s-bsds.sh` / fleet runner |
 | 10.1.1.27 cross (or 10.1.1.26 native via `RISCV_MODE=native`) | linux-riscv64 | `build-riscv.sh` |
+| 10.1.1.27 cross + RISC-V validation hosts | 3x BSD riscv64 (+provenance) | `build-riscv64-bsd-cross.sh` **then** `validate-riscv64.sh` |
 | 10.1.1.27 cross (`MIPS_HOST`) | linux-mips64el | `build-mips.sh` |
 | 10.1.1.27 build-server | fallback for the 8 hosted ones | `build-server-x86.sh` |
 
@@ -204,7 +205,7 @@ script emits the correct `<hash>  <file>` two-space form directly.
    ```bash
    cargo package --list --locked | sort > scripts/release/packaged-files.txt
    ```
-2. Binaries -> `assemble.sh` (refuses on <13 binaries or any checksum mismatch;
+2. Binaries -> `assemble.sh` (requires all 16 binaries and matching checksums;
    GH release + gs://ballistics-releases/X.Y.Z/).
 3. `deploy-wasm.sh` (4 copies + both firebase sites + badge sed + live byte-verify).
 4. Docs: `cd ~/projects/ballistics/ballistics-docs-site && ./update-docs.sh`.
@@ -338,7 +339,7 @@ backfillable, and the decision is to leave them.** Do not spend an afternoon red
   `publish-npm.yml`, and GitHub evaluates the workflow file at the dispatched ref, not on
   `main`.
 - Re-tagging an old commit so it carries the workflow is not a workaround, it is worse. `v*`
-  tags also trigger `build-and-release.yml`, so it would re-run the entire 13-platform release,
+  tags also trigger `build-and-release.yml`, so it would re-run the entire 16-platform release,
   and it would move a released tag off the commit it names.
 - Seven of the ten (everything before 0.34.0) predate `scripts/build-wasm.sh` entirely.
   Building them means a bare `wasm-pack` invocation at that revision, without the verifier that

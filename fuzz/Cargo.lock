@@ -169,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "ballistics-engine"
-version = "0.44.0"
+version = "0.45.0"
 dependencies = [
  "dirs 7.0.0",
  "getrandom 0.4.3",
@@ -196,7 +196,7 @@ version = "0.0.0"
 dependencies = [
  "arbitrary",
  "ballistics-engine 0.21.5",
- "ballistics-engine 0.44.0",
+ "ballistics-engine 0.45.0",
  "libfuzzer-sys",
  "serde_json",
 ]
