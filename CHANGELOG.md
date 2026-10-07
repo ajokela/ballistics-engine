@@ -33,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The MCP `solve` schema lists the new member, and the fuzz harness generates valid and hostile
   tables. The engine ships no airgun curves: the caller supplies the table.
 
+  **Source-breaking for Rust struct literals.** `ProjectileV1` and `ResolvedProjectileV1` gain a
+  public `drag_table: Option<DragTableV1>` field, so Rust code that builds either struct with a
+  literal must add `drag_table: None`. The JSON wire format is unaffected: requests and responses
+  that omit the member decode and encode exactly as before.
+
 ## [0.44.0] - 2026-09-28
 
 ### Added
