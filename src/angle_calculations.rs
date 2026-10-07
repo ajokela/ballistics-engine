@@ -1,5 +1,4 @@
 use crate::InternalBallisticInputs;
-use std::f64;
 
 // Constants for unit conversions
 const FEET_TO_METERS: f64 = 0.3048;
