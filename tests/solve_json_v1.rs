@@ -93,6 +93,7 @@ fn resolved_request_for(request: &SolveRequestV1) -> ResolvedSolveRequestV1 {
             length_m: request.projectile.length_m,
             drag_model: request.projectile.drag_model,
             ballistic_coefficient: request.projectile.ballistic_coefficient,
+            drag_table: request.projectile.drag_table.clone(),
         },
         rifle: ResolvedRifleV1 {
             muzzle_velocity_mps: request.rifle.muzzle_velocity_mps,

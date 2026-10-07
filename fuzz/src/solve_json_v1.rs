@@ -2,10 +2,11 @@
 
 use arbitrary::{Result, Unstructured};
 use ballistics_engine::solve_json::{
-    AtmosphereV1, DragModelV1, DropsReferenceV1, EffectsV1, PressureReferenceV1, ProjectileV1,
-    ResolvedWindV1, RifleV1, SamplingV1, SchemaVersionV1, ShotV1, SolveRequestV1, SolveSuccessV1,
-    SolverMethodV1, SolverV1, TwistDirectionV1, WindReferenceV1, WindSegmentV1, WindShearModelV1,
-    WindV1, MAX_SOLVE_JSON_SAMPLES_V1,
+    AtmosphereV1, DragModelV1, DragPointV1, DragTableKindV1, DragTableV1, DropsReferenceV1,
+    EffectsV1, PressureReferenceV1, ProjectileV1, ResolvedWindV1, RifleV1, SamplingV1,
+    SchemaVersionV1, ShotV1, SolveRequestV1, SolveSuccessV1, SolverMethodV1, SolverV1,
+    TwistDirectionV1, WindReferenceV1, WindSegmentV1, WindShearModelV1, WindV1,
+    MAX_SOLVE_JSON_SAMPLES_V1,
 };
 
 use crate::domain::{ranged, wild};
@@ -28,6 +29,67 @@ fn drag_model(u: &mut Unstructured<'_>) -> Result<DragModelV1> {
         7 => DragModelV1::GS,
         _ => DragModelV1::RA4,
     })
+}
+
+/// Upper bound on a generated drag table's length. The decoder admits 4096 points; a short
+/// table exercises the same interpolation and validation at a fraction of the cost.
+pub const MAX_FUZZ_DRAG_TABLE_POINTS: u8 = 16;
+
+fn drag_table_kind(u: &mut Unstructured<'_>) -> Result<DragTableKindV1> {
+    Ok(if u.arbitrary()? {
+        DragTableKindV1::Reference
+    } else {
+        DragTableKindV1::Projectile
+    })
+}
+
+/// A valid `projectile.drag_table` (MBA-1597): 2 to [`MAX_FUZZ_DRAG_TABLE_POINTS`] strictly
+/// ascending Mach points from a non-negative start, each with a positive Cd, under either kind.
+fn drag_table(u: &mut Unstructured<'_>) -> Result<DragTableV1> {
+    let count = u.int_in_range(2u8..=MAX_FUZZ_DRAG_TABLE_POINTS)?;
+    let mut mach = ranged(u, 0.0, 0.5)?;
+    let mut points = Vec::with_capacity(usize::from(count));
+    for _ in 0..count {
+        points.push(DragPointV1 {
+            mach,
+            cd: ranged(u, 0.05, 1.0)?,
+        });
+        mach += ranged(u, 0.01, 0.5)?;
+    }
+    Ok(DragTableV1 {
+        kind: drag_table_kind(u)?,
+        points,
+    })
+}
+
+/// Absent three times in four, so the built-in models keep most of the coverage.
+fn maybe_drag_table(u: &mut Unstructured<'_>) -> Result<Option<DragTableV1>> {
+    Ok(if u.int_in_range(0u8..=3)? == 0 {
+        Some(drag_table(u)?)
+    } else {
+        None
+    })
+}
+
+/// A drag table the service must refuse or survive: a valid one with one point's Mach or Cd
+/// replaced by an adversarial value, or cut down below the two-point minimum.
+fn hostile_drag_table(u: &mut Unstructured<'_>) -> Result<Option<DragTableV1>> {
+    if u.int_in_range(0u8..=4)? == 0 {
+        return Ok(None);
+    }
+    let mut table = drag_table(u)?;
+    match u.int_in_range(0u8..=2)? {
+        0 => table.points.truncate(usize::from(u.int_in_range(0u8..=1)?)),
+        1 => {
+            let index = u.choose_index(table.points.len())?;
+            table.points[index].mach = wild(u)?;
+        }
+        _ => {
+            let index = u.choose_index(table.points.len())?;
+            table.points[index].cd = wild(u)?;
+        }
+    }
+    Ok(Some(table))
 }
 
 fn solver_method(u: &mut Unstructured<'_>) -> Result<SolverMethodV1> {
@@ -205,7 +267,7 @@ pub fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
         _ => Some(true),
     };
 
-    Ok(SolveRequestV1 {
+    let mut request = SolveRequestV1 {
         schema_version: SchemaVersionV1,
         projectile: ProjectileV1 {
             mass_kg: ranged(u, 0.002, 0.030)?,
@@ -213,6 +275,8 @@ pub fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
             length_m: maybe_ranged(u, 0.010, 0.060)?,
             drag_model: drag_model(u)?,
             ballistic_coefficient: ranged(u, 0.1, 1.2)?,
+            // Drawn last, below, so adding it left every earlier draw where it was.
+            drag_table: None,
         },
         rifle: RifleV1 {
             muzzle_velocity_mps: ranged(u, 300.0, 1_200.0)?,
@@ -290,7 +354,9 @@ pub fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
         // to a dedicated harness, and the differential target's 0.21.5 reference engine
         // has no corrections concept. Fuzzed as absent.
         corrections: None,
-    })
+    };
+    request.projectile.drag_table = maybe_drag_table(u)?;
+    Ok(request)
 }
 
 fn hostile_wind(u: &mut Unstructured<'_>) -> Result<WindV1> {
@@ -347,7 +413,7 @@ pub fn bounded_hostile_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV
 
     let mutations = usize::from(u.int_in_range(1u8..=6)?);
     for _ in 0..mutations {
-        match u.int_in_range(0u8..=27)? {
+        match u.int_in_range(0u8..=28)? {
             0 => request.projectile.mass_kg = wild(u)?,
             1 => request.projectile.diameter_m = wild(u)?,
             2 => request.projectile.length_m = maybe_wild(u)?,
@@ -387,6 +453,7 @@ pub fn bounded_hostile_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV
                 // cannot enlarge integration work and the service must reject >10,000 samples.
                 request.sampling.interval_m = maybe_bounded_or_invalid(u, 0.001, 25.0)?
             }
+            27 => request.projectile.drag_table = hostile_drag_table(u)?,
             _ => {
                 // Explicitly exercise the structural zero/muzzle-angle conflict.
                 request.shot.zero_distance_m = Some(ranged(u, 1.0, 100.0)?);

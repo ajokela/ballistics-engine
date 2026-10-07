@@ -472,6 +472,30 @@ fn solve_warns_when_an_aux_drag_model_is_coerced_to_g1() {
     );
 }
 
+/// MBA-1597: a correction table adjusts a G1/G7 BC along the flight, and a caller-supplied
+/// `projectile.drag_table` replaces the G-curve that BC belongs to, so the pair is refused —
+/// even with a valid table on disk, which is never opened.
+#[test]
+fn solve_refuses_a_correction_table_alongside_a_drag_table() {
+    let (dir, file) = write_fixture("solve-with-drag-table", &bc5d_fixture());
+    let mut request = solve_request(Some(json!({"bc5d_table_path": file.to_str().unwrap()})));
+    request["projectile"]["drag_table"] = json!({
+        "kind": "reference",
+        "points": [{"mach": 0.0, "cd": 0.25}, {"mach": 3.0, "cd": 0.25}]
+    });
+    let out = bridge_raw("solve", request);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(out["ok"], false, "{out}");
+    assert_eq!(
+        out["error"]["details"]["error"]["code"], "conflicting_fields",
+        "{out}"
+    );
+    assert_eq!(
+        out["error"]["details"]["error"]["path"], "$.corrections.bc5d_table_path",
+        "{out}"
+    );
+}
+
 #[test]
 fn solve_rejects_corrupt_and_missing_tables_with_typed_envelopes() {
     // Corrupt CRC -> invalid_value at the corrections path.

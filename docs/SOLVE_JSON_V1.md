@@ -193,12 +193,60 @@ A representative request is:
 | `mass_kg` | yes | Projectile mass. |
 | `diameter_m` | yes | Projectile diameter. |
 | `length_m` | no | Projectile length; required by effects that need geometry. |
-| `drag_model` | yes | One of `G1`, `G2`, `G5`, `G6`, `G7`, `G8`, `GI`, `GS`, or `RA4`. |
-| `ballistic_coefficient` | yes | BC for the selected reference drag model. |
+| `drag_model` | yes | One of `G1`, `G2`, `G5`, `G6`, `G7`, `G8`, `GI`, `GS`, or `RA4`. Does not drive drag while `drag_table` is present. |
+| `ballistic_coefficient` | yes | BC for the selected reference drag model, or for `drag_table` when its `kind` is `reference`. |
+| `drag_table` | no | A caller-supplied drag curve replacing the built-in model; see below. |
 
 All nine built-in reference drag models are backed by distinct tables and are accepted by v1.
-The enum spellings are exact and case-sensitive. Custom drag files and tables remain outside
-this wire format; see [Deliberate v1 exclusions](#deliberate-v1-exclusions).
+The enum spellings are exact and case-sensitive.
+
+### `projectile.drag_table` (MBA-1597)
+
+A Cd-vs-Mach curve sent inline, the wire form of the CLI's `--drag-table`. Use it for a drag law
+the engine does not ship — an airgun pellet law such as GA2, say — or for a projectile's own
+measured curve.
+
+```json
+"drag_table": {
+  "kind": "reference",
+  "points": [
+    {"mach": 0.0, "cd": 0.210},
+    {"mach": 0.5, "cd": 0.200},
+    {"mach": 0.9, "cd": 0.350}
+  ]
+}
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `kind` | yes | `reference` or `projectile`, below. There is no default. |
+| `points` | yes | 2 to 4096 `{mach, cd}` objects. Mach finite, at least 0 and strictly ascending; Cd finite and above 0. |
+
+`kind` decides what `ballistic_coefficient` means, and there is no default because the two
+readings differ by the projectile's form factor — a wrong guess gives confident, wrong drops:
+
+- **`reference`** — a standard curve that `ballistic_coefficient` was measured against (a GA2 BC
+  with the GA2 curve). The pair flies exactly as a built-in model flies with its own BC: sending
+  the engine's own G1 table as a `reference` curve with a G1 BC gives the same trajectory as
+  `"drag_model": "G1"` to rounding. The BC still matters, so the error budget and the other
+  kernels that perturb it move the result as they do for a built-in model.
+- **`projectile`** — this projectile's own measured drag coefficient (Doppler radar, for
+  instance). `ballistic_coefficient` is not used, exactly as with `--drag-table`; the engine
+  divides the curve's Cd by the sectional density from `mass_kg` and `diameter_m`. Since the BC
+  is unused, perturbing it moves nothing.
+
+Outside the table the nearest end value is held, so give a curve covering every Mach the flight
+reaches. With either kind, `drag_model` is still required and echoed but has no effect on drag.
+
+Errors name the exact entry: `$.projectile.drag_table.kind` for a missing or unknown kind,
+`$.projectile.drag_table.points` for a wrong point count, and
+`$.projectile.drag_table.points[3].mach` (or `.cd`) for a bad value. A table cannot be combined
+with [`corrections.bc5d_table_path`](#optional-corrections-block): BC5D corrects a G1/G7 BC and a
+table replaces the curve, so the pair is `conflicting_fields` at
+`$.corrections.bc5d_table_path`.
+
+The table is echoed verbatim at `resolved_request.projectile.drag_table`, so a resolved request
+re-solves on the same curve. The engine ships no airgun curves: the caller supplies the table.
 
 ### `rifle`
 
@@ -820,7 +868,8 @@ does not load profiles, and does not write to stdout or stderr.
 
 ## Deliberate v1 exclusions
 
-V1 does not expose custom drag files or tables, caller-authored velocity/Mach-dependent BC
+V1 does not read drag files (a drag curve is sent inline as
+[`projectile.drag_table`](#projectiledrag_table-mba-1597)), caller-authored velocity/Mach-dependent BC
 schedules, powder temperature curves, atmosphere zones, cluster-BC degradation, wind shear,
 pitch damping, precession/nutation, or angular diagnostics. (The optional
 [`corrections`](#optional-corrections-block) block is the one deliberate carve-out: a

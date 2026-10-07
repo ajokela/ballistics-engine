@@ -5,14 +5,15 @@
 //! filesystem access, network access, profile lookup, or terminal output.
 
 use crate::solve_json::{
-    AtmosphereV1, DragModelV1, EffectsV1, PressureReferenceV1, ProjectileV1, ResolvedAtmosphereV1,
-    ResolvedConstantWindV1, ResolvedEffectsV1, ResolvedProjectileV1, ResolvedRifleV1,
-    ResolvedSamplingV1, ResolvedSegmentedWindV1, ResolvedShotV1, ResolvedSolveRequestV1,
-    ResolvedSolverV1, ResolvedWindSegmentV1, ResolvedWindV1, RifleV1, SampleFlagV1, SamplingV1,
-    SchemaVersionV1, ShotV1, SolveErrorCodeV1, SolveErrorEnvelopeV1, SolveErrorV1, SolveNoticeV1,
-    SolveRequestV1, SolveSuccessV1, SolveSummaryV1, SolverMethodV1, SolverV1, SuccessStatusV1,
-    TerminationReasonV1, TrajectorySampleV1, TwistDirectionV1, WindReferenceV1, WindShearModelV1,
-    WindV1, MAX_SOLVE_JSON_SAMPLES_V1,
+    AtmosphereV1, DragModelV1, DragTableKindV1, DragTableV1, EffectsV1, PressureReferenceV1,
+    ProjectileV1, ResolvedAtmosphereV1, ResolvedConstantWindV1, ResolvedEffectsV1,
+    ResolvedProjectileV1, ResolvedRifleV1, ResolvedSamplingV1, ResolvedSegmentedWindV1,
+    ResolvedShotV1, ResolvedSolveRequestV1, ResolvedSolverV1, ResolvedWindSegmentV1,
+    ResolvedWindV1, RifleV1, SampleFlagV1, SamplingV1, SchemaVersionV1, ShotV1, SolveErrorCodeV1,
+    SolveErrorEnvelopeV1, SolveErrorV1, SolveNoticeV1, SolveRequestV1, SolveSuccessV1,
+    SolveSummaryV1, SolverMethodV1, SolverV1, SuccessStatusV1, TerminationReasonV1,
+    TrajectorySampleV1, TwistDirectionV1, WindReferenceV1, WindShearModelV1, WindV1,
+    MAX_SOLVE_JSON_SAMPLES_V1,
 };
 use crate::trajectory_observation::{
     bracket_param, Bracket, TrajectoryObservation, TrajectoryObservationError,
@@ -500,6 +501,22 @@ pub(crate) fn prepare_request(
         ));
     }
 
+    // A BC5D table corrects a G1/G7 ballistic coefficient along the flight; a drag table
+    // replaces the G-curve that BC is measured against, so the pair has no meaning. Refused
+    // before the table path is ever opened.
+    if projectile.drag_table.is_some()
+        && request
+            .corrections
+            .as_ref()
+            .is_some_and(|corrections| corrections.bc5d_table_path.is_some())
+    {
+        return Err(conflicting_fields(
+            "$.corrections.bc5d_table_path",
+            "corrections.bc5d_table_path cannot be combined with projectile.drag_table (BC5D \
+             corrects a G1/G7 ballistic coefficient; a drag table replaces the G-curve)",
+        ));
+    }
+
     let resolved_request = ResolvedSolveRequestV1 {
         schema_version: SchemaVersionV1,
         projectile,
@@ -681,13 +698,20 @@ pub(crate) fn prepare_request(
         // where this used to be hardcoded false with no way for a caller to reach it.
         enable_aerodynamic_jump: resolved_request.effects.aerodynamic_jump.unwrap_or(false),
         use_cluster_bc: false,
+        // MBA-1597: `projectile.drag_table` is installed just below, once these inputs exist —
+        // the reference kind's scale reads their own sectional density.
         custom_drag_table: None,
-        // MBA-1356: solve-json v1 has no custom-drag-table field (see the module doc — the
-        // public JSON contract deliberately does not expose custom decks), so cd_scale is
-        // always inert here; keep it at the neutral default.
         cd_scale: 1.0,
         bc_type_str: None,
     };
+
+    if let Some(drag_table) = &resolved_request.projectile.drag_table {
+        install_drag_table(
+            drag_table,
+            resolved_request.projectile.ballistic_coefficient,
+            &mut inputs,
+        )?;
+    }
 
     apply_bc5d_correction(request, &resolved_request, &mut inputs, &mut warnings)?;
 
@@ -707,6 +731,44 @@ pub(crate) fn prepare_request(
         wind_segments,
         atmosphere,
     })
+}
+
+/// Install `projectile.drag_table` on the prepared engine inputs (MBA-1597).
+///
+/// The engine flies a custom table as the projectile's OWN drag coefficient divided by its
+/// sectional density ([`BallisticInputs::custom_drag_denominator`]): the `projectile` kind, BC
+/// unused, exactly as the CLI's `--drag-table`. A `reference` curve is instead a standard the
+/// BC was measured against, which a built-in model flies as `Cd_ref / BC`. Since BC = SD / i,
+/// that equals the own-curve path with `Cd_own = Cd_ref * SD / BC`, so the reference kind is
+/// the same path with `cd_scale = SD / BC` — no second retardation formula, and the SD is the
+/// very one the denominator divides by. The scale is rebuilt from the request's BC on every
+/// prepare, so a kernel that perturbs `ballistic_coefficient` and re-solves moves a
+/// reference-kind trajectory as it moves a built-in one.
+fn install_drag_table(
+    drag_table: &DragTableV1,
+    ballistic_coefficient: f64,
+    inputs: &mut BallisticInputs,
+) -> Result<(), SolveErrorEnvelopeV1> {
+    let (mach, cd): (Vec<f64>, Vec<f64>) = drag_table
+        .points
+        .iter()
+        .map(|point| (point.mach, point.cd))
+        .unzip();
+    // `resolve_projectile` has already applied the same rules with exact paths; this is the
+    // engine's own gate, kept so a rule added there can never be skipped here.
+    let table = crate::drag::DragTable::try_new(mach, cd)
+        .map_err(|message| invalid_value("$.projectile.drag_table.points", message))?;
+    inputs.cd_scale = match drag_table.kind {
+        DragTableKindV1::Projectile => 1.0,
+        DragTableKindV1::Reference => {
+            let sectional_density = inputs.sectional_density_lb_in2().ok_or_else(|| {
+                internal_error("projectile mass and diameter gave no sectional density")
+            })?;
+            sectional_density / ballistic_coefficient
+        }
+    };
+    inputs.custom_drag_table = Some(table);
+    Ok(())
 }
 
 /// Apply an optional BC5D offline correction (`$.corrections.bc5d_table_path`) to the
@@ -825,6 +887,9 @@ fn resolve_projectile(
     if let Some(length_m) = projectile.length_m {
         require_positive("$.projectile.length_m", length_m)?;
     }
+    if let Some(drag_table) = &projectile.drag_table {
+        crate::solve_json::validate_drag_table_v1(drag_table)?;
+    }
 
     let bullet_length_m = match projectile.length_m {
         Some(length_m) => length_m,
@@ -857,6 +922,7 @@ fn resolve_projectile(
             length_m: projectile.length_m,
             drag_model: projectile.drag_model,
             ballistic_coefficient: projectile.ballistic_coefficient,
+            drag_table: projectile.drag_table.clone(),
         },
         bullet_length_m,
     ))
@@ -2031,6 +2097,7 @@ mod tests {
                 length_m: None,
                 drag_model: DragModelV1::G7,
                 ballistic_coefficient: 0.243,
+                drag_table: None,
             },
             rifle: RifleV1 {
                 muzzle_velocity_mps: 823.0,

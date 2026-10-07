@@ -245,9 +245,10 @@ fn wez_kernel_drag_model(model: DragModel) -> DragModelV1 {
 /// used.
 ///
 /// Returns `None` only for a loaded custom drag table (`base_inputs.custom_drag_table`), which
-/// replaces G-model+BC drag entirely and has no solve-json v1 field. Differentiating under a
-/// built-in fallback model would silently misattribute variance, so custom-deck attribution
-/// remains explicitly unavailable. Every built-in [`DragModel`] is represented exactly by
+/// replaces G-model+BC drag entirely. solve-json v1 can carry one since MBA-1597
+/// (`projectile.drag_table`), but this mapping does not yet translate a deck and its `cd_scale`
+/// into that field. Differentiating under a built-in fallback model would silently misattribute
+/// variance, so custom-deck attribution remains explicitly unavailable. Every built-in [`DragModel`] is represented exactly by
 /// [`wez_kernel_drag_model`].
 fn wez_resolved_request(
     base_inputs: &BallisticInputs,
@@ -267,6 +268,8 @@ fn wez_resolved_request(
             length_m: Some(base_inputs.bullet_length),
             drag_model,
             ballistic_coefficient: base_inputs.bc_value,
+            // Unreachable with a table: this function returns `None` for one above.
+            drag_table: None,
         },
         rifle: ResolvedRifleV1 {
             muzzle_velocity_mps: base_inputs.muzzle_velocity,
@@ -803,8 +806,8 @@ pub fn compute_wez(
                     // attribute, but p_hit is unaffected.
                     None => (WezVarianceShares::default(), true),
                 },
-                // A custom drag table cannot be represented on the solve-json v1 wire contract
-                // at all -- see wez_resolved_request's doc. Every built-in model is represented.
+                // A custom drag table is not mapped onto the kernel's request -- see
+                // wez_resolved_request's doc. Every built-in model is represented.
                 None => (WezVarianceShares::default(), true),
             }
         } else {
@@ -1369,10 +1372,9 @@ mod wez_tests {
         assert_builtin_drag_model_attribution_available(DragModel::RA4);
     }
 
-    /// A loaded custom drag table replaces G-model+BC drag entirely, and solve-json v1 has no
-    /// field for a custom deck at all -- the kernel cannot represent this configuration, so
-    /// attribution is unavailable rather than silently computed under the wrong (G-model+BC)
-    /// physics. Reachable via `--drag-table`/`--cd-scale` on `monte-carlo --wez`.
+    /// A loaded custom drag table replaces G-model+BC drag entirely, and the WEZ mapping does
+    /// not translate a deck onto `projectile.drag_table` -- so attribution is unavailable rather
+    /// than silently computed under the wrong (G-model+BC) physics. Reachable via `--drag-table`/`--cd-scale` on `monte-carlo --wez`.
     #[test]
     fn attribution_unavailable_with_a_custom_drag_table() {
         let table = crate::drag::DragTable::new(
@@ -1412,7 +1414,7 @@ mod wez_tests {
         let row = result.rows.first().expect("one row");
         assert!(
             row.attribution_unavailable,
-            "a custom drag table has no solve-json v1 representation; attribution cannot run"
+            "a custom drag table is not mapped onto the kernel request; attribution cannot run"
         );
         assert!(
             row.p_hit.is_finite(),

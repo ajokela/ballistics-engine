@@ -35,7 +35,10 @@
 //! Concretely: anything [`ballistics_engine::solve_json::decode_solve_request_v1`] rejects is
 //! `-32602`; anything [`ballistics_engine::solve_v1()`] rejects after that is `isError: true`.
 
-use ballistics_engine::solve_json::{decode_solve_request_v1, DRAG_MODEL_WIRE_NAMES_V1};
+use ballistics_engine::solve_json::{
+    decode_solve_request_v1, DRAG_MODEL_WIRE_NAMES_V1, MAX_DRAG_TABLE_POINTS_V1,
+    MIN_DRAG_TABLE_POINTS_V1,
+};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -453,7 +456,29 @@ fn solve_input_schema() -> Value {
                     "diameter_m": {"type": "number"},
                     "length_m": {"type": "number"},
                     "drag_model": {"type": "string", "enum": DRAG_MODEL_WIRE_NAMES_V1},
-                    "ballistic_coefficient": {"type": "number"}
+                    "ballistic_coefficient": {"type": "number"},
+                    "drag_table": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["kind", "points"],
+                        "properties": {
+                            "kind": {"type": "string", "enum": ["reference", "projectile"]},
+                            "points": {
+                                "type": "array",
+                                "minItems": MIN_DRAG_TABLE_POINTS_V1,
+                                "maxItems": MAX_DRAG_TABLE_POINTS_V1,
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": ["mach", "cd"],
+                                    "properties": {
+                                        "mach": {"type": "number", "minimum": 0},
+                                        "cd": {"type": "number", "exclusiveMinimum": 0}
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             },
             "rifle": {
@@ -947,6 +972,17 @@ mod tests {
         assert_eq!(
             tools[0]["inputSchema"]["properties"]["projectile"]["properties"]["drag_model"]["enum"],
             json!(DRAG_MODEL_WIRE_NAMES_V1)
+        );
+        // MBA-1597: the drag table's kinds and point limits mirror the decoder's.
+        let drag_table =
+            &tools[0]["inputSchema"]["properties"]["projectile"]["properties"]["drag_table"];
+        assert_eq!(
+            drag_table["properties"]["kind"]["enum"],
+            json!(["reference", "projectile"])
+        );
+        assert_eq!(
+            drag_table["properties"]["points"]["maxItems"],
+            json!(MAX_DRAG_TABLE_POINTS_V1)
         );
     }
 

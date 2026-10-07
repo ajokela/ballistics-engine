@@ -5,6 +5,34 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **solve-json v1 takes a drag curve: `projectile.drag_table` (MBA-1597).** The engine has flown
+  user drag decks since MBA-940, but only the CLI's `--drag-table`, the WASM terminal and the array
+  FFI could reach them; an app on the JSON bridge could not send one at all. The new optional
+  member carries a `kind` and 2 to 4096 `{mach, cd}` points, under the rules `--drag-table`
+  applies (Mach finite, at least 0 and strictly ascending; Cd finite and above 0; the end value
+  held outside the table), and every error names the exact entry, e.g.
+  `$.projectile.drag_table.points[3].mach`.
+
+  `kind` decides what the request's BC means, and has no default because a wrong guess gives
+  confident, wrong drops. `"projectile"` is the bullet's own measured Cd, BC unused, exactly
+  `--drag-table`. `"reference"` is new to the engine: a standard curve flown with the BC measured
+  against it, which is how an airgun app flies a pellet law such as GA2 with GA2 BCs. It is the
+  existing custom-deck path with the curve scaled by sectional density over BC, so it needs no
+  second retardation formula, and it is exact: sending the bundled G1 or G7 table as a
+  `reference` curve reproduces `"drag_model": "G1"`/`"G7"` at the same BC to rounding, and the
+  error budget's BC sensitivity with it.
+
+  The resolved request echoes the table verbatim, so `explain`, `error-budget` and `tolerance`,
+  which re-solve from that echo, keep it. A table cannot be combined with
+  `corrections.bc5d_table_path` (`conflicting_fields`): BC5D corrects a G1/G7 BC, and a table
+  replaces the curve. `drag_model` stays required and echoed but has no effect on drag while a
+  table is present. Omitting the member changes nothing, and the key never appears in a response.
+  The MCP `solve` schema lists the new member, and the fuzz harness generates valid and hostile
+  tables. The engine ships no airgun curves: the caller supplies the table.
+
 ## [0.44.0] - 2026-09-28
 
 ### Added
