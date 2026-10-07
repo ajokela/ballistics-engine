@@ -272,6 +272,8 @@ EOF
 
 `-b`/`--bc` may still be supplied but its value is ignored once `--drag-table` is set. (On `trajectory` it is optional and defaults to 0.5; on `zero` and `monte-carlo` it remains a required argument, though it is likewise ignored for drag when a table is active.) — the deck supplies Cd directly. `-m/--mass` and `-d/--diameter` remain **required** (grains/inches under imperial, grams/mm under `--units metric`): the engine divides the deck's Cd by the projectile's sectional density (derived from mass and diameter) in place of the usual BC-based retardation denominator.
 
+**Over the JSON bridge:** an app on solve-json v1 (the bridge's `solve` command, `solve-json`, MCP) sends the same curve inline as `projectile.drag_table`, a `kind` plus a list of `{mach, cd}` points, with the validation rules above. `"kind": "projectile"` is this flag exactly: the projectile's own Cd, BC unused. `"kind": "reference"` is the case this flag cannot express: a standard curve, such as an airgun pellet law like GA2, flown with the BC that was measured against it, exactly as `--drag-model g1` flies with a G1 BC. See [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#projectiledrag_table-mba-1597).
+
 **Precedence:** a custom drag table completely replaces the G1/G7 model and any BC. It also takes precedence over `--use-bc-segments` / `--bc-segment`; if both are supplied, the drag table wins and a warning is printed:
 
 ```

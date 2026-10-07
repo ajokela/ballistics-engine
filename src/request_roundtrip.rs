@@ -43,6 +43,7 @@ impl From<&ResolvedSolveRequestV1> for SolveRequestV1 {
                 length_m: r.projectile.length_m,
                 drag_model: r.projectile.drag_model,
                 ballistic_coefficient: r.projectile.ballistic_coefficient,
+                drag_table: r.projectile.drag_table.clone(),
             },
             rifle: RifleV1 {
                 muzzle_velocity_mps: r.rifle.muzzle_velocity_mps,

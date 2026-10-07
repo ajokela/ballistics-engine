@@ -236,6 +236,106 @@ pub struct ProjectileV1 {
     pub length_m: Option<f64>,
     pub drag_model: DragModelV1,
     pub ballistic_coefficient: f64,
+    /// A caller-supplied drag curve replacing `drag_model`'s (MBA-1597). See [`DragTableV1`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub drag_table: Option<DragTableV1>,
+}
+
+/// The fewest points a [`DragTableV1`] may hold — two define a curve.
+pub const MIN_DRAG_TABLE_POINTS_V1: usize = 2;
+
+/// The most points a [`DragTableV1`] may hold. Matches the `.drg`/CSV loader behind the CLI's
+/// `--drag-table` and the array FFI's `MAX_FFI_DRAG_TABLE_LEN`.
+pub const MAX_DRAG_TABLE_POINTS_V1: usize = 4096;
+
+/// A caller-supplied Cd-vs-Mach drag curve (MBA-1597): solve-json's form of the CLI's
+/// `--drag-table`.
+///
+/// `kind` says what `ballistic_coefficient` means beside it, and has no default: the two
+/// readings differ by the projectile's form factor, so a guess gives confident, wrong drops.
+/// While a table is present `drag_model` does not drive drag under either kind.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DragTableV1 {
+    pub kind: DragTableKindV1,
+    /// Strictly ascending in Mach, [`MIN_DRAG_TABLE_POINTS_V1`] to
+    /// [`MAX_DRAG_TABLE_POINTS_V1`] points. Outside the table the nearest end value is held.
+    pub points: Vec<DragPointV1>,
+}
+
+/// What a [`DragTableV1`] describes, and therefore what the request's BC means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DragTableKindV1 {
+    /// A standard curve — an airgun pellet law such as GA2, say — that `ballistic_coefficient`
+    /// was measured against. Flown exactly as a built-in model is flown with its own BC.
+    Reference,
+    /// This projectile's own measured Cd (Doppler radar, for instance).
+    /// `ballistic_coefficient` is not used, exactly as with the CLI's `--drag-table`.
+    Projectile,
+}
+
+/// One point of a [`DragTableV1`]: Mach (finite, >= 0) and drag coefficient (finite, > 0).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DragPointV1 {
+    pub mach: f64,
+    pub cd: f64,
+}
+
+/// Check a [`DragTableV1`]'s values: the point count, then each point in order, naming the
+/// exact entry at fault. The same rules `DragTable::try_new` enforces for `--drag-table`.
+///
+/// Called from both the decoder and the solve service, so a Rust caller that builds a request
+/// without [`decode_solve_request_v1`] hears about a bad table at the same path.
+pub(crate) fn validate_drag_table_v1(table: &DragTableV1) -> Result<(), SolveErrorEnvelopeV1> {
+    let points_path = "$.projectile.drag_table.points";
+    let count = table.points.len();
+    if !(MIN_DRAG_TABLE_POINTS_V1..=MAX_DRAG_TABLE_POINTS_V1).contains(&count) {
+        return Err(protocol_error(
+            SolveErrorCodeV1::InvalidValue,
+            format!(
+                "drag_table must have {MIN_DRAG_TABLE_POINTS_V1} to \
+                 {MAX_DRAG_TABLE_POINTS_V1} points, got {count}"
+            ),
+            points_path,
+        ));
+    }
+    let mut previous_mach: Option<f64> = None;
+    for (index, point) in table.points.iter().enumerate() {
+        let mach_path = format!("{points_path}[{index}].mach");
+        if !point.mach.is_finite() || point.mach < 0.0 {
+            return Err(protocol_error(
+                SolveErrorCodeV1::InvalidValue,
+                format!("mach must be finite and >= 0, got {}", point.mach),
+                mach_path,
+            ));
+        }
+        if let Some(previous) = previous_mach.filter(|previous| point.mach <= *previous) {
+            return Err(protocol_error(
+                SolveErrorCodeV1::InvalidValue,
+                format!(
+                    "mach must strictly ascend; {} follows {previous} at points[{}]",
+                    point.mach,
+                    index - 1
+                ),
+                mach_path,
+            ));
+        }
+        if !point.cd.is_finite() || point.cd <= 0.0 {
+            return Err(protocol_error(
+                SolveErrorCodeV1::InvalidValue,
+                format!("cd must be finite and > 0, got {}", point.cd),
+                format!("{points_path}[{index}].cd"),
+            ));
+        }
+        previous_mach = Some(point.mach);
+    }
+    Ok(())
 }
 
 /// Built-in reference-projectile drag models supported by solve-json v1.
@@ -828,6 +928,11 @@ pub struct ResolvedProjectileV1 {
     pub length_m: Option<f64>,
     pub drag_model: DragModelV1,
     pub ballistic_coefficient: f64,
+    /// Verbatim echo of the request's table (MBA-1597). It is carried rather than summarized
+    /// because the perturbation kernels re-solve from this resolved request: dropping it would
+    /// silently fly their re-solves on `drag_model`'s curve instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drag_table: Option<DragTableV1>,
 }
 
 /// Resolved rifle and sight geometry.
@@ -1452,6 +1557,9 @@ fn validate_request_ranges(request: &SolveRequestV1) -> Result<(), SolveErrorEnv
     if let Some(length_m) = request.projectile.length_m {
         require_range(length_m, limits::LENGTH_M, "$.projectile.length_m")?;
     }
+    if let Some(drag_table) = &request.projectile.drag_table {
+        validate_drag_table_v1(drag_table)?;
+    }
     Ok(())
 }
 
@@ -1602,6 +1710,8 @@ fn validate_projectile(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
             "length_m",
             "drag_model",
             "ballistic_coefficient",
+            // MBA-1597: optional caller-supplied drag curve.
+            "drag_table",
         ],
         &[
             "mass_kg",
@@ -1620,7 +1730,41 @@ fn validate_projectile(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
         required_value(object, "drag_model", path)?,
         "$.projectile.drag_model",
         &DRAG_MODEL_WIRE_NAMES_V1,
-    )
+    )?;
+    if let Some(drag_table) = object.get("drag_table") {
+        validate_drag_table_shape(drag_table)?;
+    }
+    Ok(())
+}
+
+/// Shape-validate an optional `projectile.drag_table` (MBA-1597): a strict object with a
+/// closed `kind` enum and an array of strict `{mach, cd}` points. The values themselves — the
+/// point count, ascending Mach, positive Cd — are range rules, checked by
+/// [`validate_drag_table_v1`] once the request is typed.
+fn validate_drag_table_shape(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
+    let path = "$.projectile.drag_table";
+    let object = require_object(value, path)?;
+    validate_members(object, path, &["kind", "points"], &["kind", "points"])?;
+    validate_string_enum(
+        required_value(object, "kind", path)?,
+        "$.projectile.drag_table.kind",
+        &["reference", "projectile"],
+    )?;
+    let points_path = "$.projectile.drag_table.points";
+    let Some(points) = required_value(object, "points", path)?.as_array() else {
+        return Err(protocol_error(
+            SolveErrorCodeV1::InvalidValue,
+            "points must be an array",
+            points_path,
+        ));
+    };
+    for (index, point) in points.iter().enumerate() {
+        let point_path = format!("{points_path}[{index}]");
+        let point = require_object(point, &point_path)?;
+        validate_members(point, &point_path, &["mach", "cd"], &["mach", "cd"])?;
+        validate_required_numbers(point, &point_path, &["mach", "cd"])?;
+    }
+    Ok(())
 }
 
 fn validate_rifle(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
