@@ -243,6 +243,34 @@ pub struct ProjectileV1 {
         deserialize_with = "deserialize_present"
     )]
     pub drag_table: Option<DragTableV1>,
+    /// Velocity-segmented BCs for multi-BC flight. Mutually exclusive with `drag_table`
+    /// and `corrections.bc5d_table_path`. When present, `ballistic_coefficient` acts as
+    /// the gap-coverage fallback for any velocity not covered by a segment.
+    /// Segments must be in **descending** order of `velocity_from_mps` (highest first).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub bc_segments: Option<Vec<BcSegmentV1>>,
+}
+
+/// One velocity-segmented ballistic coefficient for multi-BC flight (JSON bridge path).
+///
+/// Segments must be supplied in **descending** order of `velocity_from_mps`
+/// (highest velocity first), matching `BCSegmentData` conventions internally.
+///
+/// When `projectile.bc_segments` is present, the scalar `ballistic_coefficient`
+/// is used only as the gap-coverage fallback; it is otherwise not flown.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BcSegmentV1 {
+    /// Lower bound of this velocity band, m/s (inclusive). Must be finite and >= 0.
+    pub velocity_from_mps: f64,
+    /// Upper bound, m/s (exclusive). Must be finite and > velocity_from_mps.
+    pub velocity_to_mps: f64,
+    /// Ballistic coefficient for this band (lb/in²). Must be finite and > 0.
+    pub ballistic_coefficient: f64,
 }
 
 /// The fewest points a [`DragTableV1`] may hold — two define a curve.
@@ -933,6 +961,10 @@ pub struct ResolvedProjectileV1 {
     /// silently fly their re-solves on `drag_model`'s curve instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drag_table: Option<DragTableV1>,
+    /// Verbatim echo of `bc_segments` when supplied, so a resolved-request
+    /// re-solve (perturbation, round-trip) re-applies the same ladder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bc_segments: Option<Vec<BcSegmentV1>>,
 }
 
 /// Resolved rifle and sight geometry.
@@ -1712,6 +1744,8 @@ fn validate_projectile(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
             "ballistic_coefficient",
             // MBA-1597: optional caller-supplied drag curve.
             "drag_table",
+            // Multi-BC velocity-segmented ladder.
+            "bc_segments",
         ],
         &[
             "mass_kg",
@@ -1733,6 +1767,119 @@ fn validate_projectile(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
     )?;
     if let Some(drag_table) = object.get("drag_table") {
         validate_drag_table_shape(drag_table)?;
+    }
+    if let Some(bc_segments) = object.get("bc_segments") {
+        validate_bc_segments_shape(bc_segments)?;
+    }
+    Ok(())
+}
+
+/// Shape-validate an optional `projectile.bc_segments`: a non-empty array where each element
+/// is a strict object with exactly `{velocity_from_mps, velocity_to_mps, ballistic_coefficient}`,
+/// all numbers. Value-level rules (ordering, positivity, band validity) are deferred to
+/// [`validate_bc_segments_v1`] once the request is typed.
+fn validate_bc_segments_shape(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
+    let segments_path = "$.projectile.bc_segments";
+    let Some(segments) = value.as_array() else {
+        return Err(protocol_error(
+            SolveErrorCodeV1::InvalidValue,
+            "bc_segments must be an array",
+            segments_path,
+        ));
+    };
+    if segments.is_empty() {
+        return Err(protocol_error(
+            SolveErrorCodeV1::InvalidValue,
+            "bc_segments must contain at least one segment",
+            segments_path,
+        ));
+    }
+    for (index, segment) in segments.iter().enumerate() {
+        let seg_path = format!("{segments_path}[{index}]");
+        let segment = require_object(segment, &seg_path)?;
+        validate_members(
+            segment,
+            &seg_path,
+            &["velocity_from_mps", "velocity_to_mps", "ballistic_coefficient"],
+            &["velocity_from_mps", "velocity_to_mps", "ballistic_coefficient"],
+        )?;
+        validate_required_numbers(
+            segment,
+            &seg_path,
+            &["velocity_from_mps", "velocity_to_mps", "ballistic_coefficient"],
+        )?;
+    }
+    Ok(())
+}
+
+/// Value-validate a [`Vec<BcSegmentV1>`] after deserialization: each field must be finite and
+/// in range, bands must not be degenerate, and segments must be in strictly descending order
+/// of `velocity_from_mps` (highest velocity first).
+///
+/// Called from both the decoder and the solve service, so a Rust caller that builds a request
+/// without [`decode_solve_request_v1`] hears about a bad segment at the same path.
+pub(crate) fn validate_bc_segments_v1(
+    segments: &[BcSegmentV1],
+) -> Result<(), SolveErrorEnvelopeV1> {
+    let base = "$.projectile.bc_segments";
+    if segments.is_empty() {
+        return Err(protocol_error(
+            SolveErrorCodeV1::InvalidValue,
+            "bc_segments must contain at least one segment",
+            base,
+        ));
+    }
+    let mut previous_from: Option<f64> = None;
+    for (index, seg) in segments.iter().enumerate() {
+        let seg_path = format!("{base}[{index}]");
+        if !seg.velocity_from_mps.is_finite() || seg.velocity_from_mps < 0.0 {
+            return Err(protocol_error(
+                SolveErrorCodeV1::InvalidValue,
+                format!(
+                    "velocity_from_mps must be finite and >= 0, got {}",
+                    seg.velocity_from_mps
+                ),
+                format!("{seg_path}.velocity_from_mps"),
+            ));
+        }
+        if !seg.velocity_to_mps.is_finite() || seg.velocity_to_mps <= seg.velocity_from_mps {
+            return Err(protocol_error(
+                SolveErrorCodeV1::InvalidValue,
+                format!(
+                    "velocity_to_mps must be finite and > velocity_from_mps ({}), got {}",
+                    seg.velocity_from_mps, seg.velocity_to_mps
+                ),
+                format!("{seg_path}.velocity_to_mps"),
+            ));
+        }
+        if !seg.ballistic_coefficient.is_finite() || seg.ballistic_coefficient <= 0.0 {
+            return Err(protocol_error(
+                SolveErrorCodeV1::InvalidValue,
+                format!(
+                    "ballistic_coefficient must be finite and > 0, got {}",
+                    seg.ballistic_coefficient
+                ),
+                format!("{seg_path}.ballistic_coefficient"),
+            ));
+        }
+        // Segments must be in descending order of velocity_from_mps (highest velocity first).
+        if let Some(prev_from) = previous_from {
+            if seg.velocity_from_mps >= prev_from {
+                return Err(protocol_error(
+                    SolveErrorCodeV1::InvalidValue,
+                    format!(
+                        "bc_segments must be in strictly descending order of velocity_from_mps; \
+                         segment[{index}] velocity_from_mps ({}) is not less than \
+                         segment[{}] velocity_from_mps ({})",
+                        seg.velocity_from_mps,
+                        index - 1,
+                        prev_from
+                    ),
+                    format!("{seg_path}.velocity_from_mps"),
+                ));
+            }
+        }
+        previous_from = Some(seg.velocity_from_mps);
     }
     Ok(())
 }

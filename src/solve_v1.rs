@@ -517,6 +517,28 @@ pub(crate) fn prepare_request(
         ));
     }
 
+    // bc_segments drives the same bc_segments_data slot as bc5d_table_path and drag_table;
+    // combining any two would silently apply whichever ran last. Both pairs are refused here.
+    if projectile.bc_segments.is_some() && projectile.drag_table.is_some() {
+        return Err(conflicting_fields(
+            "$.projectile.bc_segments",
+            "projectile.bc_segments cannot be combined with projectile.drag_table \
+             (both replace the standard BC; supply one or the other)",
+        ));
+    }
+    if projectile.bc_segments.is_some()
+        && request
+            .corrections
+            .as_ref()
+            .is_some_and(|corrections| corrections.bc5d_table_path.is_some())
+    {
+        return Err(conflicting_fields(
+            "$.projectile.bc_segments",
+            "projectile.bc_segments cannot be combined with corrections.bc5d_table_path \
+             (both populate the velocity-segmented BC ladder; supply one or the other)",
+        ));
+    }
+
     let resolved_request = ResolvedSolveRequestV1 {
         schema_version: SchemaVersionV1,
         projectile,
@@ -714,6 +736,7 @@ pub(crate) fn prepare_request(
     }
 
     apply_bc5d_correction(request, &resolved_request, &mut inputs, &mut warnings)?;
+    apply_bc_segments(&resolved_request, &mut inputs)?;
 
     let atmosphere = AtmosphericConditions {
         temperature: temperature_c,
@@ -874,6 +897,40 @@ fn apply_bc5d_correction(
     }
 }
 
+/// Convert wire-format `projectile.bc_segments` (m/s) into engine `BCSegmentData` (fps) and
+/// install them on the prepared inputs.
+///
+/// A neutral call (no `bc_segments` on the resolved request) is a cheap no-op — no allocation,
+/// no mutation. When segments are present the scalar `bc_value` in `inputs` is left untouched:
+/// the engine uses it automatically for any velocity gap not covered by a segment, mirroring
+/// exactly what `apply_bc5d_correction` does for BC5D tables.
+///
+/// Unit conversion: the wire uses SI (m/s); the engine's `BCSegmentData` uses fps.
+/// `1 m/s = 1 / 0.3048 fps` (the same constant used everywhere else in this module).
+fn apply_bc_segments(
+    resolved_request: &ResolvedSolveRequestV1,
+    inputs: &mut BallisticInputs,
+) -> Result<(), SolveErrorEnvelopeV1> {
+    let Some(bc_segments) = &resolved_request.projectile.bc_segments else {
+        return Ok(());
+    };
+
+    const MPS_TO_FPS: f64 = 1.0 / 0.3048;
+
+    let segments: Vec<crate::BCSegmentData> = bc_segments
+        .iter()
+        .map(|seg| crate::BCSegmentData {
+            velocity_min: seg.velocity_from_mps * MPS_TO_FPS,
+            velocity_max: seg.velocity_to_mps * MPS_TO_FPS,
+            bc_value: seg.ballistic_coefficient,
+        })
+        .collect();
+
+    inputs.use_bc_segments = true;
+    inputs.bc_segments_data = Some(segments);
+    Ok(())
+}
+
 fn resolve_projectile(
     projectile: &ProjectileV1,
     assumptions: &mut Vec<SolveNoticeV1>,
@@ -889,6 +946,9 @@ fn resolve_projectile(
     }
     if let Some(drag_table) = &projectile.drag_table {
         crate::solve_json::validate_drag_table_v1(drag_table)?;
+    }
+    if let Some(bc_segments) = &projectile.bc_segments {
+        crate::solve_json::validate_bc_segments_v1(bc_segments)?;
     }
 
     let bullet_length_m = match projectile.length_m {
@@ -923,6 +983,7 @@ fn resolve_projectile(
             drag_model: projectile.drag_model,
             ballistic_coefficient: projectile.ballistic_coefficient,
             drag_table: projectile.drag_table.clone(),
+            bc_segments: projectile.bc_segments.clone(),
         },
         bullet_length_m,
     ))
@@ -2098,6 +2159,7 @@ mod tests {
                 drag_model: DragModelV1::G7,
                 ballistic_coefficient: 0.243,
                 drag_table: None,
+                bc_segments: None,
             },
             rifle: RifleV1 {
                 muzzle_velocity_mps: 823.0,
