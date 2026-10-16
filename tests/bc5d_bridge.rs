@@ -549,8 +549,9 @@ fn solve_refuses_a_ladder_drag_table_and_correction_table_at_the_older_path() {
         "kind": "reference",
         "points": [{"mach": 0.0, "cd": 0.25}, {"mach": 3.0, "cd": 0.25}]
     });
+    // One band, so its BC is the scalar 0.4: a one-band ladder must match the scalar.
     request["projectile"]["bc_segments"] = json!([
-        {"velocity_min_mps": 0.0, "velocity_max_mps": 999.0, "ballistic_coefficient": 0.42}
+        {"velocity_min_mps": 0.0, "velocity_max_mps": 999.0, "ballistic_coefficient": 0.4}
     ]);
     let out = bridge_raw("solve", request);
     std::fs::remove_dir_all(&dir).unwrap();

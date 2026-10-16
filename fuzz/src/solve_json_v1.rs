@@ -461,6 +461,10 @@ pub fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
     // request this generator produces must solve, so a ladder is drawn only without a table.
     if request.projectile.drag_table.is_none() {
         request.projectile.bc_segments = maybe_bc_segments(u)?;
+        // A one-band ladder must carry the scalar BC, or the decoder refuses the pair.
+        if let Some([band]) = request.projectile.bc_segments.as_deref_mut() {
+            band.ballistic_coefficient = request.projectile.ballistic_coefficient;
+        }
     }
     Ok(request)
 }

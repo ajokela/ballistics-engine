@@ -299,9 +299,21 @@ the faster band. At any speed:
   The ladder is clamped at its ends, not padded with the scalar.
 
 `ballistic_coefficient` therefore stays required and validated, but under a gapless ladder (the
-example above) it never flies. A one-band ladder flies that band's BC at every speed. A fastest
-band that ends below the muzzle velocity still applies from the muzzle down. Band BCs are
-referenced to `drag_model` exactly as the scalar is, so a G7 ladder needs `"drag_model": "G7"`.
+example above) it never flies. A one-band ladder flies that band's BC at every speed, so its BC
+must match `ballistic_coefficient` (see **Errors** below), and its two edges change nothing as
+long as they are valid. A fastest band that ends below the muzzle velocity still
+applies from the muzzle down. Band BCs are referenced to `drag_model` exactly as the scalar is, so
+a G7 ladder needs `"drag_model": "G7"`.
+
+**Floor-style tables.** Many calculators take one speed per BC row, meaning "this BC from this
+speed up to the next faster row", and show a single row with a speed of 0. Such a table maps onto
+bands directly. List the rows fastest first, and give each band the row's speed as
+`velocity_min_mps` (0 for the last row) and the next faster row's speed as `velocity_max_mps`. The
+fastest band's `velocity_max_mps` only has to be valid, because the ladder is clamped above it. A
+value at least 200 fps (60.96 m/s) above its `velocity_min_mps` keeps that band from narrowing the
+blend at the edge below it (see **Edges are blended**). The CLI converts the BC tables in saved
+profiles the same way, ending the fastest band just above 5000 fps (1524 m/s). A one-row table
+becomes one band from 0 to 1524 m/s, with the row's BC sent as `ballistic_coefficient` too.
 
 **Airspeed, not ground speed.** Bands are selected by airspeed, the bullet's speed relative to the
 air mass. That is the same speed the drag is computed from, so in a wind the band edges are
@@ -334,10 +346,17 @@ names the exact entry:
   overlap message names that band.
 - `$.projectile.bc_segments[2].ballistic_coefficient`: `invalid_value` outside `0.0001` to `100`,
   in the same form as the scalar's message.
+- `$.projectile.bc_segments[0].ballistic_coefficient`: `conflicting_fields` when the ladder has
+  exactly one band and its BC differs from the scalar `ballistic_coefficient` by more than one
+  part in a million of the larger (`ONE_BAND_BC_RELATIVE_TOLERANCE_V1`). A one-band ladder flies
+  its band at every speed, so the two would be two different BCs for one projectile. The
+  tolerance forgives rounding nobody chose, such as a BC held as a 32-bit float or converted
+  between units and back, and within it the band's BC flies; 0.172 against 0.1724 is still
+  refused. The message names both values. Send the same value in both, or omit the ladder.
 
 The values are checked band by band in array order, and the first fault is reported. A band
 nested inside the one before it starts above that band's start, so the order rule reports it, at
-its `velocity_min_mps`.
+its `velocity_min_mps`. The one-band check runs after the band's own value rules.
 
 **Conflicts.** A ladder cannot be combined with either of these. The service refuses both as
 `conflicting_fields` at `$.projectile.bc_segments`, before any correction table is opened:
@@ -356,9 +375,11 @@ drag-table-with-correction-table check first, so it is `conflicting_fields` at
 rebuilt from a resolved request re-solves on the same ladder. The zero search and the trajectory
 both fly it. Omitting the member changes nothing, and the key never appears in a response.
 
-**Known limitation: BC sensitivity.** The CLI's `error-budget` and `tolerance` perturb only the
-scalar `ballistic_coefficient`; no input axis carries the band BCs. Under a gapless ladder the
-scalar never flies, so its slope is exactly 0, and `error-budget` reports a declared BC sigma as
+**Known limitation: BC sensitivity.** The CLI's `error-budget` and `tolerance` perturb the scalar
+`ballistic_coefficient`, and no input axis carries the band BCs of a ladder with two or more
+bands. A one-band ladder is the exception: its BC must equal the scalar, so the BC axis moves the
+band with it, and the slope is exactly that of the same request without the ladder. Under a
+gapless ladder of two or more bands the scalar never flies, so its slope is exactly 0, and `error-budget` reports a declared BC sigma as
 contributing nothing rather than listing BC under `unavailable_sources`. This is the same blind
 spot as a `kind: "projectile"` drag table. With an interior gap, the scalar moves the result only
 through the gap and the band speeds within up to 25 fps of a gap edge, where it is blended into

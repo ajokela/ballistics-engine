@@ -21,18 +21,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and gap edge is smoothstep-blended over at most 25 fps (7.62 m/s) either side. Below the
   slowest band, or at or above the top of the fastest, the edge band applies. The scalar
   `ballistic_coefficient` is still required, but flies only in an interior gap between bands,
-  and blended into the bands within up to 25 fps either side of a gap edge. A ladder cannot be
+  and blended into the bands within up to 25 fps either side of a gap edge. A one-band ladder
+  flies its band at every speed, so its band BC must match `ballistic_coefficient` to within one
+  part in a million (`ONE_BAND_BC_RELATIVE_TOLERANCE_V1`, which forgives `f32` and unit-conversion
+  noise); a larger difference is refused as `conflicting_fields` at
+  `$.projectile.bc_segments[0].ballistic_coefficient` rather than silently flying the band. The
+  docs show how to send a floor-style table, one speed per BC row. A ladder cannot be
   combined with `projectile.drag_table`, which replaces the curve the band BCs are measured
   against, or with `corrections.bc5d_table_path`, which builds its own ladder
   (`conflicting_fields`).
 
   The resolved request echoes the ladder verbatim, so `explain`, `error-budget` and `tolerance`,
   which re-solve from that echo, keep it. `error-budget` and `tolerance` perturb only the scalar
-  BC, though, so under a gapless ladder they see a BC slope of exactly 0, the same blind spot as a
+  BC, though (moving a one-band ladder's band with it), so under a gapless ladder of two or more
+  bands they see a BC slope of exactly 0, the same blind spot as a
   `kind: "projectile"` drag table. `explain` swaps the whole ladder with `drag_model` (MBA-1603,
   under Fixed). Omitting the member changes nothing, and the key never appears in a response. The
   MCP `solve` schema lists the new member, and the fuzz harness generates valid and hostile
-  ladders. `BcSegmentV1`, `MIN_BC_SEGMENTS_V1` and `MAX_BC_SEGMENTS_V1` are new in
+  ladders. `BcSegmentV1`, `MIN_BC_SEGMENTS_V1`, `MAX_BC_SEGMENTS_V1` and
+  `ONE_BAND_BC_RELATIVE_TOLERANCE_V1` are new in
   `ballistics_engine::solve_json`. See
   [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#projectilebc_segments-mba-1598).
 

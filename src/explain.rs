@@ -195,7 +195,8 @@
 //! Three resolved inputs describe the projectile's drag without being taxonomy axes:
 //! `projectile.drag_table` (MBA-1597), `projectile.bc_segments` (MBA-1598) and
 //! `corrections.bc5d_table_path`. They are deliberately not axes, so `error-budget` and
-//! `tolerance` never perturb them, but they are projectile drag all the same. Before MBA-1603 no
+//! `tolerance` never perturb them (except that the BC axis moves a one-band ladder's band with
+//! the scalar, which it must equal), but they are projectile drag all the same. Before MBA-1603 no
 //! group swapped them: every counterfactual kept the destination's own copy, so a difference in
 //! any of them landed whole in `interaction_remainder` with nothing in `skipped_axes` to say why.
 //! Worse, when `drag_model` or the BC also differed, the swap flew one request's band BCs against

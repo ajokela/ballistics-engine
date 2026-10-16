@@ -4364,7 +4364,8 @@ ballistics trajectory -v 2600 -b 0.243 -m 175 -d 0.308 --drag-model g7 --max-ran
   MCP) sends the same ladder inline as `projectile.bc_segments`, a list of
   `{velocity_min_mps, velocity_max_mps, ballistic_coefficient}` bands. It flies through the same
   lookup as this flag, but its speeds are always m/s, the bands must be listed fastest first
-  without overlaps, and it is refused alongside a correction table rather than overriding it. See
+  without overlaps, a one-band ladder's BC must equal the scalar BC, and it is refused alongside
+  a correction table rather than overriding it. See
   [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#projectilebc_segments-mba-1598).
 - To run BC5D-equivalent corrections on a device that cannot hold the tables (e.g. the
   WASM CLI), run once with `--bc-table-dir ... --use-bc-segments --print-bc-segments`:

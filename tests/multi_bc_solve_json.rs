@@ -11,8 +11,10 @@
 //!   (c) the resolved request echoes the ladder verbatim and re-solves identically from it,
 //!       through the same JSON decoder a caller uses;
 //!   (d) the perturbation kernels behind `explain`, `error-budget` and `tolerance` see the
-//!       scalar BC only where it flies: in an interior gap, never under a gapless ladder;
-//!   (e) the ladder cannot be combined with `projectile.drag_table`;
+//!       scalar BC only where it flies: in an interior gap, never under a gapless ladder of
+//!       two or more bands. Under a one-band ladder the BC axis moves the band with the scalar;
+//!   (e) the ladder cannot be combined with `projectile.drag_table`, and a one-band ladder's BC
+//!       must equal the scalar BC;
 //!   (f) the decoder itself refuses every bad ladder at the exact entry, and the service
 //!       refuses the same ladders when a Rust caller skips the decoder;
 //!   (g) the bridge `solve` command accepts and echoes a ladder.
@@ -23,6 +25,7 @@
 use ballistics_engine::solve_json::{
     decode_solve_request_v1, BcSegmentV1, SampleFlagV1, SolveErrorCodeV1, SolveErrorEnvelopeV1,
     SolveRequestV1, SolveSuccessV1, TerminationReasonV1, MAX_BC_SEGMENTS_V1,
+    ONE_BAND_BC_RELATIVE_TOLERANCE_V1,
 };
 use ballistics_engine::solve_v1;
 use serde_json::{json, Value};
@@ -150,11 +153,11 @@ fn omitting_the_ladder_leaves_no_trace_in_the_response() {
 #[test]
 fn crossing_a_band_edge_mid_flight_flies_the_slower_band() {
     let ladder = solve(&with_bc_segments(base_request(), two_band_ladder()));
-    // The fast band alone: a single band clamps to itself at every speed.
-    let fast_only = solve(&with_bc_segments(
-        base_request(),
-        json!([band(600.0, 999.0, 0.260)]),
-    ));
+    // The fast band alone: a single band clamps to itself at every speed. A one-band ladder
+    // must carry the scalar BC, so the scalar moves with it.
+    let mut fast_only = with_bc_segments(base_request(), json!([band(600.0, 999.0, 0.260)]));
+    fast_only["projectile"]["ballistic_coefficient"] = json!(0.260);
+    let fast_only = solve(&fast_only);
     assert_eq!(ladder.samples.len(), fast_only.samples.len());
 
     // Above the edge and its blend window (at most +/-7.62 m/s) both fly 0.260 exactly.
@@ -312,8 +315,38 @@ fn the_perturbation_kernel_sees_the_scalar_bc_only_in_an_interior_gap() {
     );
 }
 
+/// A one-band ladder must carry the scalar BC (section (e)), and that one BC flies at every
+/// speed, so the BC axis moves the band with the scalar. Each perturbed solve then flies the
+/// same BC a request without the ladder would, and the slope is the plain scalar's exactly.
+#[test]
+fn the_perturbation_kernel_moves_a_one_band_ladder_with_the_scalar_bc() {
+    use ballistics_engine::perturbation::{central_difference, InputAxis};
+
+    let bc_slope = |request: &Value| {
+        central_difference(
+            &solve(request).resolved_request,
+            InputAxis::BallisticCoefficient,
+            &[600.0],
+            None,
+        )
+        .expect("the BC axis is continuous")[0]
+            .d_drop_d_x
+    };
+
+    let plain = bc_slope(&base_request());
+    assert!(
+        plain < 0.0,
+        "a higher BC must reduce the drop: dDrop/dBC = {plain}"
+    );
+    let one_band = bc_slope(&with_bc_segments(
+        base_request(),
+        json!([band(0.0, 999.0, 0.243)]),
+    ));
+    assert_eq!(one_band, plain);
+}
+
 // ---------------------------------------------------------------------------
-// (e) Conflict with projectile.drag_table
+// (e) Conflicts: projectile.drag_table, and a one-band ladder against the scalar BC
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -335,6 +368,83 @@ fn a_ladder_cannot_be_combined_with_a_drag_table() {
         "projectile.bc_segments cannot be combined with projectile.drag_table: a drag table \
          replaces the drag_model curve that the band BCs are measured against"
     );
+}
+
+/// A one-band ladder flies its band's BC at every speed, so the scalar never flies beside it,
+/// and two different BCs for one projectile can only be a caller mistake. The decoder refuses
+/// the pair at the band's BC, and so does the service for a Rust caller that skips the
+/// decoder. Equal values fly exactly as the scalar alone, wherever the band's edges sit.
+#[test]
+fn a_one_band_ladder_must_carry_the_scalar_bc() {
+    let path = "$.projectile.bc_segments[0].ballistic_coefficient";
+    let message = "a one-band ladder flies its band's BC at every speed, so \
+                   bc_segments[0].ballistic_coefficient (0.26) must match \
+                   projectile.ballistic_coefficient (0.243): send the same value in both, or \
+                   omit bc_segments";
+
+    let mismatched = with_bc_segments(base_request(), json!([band(0.0, 999.0, 0.260)]));
+    let error = decode(&mismatched).expect_err("the decoder must refuse two different BCs");
+    assert_eq!(error.error.code, SolveErrorCodeV1::ConflictingFields);
+    assert_eq!(error.error.path(), Some(path));
+    assert_eq!(error.error.message, message);
+
+    let mut skipped = decode(&base_request()).unwrap();
+    skipped.projectile.bc_segments = Some(vec![BcSegmentV1 {
+        velocity_min_mps: 0.0,
+        velocity_max_mps: 999.0,
+        ballistic_coefficient: 0.260,
+    }]);
+    let error = solve_v1(skipped).expect_err("the service must refuse it too");
+    assert_eq!(error.error.code, SolveErrorCodeV1::ConflictingFields);
+    assert_eq!(error.error.path(), Some(path));
+    assert_eq!(error.error.message, message);
+
+    // Below every flight speed, across the whole flight, and above the muzzle velocity.
+    let plain = solve(&base_request());
+    for (min, max) in [(100.0, 200.0), (0.0, 999.0), (900.0, 1500.0)] {
+        let one_band = solve(&with_bc_segments(
+            base_request(),
+            json!([band(min, max, 0.243)]),
+        ));
+        assert_eq!(one_band.samples, plain.samples, "band {min} to {max} m/s");
+    }
+
+    // The rule is for one band only: a longer ladder's band BCs need not match the scalar.
+    solve(&with_bc_segments(base_request(), two_band_ladder()));
+}
+
+/// Rounding nobody chose must not refuse a solve: a BC held as an `f32` and widened back, or a
+/// value inside one part in a million of the scalar, is the same BC, and the band flies. Just
+/// past the tolerance, in either direction, it is a different BC again.
+#[test]
+fn a_one_band_ladder_forgives_rounding_noise_but_not_a_different_bc() {
+    let scalar = 0.243_f64;
+    let widened_f32 = f64::from(0.243_f32);
+    assert_ne!(widened_f32, scalar, "the fixture needs real f32 noise");
+    let inside = scalar * (1.0 + 0.5 * ONE_BAND_BC_RELATIVE_TOLERANCE_V1);
+    let below = scalar * (1.0 - 0.5 * ONE_BAND_BC_RELATIVE_TOLERANCE_V1);
+    for band_bc in [widened_f32, inside, below] {
+        let response = solve(&with_bc_segments(
+            base_request(),
+            json!([band(0.0, 999.0, band_bc)]),
+        ));
+        assert_eq!(
+            response.resolved_request.projectile.bc_segments.unwrap()[0].ballistic_coefficient,
+            band_bc,
+            "the band is echoed, and flown, as sent"
+        );
+    }
+
+    for band_bc in [
+        scalar * (1.0 + 2.0 * ONE_BAND_BC_RELATIVE_TOLERANCE_V1),
+        scalar * (1.0 - 2.0 * ONE_BAND_BC_RELATIVE_TOLERANCE_V1),
+    ] {
+        expect_decode_error(
+            &with_bc_segments(base_request(), json!([band(0.0, 999.0, band_bc)])),
+            SolveErrorCodeV1::ConflictingFields,
+            "$.projectile.bc_segments[0].ballistic_coefficient",
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -418,10 +528,11 @@ fn band_bc_is_held_to_the_scalar_bc_bounds() {
         );
     }
     // The bounds themselves are legal, as they are for the scalar.
+    // Two bands, because a one-band ladder must also match the scalar 0.243.
     for edge_bc in [1.0e-4, 100.0] {
         decode(&with_bc_segments(
             base_request(),
-            json!([band(0.0, 999.0, edge_bc)]),
+            json!([band(500.0, 999.0, edge_bc), band(0.0, 500.0, 0.243)]),
         ))
         .expect("a band BC at the scalar's bound is legal");
     }
@@ -640,6 +751,39 @@ fn the_bridge_rejects_a_bad_ladder_as_a_request_error() {
     assert_eq!(
         out["error"]["details"]["error"]["path"],
         json!("$.projectile.bc_segments[1].velocity_max_mps"),
+        "{out}"
+    );
+    assert!(
+        out["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("rejected")),
+        "{out}"
+    );
+}
+
+/// A one-band ladder that disagrees with the scalar BC is refused by the decoder, so the bridge
+/// reports a rejected request, as it does for every other bad ladder.
+#[cfg(feature = "bridge")]
+#[test]
+fn the_bridge_rejects_a_one_band_ladder_that_disagrees_with_the_scalar() {
+    let envelope = json!({
+        "api_version": 1,
+        "command": "solve",
+        "request": with_bc_segments(base_request(), json!([band(0.0, 274.32, 0.150)])),
+    });
+    let out: Value = serde_json::from_str(&ballistics_engine::bridge::bridge_call(
+        &envelope.to_string(),
+    ))
+    .unwrap();
+    assert_eq!(out["ok"], json!(false), "{out}");
+    assert_eq!(
+        out["error"]["details"]["error"]["code"],
+        json!("conflicting_fields"),
+        "{out}"
+    );
+    assert_eq!(
+        out["error"]["details"]["error"]["path"],
+        json!("$.projectile.bc_segments[0].ballistic_coefficient"),
         "{out}"
     );
     assert!(

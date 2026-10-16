@@ -952,7 +952,7 @@ fn resolve_projectile(
         crate::solve_json::validate_drag_table_v1(drag_table)?;
     }
     if let Some(bc_segments) = &projectile.bc_segments {
-        crate::solve_json::validate_bc_segments_v1(bc_segments)?;
+        crate::solve_json::validate_bc_segments_v1(bc_segments, projectile.ballistic_coefficient)?;
     }
 
     let bullet_length_m = match projectile.length_m {
