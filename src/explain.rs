@@ -2644,9 +2644,14 @@ mod tests {
         assert_all_of_it_is_projectile_drag(&a, &b);
     }
 
-    /// Equal drag descriptions keep the pre-MBA-1603 path exactly: a scalar BC difference
-    /// under the SAME ladder still attributes to ProjectileDrag, and the report matches a
-    /// recomputation that never touches the drag description at all.
+    /// Equal drag descriptions keep the pre-MBA-1603 path exactly: the guard reports no
+    /// difference, so `swap_group` never clears or rewrites the description, a scalar BC
+    /// difference under the SAME ladder still attributes to ProjectileDrag, and the report
+    /// matches the two legs recomputed from that swap.
+    ///
+    /// Carrying an equal description anyway would give the same numbers at the cost of extra
+    /// solves, so the report alone cannot tell the two paths apart; the guard is asserted
+    /// directly.
     #[test]
     fn equal_drag_descriptions_leave_the_existing_swap_untouched() {
         // An interior gap (500-700 m/s) is where the scalar BC flies under a ladder.
@@ -2658,6 +2663,10 @@ mod tests {
         let b = resolved_with_projectile(serde_json::json!({
             "ballistic_coefficient": 0.300, "bc_segments": ladder
         }));
+        assert!(
+            !drag_descriptions_differ(&a, &b) && !drag_descriptions_differ(&b, &a),
+            "a scalar BC difference under one ladder is not a drag-description difference"
+        );
         let rep = explain_difference(&a, &b, &[600.0]).unwrap();
         let (excluded, _) = plan_exclusions(&a, &b, InputGroup::ProjectileDrag).unwrap();
         let fwd = evaluate(
