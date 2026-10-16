@@ -143,6 +143,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other comparison is byte-identical. Inputs that belong to no group (`effects.aerodynamic_jump`,
   `effects.wind_shear_model`, `solver.*`, `shot.ground_threshold_m`) are still not swapped, and a
   difference in one of them still lands in the remainder.
+- **A dope card no longer prints a BC its rows did not fly (MBA-1601).** With a BC ladder
+  (`card.*`'s `bc_segments`, or the ladder a `bc5d_table_path` builds), the scalar BC only fills
+  interior gaps between bands. Under a gapless ladder, which includes every ladder a correction
+  table builds, it never flies. `card.pdf` still printed it as the card's `BC:`, and
+  `bc_for_solve` was documented as the BC the rows were computed with. The footer now prints the
+  ladder's BC range, e.g. `BC:0.420-0.450 (g1 ladder)`, or `(g1 ladder+gap)` when an interior gap
+  lets the scalar fly too, in which case the range includes it. A card without a ladder prints
+  `BC:0.400 (g1)` exactly as before. A reprint reads the range from the stored card. A card saved
+  before this release has no `bc_ladder` and reprints its stored scalar as before; regenerate it
+  to print the ladder range.
+
+  `card.range_table`, `card.come_ups` and `card.wind` responses gain an additive `bc_ladder` block
+  whenever a ladder fed the solve. It carries `source` (`"bc_segments"` or `"bc5d_table"`),
+  `segments` (the bands as flown, `{velocity_min, velocity_max, bc}` in `units.velocity`; a
+  request's own bands are echoed in request order, a table's generated ladder is listed fastest
+  first) and `interior_gap`, which describes the ladder rather than the flight: a gap the card's
+  airspeeds never reach still counts. The key is absent on every card without a ladder, so those
+  responses are byte-identical. `bc_for_solve` keeps its value; only its documentation changes.
+  A `stored_card` may carry the block back, and one with no segments or a non-positive band BC
+  is refused rather than printed.
+
+  **Source-breaking for Rust struct literals.** `pdf_dope_card::DopeCardConfig` gains
+  `bc_label: String` (empty prints the scalar as before; see `pdf_dope_card::ladder_bc_label`).
+  `CardResponseV1` and `StoredCardResponseV1` gain `bc_ladder`. JSON without a ladder is
+  unaffected, and the CLI's PDF cards print as before.
 
 ## [0.45.0] - 2026-10-07
 

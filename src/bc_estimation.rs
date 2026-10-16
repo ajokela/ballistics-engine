@@ -98,6 +98,26 @@ pub(crate) fn velocity_segment_bc(
     })
 }
 
+/// Whether a ladder leaves a speed uncovered between its slowest and fastest bands (MBA-1601).
+///
+/// True exactly when some speed above the slowest band's `velocity_min` and below the fastest
+/// band's `velocity_max` lies in no band, which is the only place [`raw_velocity_segment_bc`]
+/// returns the caller's fallback BC. Below and above the ladder the edge bands clamp, so a
+/// ladder without an interior gap never flies the fallback. Order-independent; overlapping
+/// bands cover their union, and touching bands (half-open) leave no gap.
+pub(crate) fn has_interior_gap(segments: &[BCSegmentData]) -> bool {
+    let mut sorted: Vec<&BCSegmentData> = segments.iter().collect();
+    sorted.sort_by(|a, b| a.velocity_min.total_cmp(&b.velocity_min));
+    let mut covered_to = f64::NEG_INFINITY;
+    for segment in sorted {
+        if covered_to.is_finite() && segment.velocity_min > covered_to {
+            return true;
+        }
+        covered_to = covered_to.max(segment.velocity_max);
+    }
+    false
+}
+
 /// The pre-MBA-1404 step/clamp lookup, unchanged. Also used by [`velocity_segment_bc`] to
 /// sample the value on each side of a boundary when building a blend.
 fn raw_velocity_segment_bc(velocity_fps: f64, segments: &[BCSegmentData], fallback_bc: f64) -> f64 {
@@ -1103,6 +1123,57 @@ mod tests {
                 0.75f64.to_bits(),
                 "above-coverage clamp must stay exactly flat (v={v})"
             );
+        }
+    }
+
+    #[test]
+    fn has_interior_gap_is_exactly_where_the_lookup_returns_the_fallback() {
+        let band = |velocity_min: f64, velocity_max: f64, bc_value: f64| BCSegmentData {
+            velocity_min,
+            velocity_max,
+            bc_value,
+        };
+        let cases = [
+            (
+                "touching",
+                vec![band(500.0, 2000.0, 0.42), band(2000.0, 4000.0, 0.45)],
+                false,
+            ),
+            (
+                "gapped",
+                vec![band(500.0, 1800.0, 0.42), band(2300.0, 4000.0, 0.45)],
+                true,
+            ),
+            (
+                "gapped, descending",
+                vec![band(2300.0, 4000.0, 0.45), band(500.0, 1800.0, 0.42)],
+                true,
+            ),
+            (
+                "overlaps covering the span",
+                vec![
+                    band(500.0, 3000.0, 0.40),
+                    band(1000.0, 1500.0, 0.42),
+                    band(1600.0, 2000.0, 0.44),
+                ],
+                false,
+            ),
+            ("single", vec![band(500.0, 4000.0, 0.45)], false),
+            (
+                "three bands, one gap",
+                vec![
+                    band(2500.0, 4000.0, 0.46),
+                    band(1500.0, 2500.0, 0.44),
+                    band(500.0, 1200.0, 0.40),
+                ],
+                true,
+            ),
+        ];
+        for (label, ladder, expected) in cases {
+            let lookup_falls_back =
+                (0..5000).any(|v| raw_velocity_segment_bc(f64::from(v), &ladder, -1.0) == -1.0);
+            assert_eq!(lookup_falls_back, expected, "{label}: the case itself");
+            assert_eq!(has_interior_gap(&ladder), expected, "{label}");
         }
     }
 }

@@ -569,13 +569,34 @@ pub struct PdfCardOptionsV1 {
 /// (`CardRequestV1::bc_segments`). `velocity_min`/`velocity_max` are in the
 /// request's `velocity_unit` and must satisfy `velocity_min < velocity_max`;
 /// `bc` is the BC (for the request's `drag_model`) that applies inside the band.
-/// `bc` must lie in 0.0001..=100.
+/// `bc` must lie in 0.0001..=100. Responses state the bands a card flew in the same shape,
+/// in [`CardBcLadderV1::segments`] (MBA-1601).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CardBcSegmentV1 {
     pub velocity_min: f64,
     pub velocity_max: f64,
     pub bc: f64,
+}
+
+/// The BC ladder a card's rows flew (MBA-1601): [`CardResponseV1::bc_ladder`].
+///
+/// Under a ladder the scalar [`CardResponseV1::bc_for_solve`] is only the interior-gap
+/// fallback, so this block is what states the BCs the card actually flew.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CardBcLadderV1 {
+    /// Where the ladder came from: `"bc_segments"` (the request's own bands) or
+    /// `"bc5d_table"` (the ladder `bc5d_table_path` generated for this load).
+    pub source: &'static str,
+    /// The bands as flown, `velocity_min`/`velocity_max` in the response's `units.velocity`.
+    /// For `bc_segments` these are the request's bands verbatim and in request order; for
+    /// `bc5d_table` the generated ladder, fastest band first.
+    pub segments: Vec<CardBcSegmentV1>,
+    /// True when some airspeed between the slowest and the fastest band lies in no band: there,
+    /// and only there, `bc_for_solve` flies. False means `bc_for_solve` never flew on this
+    /// card. It describes the ladder, not the flight: a gap the card's airspeeds never reach
+    /// still reads true.
+    pub interior_gap: bool,
 }
 
 /// The `sight_height` sentinel for "not supplied".
@@ -665,16 +686,24 @@ pub struct CardResponseV1 {
     pub schema_version: u32,
     pub kind: &'static str,
     pub zero_distance: f64,
-    /// The scalar BC these rows were actually computed with: the request's published
-    /// `ballistic_coefficient` unless a `bc5d_table_path` applied its muzzle correction, in
-    /// which case it is the corrected value (the same scalar the solve and every sampled
-    /// flight ran with).
+    /// The scalar BC fed to the zero solve and every sampled flight: the request's published
+    /// `ballistic_coefficient`, or, when `bc5d_table_path` generated a ladder, that BC with
+    /// the table's muzzle-velocity correction applied.
     ///
-    /// A saved card must be able to state the BC its numbers came from — the printed
-    /// footer's `BC:` — long after the correction table it used has been replaced on disk.
-    /// Without this on the response there is nothing for an app to store, and a reprint
-    /// could only quote the BC the request nominated.
+    /// With no [`Self::bc_ladder`] it is the BC every row flew, and the printed footer's
+    /// `BC:`. With a `bc_ladder` it is only the interior-gap fallback: it flies only where
+    /// `bc_ladder.interior_gap` allows, and never under a gapless ladder (every ladder a
+    /// correction table builds), so it must not be presented as the card's BC (MBA-1601).
     pub bc_for_solve: f64,
+    /// The BC ladder these rows flew, present only when one fed the solve: the request's
+    /// `bc_segments`, or the ladder its `bc5d_table_path` generated (MBA-1601).
+    ///
+    /// Additive and absent on every card without a ladder, so those responses are
+    /// byte-identical to before. A saved card has to be able to state the BCs its numbers
+    /// came from long after the correction table has been replaced on disk, and under a
+    /// ladder `bc_for_solve` alone does not do that.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub bc_ladder: Option<CardBcLadderV1>,
     pub units: CardUnitsBlockV1,
     /// Wind card only: the swept speeds, one per `wind_columns` entry.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -1003,6 +1032,15 @@ impl Units {
             CardVelocityUnit::Mps => v * 3.280_839_895,
         }
     }
+    /// fps -> display velocity, the inverse of [`Self::velocity_to_fps_bc5d`], for the band
+    /// edges of a generated BC5D ladder (which no wasm32 build has).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn velocity_from_fps_bc5d(&self, v: f64) -> f64 {
+        match self.velocity {
+            CardVelocityUnit::Fps => v,
+            CardVelocityUnit::Mps => v / 3.280_839_895,
+        }
+    }
     /// Bullet weight -> grains using the CLI's BC5D/PDF factor.
     #[cfg(any(feature = "pdf", not(target_arch = "wasm32")))]
     fn mass_to_grains_cli(&self, v: f64) -> f64 {
@@ -1128,6 +1166,8 @@ struct Resolved {
     /// Velocity-keyed BC schedule (velocities in fps, the unit the solver compares
     /// against), from explicit `bc_segments` or generated from `bc5d_table_path`.
     bc_segments_fps: Option<Vec<BCSegmentData>>,
+    /// The same schedule as the response states it ([`CardResponseV1::bc_ladder`]).
+    bc_ladder: Option<CardBcLadderV1>,
 }
 
 fn resolve(req: &CardRequestV1) -> Result<Resolved, CardServiceError> {
@@ -1141,8 +1181,8 @@ fn resolve(req: &CardRequestV1) -> Result<Resolved, CardServiceError> {
 /// were computed elsewhere (they are the stored `card.range_table` response), so opening
 /// `bc5d_table_path` here would do nothing but couple a reprint to whether that file is
 /// still on the device — which is exactly the coupling printing stored rows exists to
-/// break. `bc_for_solve` is left at the request's published BC and is not used for the
-/// footer on that path (the stored card's own `bc_for_solve` is).
+/// break. `bc_for_solve` is left at the request's published BC and `bc_ladder` at `None`;
+/// neither is used for the footer on that path (the stored card's own are).
 #[cfg(feature = "pdf")]
 fn resolve_axes_only(req: &CardRequestV1) -> Result<Resolved, CardServiceError> {
     resolve_inner(req, false)
@@ -1218,15 +1258,16 @@ fn resolve_inner(
         ));
     }
 
-    let (bc_for_solve, bc_segments_fps) = if load_bc_schedule {
+    let (bc_for_solve, bc_segments_fps, bc_ladder) = if load_bc_schedule {
         resolve_bc_schedule(req, &u)?
     } else {
-        (req.ballistic_coefficient, None)
+        (req.ballistic_coefficient, None, None)
     };
 
     Ok(Resolved {
         bc_for_solve,
         bc_segments_fps,
+        bc_ladder,
         velocity_m: u.velocity_to_metric(req.muzzle_velocity),
         mass_kg: u.mass_to_kg(req.mass),
         diameter_m: u.diameter_to_metric(req.diameter),
@@ -1247,17 +1288,18 @@ fn resolve_inner(
     })
 }
 
+/// `(scalar BC for the solve, optional fps-keyed schedule, the same schedule as the response
+/// states it)`. The last two are both present or both absent.
+type BcSchedule = (f64, Option<Vec<BCSegmentData>>, Option<CardBcLadderV1>);
+
 /// Resolve the velocity-keyed BC schedule for a card request, mirroring the CLI's
 /// precedence exactly: explicit `bc_segments` win outright (and leave the scalar BC
 /// untouched, like `--bc-segment` restoring the pre-table BC); otherwise a
 /// `bc5d_table_path` generates the same segment ladder `--bc-table-dir` does and
 /// applies the table's muzzle correction to the scalar fallback BC.
 ///
-/// Returns `(scalar BC for the solve, optional fps-keyed schedule)`.
-fn resolve_bc_schedule(
-    req: &CardRequestV1,
-    u: &Units,
-) -> Result<(f64, Option<Vec<BCSegmentData>>), CardServiceError> {
+/// Returns a [`BcSchedule`].
+fn resolve_bc_schedule(req: &CardRequestV1, u: &Units) -> Result<BcSchedule, CardServiceError> {
     if let Some(segments) = req.bc_segments.as_ref().filter(|s| !s.is_empty()) {
         if segments.len() > crate::solve_json::MAX_BC_SEGMENTS_V1 {
             return Err(CardServiceError::InvalidRequest(format!(
@@ -1302,11 +1344,17 @@ fn resolve_bc_schedule(
             });
         }
         reject_overlapping_bc_segments(segments, u)?;
-        return Ok((req.ballistic_coefficient, Some(converted)));
+        // Built only once the ladder has passed every check above.
+        let ladder = CardBcLadderV1 {
+            source: "bc_segments",
+            segments: segments.clone(),
+            interior_gap: crate::bc_estimation::has_interior_gap(&converted),
+        };
+        return Ok((req.ballistic_coefficient, Some(converted), Some(ladder)));
     }
 
     let Some(path) = req.bc5d_table_path.as_deref() else {
-        return Ok((req.ballistic_coefficient, None));
+        return Ok((req.ballistic_coefficient, None, None));
     };
 
     #[cfg(target_arch = "wasm32")]
@@ -1355,11 +1403,24 @@ fn resolve_bc_schedule(
                     muzzle_fps,
                     drag_type,
                 );
-                Ok((fallback_bc, Some(segments)))
+                // The generated ladder, stated in the request's own velocity unit.
+                let ladder = CardBcLadderV1 {
+                    source: "bc5d_table",
+                    segments: segments
+                        .iter()
+                        .map(|s| CardBcSegmentV1 {
+                            velocity_min: u.velocity_from_fps_bc5d(s.velocity_min),
+                            velocity_max: u.velocity_from_fps_bc5d(s.velocity_max),
+                            bc: s.bc_value,
+                        })
+                        .collect(),
+                    interior_gap: crate::bc_estimation::has_interior_gap(&segments),
+                };
+                Ok((fallback_bc, Some(segments), Some(ladder)))
             }
             // A neutral table (every sampled cell ~= 1.0) carries no correction:
             // keep the published scalar BC, exactly like the CLI.
-            None => Ok((base_bc, None)),
+            None => Ok((base_bc, None, None)),
         }
     }
 }
@@ -1586,6 +1647,7 @@ pub fn come_ups_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardServiceErr
         kind: "come_ups",
         zero_distance: req.zero_distance,
         bc_for_solve: r.bc_for_solve,
+        bc_ladder: r.bc_ladder.clone(),
         units: units_block(req, &r.u, req.adjustment_unit),
         wind_speeds: Vec::new(),
         wind_angles_deg: Vec::new(),
@@ -1616,8 +1678,10 @@ pub fn range_table_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardService
 ///   request's `wind_speed_unit`; `None` (no lead requested) yields all `None`, which the
 ///   PDF renders as em-dashes rather than fake zeroes.
 /// * The BC is `Resolved::bc_for_solve` — the published BC unless a BC5D table applied its
-///   muzzle correction — which the PDF footer prints. The footer must state the BC the
-///   numbers above it came from, not the one the request nominated.
+///   muzzle correction — which the PDF footer prints when the card flew no ladder. The
+///   footer must state the BC the numbers above it came from, not the one the request
+///   nominated; under a ladder that is the card's `bc_ladder` range (MBA-1601), and this
+///   scalar is only its interior-gap fallback.
 fn range_table_rows(
     req: &CardRequestV1,
     lead_target_speed: Option<f64>,
@@ -1717,6 +1781,7 @@ fn range_table_rows(
             kind: "range_table",
             zero_distance: req.zero_distance,
             bc_for_solve: r.bc_for_solve,
+            bc_ladder: r.bc_ladder.clone(),
             units: units_block(req, &r.u, r.windage_unit),
             wind_speeds: Vec::new(),
             wind_angles_deg: Vec::new(),
@@ -1829,6 +1894,7 @@ pub fn wind_card_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardServiceEr
         kind: "wind_card",
         zero_distance: req.zero_distance,
         bc_for_solve: r.bc_for_solve,
+        bc_ladder: r.bc_ladder.clone(),
         units: units_block(req, &r.u, req.adjustment_unit),
         wind_speeds: req.wind_speeds.clone(),
         wind_angles_deg: angles,
@@ -1962,11 +2028,22 @@ pub struct StoredCardResponseV1 {
     pub schema_version: Option<u32>,
     #[serde(default)]
     pub zero_distance: Option<f64>,
-    /// The BC the stored rows were computed with; printed in the footer. Absent (a card
-    /// saved by an engine before [`CardResponseV1::bc_for_solve`] existed) falls back to the
-    /// request's published `ballistic_coefficient`.
+    /// The scalar BC the stored rows were computed with; printed in the footer when the card
+    /// carries no `bc_ladder`. Absent (a card saved by an engine before
+    /// [`CardResponseV1::bc_for_solve`] existed) falls back to the request's published
+    /// `ballistic_coefficient`. Under a ladder it is only the interior-gap fallback, and the
+    /// footer prints the ladder's range instead (MBA-1601).
     #[serde(default)]
     pub bc_for_solve: Option<f64>,
+    /// The [`CardResponseV1::bc_ladder`] block, round-tripped (MBA-1601): present when the
+    /// stored rows flew a BC ladder, and then the footer's `BC:` states the ladder's range.
+    ///
+    /// A card saved before the block existed has none, and reprints its stored scalar exactly
+    /// as before: the reprint never re-derives a ladder from the request, so a solve and a
+    /// reprint of the same document cannot be labelled differently. Regenerating such a card
+    /// prints the range.
+    #[serde(default)]
+    pub bc_ladder: Option<StoredCardBcLadderV1>,
     /// Present only on a wind card, and therefore a refusal here.
     #[serde(default)]
     pub wind_speeds: Vec<f64>,
@@ -2000,6 +2077,32 @@ pub struct StoredCardTruncationV1 {
     pub requested_end: f64,
     pub last_row: f64,
     pub reach: f64,
+}
+
+/// The `bc_ladder` block of a stored response (see [`CardBcLadderV1`], which this mirrors).
+/// Unknown fields are ignored, for the reason [`StoredCardResponseV1`] gives.
+///
+/// `segments` and `interior_gap` are REQUIRED, like the numbers of a stored truncation block:
+/// the footer is printed from them together, and a block missing either cannot say which BCs
+/// flew. A card that flew no ladder omits the whole block.
+#[cfg(feature = "pdf")]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct StoredCardBcLadderV1 {
+    pub segments: Vec<StoredCardBcSegmentV1>,
+    pub interior_gap: bool,
+    /// `"bc_segments"` or `"bc5d_table"`; informational, not printed.
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+/// One band of a stored `bc_ladder` (see [`CardBcSegmentV1`], which this mirrors). Unknown
+/// fields are ignored, for the reason [`StoredCardResponseV1`] gives.
+#[cfg(feature = "pdf")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+pub struct StoredCardBcSegmentV1 {
+    pub velocity_min: f64,
+    pub velocity_max: f64,
+    pub bc: f64,
 }
 
 #[cfg(feature = "pdf")]
@@ -2144,8 +2247,12 @@ fn resolve_font_scale(opts: &PdfCardOptionsV1) -> Result<f32, CardServiceError> 
 struct RowsToPrint {
     rows: Vec<crate::card::CardRow>,
     source: PdfRowSource,
-    /// Footer `BC:` — the BC these rows were computed with.
+    /// Footer `BC:` — the scalar BC these rows were computed with, printed when `bc_label`
+    /// is empty.
     bc: f64,
+    /// Footer `BC:` text for a card that flew a BC ladder (its range, from
+    /// [`crate::pdf_dope_card::ladder_bc_label`]); empty for a card that flew none (MBA-1601).
+    bc_label: String,
     /// Footer `Engine:` — empty prints nothing.
     engine_version: String,
     /// Footer `Table:` — empty prints nothing.
@@ -2292,6 +2399,24 @@ fn validate_stored_card(
         }
     }
 
+    // The footer prints the ladder's BC range from this block, so a block with nothing to
+    // print, or a BC no ladder could fly, is refused rather than printed (MBA-1601).
+    if let Some(ladder) = &card.bc_ladder {
+        if ladder.segments.is_empty() {
+            return Err(CardServiceError::InvalidRequest(
+                "the stored card's bc_ladder has no segments".into(),
+            ));
+        }
+        for (index, segment) in ladder.segments.iter().enumerate() {
+            if !(segment.bc.is_finite() && segment.bc > 0.0) {
+                return Err(CardServiceError::InvalidRequest(format!(
+                    "the stored card's bc_ladder.segments[{index}].bc is not a finite positive \
+                     number"
+                )));
+            }
+        }
+    }
+
     // A non-finite cell would print "NaN"/"inf" on a field card.
     for (index, row) in card.rows.iter().enumerate() {
         for (field, value) in [
@@ -2341,11 +2466,12 @@ pub fn pdf_card_v1(
     stored: Option<&StoredCardV1>,
 ) -> Result<PdfCardV1, CardServiceError> {
     use crate::pdf_dope_card::{
-        calculate_density_altitude, dope_card_page_count, generate_dope_card_pdf, DopeCardConfig,
-        RangeUnit,
+        calculate_density_altitude, dope_card_page_count, generate_dope_card_pdf, ladder_bc_label,
+        DopeCardConfig, RangeUnit,
     };
 
     let opts = req.pdf.clone().unwrap_or_default();
+    let drag_model = DragModel::from(req.drag_model).to_string();
     // Validate presentation options BEFORE spending a zero solve and two trajectories on a
     // request that cannot be rendered anyway.
     let font_scale = resolve_font_scale(&opts)?;
@@ -2379,13 +2505,25 @@ pub fn pdf_card_v1(
             // opened for a card whose numbers are already decided.
             let r = resolve_axes_only(req)?;
             validate_stored_card(stored, req, &r)?;
+            let bc = stored
+                .card
+                .bc_for_solve
+                .unwrap_or(req.ballistic_coefficient);
             RowsToPrint {
                 rows: stored_rows_to_print(&stored.card, req, &r, opts.target_speed),
                 source: PdfRowSource::StoredRows,
-                bc: stored
+                bc,
+                // Only the stored card's own ladder block: a card saved without one reprints
+                // its scalar as before, never a ladder re-derived from the request.
+                bc_label: stored
                     .card
-                    .bc_for_solve
-                    .unwrap_or(req.ballistic_coefficient),
+                    .bc_ladder
+                    .as_ref()
+                    .map(|ladder| {
+                        let bcs: Vec<f64> = ladder.segments.iter().map(|s| s.bc).collect();
+                        ladder_bc_label(&drag_model, &bcs, bc, ladder.interior_gap)
+                    })
+                    .unwrap_or_default(),
                 engine_version: stored.engine_version.clone().unwrap_or_default(),
                 table_version: stored.bc5d_table_version.clone().unwrap_or_default(),
                 elevation_unit_label: stored.card.units.elevation_adjustment.clone(),
@@ -2428,6 +2566,15 @@ pub fn pdf_card_v1(
                     .collect(),
                 source: PdfRowSource::Solve,
                 bc: bc_for_solve,
+                // The ladder `card.range_table` reports for these very rows.
+                bc_label: card
+                    .bc_ladder
+                    .as_ref()
+                    .map(|ladder| {
+                        let bcs: Vec<f64> = ladder.segments.iter().map(|s| s.bc).collect();
+                        ladder_bc_label(&drag_model, &bcs, bc_for_solve, ladder.interior_gap)
+                    })
+                    .unwrap_or_default(),
                 // No table version is knowable from a path, so none is claimed; the engine
                 // version is this build's, which is what produced these rows.
                 engine_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -2504,9 +2651,11 @@ pub fn pdf_card_v1(
         bullet: opts.bullet.clone().unwrap_or_default(),
         weight_gr: u.mass_to_grains_cli(req.mass),
         // The BC these rows came from: the stored card's own, or this solve's (which is the
-        // muzzle-corrected value when a BC5D table applied one).
+        // muzzle-corrected value when a BC5D table applied one). Under a BC ladder the footer
+        // prints `bc_label`, the ladder's range, instead (MBA-1601).
         bc: to_print.bc,
-        drag_model: DragModel::from(req.drag_model).to_string(),
+        drag_model,
+        bc_label: to_print.bc_label.clone(),
         velocity_fps: u.velocity_to_fps_pdf(req.muzzle_velocity),
         font_scale,
         bold_data: opts.bold_data,
