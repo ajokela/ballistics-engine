@@ -87,14 +87,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already did.
 
   **Numeric change, only for callers who send a ladder.** Results move from the estimated ladder
-  to the caller's. A .308 175 gr, G1 0.505 at 792.48 m/s with a 0.505/0.496/0.485/0.470 ladder
-  (breaks at 2800/1800/1500 fps) now impacts 30.98 mm lower at 1000 m and 1.910 m/s slower. A
-  .177 8.44 gr pellet, G1 0.021 at 274.32 m/s with a 0.0215/0.0205/0.0195 ladder (breaks at 800
-  and 600 fps) now impacts 23.89 mm higher at 50 m and 23.204 m/s faster, because the
-  estimator's rifle bands had cut its BC to 0.015 for the whole flight. On this path, inputs
-  without a ladder, or with an empty one, are byte-identical: with `use_bc_segments` on and no
-  ladder it still auto-estimates, while `TrajectorySolver` and `fast_trajectory::fast_integrate`
-  still fly the scalar BC.
+  (or, beside a Mach `bc_segments` table, from that table) to the caller's. A .308 175 gr, G1
+  0.505 at 792.48 m/s with a 0.505/0.496/0.485/0.470 ladder (breaks at 2800/1800/1500 fps) now
+  impacts 30.98 mm lower at 1000 m and 1.910 m/s slower. A .177 8.44 gr pellet, G1 0.021 at
+  274.32 m/s with a 0.0215/0.0205/0.0195 ladder (breaks at 800 and 600 fps) now impacts 23.89 mm
+  higher at 50 m and 23.204 m/s faster, because the estimator's rifle bands had cut its BC to
+  0.015 for the whole flight. On this path, inputs without a ladder, or with an empty one, are
+  byte-identical: with `use_bc_segments` on and no ladder it still auto-estimates, while
+  `TrajectorySolver` and `fast_trajectory::fast_integrate` still fly the scalar BC.
 
   **Source-breaking for Rust struct literals.** `trajectory_integration::TrajectoryParams` gains
   a public `bc_segments_data: Option<Vec<BCSegmentData>>` field, so Rust code that builds it
