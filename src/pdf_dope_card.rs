@@ -85,10 +85,11 @@ pub struct DopeCardConfig {
 /// The footer's `BC:` text for rows that flew a velocity-keyed BC ladder (MBA-1601), for
 /// [`DopeCardConfig::bc_label`].
 ///
-/// Under a ladder the scalar BC flies only where airspeed falls in an interior gap between
-/// bands, and never under a gapless ladder (every ladder a correction table builds), so it is
-/// not the card's BC. This states the range of the band BCs instead, widened to include
-/// `fallback_bc` when `interior_gap` says the scalar can fly too, to three decimals:
+/// Under a ladder the scalar BC flies only in an interior gap between bands (and, blended,
+/// within up to 25 fps either side of a gap edge), and never under a gapless ladder (every
+/// ladder a correction table builds), so it is not the card's BC. This states the range of the
+/// band BCs instead, widened to include `fallback_bc` when `interior_gap` says the scalar can
+/// fly too, to three decimals:
 /// `0.420-0.450 (g1 ladder)`, `0.400-0.450 (g1 ladder+gap)`, or `0.250 (g7 ladder)` when the
 /// range prints as one figure. No bands returns an empty string, which prints the scalar
 /// exactly as before.

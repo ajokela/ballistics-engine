@@ -18,6 +18,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "pdf")]
+#[path = "support/pdf_text.rs"]
+mod pdf_text;
+
 // ---------------------------------------------------------------------------
 // Synthesized BC5D v2 fixture (see module doc for provenance)
 // ---------------------------------------------------------------------------
@@ -1211,5 +1215,33 @@ fn a_correction_table_card_reports_its_generated_ladder() {
     assert!(
         (segments[0]["velocity_max"].as_f64().unwrap() - 853.44).abs() < 1e-9,
         "{metric}"
+    );
+}
+
+/// The printed footer of a correction-table card states the ladder the table generated, not the
+/// scalar (MBA-1601). The apps send `bc5d_table_path`, so this is the footer on their printed
+/// cards. Under the velocity fixture the ladder runs 0.320 to 0.398 and the 0.400 scalar never
+/// flies, yet the footer used to read `BC:0.400 (g1)`.
+#[cfg(feature = "pdf")]
+#[test]
+fn a_correction_table_cards_pdf_footer_states_the_generated_ladder() {
+    let (dir, file) = write_fixture("card-ladder-pdf", &bc5d_velocity_fixture());
+    let request: ballistics_engine::card_service::CardRequestV1 = serde_json::from_value(
+        card_request(json!({ "bc5d_table_path": file.to_str().unwrap() })),
+    )
+    .unwrap();
+    let card = ballistics_engine::card_service::pdf_card_v1(&request, None);
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    let card = card.expect("a correction-table card must print");
+    let printed = pdf_text::tokens(&card.pdf_bytes, "correction-table card");
+    assert!(
+        printed.iter().any(|t| t == "BC:0.320-0.398"),
+        "the footer must state the generated ladder's range: {printed:?}"
+    );
+    assert!(printed.iter().any(|t| t == "ladder)"), "{printed:?}");
+    assert!(
+        !printed.iter().any(|t| t == "BC:0.400"),
+        "the scalar never flew on this card: {printed:?}"
     );
 }

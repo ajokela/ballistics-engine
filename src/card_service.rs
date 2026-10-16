@@ -593,9 +593,9 @@ pub struct CardBcLadderV1 {
     /// `bc5d_table` the generated ladder, fastest band first.
     pub segments: Vec<CardBcSegmentV1>,
     /// True when some airspeed between the slowest and the fastest band lies in no band: there,
-    /// and only there, `bc_for_solve` flies. False means `bc_for_solve` never flew on this
-    /// card. It describes the ladder, not the flight: a gap the card's airspeeds never reach
-    /// still reads true.
+    /// and blended into the bands within up to 25 fps either side of a gap edge, `bc_for_solve`
+    /// flies. False means `bc_for_solve` never flew on this card. It describes the ladder, not
+    /// the flight: a gap the card's airspeeds never reach still reads true.
     pub interior_gap: bool,
 }
 
