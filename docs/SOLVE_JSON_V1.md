@@ -193,9 +193,10 @@ A representative request is:
 | `mass_kg` | yes | Projectile mass. |
 | `diameter_m` | yes | Projectile diameter. |
 | `length_m` | no | Projectile length; required by effects that need geometry. |
-| `drag_model` | yes | One of `G1`, `G2`, `G5`, `G6`, `G7`, `G8`, `GI`, `GS`, or `RA4`. Does not drive drag while `drag_table` is present. |
-| `ballistic_coefficient` | yes | BC for the selected reference drag model, or for `drag_table` when its `kind` is `reference`. |
+| `drag_model` | yes | One of `G1`, `G2`, `G5`, `G6`, `G7`, `G8`, `GI`, `GS`, or `RA4`. Does not drive drag while `drag_table` is present. `bc_segments` band BCs are referenced to it. |
+| `ballistic_coefficient` | yes | BC for the selected reference drag model, or for `drag_table` when its `kind` is `reference`. Still required beside `bc_segments`, but then it flies only in an interior gap between bands. |
 | `drag_table` | no | A caller-supplied drag curve replacing the built-in model; see below. |
+| `bc_segments` | no | A velocity-banded BC ladder, the wire form of the CLI's `--bc-segment`; see below. |
 
 All nine built-in reference drag models are backed by distinct tables and are accepted by v1.
 The enum spellings are exact and case-sensitive.
@@ -243,10 +244,145 @@ Errors name the exact entry: `$.projectile.drag_table.kind` for a missing or unk
 `$.projectile.drag_table.points[3].mach` (or `.cd`) for a bad value. A table cannot be combined
 with [`corrections.bc5d_table_path`](#optional-corrections-block): BC5D corrects a G1/G7 BC and a
 table replaces the curve, so the pair is `conflicting_fields` at
-`$.corrections.bc5d_table_path`.
+`$.corrections.bc5d_table_path`. A table also cannot be combined with
+[`projectile.bc_segments`](#projectilebc_segments-mba-1598), whose band BCs are measured against
+the `drag_model` curve the table replaces; that pair is `conflicting_fields` at
+`$.projectile.bc_segments`.
 
 The table is echoed verbatim at `resolved_request.projectile.drag_table`, so a resolved request
 re-solves on the same curve. The engine ships no airgun curves: the caller supplies the table.
+
+### `projectile.bc_segments` (MBA-1598)
+
+A velocity-banded BC ladder sent inline, the wire form of the CLI's `--bc-segment`. Use it to fly
+a published multi-BC schedule, where a maker quotes one BC per velocity band, or BCs you measured
+at different speeds.
+
+```json
+"projectile": {
+  "mass_kg": 0.01089,
+  "diameter_m": 0.00782,
+  "drag_model": "G1",
+  "ballistic_coefficient": 0.462,
+  "bc_segments": [
+    {"velocity_min_mps": 640.0, "velocity_max_mps": 1200.0, "ballistic_coefficient": 0.462},
+    {"velocity_min_mps": 490.0, "velocity_max_mps": 640.0, "ballistic_coefficient": 0.447},
+    {"velocity_min_mps": 0.0, "velocity_max_mps": 490.0, "ballistic_coefficient": 0.424}
+  ]
+}
+```
+
+The member is an array of 1 to 64 bands (`MIN_BC_SEGMENTS_V1` and `MAX_BC_SEGMENTS_V1` in
+`ballistics_engine::solve_json`). Each band is an object with exactly these three members, all
+required numbers:
+
+| Field | Meaning |
+| --- | --- |
+| `velocity_min_mps` | The band's lower edge, in m/s, inclusive. Finite and at least 0. |
+| `velocity_max_mps` | The band's upper edge, in m/s, exclusive. Finite and above `velocity_min_mps`. There is no upper bound. |
+| `ballistic_coefficient` | The BC that flies inside the band. Same units as the scalar `ballistic_coefficient` (lb/in²), referenced to the same `drag_model`, and held to the same bounds, `0.0001` to `100`. |
+
+**Order.** List the bands from the fastest to the slowest. `velocity_min_mps` must strictly
+descend, and each band must end at or below the start of the band before it:
+`bc_segments[i].velocity_max_mps <= bc_segments[i-1].velocity_min_mps`. Bands may touch (equal
+edges) or leave a gap between them, but they may not overlap. The order is only a validation
+rule: the engine's lookup does not depend on it, and the rule leaves exactly one legal order for
+each set of bands.
+
+**Which BC flies.** Before the edge blending below, a band covers the speeds from its
+`velocity_min_mps` up to, but not including, its `velocity_max_mps`, so a touching edge belongs to
+the faster band. At any speed:
+
+- inside a band, that band's BC flies;
+- in an interior gap between two bands, the scalar `ballistic_coefficient` flies;
+- below the slowest band, or at or above the top of the fastest, the nearest edge band applies.
+  The ladder is clamped at its ends, not padded with the scalar.
+
+`ballistic_coefficient` therefore stays required and validated, but under a gapless ladder (the
+example above) it never flies. A one-band ladder flies that band's BC at every speed. A fastest
+band that ends below the muzzle velocity still applies from the muzzle down. Band BCs are
+referenced to `drag_model` exactly as the scalar is, so a G7 ladder needs `"drag_model": "G7"`.
+
+**Airspeed, not ground speed.** Bands are selected by airspeed, the bullet's speed relative to the
+air mass. That is the same speed the drag is computed from, so in a wind the band edges are
+crossed at a different distance than in still air.
+
+**Edges are blended.** The BC does not jump at an edge. The engine blends every interior
+band-to-band edge, and both edges of every interior gap, with a smoothstep (`3t^2 - 2t^3`). The
+blend window is centred on the edge and is as wide as the smaller of two values: 50 fps
+(15.24 m/s), or a quarter of the narrower of the two spans that meet there (a band or a gap). So
+the BC starts to change at most 25 fps (7.62 m/s) either side of an edge, and closer to it where a
+band or gap is narrow. The two outer edges of the ladder are clamps, with nothing on the far side
+to blend toward, so the BC stays flat across them. A one-band ladder is never blended. This is the
+engine's own lookup (`velocity_segment_bc` in `src/bc_estimation.rs`), the same one
+`--bc-segment` and `card.*` use.
+
+**Errors.** The decoder checks every rule above before anything is solved, and the service checks
+the value rules again for a Rust caller that builds the request without the decoder. Each error
+names the exact entry:
+
+- `$.projectile.bc_segments`: `invalid_value` for `null`, a non-array, an empty array, or more than
+  64 bands. To send no ladder, omit the member; `[]` is not read as "no ladder".
+- `$.projectile.bc_segments[2]`: `invalid_value` for a band that is not an object.
+- `$.projectile.bc_segments[2].<member>`: `missing_field` for a missing member, `unknown_field` for
+  a member not listed above, and `invalid_value` for a non-number.
+- `$.projectile.bc_segments[2].velocity_min_mps`: `invalid_value` when it is negative or not
+  finite, or when it is not below the previous band's. The order message names the previous band
+  and says to list the bands from the highest speed to the lowest, or to reverse the array.
+- `$.projectile.bc_segments[2].velocity_max_mps`: `invalid_value` when it is not above
+  `velocity_min_mps` or not finite, or when it reaches above the start of the previous band. The
+  overlap message names that band.
+- `$.projectile.bc_segments[2].ballistic_coefficient`: `invalid_value` outside `0.0001` to `100`,
+  in the same form as the scalar's message.
+
+The values are checked band by band in array order, and the first fault is reported. A band
+nested inside the one before it starts above that band's start, so the order rule reports it, at
+its `velocity_min_mps`.
+
+**Conflicts.** A ladder cannot be combined with either of these. The service refuses both as
+`conflicting_fields` at `$.projectile.bc_segments`, before any correction table is opened:
+
+- [`projectile.drag_table`](#projectiledrag_table-mba-1597): a drag table replaces the
+  `drag_model` curve that the band BCs are measured against, and a present table takes over the
+  drag, so the bands would change nothing.
+- [`corrections.bc5d_table_path`](#optional-corrections-block): the correction table builds its own
+  BC ladder from `ballistic_coefficient`. Send one ladder or the other.
+
+A request that carries a ladder, a drag table and a correction table together fails the older
+drag-table-with-correction-table check first, so it is `conflicting_fields` at
+`$.corrections.bc5d_table_path` instead.
+
+**Echo.** The ladder is echoed verbatim at `resolved_request.projectile.bc_segments`, so a request
+rebuilt from a resolved request re-solves on the same ladder. The zero search and the trajectory
+both fly it. Omitting the member changes nothing, and the key never appears in a response.
+
+**Known limitation: BC sensitivity.** The perturbation kernels behind the CLI's `explain`,
+`error-budget` and `tolerance` perturb and swap only the scalar `ballistic_coefficient`; no input
+axis carries the band BCs. Under a gapless ladder the scalar never flies, so its slope is exactly
+0, and `error-budget` reports a declared BC sigma as contributing nothing rather than listing BC
+under `unavailable_sources`. This is the same blind spot as a `kind: "projectile"` drag table.
+With an interior gap, the scalar moves the result only through the gap.
+
+**Platforms.** The ladder is plain request data and no file is read, so it works wherever
+`solve` runs, including through the WASM module's `bridgeCall`, where `corrections.bc5d_table_path`
+is refused for want of a filesystem.
+
+**Compared with `card.*`.** The bridge's `card.*` commands take a BC ladder too, under different
+rules, so a ladder stored for one is not always valid for the other:
+
+| | `solve`: `projectile.bc_segments` | `card.*`: `bc_segments` |
+| --- | --- | --- |
+| Band members | `velocity_min_mps`, `velocity_max_mps`, `ballistic_coefficient` | `velocity_min`, `velocity_max`, `bc` |
+| Speed unit | m/s, always | the request's `velocity_unit` (fps imperial, m/s metric by default) |
+| Order | fastest first, no overlaps | any order; overlaps are not refused |
+| `[]` | refused | read as no ladder |
+| With a correction table | `conflicting_fields` | the ladder wins and the table is ignored |
+| Band BC | `0.0001` to `100` | above 0 |
+| Band count | 1 to 64 | no cap of its own |
+
+Both are converted to the engine's fps ladder and fly through the same lookup. The CLI's
+`--bc-segment` behaves like `card.*` here: its speeds follow `--units`, any order is accepted, and
+it overrides the correction tables.
 
 ### `rifle`
 
@@ -869,11 +1005,16 @@ does not load profiles, and does not write to stdout or stderr.
 ## Deliberate v1 exclusions
 
 V1 does not read drag files (a drag curve is sent inline as
-[`projectile.drag_table`](#projectiledrag_table-mba-1597)), caller-authored velocity/Mach-dependent BC
-schedules, powder temperature curves, atmosphere zones, cluster-BC degradation, wind shear,
-pitch damping, precession/nutation, or angular diagnostics. (The optional
-[`corrections`](#optional-corrections-block) block is the one deliberate carve-out: a
-velocity-keyed BC schedule generated by the engine itself from a verified BC5D table, not an
-arbitrary caller-supplied schedule.) It also does not expose network access or filesystem access
-beyond reading the one named correction table. Those features require a later schema or a
-separately versioned extension after their input semantics and result provenance are stable.
+[`projectile.drag_table`](#projectiledrag_table-mba-1597)) or Mach-keyed BC tables (a
+velocity-keyed BC ladder is sent inline as
+[`projectile.bc_segments`](#projectilebc_segments-mba-1598)). It has
+no field for powder temperature curves, atmosphere zones, cluster-BC degradation, custom wind-shear
+layer tables (the built-in profiles are
+[`effects.wind_shear_model`](#effectswind_shear_model)), pitch damping, precession/nutation, or
+angular diagnostics. (The optional [`corrections`](#optional-corrections-block) block is the one
+place the engine builds a BC ladder itself, from a verified BC5D table, instead of reading one
+from the request.) It also does not expose network access or filesystem access beyond reading the
+one named correction table. Those features need a later schema, a separately versioned
+extension, or an optional addition under the rules in
+[Versioning and compatibility](#versioning-and-compatibility), once their input semantics and
+result provenance are stable.

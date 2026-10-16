@@ -517,6 +517,31 @@ pub(crate) fn prepare_request(
         ));
     }
 
+    // MBA-1598: a BC ladder's band BCs are measured against drag_model's curve. A drag table
+    // replaces that curve, and the solver flies a present table whatever else is set, so the
+    // bands would have nothing to scale. The correction table builds its own ladder from
+    // ballistic_coefficient, so a caller ladder beside it is two answers to one question.
+    // Both pairs are refused here, before the correction table path is ever opened.
+    if projectile.bc_segments.is_some() && projectile.drag_table.is_some() {
+        return Err(conflicting_fields(
+            "$.projectile.bc_segments",
+            "projectile.bc_segments cannot be combined with projectile.drag_table: a drag \
+             table replaces the drag_model curve that the band BCs are measured against",
+        ));
+    }
+    if projectile.bc_segments.is_some()
+        && request
+            .corrections
+            .as_ref()
+            .is_some_and(|corrections| corrections.bc5d_table_path.is_some())
+    {
+        return Err(conflicting_fields(
+            "$.projectile.bc_segments",
+            "projectile.bc_segments cannot be combined with corrections.bc5d_table_path: the \
+             correction table builds its own BC ladder from ballistic_coefficient",
+        ));
+    }
+
     let resolved_request = ResolvedSolveRequestV1 {
         schema_version: SchemaVersionV1,
         projectile,
@@ -714,6 +739,7 @@ pub(crate) fn prepare_request(
     }
 
     apply_bc5d_correction(request, &resolved_request, &mut inputs, &mut warnings)?;
+    apply_bc_segments(&resolved_request, &mut inputs)?;
 
     let atmosphere = AtmosphericConditions {
         temperature: temperature_c,
@@ -874,6 +900,40 @@ fn apply_bc5d_correction(
     }
 }
 
+/// Install a `projectile.bc_segments` ladder (MBA-1598) on the prepared inputs, converting its
+/// m/s band edges to the fps the engine's `BCSegmentData` is keyed in. Without a ladder this
+/// is a no-op.
+///
+/// The scalar `bc_value` is left untouched, exactly as the CLI's `--bc-segment` and `card.*`
+/// leave it; the correction path above, by contrast, rewrites `bc_value`. The engine flies the
+/// scalar only in an interior gap between two bands: below the lowest band, or at or above the
+/// highest, the nearest edge band applies, so under a gapless ladder the scalar never flies.
+/// Band BCs are referenced to `drag_model`, bands are selected by airspeed (speed relative to
+/// the air mass), and every interior band edge and gap edge is smoothstep-blended
+/// (`velocity_segment_bc` in `src/bc_estimation.rs`). The lookup does not depend on the array
+/// order; the fastest-first order is only a validation rule.
+fn apply_bc_segments(
+    resolved_request: &ResolvedSolveRequestV1,
+    inputs: &mut BallisticInputs,
+) -> Result<(), SolveErrorEnvelopeV1> {
+    let Some(bc_segments) = &resolved_request.projectile.bc_segments else {
+        return Ok(());
+    };
+
+    let segments: Vec<crate::BCSegmentData> = bc_segments
+        .iter()
+        .map(|seg| crate::BCSegmentData {
+            velocity_min: seg.velocity_min_mps / 0.3048,
+            velocity_max: seg.velocity_max_mps / 0.3048,
+            bc_value: seg.ballistic_coefficient,
+        })
+        .collect();
+
+    inputs.use_bc_segments = true;
+    inputs.bc_segments_data = Some(segments);
+    Ok(())
+}
+
 fn resolve_projectile(
     projectile: &ProjectileV1,
     assumptions: &mut Vec<SolveNoticeV1>,
@@ -889,6 +949,9 @@ fn resolve_projectile(
     }
     if let Some(drag_table) = &projectile.drag_table {
         crate::solve_json::validate_drag_table_v1(drag_table)?;
+    }
+    if let Some(bc_segments) = &projectile.bc_segments {
+        crate::solve_json::validate_bc_segments_v1(bc_segments)?;
     }
 
     let bullet_length_m = match projectile.length_m {
@@ -923,6 +986,7 @@ fn resolve_projectile(
             drag_model: projectile.drag_model,
             ballistic_coefficient: projectile.ballistic_coefficient,
             drag_table: projectile.drag_table.clone(),
+            bc_segments: projectile.bc_segments.clone(),
         },
         bullet_length_m,
     ))
@@ -2098,6 +2162,7 @@ mod tests {
                 drag_model: DragModelV1::G7,
                 ballistic_coefficient: 0.243,
                 drag_table: None,
+                bc_segments: None,
             },
             rifle: RifleV1 {
                 muzzle_velocity_mps: 823.0,
@@ -2381,6 +2446,160 @@ mod tests {
         let error = prepare_request(&request).expect_err("zero trial range must remain finite");
         assert_eq!(error.error.code, SolveErrorCodeV1::InvalidValue);
         assert_eq!(error.error.path(), Some("$.shot.zero_distance_m"));
+    }
+
+    /// Zero and fly a prepared request as `solve_v1` does when no explicit muzzle angle was
+    /// supplied, returning its samples.
+    fn fly(prepared: PreparedSolveV1) -> Vec<TrajectoryObservation> {
+        let max_range_m = prepared.resolved_request.shot.max_range_m;
+        let time_step_s = prepared.resolved_request.solver.time_step_s;
+        let zero_distance_m = prepared.resolved_request.shot.zero_distance_m;
+        let target_height_m = prepared.resolved_request.shot.target_height_m;
+        let (solver, _) = build_zeroed_solver(
+            prepared.inputs,
+            prepared.wind,
+            prepared.atmosphere,
+            prepared.wind_segments,
+            max_range_m,
+            time_step_s,
+            zero_distance_m,
+            target_height_m,
+            None,
+        )
+        .expect("zeroed solver");
+        solver
+            .solve()
+            .expect("solve")
+            .sample_observations(25.0, MAX_SOLVE_JSON_SAMPLES_V1)
+            .expect("samples")
+    }
+
+    /// `minimal_request` zeroed at 100 m, with a ladder written straight into the engine inputs.
+    fn fly_with_engine_ladder(segments: Vec<crate::BCSegmentData>) -> Vec<TrajectoryObservation> {
+        let mut request = minimal_request();
+        request.shot.zero_distance_m = Some(100.0);
+        let mut prepared = prepare_request(&request).expect("valid request");
+        prepared.inputs.use_bc_segments = true;
+        prepared.inputs.bc_segments_data = Some(segments);
+        fly(prepared)
+    }
+
+    /// MBA-1598: a wire ladder's m/s band edges reach the engine as the fps `BCSegmentData`
+    /// the CLI's `--bc-segment` builds. The ladder arrives as JSON text through
+    /// `decode_solve_request_v1`, so the wire spelling is covered too, and is pinned against a
+    /// solve whose ladder is written directly in fps, with every edge on a round fps number.
+    /// The .308 slows from 2700 fps through a band, an interior gap, a touching edge and a
+    /// third band, so a missing or wrong conversion would key every edge off the wrong speed.
+    #[test]
+    fn bc_segment_edges_reach_the_engine_in_fps() {
+        use crate::solve_json::{decode_solve_request_v1, BcSegmentV1};
+        use crate::BCSegmentData;
+
+        // fps: 2200-3000 at 0.250, a 2000-2200 gap flying the scalar 0.243, then 1500-2000 at
+        // 0.235 touching 0-1500 at 0.225.
+        let fps_ladder = [
+            (2_200.0, 3_000.0, 0.250),
+            (1_500.0, 2_000.0, 0.235),
+            (0.0, 1_500.0, 0.225),
+        ];
+        let mut base = minimal_request();
+        base.shot.zero_distance_m = Some(100.0);
+        let mut wire = serde_json::to_value(&base).expect("serialize the base request");
+        wire["projectile"]["bc_segments"] = serde_json::json!([
+            {"velocity_min_mps": 670.56, "velocity_max_mps": 914.4, "ballistic_coefficient": 0.250},
+            {"velocity_min_mps": 457.2, "velocity_max_mps": 609.6, "ballistic_coefficient": 0.235},
+            {"velocity_min_mps": 0.0, "velocity_max_mps": 457.2, "ballistic_coefficient": 0.225}
+        ]);
+        let request = decode_solve_request_v1(&wire.to_string()).expect("decodable ladder");
+        assert_eq!(
+            request.projectile.bc_segments.as_deref(),
+            Some(
+                &[
+                    (670.56, 914.4, 0.250),
+                    (457.2, 609.6, 0.235),
+                    (0.0, 457.2, 0.225),
+                ]
+                .map(|(min, max, bc)| BcSegmentV1 {
+                    velocity_min_mps: min,
+                    velocity_max_mps: max,
+                    ballistic_coefficient: bc,
+                })[..]
+            ),
+            "the wire names decode onto the struct fields"
+        );
+        assert_eq!(
+            SolveRequestV1 {
+                projectile: ProjectileV1 {
+                    bc_segments: None,
+                    ..request.projectile.clone()
+                },
+                ..request.clone()
+            },
+            base,
+            "only the ladder differs from the base request"
+        );
+
+        let prepared = prepare_request(&request).expect("valid ladder");
+        assert!(prepared.inputs.use_bc_segments);
+        assert_eq!(
+            prepared.inputs.bc_value, 0.243,
+            "the scalar BC is left alone"
+        );
+        let installed = prepared
+            .inputs
+            .bc_segments_data
+            .clone()
+            .expect("ladder installed");
+        assert_eq!(installed.len(), fps_ladder.len());
+        for (band, (min_fps, max_fps, bc)) in installed.iter().zip(fps_ladder) {
+            assert!((band.velocity_min - min_fps).abs() < 1e-9, "{band:?}");
+            assert!((band.velocity_max - max_fps).abs() < 1e-9, "{band:?}");
+            assert_eq!(band.bc_value, bc);
+        }
+
+        let from_wire = fly(prepared);
+        let engine_ladder = |scale: f64| {
+            fps_ladder
+                .iter()
+                .map(|&(min, max, bc)| BCSegmentData {
+                    velocity_min: min * scale,
+                    velocity_max: max * scale,
+                    bc_value: bc,
+                })
+                .collect::<Vec<_>>()
+        };
+        let direct = fly_with_engine_ladder(engine_ladder(1.0));
+        assert_eq!(from_wire.len(), direct.len());
+        for (wire, engine) in from_wire.iter().zip(&direct) {
+            assert!((wire.distance_m - engine.distance_m).abs() < 1e-9);
+            assert!(
+                (wire.drop_m - engine.drop_m).abs() < 1e-9,
+                "{wire:?} vs {engine:?}"
+            );
+            assert!(
+                (wire.speed_mps - engine.speed_mps).abs() < 1e-9,
+                "{wire:?} vs {engine:?}"
+            );
+            assert!(
+                (wire.time_s - engine.time_s).abs() < 1e-12,
+                "{wire:?} vs {engine:?}"
+            );
+        }
+
+        // The pin is not vacuous: edges left in m/s, or the scalar alone, fly differently.
+        let terminal_drop = |samples: &[TrajectoryObservation]| samples.last().unwrap().drop_m;
+        let unconverted = fly_with_engine_ladder(engine_ladder(0.3048));
+        let mut scalar_only = minimal_request();
+        scalar_only.shot.zero_distance_m = Some(100.0);
+        let scalar_only = fly(prepare_request(&scalar_only).unwrap());
+        for other in [&unconverted, &scalar_only] {
+            assert!(
+                (terminal_drop(&from_wire) - terminal_drop(other)).abs() > 1e-3,
+                "{} vs {}",
+                terminal_drop(&from_wire),
+                terminal_drop(other)
+            );
+        }
     }
 
     #[test]

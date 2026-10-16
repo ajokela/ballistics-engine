@@ -2,10 +2,10 @@
 
 use arbitrary::{Result, Unstructured};
 use ballistics_engine::solve_json::{
-    AtmosphereV1, DragModelV1, DragPointV1, DragTableKindV1, DragTableV1, DropsReferenceV1,
-    EffectsV1, PressureReferenceV1, ProjectileV1, ResolvedWindV1, RifleV1, SamplingV1,
-    SchemaVersionV1, ShotV1, SolveRequestV1, SolveSuccessV1, SolverMethodV1, SolverV1,
-    TwistDirectionV1, WindReferenceV1, WindSegmentV1, WindShearModelV1, WindV1,
+    AtmosphereV1, BcSegmentV1, DragModelV1, DragPointV1, DragTableKindV1, DragTableV1,
+    DropsReferenceV1, EffectsV1, PressureReferenceV1, ProjectileV1, ResolvedWindV1, RifleV1,
+    SamplingV1, SchemaVersionV1, ShotV1, SolveRequestV1, SolveSuccessV1, SolverMethodV1, SolverV1,
+    TwistDirectionV1, WindReferenceV1, WindSegmentV1, WindShearModelV1, WindV1, MAX_BC_SEGMENTS_V1,
     MAX_SOLVE_JSON_SAMPLES_V1,
 };
 
@@ -90,6 +90,105 @@ fn hostile_drag_table(u: &mut Unstructured<'_>) -> Result<Option<DragTableV1>> {
         }
     }
     Ok(Some(table))
+}
+
+/// Upper bound on a generated BC ladder's length. The decoder admits [`MAX_BC_SEGMENTS_V1`]
+/// bands; a short ladder exercises the same lookup, blending and validation more cheaply.
+pub const MAX_FUZZ_BC_SEGMENTS: u8 = 8;
+
+/// A valid `projectile.bc_segments` ladder (MBA-1598): 1 to [`MAX_FUZZ_BC_SEGMENTS`] bands,
+/// fastest first, each band ending at or below the start of the one before it (touching edges
+/// and gaps both drawn), every BC in the same range as the scalar BC above. The top band
+/// starts above or below the muzzle velocity, so ladders that clamp to an edge band are
+/// covered too.
+fn bc_segments(u: &mut Unstructured<'_>) -> Result<Vec<BcSegmentV1>> {
+    let count = u.int_in_range(1u8..=MAX_FUZZ_BC_SEGMENTS)?;
+    let mut upper = ranged(u, 200.0, 1_500.0)?;
+    let mut segments = Vec::with_capacity(usize::from(count));
+    for _ in 0..count {
+        // `upper` > 0 and the width is at least 10 m/s, so the band is never empty.
+        let lower = (upper - ranged(u, 10.0, 400.0)?).max(0.0);
+        segments.push(BcSegmentV1 {
+            velocity_min_mps: lower,
+            velocity_max_mps: upper,
+            ballistic_coefficient: ranged(u, 0.1, 1.2)?,
+        });
+        upper = if u.arbitrary()? {
+            lower
+        } else {
+            lower - ranged(u, 0.0, 100.0)?
+        };
+        if upper <= 0.0 {
+            break;
+        }
+    }
+    Ok(segments)
+}
+
+/// Absent three times in four, like the drag table, so the scalar BC keeps most of the coverage.
+fn maybe_bc_segments(u: &mut Unstructured<'_>) -> Result<Option<Vec<BcSegmentV1>>> {
+    Ok(if u.int_in_range(0u8..=3)? == 0 {
+        Some(bc_segments(u)?)
+    } else {
+        None
+    })
+}
+
+/// A BC ladder the service must refuse or survive: empty, a NaN-free wild value (negative,
+/// zero or 1e6) in one band's speed or BC, the bands listed slowest first, two bands
+/// overlapping, or one band more than the decoder admits. A few wild draws stay legal (a zero
+/// floor on the slowest band, a 1e6 m/s top on the fastest), which the service must solve.
+fn hostile_bc_segments(u: &mut Unstructured<'_>) -> Result<Option<Vec<BcSegmentV1>>> {
+    if u.int_in_range(0u8..=5)? == 0 {
+        return Ok(None);
+    }
+    let mut segments = bc_segments(u)?;
+    match u.int_in_range(0u8..=4)? {
+        0 => segments.clear(),
+        1 => {
+            let wild = match u.int_in_range(0u8..=2)? {
+                0 => -ranged(u, f64::EPSILON, 1.0e6)?,
+                1 => 0.0,
+                _ => 1.0e6,
+            };
+            let index = u.choose_index(segments.len())?;
+            match u.int_in_range(0u8..=2)? {
+                0 => segments[index].velocity_min_mps = wild,
+                1 => segments[index].velocity_max_mps = wild,
+                _ => segments[index].ballistic_coefficient = wild,
+            }
+        }
+        2 => {
+            if segments.len() < 2 {
+                segments.push(BcSegmentV1 {
+                    velocity_min_mps: segments[0].velocity_max_mps,
+                    velocity_max_mps: segments[0].velocity_max_mps + ranged(u, 10.0, 400.0)?,
+                    ballistic_coefficient: ranged(u, 0.1, 1.2)?,
+                });
+            } else {
+                segments.reverse();
+            }
+        }
+        3 => {
+            // Reach the second band's top past the start of the first.
+            let first = segments[0];
+            let reach = ranged(u, 1.0, 100.0)?;
+            if let Some(second) = segments.get_mut(1) {
+                second.velocity_max_mps = first.velocity_min_mps + reach;
+            } else {
+                segments.push(BcSegmentV1 {
+                    velocity_min_mps: (first.velocity_min_mps - reach).max(0.0) / 2.0,
+                    velocity_max_mps: first.velocity_min_mps + reach,
+                    ballistic_coefficient: ranged(u, 0.1, 1.2)?,
+                });
+            }
+        }
+        _ => {
+            let band = segments[0];
+            segments = vec![band; MAX_BC_SEGMENTS_V1 + 1];
+        }
+    }
+    Ok(Some(segments))
 }
 
 fn solver_method(u: &mut Unstructured<'_>) -> Result<SolverMethodV1> {
@@ -277,6 +376,8 @@ pub fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
             ballistic_coefficient: ranged(u, 0.1, 1.2)?,
             // Drawn last, below, so adding it left every earlier draw where it was.
             drag_table: None,
+            // Drawn after the drag table, below, for the same reason.
+            bc_segments: None,
         },
         rifle: RifleV1 {
             muzzle_velocity_mps: ranged(u, 300.0, 1_200.0)?,
@@ -356,6 +457,11 @@ pub fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
         corrections: None,
     };
     request.projectile.drag_table = maybe_drag_table(u)?;
+    // A ladder beside a drag table is a documented `conflicting_fields` refusal, and every
+    // request this generator produces must solve, so a ladder is drawn only without a table.
+    if request.projectile.drag_table.is_none() {
+        request.projectile.bc_segments = maybe_bc_segments(u)?;
+    }
     Ok(request)
 }
 
@@ -413,7 +519,7 @@ pub fn bounded_hostile_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV
 
     let mutations = usize::from(u.int_in_range(1u8..=6)?);
     for _ in 0..mutations {
-        match u.int_in_range(0u8..=28)? {
+        match u.int_in_range(0u8..=29)? {
             0 => request.projectile.mass_kg = wild(u)?,
             1 => request.projectile.diameter_m = wild(u)?,
             2 => request.projectile.length_m = maybe_wild(u)?,
@@ -454,11 +560,12 @@ pub fn bounded_hostile_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV
                 request.sampling.interval_m = maybe_bounded_or_invalid(u, 0.001, 25.0)?
             }
             27 => request.projectile.drag_table = hostile_drag_table(u)?,
-            _ => {
+            28 => {
                 // Explicitly exercise the structural zero/muzzle-angle conflict.
                 request.shot.zero_distance_m = Some(ranged(u, 1.0, 100.0)?);
                 request.shot.muzzle_angle_rad = Some(ranged(u, -0.1, 0.3)?);
             }
+            _ => request.projectile.bc_segments = hostile_bc_segments(u)?,
         }
     }
     Ok(request)
@@ -659,6 +766,42 @@ mod tests {
         }
         if let Some(segments) = request.wind.segments {
             assert!(segments.len() <= MAX_FUZZ_WIND_SEGMENTS);
+        }
+        if let Some(segments) = request.projectile.bc_segments {
+            assert!(segments.len() <= MAX_BC_SEGMENTS_V1 + 1);
+        }
+    }
+
+    /// Deterministic pseudo-random generator input, so the ladder test below sees many shapes.
+    fn bytes(seed: u64) -> Vec<u8> {
+        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        (0..4_096)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state.to_le_bytes()[0]
+            })
+            .collect()
+    }
+
+    /// `valid_request` promises a request that solves, so every ladder `bc_segments` draws
+    /// must pass the decoder's order, no-overlap, count and bound rules.
+    #[test]
+    fn generated_bc_ladders_pass_the_decoder() {
+        let base_bytes = vec![0x5A; 16_384];
+        for seed in 0..256 {
+            let ladder_bytes = bytes(seed);
+            let ladder = bc_segments(&mut Unstructured::new(&ladder_bytes)).expect("enough input");
+            assert!(!ladder.is_empty() && ladder.len() <= usize::from(MAX_FUZZ_BC_SEGMENTS));
+            let mut request =
+                valid_request(&mut Unstructured::new(&base_bytes)).expect("enough input");
+            request.projectile.drag_table = None;
+            request.projectile.bc_segments = Some(ladder.clone());
+            let json = serde_json::to_string(&request).expect("request serializes");
+            if let Err(error) = ballistics_engine::decode_solve_request_v1(&json) {
+                panic!("seed {seed}: generated ladder {ladder:?} was refused: {error:?}");
+            }
         }
     }
 }

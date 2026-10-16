@@ -1,0 +1,606 @@
+//! `projectile.bc_segments` on the solve-json v1 wire (MBA-1598): a velocity-banded BC ladder,
+//! the wire form of the CLI's `--bc-segment`, so an app on the JSON bridge can fly a published
+//! multi-BC schedule from plain request data.
+//!
+//! This file pins the wire contract:
+//!
+//!   (a) omitting the field changes nothing, and the key appears nowhere in the response;
+//!   (b) the ladder really flies: crossing a band edge mid-flight switches to the slower
+//!       band's BC, while the trajectory before the edge is untouched;
+//!   (c) the resolved request echoes the ladder verbatim and re-solves identically from it,
+//!       through the same JSON decoder a caller uses;
+//!   (d) the perturbation kernels behind `explain`, `error-budget` and `tolerance` see the
+//!       scalar BC only where it flies: in an interior gap, never under a gapless ladder;
+//!   (e) the ladder cannot be combined with `projectile.drag_table`;
+//!   (f) the decoder itself refuses every bad ladder at the exact entry, and the service
+//!       refuses the same ladders when a Rust caller skips the decoder;
+//!   (g) the bridge `solve` command accepts and echoes a ladder.
+//!
+//! The m/s-to-fps conversion is pinned in `src/solve_v1.rs`'s unit tests, against a solve
+//! built directly from engine `BCSegmentData` in fps.
+
+use ballistics_engine::solve_json::{
+    decode_solve_request_v1, BcSegmentV1, SolveErrorCodeV1, SolveErrorEnvelopeV1, SolveRequestV1,
+    SolveSuccessV1, MAX_BC_SEGMENTS_V1,
+};
+use ballistics_engine::solve_v1;
+use serde_json::{json, Value};
+
+// ---------------------------------------------------------------------------
+// Shared fixture helpers
+// ---------------------------------------------------------------------------
+
+/// A .308 175 gr at 792 m/s, zeroed at 100 m, solved to 800 m in still ICAO air. It slows
+/// through 600 m/s near 330 m and reaches about 375 m/s at 800 m.
+fn base_request() -> Value {
+    json!({
+        "schema_version": 1,
+        "projectile": {
+            "mass_kg": 0.01134,
+            "diameter_m": 0.00782,
+            "drag_model": "G7",
+            "ballistic_coefficient": 0.243
+        },
+        "rifle": {
+            "muzzle_velocity_mps": 792.48,
+            "sight_height_m": 0.0508
+        },
+        "shot": {
+            "max_range_m": 800.0,
+            "zero_distance_m": 100.0
+        },
+        "atmosphere": {
+            "altitude_m": 0.0,
+            "temperature_k": 288.15,
+            "pressure_pa": 101325.0,
+            "relative_humidity": 0.0
+        },
+        "wind": {"speed_mps": 0.0, "direction_from_rad": 0.0},
+        "solver": {"method": "rk4", "time_step_s": 0.0005},
+        "effects": {},
+        "sampling": {"interval_m": 100.0}
+    })
+}
+
+fn band(min: f64, max: f64, bc: f64) -> Value {
+    json!({"velocity_min_mps": min, "velocity_max_mps": max, "ballistic_coefficient": bc})
+}
+
+/// Two touching bands with one edge at 600 m/s, which the fixture crosses mid-flight. Both BCs
+/// differ from the scalar 0.243, which never flies under this gapless ladder.
+fn two_band_ladder() -> Value {
+    json!([band(600.0, 999.0, 0.260), band(0.0, 600.0, 0.220)])
+}
+
+fn with_bc_segments(mut request: Value, segments: Value) -> Value {
+    request["projectile"]["bc_segments"] = segments;
+    request
+}
+
+fn decode(request: &Value) -> Result<SolveRequestV1, SolveErrorEnvelopeV1> {
+    decode_solve_request_v1(&request.to_string())
+}
+
+fn solve(request: &Value) -> SolveSuccessV1 {
+    let decoded = decode(request).expect("request should decode without error");
+    solve_v1(decoded).expect("solve should succeed")
+}
+
+/// The decoder alone must refuse the request, with this code at this path.
+fn expect_decode_error(request: &Value, code: SolveErrorCodeV1, path: &str) {
+    let error = decode(request).expect_err("the decoder must refuse this request");
+    assert_eq!(error.error.code, code, "{}", error.error.message);
+    assert_eq!(error.error.path(), Some(path), "{}", error.error.message);
+}
+
+fn expect_ladder_refused(segments: Value, path: &str) {
+    expect_decode_error(
+        &with_bc_segments(base_request(), segments),
+        SolveErrorCodeV1::InvalidValue,
+        path,
+    );
+}
+
+/// `count` touching 10 m/s bands, fastest first, from 1000 m/s down.
+fn touching_bands(count: usize) -> Value {
+    Value::Array(
+        (0..count)
+            .map(|i| {
+                let max = 1000.0 - 10.0 * i as f64;
+                band(max - 10.0, max, 0.243)
+            })
+            .collect(),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// (a) Omitting the field leaves no trace
+// ---------------------------------------------------------------------------
+
+#[test]
+fn omitting_the_ladder_leaves_no_trace_in_the_response() {
+    let response = solve(&base_request());
+    let text = serde_json::to_string(&response).unwrap();
+    assert!(
+        !text.contains("bc_segments"),
+        "an omitted bc_segments must not appear anywhere in the response"
+    );
+
+    // The resolved request survives its own serialization, and the request rebuilt from it
+    // survives the decoder, both without growing a ladder.
+    let resolved = &response.resolved_request;
+    let resolved_text = serde_json::to_string(resolved).unwrap();
+    let reparsed: ballistics_engine::ResolvedSolveRequestV1 =
+        serde_json::from_str(&resolved_text).expect("resolved request parses back");
+    assert_eq!(&reparsed, resolved);
+
+    let rebuilt = SolveRequestV1::from(resolved);
+    let redecoded = decode_solve_request_v1(&serde_json::to_string(&rebuilt).unwrap())
+        .expect("a rebuilt request must pass the decoder");
+    assert_eq!(redecoded, rebuilt);
+    assert!(redecoded.projectile.bc_segments.is_none());
+    assert_eq!(solve_v1(redecoded).unwrap().samples, response.samples);
+}
+
+// ---------------------------------------------------------------------------
+// (b) The ladder flies
+// ---------------------------------------------------------------------------
+
+#[test]
+fn crossing_a_band_edge_mid_flight_flies_the_slower_band() {
+    let ladder = solve(&with_bc_segments(base_request(), two_band_ladder()));
+    // The fast band alone: a single band clamps to itself at every speed.
+    let fast_only = solve(&with_bc_segments(
+        base_request(),
+        json!([band(600.0, 999.0, 0.260)]),
+    ));
+    assert_eq!(ladder.samples.len(), fast_only.samples.len());
+
+    // Above the edge and its blend window (at most +/-7.62 m/s) both fly 0.260 exactly.
+    let mut crossed = false;
+    for (with_low, without) in ladder.samples.iter().zip(&fast_only.samples) {
+        if without.speed_mps > 610.0 {
+            assert_eq!(
+                with_low, without,
+                "before the edge the low band must not fly"
+            );
+        } else {
+            crossed = true;
+            assert!(
+                with_low.speed_mps < without.speed_mps && with_low.drop_m > without.drop_m,
+                "past the edge the lower BC must slow the bullet and drop it more: \
+                 {with_low:?} vs {without:?}"
+            );
+        }
+    }
+    assert!(crossed, "the fixture must slow through the 600 m/s edge");
+
+    let (ladder_end, fast_end) = (
+        ladder.samples.last().unwrap(),
+        fast_only.samples.last().unwrap(),
+    );
+    assert!(
+        ladder_end.drop_m - fast_end.drop_m > 0.05,
+        "the low band must move the drop at 800 m by centimetres: {} vs {}",
+        ladder_end.drop_m,
+        fast_end.drop_m
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (c) Echo and round trip
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resolved_request_echoes_the_ladder_verbatim() {
+    let request = with_bc_segments(base_request(), two_band_ladder());
+    let response = solve(&request);
+
+    let echoed = serde_json::to_value(&response.resolved_request).unwrap();
+    assert_eq!(
+        echoed["projectile"]["bc_segments"],
+        request["projectile"]["bc_segments"]
+    );
+    assert_eq!(
+        response.resolved_request.projectile.bc_segments,
+        Some(vec![
+            BcSegmentV1 {
+                velocity_min_mps: 600.0,
+                velocity_max_mps: 999.0,
+                ballistic_coefficient: 0.260,
+            },
+            BcSegmentV1 {
+                velocity_min_mps: 0.0,
+                velocity_max_mps: 600.0,
+                ballistic_coefficient: 0.220,
+            },
+        ])
+    );
+}
+
+#[test]
+fn a_request_rebuilt_from_the_echo_re_solves_identically_through_the_decoder() {
+    let first = solve(&with_bc_segments(base_request(), two_band_ladder()));
+
+    let rebuilt = SolveRequestV1::from(&first.resolved_request);
+    let redecoded = decode_solve_request_v1(&serde_json::to_string(&rebuilt).unwrap())
+        .expect("a rebuilt request must pass the decoder");
+    assert_eq!(redecoded, rebuilt);
+    assert!(redecoded.projectile.bc_segments.is_some());
+
+    let second = solve_v1(redecoded).expect("the rebuilt request must solve");
+    assert_eq!(first.samples, second.samples);
+    assert_eq!(first.summary, second.summary);
+}
+
+// ---------------------------------------------------------------------------
+// (d) The perturbation kernels
+// ---------------------------------------------------------------------------
+
+/// The kernels perturb `ballistic_coefficient` on the resolved request and re-solve it. Under a
+/// gapless ladder the scalar never flies, so its slope is exactly zero: a known limitation, the
+/// same one a `kind: "projectile"` drag table has. With an interior gap the bullet crosses, the
+/// scalar flies there and the slope is real, which also proves the re-solves kept the ladder.
+#[test]
+fn the_perturbation_kernel_sees_the_scalar_bc_only_in_an_interior_gap() {
+    use ballistics_engine::perturbation::{central_difference, InputAxis};
+
+    let bc_slope = |ladder: Value| {
+        let response = solve(&with_bc_segments(base_request(), ladder));
+        central_difference(
+            &response.resolved_request,
+            InputAxis::BallisticCoefficient,
+            &[600.0],
+            None,
+        )
+        .expect("the BC axis is continuous")[0]
+            .d_drop_d_x
+    };
+
+    assert_eq!(bc_slope(two_band_ladder()), 0.0);
+
+    // A 500-650 m/s gap, which the fixture crosses between about 230 m and 520 m.
+    let gapped = bc_slope(json!([band(650.0, 999.0, 0.260), band(0.0, 500.0, 0.220)]));
+    assert!(
+        gapped < 0.0,
+        "a higher scalar BC flown through the gap must reduce the drop: dDrop/dBC = {gapped}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (e) Conflict with projectile.drag_table
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_ladder_cannot_be_combined_with_a_drag_table() {
+    let mut request = with_bc_segments(base_request(), two_band_ladder());
+    request["projectile"]["drag_table"] = json!({
+        "kind": "reference",
+        "points": [
+            {"mach": 0.0, "cd": 0.2},
+            {"mach": 2.0, "cd": 0.3}
+        ]
+    });
+    let error = solve_v1(decode(&request).expect("each field is valid on its own"))
+        .expect_err("the pair must be refused");
+    assert_eq!(error.error.code, SolveErrorCodeV1::ConflictingFields);
+    assert_eq!(error.error.path(), Some("$.projectile.bc_segments"));
+    assert_eq!(
+        error.error.message,
+        "projectile.bc_segments cannot be combined with projectile.drag_table: a drag table \
+         replaces the drag_model curve that the band BCs are measured against"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (f) Validation: shape
+// ---------------------------------------------------------------------------
+
+#[test]
+fn null_ladder_is_not_omission() {
+    let mut request = base_request();
+    request["projectile"]["bc_segments"] = Value::Null;
+    expect_decode_error(
+        &request,
+        SolveErrorCodeV1::InvalidValue,
+        "$.projectile.bc_segments",
+    );
+}
+
+#[test]
+fn the_ladder_must_be_an_array() {
+    expect_ladder_refused(json!("not_an_array"), "$.projectile.bc_segments");
+    expect_ladder_refused(band(0.0, 999.0, 0.26), "$.projectile.bc_segments");
+}
+
+#[test]
+fn an_empty_ladder_is_refused() {
+    expect_ladder_refused(json!([]), "$.projectile.bc_segments");
+}
+
+#[test]
+fn a_band_missing_a_member_is_refused_at_that_member() {
+    expect_decode_error(
+        &with_bc_segments(
+            base_request(),
+            json!([{"velocity_min_mps": 274.3, "ballistic_coefficient": 0.260}]),
+        ),
+        SolveErrorCodeV1::MissingField,
+        "$.projectile.bc_segments[0].velocity_max_mps",
+    );
+}
+
+#[test]
+fn unknown_and_old_member_names_are_refused_at_their_path() {
+    let mut extra = band(274.3, 999.0, 0.260);
+    extra["unknown_extra"] = json!(true);
+    expect_decode_error(
+        &with_bc_segments(base_request(), json!([extra])),
+        SolveErrorCodeV1::UnknownField,
+        "$.projectile.bc_segments[0].unknown_extra",
+    );
+
+    expect_decode_error(
+        &with_bc_segments(
+            base_request(),
+            json!([{"velocity_from_mps": 274.3, "velocity_max_mps": 999.0,
+                    "ballistic_coefficient": 0.260}]),
+        ),
+        SolveErrorCodeV1::UnknownField,
+        "$.projectile.bc_segments[0].velocity_from_mps",
+    );
+}
+
+#[test]
+fn a_band_member_must_be_a_number() {
+    expect_ladder_refused(
+        json!([{"velocity_min_mps": 0.0, "velocity_max_mps": "999",
+                "ballistic_coefficient": 0.26}]),
+        "$.projectile.bc_segments[0].velocity_max_mps",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (f) Validation: values, refused by the decoder itself
+// ---------------------------------------------------------------------------
+
+#[test]
+fn band_bc_is_held_to_the_scalar_bc_bounds() {
+    for bad_bc in [0.0, -0.1, 0.00009, 100.5, 1.0e6] {
+        expect_ladder_refused(
+            json!([band(0.0, 999.0, bad_bc)]),
+            "$.projectile.bc_segments[0].ballistic_coefficient",
+        );
+    }
+    // The bounds themselves are legal, as they are for the scalar.
+    for edge_bc in [1.0e-4, 100.0] {
+        decode(&with_bc_segments(
+            base_request(),
+            json!([band(0.0, 999.0, edge_bc)]),
+        ))
+        .expect("a band BC at the scalar's bound is legal");
+    }
+
+    // The message reads exactly as the scalar's does.
+    let error = decode(&with_bc_segments(
+        base_request(),
+        json!([band(0.0, 999.0, 100.5)]),
+    ))
+    .unwrap_err();
+    let mut scalar = base_request();
+    scalar["projectile"]["ballistic_coefficient"] = json!(100.5);
+    let scalar_error = decode(&scalar).unwrap_err();
+    assert_eq!(
+        error.error.message.replace("bc_segments[0].", ""),
+        scalar_error.error.message
+    );
+}
+
+#[test]
+fn velocity_max_must_exceed_velocity_min() {
+    expect_ladder_refused(
+        json!([band(274.3, 274.3, 0.260)]),
+        "$.projectile.bc_segments[0].velocity_max_mps",
+    );
+    expect_ladder_refused(
+        json!([band(500.0, 274.3, 0.260)]),
+        "$.projectile.bc_segments[0].velocity_max_mps",
+    );
+}
+
+#[test]
+fn velocity_min_must_not_be_negative() {
+    expect_ladder_refused(
+        json!([band(-1.0, 999.0, 0.260)]),
+        "$.projectile.bc_segments[0].velocity_min_mps",
+    );
+}
+
+#[test]
+fn bands_run_from_the_highest_speed_to_the_lowest() {
+    let ascending = with_bc_segments(
+        base_request(),
+        json!([band(0.0, 600.0, 0.220), band(600.0, 999.0, 0.260)]),
+    );
+    let error = decode(&ascending).expect_err("an ascending ladder must be refused");
+    assert_eq!(error.error.code, SolveErrorCodeV1::InvalidValue);
+    assert_eq!(
+        error.error.path(),
+        Some("$.projectile.bc_segments[1].velocity_min_mps")
+    );
+    for hint in ["bc_segments[0]", "highest speed to the lowest", "reverse"] {
+        assert!(
+            error.error.message.contains(hint),
+            "the message must say {hint:?}: {}",
+            error.error.message
+        );
+    }
+
+    // A repeated start is not descending either.
+    expect_ladder_refused(
+        json!([band(274.3, 999.0, 0.260), band(274.3, 500.0, 0.240)]),
+        "$.projectile.bc_segments[1].velocity_min_mps",
+    );
+}
+
+#[test]
+fn bands_must_not_overlap() {
+    let overlapping = with_bc_segments(
+        base_request(),
+        json!([band(600.0, 999.0, 0.260), band(400.0, 650.0, 0.220)]),
+    );
+    let error = decode(&overlapping).expect_err("an overlap must be refused");
+    assert_eq!(error.error.code, SolveErrorCodeV1::InvalidValue);
+    assert_eq!(
+        error.error.path(),
+        Some("$.projectile.bc_segments[1].velocity_max_mps")
+    );
+    assert!(
+        error.error.message.contains("bc_segments[0]"),
+        "{}",
+        error.error.message
+    );
+
+    // A band nested inside the one before it starts above it, so the order rule refuses it;
+    // a third band reaching past the second's start is an overlap at that band.
+    expect_ladder_refused(
+        json!([band(300.0, 999.0, 0.260), band(400.0, 500.0, 0.220)]),
+        "$.projectile.bc_segments[1].velocity_min_mps",
+    );
+    expect_ladder_refused(
+        json!([
+            band(700.0, 999.0, 0.260),
+            band(500.0, 700.0, 0.240),
+            band(100.0, 500.1, 0.220)
+        ]),
+        "$.projectile.bc_segments[2].velocity_max_mps",
+    );
+}
+
+#[test]
+fn touching_edges_and_interior_gaps_are_both_legal() {
+    solve(&with_bc_segments(base_request(), two_band_ladder()));
+    solve(&with_bc_segments(
+        base_request(),
+        json!([band(650.0, 999.0, 0.260), band(0.0, 500.0, 0.220)]),
+    ));
+    // A gap below the slowest band and a ladder that never reaches the muzzle are legal too.
+    solve(&with_bc_segments(
+        base_request(),
+        json!([band(500.0, 700.0, 0.250), band(300.0, 450.0, 0.230)]),
+    ));
+}
+
+#[test]
+fn band_count_is_capped() {
+    expect_ladder_refused(
+        touching_bands(MAX_BC_SEGMENTS_V1 + 1),
+        "$.projectile.bc_segments",
+    );
+    solve(&with_bc_segments(
+        base_request(),
+        touching_bands(MAX_BC_SEGMENTS_V1),
+    ));
+    solve(&with_bc_segments(base_request(), touching_bands(1)));
+}
+
+/// Rust callers can build a request without the decoder; the service still refuses a bad
+/// ladder at the same path.
+#[test]
+fn the_service_refuses_a_bad_ladder_that_skipped_the_decoder() {
+    let good = decode(&with_bc_segments(base_request(), two_band_ladder())).unwrap();
+    let seg = |min: f64, max: f64, bc: f64| BcSegmentV1 {
+        velocity_min_mps: min,
+        velocity_max_mps: max,
+        ballistic_coefficient: bc,
+    };
+    let cases = [
+        (
+            vec![seg(274.3, 999.0, 0.0)],
+            "$.projectile.bc_segments[0].ballistic_coefficient",
+        ),
+        (
+            vec![seg(274.3, 999.0, f64::NAN)],
+            "$.projectile.bc_segments[0].ballistic_coefficient",
+        ),
+        (
+            vec![seg(0.0, f64::INFINITY, 0.26)],
+            "$.projectile.bc_segments[0].velocity_max_mps",
+        ),
+        (
+            vec![seg(0.0, 600.0, 0.22), seg(600.0, 999.0, 0.26)],
+            "$.projectile.bc_segments[1].velocity_min_mps",
+        ),
+        (
+            vec![seg(600.0, 999.0, 0.26), seg(0.0, 601.0, 0.22)],
+            "$.projectile.bc_segments[1].velocity_max_mps",
+        ),
+        (Vec::new(), "$.projectile.bc_segments"),
+        (
+            vec![seg(600.0, 999.0, 0.26); MAX_BC_SEGMENTS_V1 + 1],
+            "$.projectile.bc_segments",
+        ),
+    ];
+    for (ladder, path) in cases {
+        let mut request = good.clone();
+        request.projectile.bc_segments = Some(ladder);
+        let error = solve_v1(request).expect_err("the service must refuse a bad ladder");
+        assert_eq!(error.error.code, SolveErrorCodeV1::InvalidValue);
+        assert_eq!(error.error.path(), Some(path), "{}", error.error.message);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (g) Bridge
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "bridge")]
+#[test]
+fn the_bridge_solve_command_accepts_a_ladder() {
+    let envelope = json!({
+        "api_version": 1,
+        "command": "solve",
+        "request": with_bc_segments(base_request(), two_band_ladder()),
+    });
+    let out: Value = serde_json::from_str(&ballistics_engine::bridge::bridge_call(
+        &envelope.to_string(),
+    ))
+    .unwrap();
+
+    assert_eq!(out["ok"], json!(true), "bridge solve must succeed: {out}");
+    assert_eq!(
+        out["result"]["resolved_request"]["projectile"]["bc_segments"],
+        two_band_ladder()
+    );
+}
+
+/// A bad ladder is refused by the decoder, so the bridge reports a rejected request rather
+/// than a failed solve.
+#[cfg(feature = "bridge")]
+#[test]
+fn the_bridge_rejects_a_bad_ladder_as_a_request_error() {
+    let envelope = json!({
+        "api_version": 1,
+        "command": "solve",
+        "request": with_bc_segments(
+            base_request(),
+            json!([band(600.0, 999.0, 0.260), band(0.0, 650.0, 0.220)])
+        ),
+    });
+    let out: Value = serde_json::from_str(&ballistics_engine::bridge::bridge_call(
+        &envelope.to_string(),
+    ))
+    .unwrap();
+    assert_eq!(out["ok"], json!(false), "{out}");
+    assert_eq!(
+        out["error"]["details"]["error"]["path"],
+        json!("$.projectile.bc_segments[1].velocity_max_mps"),
+        "{out}"
+    );
+    assert!(
+        out["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("rejected")),
+        "{out}"
+    );
+}

@@ -4347,6 +4347,17 @@ ballistics trajectory -v 2600 -b 0.243 -m 175 -d 0.308 --drag-model g7 --max-ran
   `--bc-table-dir` (manual pairs are highest priority). An interior gap between segments falls
   back to the manually adjusted base `--bc`; outside the global coverage, the nearest segment
   is used.
+- Bands are selected by **airspeed**, the bullet's speed relative to the air mass, not its speed
+  over the ground. The BC does not step at an edge: each band-to-band edge and each edge of an
+  interior gap is smoothstep-blended across a window of 50 fps or a quarter of the narrower
+  adjacent band or gap, whichever is smaller, centred on the edge, so the BC starts to change at
+  most 25 fps (7.62 m/s) either side of it.
+- **Over the JSON bridge:** an app on solve-json v1 (the bridge's `solve` command, `solve-json`,
+  MCP) sends the same ladder inline as `projectile.bc_segments`, a list of
+  `{velocity_min_mps, velocity_max_mps, ballistic_coefficient}` bands. It flies through the same
+  lookup as this flag, but its speeds are always m/s, the bands must be listed fastest first
+  without overlaps, and it is refused alongside a correction table rather than overriding it. See
+  [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#projectilebc_segments-mba-1598).
 - To run BC5D-equivalent corrections on a device that cannot hold the tables (e.g. the
   WASM CLI), run once with `--bc-table-dir ... --use-bc-segments --print-bc-segments`:
   the generated ladder prints as ready-to-paste `--bc-segment` lines (velocities in the

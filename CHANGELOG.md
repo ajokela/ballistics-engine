@@ -5,6 +5,40 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **solve-json v1 takes a BC ladder: `projectile.bc_segments` (MBA-1598).** The engine already
+  flies velocity-banded BCs from the CLI's `--bc-segment`, saved profiles and the bridge's
+  `card.*` commands, but the bridge's `solve` command had no field for one. The new optional
+  member carries 1 to 64 `{velocity_min_mps, velocity_max_mps, ballistic_coefficient}` bands in
+  m/s, listed fastest first. Bands may touch or leave gaps but may not overlap, each band BC is
+  held to the scalar BC's own bounds, and every error names the exact entry, e.g.
+  `$.projectile.bc_segments[1].velocity_max_mps`. Contributed by Alfredo (@oa4ajp) in #89.
+
+  The ladder flies through the engine's existing lookup, exactly as `--bc-segment` does. Bands
+  are selected by airspeed, band BCs are referenced to `drag_model`, and every interior band edge
+  and gap edge is smoothstep-blended over at most 25 fps (7.62 m/s) either side. Below the
+  slowest band, or at or above the top of the fastest, the edge band applies. The scalar
+  `ballistic_coefficient` is still required, but flies only in an interior gap between bands. A
+  ladder cannot be combined with `projectile.drag_table`, which replaces the curve the band BCs
+  are measured against, or with `corrections.bc5d_table_path`, which builds its own ladder
+  (`conflicting_fields`).
+
+  The resolved request echoes the ladder verbatim, so `explain`, `error-budget` and `tolerance`,
+  which re-solve from that echo, keep it. They perturb only the scalar BC, though, so under a
+  gapless ladder they see a BC slope of exactly 0, the same blind spot as a `kind: "projectile"`
+  drag table. Omitting the member changes nothing, and the key never appears in a response. The
+  MCP `solve` schema lists the new member, and the fuzz harness generates valid and hostile
+  ladders. `BcSegmentV1`, `MIN_BC_SEGMENTS_V1` and `MAX_BC_SEGMENTS_V1` are new in
+  `ballistics_engine::solve_json`. See
+  [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#projectilebc_segments-mba-1598).
+
+  **Source-breaking for Rust struct literals.** `ProjectileV1` and `ResolvedProjectileV1` gain a
+  public `bc_segments: Option<Vec<BcSegmentV1>>` field, so Rust code that builds either struct
+  with a literal must add `bc_segments: None`. The JSON wire format is unaffected: requests and
+  responses that omit the member decode and encode exactly as before.
+
 ## [0.45.0] - 2026-10-07
 
 ### Added
