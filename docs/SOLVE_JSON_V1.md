@@ -194,7 +194,7 @@ A representative request is:
 | `diameter_m` | yes | Projectile diameter. |
 | `length_m` | no | Projectile length; required by effects that need geometry. |
 | `drag_model` | yes | One of `G1`, `G2`, `G5`, `G6`, `G7`, `G8`, `GI`, `GS`, or `RA4`. Does not drive drag while `drag_table` is present. `bc_segments` band BCs are referenced to it. |
-| `ballistic_coefficient` | yes | BC for the selected reference drag model, or for `drag_table` when its `kind` is `reference`. Still required beside `bc_segments`, but then it flies only in an interior gap between bands. |
+| `ballistic_coefficient` | yes | BC for the selected reference drag model, or for `drag_table` when its `kind` is `reference`. Still required beside `bc_segments`, but then it flies only in an interior gap between bands, and blended into the bands within up to 25 fps either side of a gap edge. |
 | `drag_table` | no | A caller-supplied drag curve replacing the built-in model; see below. |
 | `bc_segments` | no | A velocity-banded BC ladder, the wire form of the CLI's `--bc-segment`; see below. |
 

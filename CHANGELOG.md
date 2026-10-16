@@ -20,9 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are selected by airspeed, band BCs are referenced to `drag_model`, and every interior band edge
   and gap edge is smoothstep-blended over at most 25 fps (7.62 m/s) either side. Below the
   slowest band, or at or above the top of the fastest, the edge band applies. The scalar
-  `ballistic_coefficient` is still required, but flies only in an interior gap between bands. A
-  ladder cannot be combined with `projectile.drag_table`, which replaces the curve the band BCs
-  are measured against, or with `corrections.bc5d_table_path`, which builds its own ladder
+  `ballistic_coefficient` is still required, but flies only in an interior gap between bands,
+  and blended into the bands within up to 25 fps either side of a gap edge. A ladder cannot be
+  combined with `projectile.drag_table`, which replaces the curve the band BCs are measured
+  against, or with `corrections.bc5d_table_path`, which builds its own ladder
   (`conflicting_fields`).
 
   The resolved request echoes the ladder verbatim, so `explain`, `error-budget` and `tolerance`,

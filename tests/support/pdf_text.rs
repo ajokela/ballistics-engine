@@ -1,5 +1,5 @@
 //! Reading text back out of a rendered dope card, shared by every test that asserts on what
-//! a PDF actually says (`card_pdf_bridge`, `card_row_range_invariance`).
+//! a PDF actually says (`card_pdf_bridge`, `card_row_range_invariance`, `bc5d_bridge`).
 //!
 //! Not a test target of its own — it lives under `tests/support/` (cargo builds only the
 //! top-level `tests/*.rs` as test binaries) and is pulled in with
