@@ -645,8 +645,10 @@ fn ballistic_coefficient_lower_bound_terminates_where_downrange_motion_stops() {
 
 /// MBA-1599: a stalled step is collapsed onto the previous point but still counts against the
 /// 250,000-point limit. A fine fixed step at the bottom of the BC range takes more steps than
-/// that before it reaches the ground threshold, so the request still fails at the limit, at the
-/// step and with the message it always did, instead of integrating on to the ground.
+/// that before it reaches the ground threshold, so the request still fails at the limit with the
+/// message it always did, instead of integrating on to the ground. This test checks the error
+/// only; the unit test mba1599_point_budget_fails_on_the_same_call_with_or_without_collapsing in
+/// src/cli_api.rs pins the step at which the limit fires.
 #[test]
 fn stalled_fine_step_flight_still_fails_at_the_point_limit() {
     for method in ["rk4", "euler"] {

@@ -5601,9 +5601,12 @@ mod trajectory_point_budget_tests {
     }
 
     /// MBA-1599: a stalled flight stores one point per downrange distance, but every step it
-    /// collapses still counts against the point budget. A budget that holds exactly the stored
-    /// points is far smaller than the steps the flight took, so the solve fails at the budget
-    /// as it did when every step was stored, instead of running on to the ground threshold.
+    /// collapses still counts against the point budget. The budget here is one more than the
+    /// points the flight stores, so the stored points alone can never reach it and only the
+    /// collapsed steps can. It is still far smaller than the steps the flight took, so the solve
+    /// fails at the budget as it did when every step was stored, instead of running on to the
+    /// ground threshold. (A budget of exactly the stored points would fail on the first collapse
+    /// after the last stored point whether or not collapsed steps were counted.)
     #[test]
     fn mba1599_collapsed_stall_steps_count_toward_point_budget() {
         for (mode, use_rk4, use_adaptive_rk45, bc_value) in [
@@ -5642,13 +5645,14 @@ mod trajectory_point_budget_tests {
                 "{mode}"
             );
             let stored = flown.points.len();
-            let Err(error) = stalled(stored) else {
-                panic!("{mode}: {stored} stored points fit a {stored}-point budget, so the collapsed steps were not counted");
+            let budget = stored + 1;
+            let Err(error) = stalled(budget) else {
+                panic!("{mode}: the flight fit a {budget}-point budget with {stored} stored points, so the collapsed steps were not counted");
             };
             assert!(
                 error
                     .to_string()
-                    .contains(&format!("trajectory point limit of {stored} exceeded")),
+                    .contains(&format!("trajectory point limit of {budget} exceeded")),
                 "unexpected {mode} stall-budget error: {error}"
             );
         }
