@@ -445,6 +445,25 @@ fn a_one_band_ladder_forgives_rounding_noise_but_not_a_different_bc() {
             "$.projectile.bc_segments[0].ballistic_coefficient",
         );
     }
+
+    // The size itself, in plain numbers: 0.2430001 (4.1e-7 relative) is the same BC, while
+    // 0.24301 (4.1e-5) and the documented 0.1724 against 0.172 are different ones.
+    solve(&with_bc_segments(
+        base_request(),
+        json!([band(0.0, 999.0, 0.2430001)]),
+    ));
+    expect_decode_error(
+        &with_bc_segments(base_request(), json!([band(0.0, 999.0, 0.24301)])),
+        SolveErrorCodeV1::ConflictingFields,
+        "$.projectile.bc_segments[0].ballistic_coefficient",
+    );
+    let mut documented = with_bc_segments(base_request(), json!([band(0.0, 999.0, 0.1724)]));
+    documented["projectile"]["ballistic_coefficient"] = json!(0.172);
+    expect_decode_error(
+        &documented,
+        SolveErrorCodeV1::ConflictingFields,
+        "$.projectile.bc_segments[0].ballistic_coefficient",
+    );
 }
 
 // ---------------------------------------------------------------------------

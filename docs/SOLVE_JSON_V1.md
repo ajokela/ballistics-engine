@@ -247,7 +247,8 @@ table replaces the curve, so the pair is `conflicting_fields` at
 `$.corrections.bc5d_table_path`. A table also cannot be combined with
 [`projectile.bc_segments`](#projectilebc_segments-mba-1598), whose band BCs are measured against
 the `drag_model` curve the table replaces; that pair is `conflicting_fields` at
-`$.projectile.bc_segments`.
+`$.projectile.bc_segments`. A ladder that breaks one of its own rules, including a one-band
+ladder whose BC does not match the scalar, is refused at that band first, by the decoder.
 
 The table is echoed verbatim at `resolved_request.projectile.drag_table`, so a resolved request
 re-solves on the same curve. The engine ships no airgun curves: the caller supplies the table.
@@ -311,9 +312,10 @@ bands directly. List the rows fastest first, and give each band the row's speed 
 `velocity_min_mps` (0 for the last row) and the next faster row's speed as `velocity_max_mps`. The
 fastest band's `velocity_max_mps` only has to be valid, because the ladder is clamped above it. A
 value at least 200 fps (60.96 m/s) above its `velocity_min_mps` keeps that band from narrowing the
-blend at the edge below it (see **Edges are blended**). The CLI converts the BC tables in saved
-profiles the same way, ending the fastest band just above 5000 fps (1524 m/s). A one-row table
-becomes one band from 0 to 1524 m/s, with the row's BC sent as `ballistic_coefficient` too.
+blend at the edge below it (see **Edges are blended**). The CLI applies the same floor rule to
+the BC tables in saved profiles, ending the fastest band just above 5000 fps (1524 m/s). Send a
+one-row table as one band from 0 to 1524 m/s with the row's BC as `ballistic_coefficient` too, or
+simply send the scalar alone: both fly the same.
 
 **Airspeed, not ground speed.** Bands are selected by airspeed, the bullet's speed relative to the
 air mass. That is the same speed the drag is computed from, so in a wind the band edges are
@@ -369,7 +371,9 @@ its `velocity_min_mps`. The one-band check runs after the band's own value rules
 
 A request that carries a ladder, a drag table and a correction table together fails the older
 drag-table-with-correction-table check first, so it is `conflicting_fields` at
-`$.corrections.bc5d_table_path` instead.
+`$.corrections.bc5d_table_path` instead. All of these conflicts are checked after the ladder's own
+rules: a band that breaks one, including a one-band BC that does not match the scalar, is refused
+at that band first, by the decoder.
 
 **Echo.** The ladder is echoed verbatim at `resolved_request.projectile.bc_segments`, so a request
 rebuilt from a resolved request re-solves on the same ladder. The zero search and the trajectory
@@ -401,6 +405,7 @@ rules, so a ladder stored for one is not always valid for the other:
 | `[]` | refused | read as no ladder |
 | With a correction table | `conflicting_fields` | the ladder wins and the table is ignored |
 | Band BC | `0.0001` to `100` | `0.0001` to `100` |
+| One band beside the scalar BC | must match it (within one part in a million) | not compared; the band flies |
 | Band count | 1 to 64 | up to 64 |
 
 Both are converted to the engine's fps ladder and fly through the same lookup. The CLI's
