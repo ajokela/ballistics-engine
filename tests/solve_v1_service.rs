@@ -595,6 +595,77 @@ fn sample_ceiling_uses_actual_reached_range_and_keeps_exact_boundary() {
     assert!(early_ground.samples.len() < 10_000);
 }
 
+/// MBA-1599: at the documented bottom of the BC range the projectile stops moving downrange in
+/// floating point while it is still falling. That is an ordinary early termination, not an
+/// `internal_error`: the solve ends at the ground threshold, where downrange motion stopped.
+#[test]
+fn ballistic_coefficient_lower_bound_terminates_where_downrange_motion_stops() {
+    for method in ["rk45", "rk4"] {
+        let mut value = request_value(method);
+        value["projectile"]["ballistic_coefficient"] = json!(1.0e-4);
+        let success = solve_v1(decode(&value))
+            .unwrap_or_else(|error| panic!("{method}: BC 1e-4 must solve, got {error:?}"));
+        assert_eq!(
+            success.summary.termination,
+            TerminationReasonV1::GroundThreshold,
+            "{method}"
+        );
+        assert!(
+            success.summary.actual_range_m > 0.0 && success.summary.actual_range_m < 200.0,
+            "{method}: {}",
+            success.summary.actual_range_m
+        );
+        assert_eq!(
+            success
+                .samples
+                .iter()
+                .filter(|sample| sample.flags.contains(&SampleFlagV1::Terminal))
+                .count(),
+            1,
+            "{method}"
+        );
+        let terminal = success.samples.last().expect("terminal sample");
+        assert!(
+            terminal.flags.contains(&SampleFlagV1::GroundThreshold),
+            "{method}"
+        );
+        assert_eq!(
+            terminal.distance_m, success.summary.actual_range_m,
+            "{method}"
+        );
+        assert!(
+            success
+                .samples
+                .windows(2)
+                .all(|pair| pair[1].distance_m > pair[0].distance_m),
+            "{method}: sample distances must strictly increase"
+        );
+    }
+}
+
+/// MBA-1599: explicit Euler at the default 1 ms step cannot fly BC 1e-4: the first step's drag
+/// exceeds the muzzle speed and carries the projectile back toward the muzzle. The engine
+/// already reports a reversal that lasts until termination as `solve_failed`; one that recovers
+/// before termination must get the same code, not `internal_error`.
+#[test]
+fn trajectory_moving_back_toward_the_muzzle_is_solve_failed_not_internal_error() {
+    let mut value = request_value("euler");
+    value["projectile"]["ballistic_coefficient"] = json!(1.0e-4);
+    let error = solve_v1(decode(&value)).expect_err("explicit Euler at 1 ms cannot fly BC 1e-4");
+    assert_eq!(
+        error.error.code,
+        ballistics_engine::solve_json::SolveErrorCodeV1::SolveFailed,
+        "{}",
+        error.error.message
+    );
+    assert_eq!(error.error.path(), None);
+    assert!(
+        error.error.message.contains("back toward the muzzle"),
+        "{}",
+        error.error.message
+    );
+}
+
 /// Every field solve_v1 reads from the RAW request must have a resolved echo.
 /// This is the guard that keeps Phase 0 true as the schema grows: if you add a
 /// request field and consume it in solve_v1, add it here and to the resolved DTO.

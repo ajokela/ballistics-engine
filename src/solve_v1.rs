@@ -1937,6 +1937,21 @@ fn map_observation_error(error: TrajectoryObservationError) -> SolveErrorEnvelop
             message,
             "$.sampling.interval_m",
         ),
+        // MBA-1599: a trajectory that really moves back toward the muzzle (a headwind carrying a
+        // stalled projectile back, a launch past vertical, or an explicit-Euler/RK4 step too
+        // coarse for the drag) cannot be reported against downrange distance. That is a failed
+        // solve, the code the engine already returns when such a reversal lasts until
+        // termination. Equal distances stay internal_error below: the engine collapses a
+        // downrange stall, so a repeated distance would be a broken engine invariant.
+        TrajectoryObservationError::NonMonotonicTrajectory {
+            previous_distance_m,
+            distance_m,
+            ..
+        } if distance_m < previous_distance_m => solve_failed_message(format!(
+            "the projectile moved back toward the muzzle ({previous_distance_m} m then \
+             {distance_m} m downrange) before reaching a termination boundary, so the \
+             trajectory cannot be reported against downrange distance"
+        )),
         TrajectoryObservationError::EmptyTrajectory
         | TrajectoryObservationError::NonFiniteQuery { .. }
         | TrajectoryObservationError::OutOfRange { .. }

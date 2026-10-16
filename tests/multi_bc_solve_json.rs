@@ -6,7 +6,8 @@
 //!
 //!   (a) omitting the field changes nothing, and the key appears nowhere in the response;
 //!   (b) the ladder really flies: crossing a band edge mid-flight switches to the slower
-//!       band's BC, while the trajectory before the edge is untouched;
+//!       band's BC, while the trajectory before the edge is untouched, and a band slow enough
+//!       to stop the bullet downrange ends the flight as an ordinary early termination;
 //!   (c) the resolved request echoes the ladder verbatim and re-solves identically from it,
 //!       through the same JSON decoder a caller uses;
 //!   (d) the perturbation kernels behind `explain`, `error-budget` and `tolerance` see the
@@ -20,8 +21,8 @@
 //! built directly from engine `BCSegmentData` in fps.
 
 use ballistics_engine::solve_json::{
-    decode_solve_request_v1, BcSegmentV1, SolveErrorCodeV1, SolveErrorEnvelopeV1, SolveRequestV1,
-    SolveSuccessV1, MAX_BC_SEGMENTS_V1,
+    decode_solve_request_v1, BcSegmentV1, SampleFlagV1, SolveErrorCodeV1, SolveErrorEnvelopeV1,
+    SolveRequestV1, SolveSuccessV1, TerminationReasonV1, MAX_BC_SEGMENTS_V1,
 };
 use ballistics_engine::solve_v1;
 use serde_json::{json, Value};
@@ -185,6 +186,50 @@ fn crossing_a_band_edge_mid_flight_flies_the_slower_band() {
         ladder_end.drop_m,
         fast_end.drop_m
     );
+}
+
+/// MBA-1599: a band at the bottom of the BC range sheds the bullet's downrange speed within a
+/// few metres of its edge. The bullet then falls almost straight down until its downrange
+/// position stops changing in floating point. That is an ordinary early termination at the
+/// ground threshold where downrange motion stopped, not an `internal_error`.
+#[test]
+fn a_band_slow_enough_to_stop_the_bullet_ends_at_the_ground_threshold() {
+    let mut request = with_bc_segments(
+        base_request(),
+        json!([band(300.0, 1200.0, 0.243), band(0.0, 300.0, 0.0001)]),
+    );
+    request["shot"]["max_range_m"] = json!(2000.0);
+    let response = solve(&request);
+
+    assert_eq!(
+        response.summary.termination,
+        TerminationReasonV1::GroundThreshold
+    );
+    let range = response.summary.actual_range_m;
+    assert!(
+        (1100.0..1150.0).contains(&range),
+        "the bullet stops moving downrange just past the 300 m/s edge, got {range} m"
+    );
+    assert_eq!(
+        response
+            .samples
+            .iter()
+            .filter(|sample| sample.flags.contains(&SampleFlagV1::Terminal))
+            .count(),
+        1
+    );
+    let terminal = response.samples.last().expect("terminal sample");
+    assert!(terminal.flags.contains(&SampleFlagV1::GroundThreshold));
+    assert_eq!(terminal.distance_m, range);
+    assert!(
+        terminal.speed_mps < 10.0,
+        "the bullet ends in a near-vertical fall, got {} m/s",
+        terminal.speed_mps
+    );
+    assert!(response
+        .samples
+        .windows(2)
+        .all(|pair| pair[1].distance_m > pair[0].distance_m));
 }
 
 // ---------------------------------------------------------------------------

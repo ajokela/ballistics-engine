@@ -77,6 +77,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Source-breaking for Rust struct literals.** `trajectory_integration::TrajectoryParams` gains
   a public `bc_segments_data: Option<Vec<BCSegmentData>>` field, so Rust code that builds it
   with a literal must add `bc_segments_data: None` (the previous behavior).
+- **solve-json no longer returns `internal_error` when a projectile stops moving downrange
+  (MBA-1599).** At the documented bottom of the BC range (`ballistic_coefficient` 0.0001, failing
+  up to about 0.00025 at the default -100 m `ground_threshold_m` and up to about 0.009 with a very
+  low one), and for a `bc_segments` band that low, the bullet sheds its downrange speed and falls
+  almost straight down. Its downrange position then stops changing in floating point. The engine
+  stored many trajectory points at the same distance, and the checked sampling rejected them as
+  `internal_error` ("trajectory distance is not strictly increasing"). The engine now keeps one
+  point per downrange distance, the newest, which is the rule it already applied to the final
+  point. The solve now completes as an ordinary early termination: `status: ok`,
+  `summary.termination` `ground_threshold` (or `time_limit`), and `actual_range_m` where
+  downrange motion stopped (7.38 m for the calm-air fixture at BC 0.0001).
+
+  A trajectory that really moves back toward the muzzle before it terminates now returns
+  `solve_failed` instead of `internal_error`; explicit `euler` at the default 1 ms step does this
+  at BC 0.0001. That is the code the engine already returned when such a reversal lasts to the
+  end. `explain`, `tolerance` and `error-budget` stop failing on these requests too.
+  [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md) describes both outcomes, and now also says that
+  no current solver emits `summary.termination` `velocity_floor`; the value is reserved.
+
+  Nothing that solved before changes: no fields, units or BC limits change, and every previously
+  successful response is byte-identical. One kind of previously failing request now solves: a
+  stalled `euler` request with a fine `time_step_s` used to hit the 250,000-point limit and now
+  finishes. Engine, CLI and binding users: a stalled flight's `points` (CLI `trajectory --full`,
+  the bindings' point lists) no longer repeat the stall distance thousands of times. Summary
+  values, sampled tables and range cards are unchanged.
 
 ## [0.45.0] - 2026-10-07
 

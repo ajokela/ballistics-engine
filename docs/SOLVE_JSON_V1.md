@@ -944,6 +944,17 @@ extrapolates a hold off a trajectory that did not get there.
 `summary.termination` is one of `max_range`, `ground_threshold`, `time_limit`, or
 `velocity_floor`. The solve service must populate it from explicit termination metadata returned
 by the engine. It must not infer a reason heuristically from the last distance, height, or speed.
+No current solver emits `velocity_floor`; the value is reserved.
+
+A projectile that loses all of its downrange speed, such as one at the bottom of the accepted
+`ballistic_coefficient` range, a `bc_segments` band that low, or a long fall toward a very low
+`ground_threshold_m`, ends like any other early termination (MBA-1599). The response is
+`status: ok`, `termination` is `ground_threshold` (or `time_limit` if it is still falling at
+100 s), and `actual_range_m` is the distance at which downrange motion stopped, with the terminal
+sample at the impact state. A trajectory that moves back toward the muzzle before it terminates
+(a headwind carrying a stalled projectile back, a launch past vertical, or an explicit
+`euler`/`rk4` time step too coarse for the drag) cannot be reported against downrange distance
+and returns `solve_failed`.
 
 Regular interval sampling never drops the terminal observation. `samples` includes the terminal
 sample exactly once even when its distance is not an interval boundary, and that sample carries

@@ -1915,12 +1915,28 @@ impl TrajectorySolver {
             + crate::constants::G_ACCEL_MPS2 * time
     }
 
-    /// Store one public trajectory point without exceeding the per-solve resource budget.
+    /// Store one public trajectory point, collapsing a downrange stall, without exceeding the
+    /// per-solve resource budget.
     fn push_trajectory_point(
         &self,
         points: &mut Vec<TrajectoryPoint>,
         point: TrajectoryPoint,
     ) -> Result<(), BallisticsError> {
+        // MBA-1599: the public trajectory is indexed by downrange distance, so stored x must
+        // strictly increase. A drag-dominated flight (the bottom of the BC range, a slow
+        // bc_segments band, or a long fall to a deep ground_threshold) can shed so much downrange
+        // speed that a whole step moves x by less than half a ULP: x + vx*dt == x while y keeps
+        // falling. Two states cannot both be kept at one representable range, so the newer state
+        // wins, the same rule append_terminal_endpoint applies to the terminal point. A
+        // replacement does not grow the trajectory, so it is not counted against
+        // max_trajectory_points. A strict DECREASE is deliberately still pushed: that is a
+        // reversal, which the checked observation API reports.
+        if let Some(last) = points.last_mut() {
+            if point.position.x == last.position.x {
+                *last = point;
+                return Ok(());
+            }
+        }
         if points.len() >= self.max_trajectory_points {
             return Err(BallisticsError::from(format!(
                 "trajectory point limit of {} exceeded",
@@ -2232,7 +2248,7 @@ impl TrajectorySolver {
             // A very early ground/time crossing can be distinct in time but less than one ULP
             // downrange. There is no representable range at which to retain both states, so make
             // the terminal state authoritative instead of creating a duplicate-X trajectory that
-            // the checked observation API must reject.
+            // the checked observation API must reject (see push_trajectory_point).
             let last = points.last_mut().ok_or_else(|| {
                 BallisticsError::from("trajectory points disappeared during terminal finalization")
             })?;
@@ -7484,6 +7500,65 @@ mod terminal_range_interpolation_tests {
         assert_eq!(points[0].position.x, 100.0);
         assert_eq!(points[0].position.y.to_bits(), ground_threshold.to_bits());
         assert!(points[0].time > 0.0);
+    }
+
+    /// MBA-1599: at the bottom of the BC range the projectile sheds its downrange speed within a
+    /// few metres and then falls almost straight down. Once a whole step moves x by less than half
+    /// a ULP, `x + vx*dt == x` while y keeps falling. Every solver must keep one stored point per
+    /// downrange distance and still end at the real boundary, so the checked observation API
+    /// accepts the flight. Euler flies 2e-4 because explicit Euler at 1 ms is unstable at 1e-4.
+    #[test]
+    fn downrange_stall_replaces_instead_of_duplicating_range() {
+        for (name, use_rk4, use_adaptive_rk45, bc_value) in [
+            ("Euler", false, false, 2.0e-4),
+            ("RK4", true, false, 1.0e-4),
+            ("RK45", true, true, 1.0e-4),
+        ] {
+            let inputs = BallisticInputs {
+                bc_value,
+                bc_type: DragModel::G7,
+                bullet_mass: 0.01134,
+                bullet_diameter: 0.00782,
+                muzzle_velocity: 823.0,
+                use_rk4,
+                use_adaptive_rk45,
+                ground_threshold: -100.0,
+                ..BallisticInputs::default()
+            };
+            let mut solver = TrajectorySolver::new(
+                inputs,
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            );
+            solver.set_max_range(300.0);
+            solver.set_time_step(0.001);
+
+            let result = solver
+                .solve()
+                .unwrap_or_else(|error| panic!("{name}: a stalled flight still solves: {error}"));
+            assert!(
+                result
+                    .points
+                    .windows(2)
+                    .all(|pair| pair[1].position.x > pair[0].position.x),
+                "{name}: stored downrange distances must strictly increase"
+            );
+            assert_eq!(
+                result.termination,
+                TrajectoryTermination::GroundThreshold,
+                "{name}"
+            );
+            assert!(
+                result.max_range > 0.0 && result.max_range < 300.0,
+                "{name}: the stall ends short of max_range, got {} m",
+                result.max_range
+            );
+            let terminal = result.points.last().expect("terminal point");
+            assert_eq!(terminal.position.y, -100.0, "{name}");
+            result
+                .sample_observations(50.0, 100)
+                .unwrap_or_else(|error| panic!("{name}: checked sampling refused: {error}"));
+        }
     }
 
     #[test]
