@@ -288,8 +288,13 @@ pub fn compute_derivatives(
         let mut bc_val = bc_used;
 
         if inputs.use_bc_segments {
-            // First try velocity-based segments if available
-            if inputs.bc_segments_data.is_some() {
+            // First try velocity-based segments if available. MBA-1602: an empty table is no
+            // table, so it falls through to the Mach table / auto-estimate like None does.
+            if inputs
+                .bc_segments_data
+                .as_ref()
+                .is_some_and(|segments| !segments.is_empty())
+            {
                 bc_val = get_bc_for_velocity(v_rel_fps, inputs, bc_used);
             } else {
                 match inputs.bc_segments.as_deref() {
@@ -1180,6 +1185,71 @@ mod tests {
         // Single segment
         let single = vec![(1.0, 0.7)];
         assert!((interpolated_bc(1.5, &single, None) - 0.7).abs() < 1e-10);
+    }
+
+    #[test]
+    fn empty_velocity_table_does_not_mask_mach_table() {
+        // MBA-1602: an empty velocity table is no table. With use_bc_segments on, an explicit
+        // Mach table must fly whether bc_segments_data is None or Some([]), as it does in
+        // TrajectorySolver::drag_terms and the plain fast kernel, instead of the empty velocity
+        // table routing to the auto-estimator and masking the caller's Mach table.
+        let mut inputs = create_test_inputs();
+        inputs.use_bc_segments = true;
+        inputs.bc_segments = Some(vec![(0.0, 0.3), (3.0, 0.3)]);
+        let drag_acceleration = |inputs: &BallisticInputs| {
+            compute_derivatives(
+                Vector3::zeros(),
+                Vector3::new(700.0, 0.0, 0.0),
+                inputs,
+                Vector3::zeros(),
+                (1.225, 340.0, 0.0, 0.0),
+                inputs.bc_value,
+                None,
+                0.0,
+                None,
+            )[3]
+        };
+        inputs.bc_segments_data = None;
+        let absent = drag_acceleration(&inputs);
+        inputs.bc_segments_data = Some(Vec::new());
+        let empty = drag_acceleration(&inputs);
+        assert_eq!(
+            empty.to_bits(),
+            absent.to_bits(),
+            "Some(empty) velocity data must not mask the Mach table"
+        );
+    }
+
+    #[test]
+    fn empty_velocity_and_mach_tables_fly_the_scalar_bc() {
+        // MBA-1602: with use_bc_segments on, Some([]) velocity data beside an empty Mach table
+        // Some([]) is no table at all, so it must fly the caller's BC exactly as None velocity
+        // data does, instead of routing to the auto-estimator.
+        let mut inputs = create_test_inputs();
+        inputs.use_bc_segments = true;
+        inputs.bc_segments = Some(Vec::new());
+        let drag_acceleration = |inputs: &BallisticInputs| {
+            compute_derivatives(
+                Vector3::zeros(),
+                Vector3::new(700.0, 0.0, 0.0),
+                inputs,
+                Vector3::zeros(),
+                (1.225, 340.0, 0.0, 0.0),
+                inputs.bc_value,
+                None,
+                0.0,
+                None,
+            )[3]
+        };
+        inputs.bc_segments_data = None;
+        let absent = drag_acceleration(&inputs);
+        inputs.bc_segments_data = Some(Vec::new());
+        let empty = drag_acceleration(&inputs);
+        assert_eq!(
+            empty.to_bits(),
+            absent.to_bits(),
+            "Some(empty) velocity data beside an empty Mach table must fly the scalar BC"
+        );
     }
 
     #[test]

@@ -268,6 +268,12 @@ pub struct TrajectoryParams {
     pub cd_scale: f64,
     pub bc_segments: Option<Vec<(f64, f64)>>, // Mach-based BC segments: (mach, bc)
     pub use_bc_segments: bool,                // Whether to use BC segment interpolation
+    /// MBA-1602: the caller's velocity-keyed BC ladder (fps bands), flown when
+    /// `use_bc_segments` is on and the ladder is non-empty. `None` or an empty ladder is no
+    /// ladder: with `use_bc_segments` on and no Mach `bc_segments`, the kernel keeps its
+    /// historical opt-in auto-estimate (MBA-955). Threaded so the binding entry point
+    /// (fast_integrate_with_segments) cannot silently drop it.
+    pub bc_segments_data: Option<Vec<crate::BCSegmentData>>,
     /// MBA-954: altitude (m, relative to launch) below which integration stops. -1000.0 is the
     /// historical default — effectively "no early ground impact" for normal flat-fire shots.
     pub ground_threshold: f64,
@@ -340,7 +346,12 @@ fn build_inputs(params: &TrajectoryParams, muzzle_velocity_mps: f64) -> Ballisti
         weight_grains: params.mass_kg / crate::constants::GRAINS_TO_KG,
         use_bc_segments: params.use_bc_segments,
         bullet_id: None,
-        bc_segments_data: None,
+        // MBA-1602: fly the caller's ladder. An empty ladder is no ladder, so it collapses to
+        // None here and the MBA-955 pre-population below behaves exactly as before.
+        bc_segments_data: params
+            .bc_segments_data
+            .clone()
+            .filter(|segments| !segments.is_empty()),
         use_enhanced_spin_drift: params.enable_spin_drift,
         use_form_factor: false,
         manufacturer: None,
@@ -792,6 +803,7 @@ pub fn solve_trajectory_rust(
         cd_scale: 1.0,
         bc_segments: None, // No BC segments for legacy function
         use_bc_segments: false,
+        bc_segments_data: None,
         ground_threshold: -1000.0, // MBA-954: preserve the historical default
         atmo_sock: None,           // MBA-1137: legacy entry has no downrange atmosphere
     };
@@ -844,6 +856,7 @@ mod tests {
             cd_scale: 1.0,
             bc_segments: None,
             use_bc_segments: false,
+            bc_segments_data: None,
             ground_threshold: -1000.0,
             atmo_sock: None,
         }
@@ -1293,6 +1306,7 @@ mod tests {
             cd_scale: 1.0,
             bc_segments: None,
             use_bc_segments: false,
+            bc_segments_data: None,
             ground_threshold: -1000.0,
             atmo_sock: None,
         };

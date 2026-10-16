@@ -250,6 +250,13 @@ pub struct BallisticInputs {
     pub cd_delta2: f64,
     /// Enables velocity-keyed `bc_segments_data`. Explicit Mach-keyed `bc_segments` retain their
     /// legacy behavior and remain active when this flag is false.
+    ///
+    /// An empty `bc_segments_data` is the same as `None`. With the flag on and no velocity
+    /// ladder, every solver flies a non-empty Mach `bc_segments` table. Without one,
+    /// `TrajectorySolver` and `fast_trajectory::fast_integrate` fly the scalar BC, while the RK45
+    /// kernel behind `fast_integrate_with_segments` /
+    /// `trajectory_integration::integrate_trajectory` / `derivatives::compute_derivatives`
+    /// auto-estimates a ladder when `bc_segments` is `None` (MBA-955, legacy opt-in).
     pub use_bc_segments: bool,
     pub bc_segments: Option<Vec<(f64, f64)>>, // Mach-BC pairs
     pub bc_segments_data: Option<Vec<crate::BCSegmentData>>, // Velocity-BC segments
