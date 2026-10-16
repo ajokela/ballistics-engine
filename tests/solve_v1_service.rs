@@ -643,6 +643,32 @@ fn ballistic_coefficient_lower_bound_terminates_where_downrange_motion_stops() {
     }
 }
 
+/// MBA-1599: a stalled step is collapsed onto the previous point but still counts against the
+/// 250,000-point limit. A fine fixed step at the bottom of the BC range takes more steps than
+/// that before it reaches the ground threshold, so the request still fails at the limit, at the
+/// step and with the message it always did, instead of integrating on to the ground.
+#[test]
+fn stalled_fine_step_flight_still_fails_at_the_point_limit() {
+    for method in ["rk4", "euler"] {
+        let mut value = request_value(method);
+        value["projectile"]["ballistic_coefficient"] = json!(1.0e-4);
+        value["solver"]["time_step_s"] = json!(1.0e-4);
+        let error = solve_v1(decode(&value))
+            .expect_err("the stalled steps exceed the point limit before the ground threshold");
+        assert_eq!(
+            error.error.code,
+            ballistics_engine::solve_json::SolveErrorCodeV1::SolveFailed,
+            "{method}: {}",
+            error.error.message
+        );
+        assert_eq!(error.error.path(), None, "{method}");
+        assert_eq!(
+            error.error.message, "trajectory point limit of 250000 exceeded",
+            "{method}"
+        );
+    }
+}
+
 /// MBA-1599: explicit Euler at the default 1 ms step cannot fly BC 1e-4: the first step's drag
 /// exceeds the muzzle speed and carries the projectile back toward the muzzle. The engine
 /// already reports a reversal that lasts until termination as `solve_failed`; one that recovers

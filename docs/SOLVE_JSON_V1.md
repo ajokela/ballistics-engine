@@ -953,10 +953,13 @@ A projectile that loses all of its downrange speed, such as one at the bottom of
 `ground_threshold_m`, ends like any other early termination (MBA-1599). The response is
 `status: ok`, `termination` is `ground_threshold` (or `time_limit` if it is still falling at
 100 s), and `actual_range_m` is the distance at which downrange motion stopped, with the terminal
-sample at the impact state. A trajectory that moves back toward the muzzle before it terminates
-(a headwind carrying a stalled projectile back, a launch past vertical, or an explicit
-`euler`/`rk4` time step too coarse for the drag) cannot be reported against downrange distance
-and returns `solve_failed`.
+sample at the impact state. Every integration step counts against the engine's 250,000-point
+limit, including the steps spent at the stall distance, so with a fine `euler` or `rk4`
+`time_step_s` a stall can reach that limit before the ground and return `solve_failed` with
+the message `trajectory point limit of 250000 exceeded`. A trajectory that moves back toward
+the muzzle before it terminates (a headwind carrying a stalled projectile back, a launch past
+vertical, or an explicit `euler`/`rk4` time step too coarse for the drag) cannot be reported
+against downrange distance and returns `solve_failed`.
 
 Regular interval sampling never drops the terminal observation. `samples` includes the terminal
 sample exactly once even when its distance is not an interval boundary, and that sample carries
