@@ -1929,8 +1929,10 @@ impl TrajectorySolver {
         // falling. Two states cannot both be kept at one representable range, so the newer state
         // wins, the same rule append_terminal_endpoint applies to the terminal point. A
         // replacement does not grow the trajectory, so it is not counted against
-        // max_trajectory_points. A strict DECREASE is deliberately still pushed: that is a
-        // reversal, which the checked observation API reports.
+        // max_trajectory_points, and nothing else counts it: a stalled fixed-step flight can run
+        // up to TRAJECTORY_TIME_LIMIT_S / time_step steps before it ends. A strict DECREASE is
+        // deliberately still pushed: that is a reversal, which the checked observation API
+        // reports.
         if let Some(last) = points.last_mut() {
             if point.position.x == last.position.x {
                 *last = point;

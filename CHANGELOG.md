@@ -120,10 +120,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Nothing that solved before changes: no fields, units or BC limits change, and every previously
   successful response is byte-identical. One kind of previously failing request now solves: a
-  stalled `euler` request with a fine `time_step_s` used to hit the 250,000-point limit and now
-  finishes. Engine, CLI and binding users: a stalled flight's `points` (CLI `trajectory --full`,
-  the bindings' point lists) no longer repeat the stall distance thousands of times. Summary
-  values, sampled tables and range cards are unchanged.
+  stalled `euler` or `rk4` request with a fine `time_step_s` used to hit the 250,000-point limit,
+  and now integrates on to `ground_threshold` or the 100 s time limit. A step that stays at the
+  stall distance does not count against that limit, so such a solve can take far longer than the
+  old failure did. In a release build, `rk4` at BC 0.0001 with `time_step_s` 4.5e-5,
+  `pressure_pa` 100000 and `ground_threshold_m` -100000 returns `time_limit` in about 1.1 s,
+  where it used to fail in 0.16 s. At inputs the schema accepts but no real shot has
+  (`pressure_pa` 3e7, `time_step_s` 3e-6, the default ground threshold) it runs about 33 million
+  steps and returns `time_limit` after about 17 s. `explain`, `tolerance` and `error-budget`
+  repeat that cost for every solve they make that stalls. Engine, CLI and binding users: a
+  stalled flight's `points` (CLI `trajectory --full`, the bindings' point lists) no longer repeat
+  the stall distance thousands of times. Summary values, sampled tables and range cards are
+  unchanged.
 - **`explain` attributes a drag-table, BC-ladder or correction-table difference to
   `ProjectileDrag` (MBA-1603).** The group swap carried only the scalar projectile members
   (`drag_model`, `ballistic_coefficient`, mass, diameter, length, twist), so a difference in
