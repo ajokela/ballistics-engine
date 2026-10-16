@@ -906,8 +906,9 @@ fn apply_bc5d_correction(
 ///
 /// The scalar `bc_value` is left untouched, exactly as the CLI's `--bc-segment` and `card.*`
 /// leave it; the correction path above, by contrast, rewrites `bc_value`. The engine flies the
-/// scalar only in an interior gap between two bands: below the lowest band, or at or above the
-/// highest, the nearest edge band applies, so under a gapless ladder the scalar never flies.
+/// scalar only in an interior gap between two bands, and blended into the bands within up to
+/// 25 fps either side of a gap edge. Below the lowest band, or at or above the highest, the
+/// nearest edge band applies, so under a gapless ladder the scalar never flies.
 /// Band BCs are referenced to `drag_model`, bands are selected by airspeed (speed relative to
 /// the air mass), and every interior band edge and gap edge is smoothstep-blended
 /// (`velocity_segment_bc` in `src/bc_estimation.rs`). The lookup does not depend on the array

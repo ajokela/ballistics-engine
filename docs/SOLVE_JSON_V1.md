@@ -361,8 +361,9 @@ scalar `ballistic_coefficient`; no input axis carries the band BCs. Under a gapl
 scalar never flies, so its slope is exactly 0, and `error-budget` reports a declared BC sigma as
 contributing nothing rather than listing BC under `unavailable_sources`. This is the same blind
 spot as a `kind: "projectile"` drag table. With an interior gap, the scalar moves the result only
-through the gap. `explain` is not affected: its `ProjectileDrag` swap carries the whole ladder
-with `drag_model` (MBA-1603).
+through the gap and the band speeds within up to 25 fps of a gap edge, where it is blended into
+the bands. `explain` is not affected: its `ProjectileDrag` swap carries the whole ladder with
+`drag_model` (MBA-1603).
 
 **Platforms.** The ladder is plain request data and no file is read, so it works wherever
 `solve` runs, including through the WASM module's `bridgeCall`, where `corrections.bc5d_table_path`

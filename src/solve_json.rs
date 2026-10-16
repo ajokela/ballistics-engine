@@ -247,8 +247,9 @@ pub struct ProjectileV1 {
     /// See [`BcSegmentV1`] for the band rules.
     ///
     /// `ballistic_coefficient` stays required and validated beside it, but flies only in an
-    /// interior gap between two bands. Below the lowest band, or at or above the highest, the
-    /// nearest edge band applies, so under a gapless ladder the scalar never flies. Band BCs
+    /// interior gap between two bands, and blended into the bands within up to 25 fps either
+    /// side of a gap edge. Below the lowest band, or at or above the highest, the nearest edge
+    /// band applies, so under a gapless ladder the scalar never flies. Band BCs
     /// are referenced to `drag_model`, and bands are selected by airspeed (speed relative to
     /// the air mass). Interior band and gap edges are smoothstep-blended
     /// (`velocity_segment_bc` in `src/bc_estimation.rs`). Refused alongside
