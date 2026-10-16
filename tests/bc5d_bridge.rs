@@ -535,6 +535,32 @@ fn solve_refuses_a_correction_table_alongside_a_bc_ladder() {
     }
 }
 
+/// MBA-1598: with a ladder, a drag table and a correction table all present, the older drag
+/// table check answers first, at the correction table's path, as docs/SOLVE_JSON_V1.md says.
+#[test]
+fn solve_refuses_a_ladder_drag_table_and_correction_table_at_the_older_path() {
+    let (dir, file) = write_fixture("solve-with-all-three", &bc5d_fixture());
+    let mut request = solve_request(Some(json!({"bc5d_table_path": file.to_str().unwrap()})));
+    request["projectile"]["drag_table"] = json!({
+        "kind": "reference",
+        "points": [{"mach": 0.0, "cd": 0.25}, {"mach": 3.0, "cd": 0.25}]
+    });
+    request["projectile"]["bc_segments"] = json!([
+        {"velocity_min_mps": 0.0, "velocity_max_mps": 999.0, "ballistic_coefficient": 0.42}
+    ]);
+    let out = bridge_raw("solve", request);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(out["ok"], false, "{out}");
+    assert_eq!(
+        out["error"]["details"]["error"]["code"], "conflicting_fields",
+        "{out}"
+    );
+    assert_eq!(
+        out["error"]["details"]["error"]["path"], "$.corrections.bc5d_table_path",
+        "{out}"
+    );
+}
+
 #[test]
 fn solve_rejects_corrupt_and_missing_tables_with_typed_envelopes() {
     // Corrupt CRC -> invalid_value at the corrections path.

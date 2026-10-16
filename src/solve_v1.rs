@@ -2485,13 +2485,14 @@ mod tests {
     }
 
     /// MBA-1598: a wire ladder's m/s band edges reach the engine as the fps `BCSegmentData`
-    /// the CLI's `--bc-segment` builds. Pinned against a solve whose ladder is written directly
-    /// in fps, with every edge on a round fps number. The .308 slows from 2700 fps through a
-    /// band, an interior gap, a touching edge and a third band, so a missing or wrong
-    /// conversion would key every edge off the wrong speed.
+    /// the CLI's `--bc-segment` builds. The ladder arrives as JSON text through
+    /// `decode_solve_request_v1`, so the wire spelling is covered too, and is pinned against a
+    /// solve whose ladder is written directly in fps, with every edge on a round fps number.
+    /// The .308 slows from 2700 fps through a band, an interior gap, a touching edge and a
+    /// third band, so a missing or wrong conversion would key every edge off the wrong speed.
     #[test]
     fn bc_segment_edges_reach_the_engine_in_fps() {
-        use crate::solve_json::BcSegmentV1;
+        use crate::solve_json::{decode_solve_request_v1, BcSegmentV1};
         use crate::BCSegmentData;
 
         // fps: 2200-3000 at 0.250, a 2000-2200 gap flying the scalar 0.243, then 1500-2000 at
@@ -2501,20 +2502,41 @@ mod tests {
             (1_500.0, 2_000.0, 0.235),
             (0.0, 1_500.0, 0.225),
         ];
-        let mut request = minimal_request();
-        request.shot.zero_distance_m = Some(100.0);
-        request.projectile.bc_segments = Some(
-            [
-                (670.56, 914.4, 0.250),
-                (457.2, 609.6, 0.235),
-                (0.0, 457.2, 0.225),
-            ]
-            .map(|(min, max, bc)| BcSegmentV1 {
-                velocity_min_mps: min,
-                velocity_max_mps: max,
-                ballistic_coefficient: bc,
-            })
-            .to_vec(),
+        let mut base = minimal_request();
+        base.shot.zero_distance_m = Some(100.0);
+        let mut wire = serde_json::to_value(&base).expect("serialize the base request");
+        wire["projectile"]["bc_segments"] = serde_json::json!([
+            {"velocity_min_mps": 670.56, "velocity_max_mps": 914.4, "ballistic_coefficient": 0.250},
+            {"velocity_min_mps": 457.2, "velocity_max_mps": 609.6, "ballistic_coefficient": 0.235},
+            {"velocity_min_mps": 0.0, "velocity_max_mps": 457.2, "ballistic_coefficient": 0.225}
+        ]);
+        let request = decode_solve_request_v1(&wire.to_string()).expect("decodable ladder");
+        assert_eq!(
+            request.projectile.bc_segments.as_deref(),
+            Some(
+                &[
+                    (670.56, 914.4, 0.250),
+                    (457.2, 609.6, 0.235),
+                    (0.0, 457.2, 0.225),
+                ]
+                .map(|(min, max, bc)| BcSegmentV1 {
+                    velocity_min_mps: min,
+                    velocity_max_mps: max,
+                    ballistic_coefficient: bc,
+                })[..]
+            ),
+            "the wire names decode onto the struct fields"
+        );
+        assert_eq!(
+            SolveRequestV1 {
+                projectile: ProjectileV1 {
+                    bc_segments: None,
+                    ..request.projectile.clone()
+                },
+                ..request.clone()
+            },
+            base,
+            "only the ladder differs from the base request"
         );
 
         let prepared = prepare_request(&request).expect("valid ladder");

@@ -244,7 +244,10 @@ Errors name the exact entry: `$.projectile.drag_table.kind` for a missing or unk
 `$.projectile.drag_table.points[3].mach` (or `.cd`) for a bad value. A table cannot be combined
 with [`corrections.bc5d_table_path`](#optional-corrections-block): BC5D corrects a G1/G7 BC and a
 table replaces the curve, so the pair is `conflicting_fields` at
-`$.corrections.bc5d_table_path`.
+`$.corrections.bc5d_table_path`. A table also cannot be combined with
+[`projectile.bc_segments`](#projectilebc_segments-mba-1598), whose band BCs are measured against
+the `drag_model` curve the table replaces; that pair is `conflicting_fields` at
+`$.projectile.bc_segments`.
 
 The table is echoed verbatim at `resolved_request.projectile.drag_table`, so a resolved request
 re-solves on the same curve. The engine ships no airgun curves: the caller supplies the table.
@@ -344,6 +347,10 @@ its `velocity_min_mps`.
   drag, so the bands would change nothing.
 - [`corrections.bc5d_table_path`](#optional-corrections-block): the correction table builds its own
   BC ladder from `ballistic_coefficient`. Send one ladder or the other.
+
+A request that carries a ladder, a drag table and a correction table together fails the older
+drag-table-with-correction-table check first, so it is `conflicting_fields` at
+`$.corrections.bc5d_table_path` instead.
 
 **Echo.** The ladder is echoed verbatim at `resolved_request.projectile.bc_segments`, so a request
 rebuilt from a resolved request re-solves on the same ladder. The zero search and the trajectory
