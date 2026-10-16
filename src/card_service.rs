@@ -479,6 +479,10 @@ pub struct CardRequestV1 {
     /// wins over `bc5d_table_path`, and — CLI parity — the scalar
     /// `ballistic_coefficient` remains the interior-gap fallback unchanged. The
     /// schedule feeds BOTH the zero solve and every sampled trajectory.
+    ///
+    /// Bands may be listed in any order and may touch or leave gaps, but must not overlap; at
+    /// most [`crate::solve_json::MAX_BC_SEGMENTS_V1`] bands; each `bc` within 0.0001..=100, the
+    /// bound solve-json puts on a BC. `[]` and `null` mean no ladder (MBA-1600).
     #[serde(default)]
     pub bc_segments: Option<Vec<CardBcSegmentV1>>,
     /// Filesystem path to a caliber-specific BC5D correction table
@@ -565,6 +569,7 @@ pub struct PdfCardOptionsV1 {
 /// (`CardRequestV1::bc_segments`). `velocity_min`/`velocity_max` are in the
 /// request's `velocity_unit` and must satisfy `velocity_min < velocity_max`;
 /// `bc` is the BC (for the request's `drag_model`) that applies inside the band.
+/// `bc` must lie in 0.0001..=100.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CardBcSegmentV1 {
@@ -1254,6 +1259,14 @@ fn resolve_bc_schedule(
     u: &Units,
 ) -> Result<(f64, Option<Vec<BCSegmentData>>), CardServiceError> {
     if let Some(segments) = req.bc_segments.as_ref().filter(|s| !s.is_empty()) {
+        if segments.len() > crate::solve_json::MAX_BC_SEGMENTS_V1 {
+            return Err(CardServiceError::InvalidRequest(format!(
+                "bc_segments must have at most {} bands, got {}",
+                crate::solve_json::MAX_BC_SEGMENTS_V1,
+                segments.len()
+            )));
+        }
+        let (bc_min, bc_max) = crate::solve_json::limits::BALLISTIC_COEFFICIENT;
         let mut converted = Vec::with_capacity(segments.len());
         for (index, segment) in segments.iter().enumerate() {
             if !segment.velocity_min.is_finite()
@@ -1274,6 +1287,12 @@ fn resolve_bc_schedule(
                     "bc_segments[{index}]: bc must be > 0"
                 )));
             }
+            if !(bc_min..=bc_max).contains(&segment.bc) {
+                return Err(CardServiceError::InvalidRequest(format!(
+                    "bc_segments[{index}]: bc must be between {bc_min} and {bc_max}, got {}",
+                    segment.bc
+                )));
+            }
             converted.push(BCSegmentData {
                 // Display velocity -> fps with the exact factor the CLI's parse_bc_segment
                 // uses; the band edges are in `velocity_unit`, like `muzzle_velocity`.
@@ -1282,6 +1301,7 @@ fn resolve_bc_schedule(
                 bc_value: segment.bc,
             });
         }
+        reject_overlapping_bc_segments(segments, u)?;
         return Ok((req.ballistic_coefficient, Some(converted)));
     }
 
@@ -1342,6 +1362,38 @@ fn resolve_bc_schedule(
             None => Ok((base_bc, None)),
         }
     }
+}
+
+/// Refuse a card ladder whose bands overlap (MBA-1600). Card accepts bands in any order, so they
+/// are compared in `velocity_min` order; touching edges and gaps are legal. The engine's lookup
+/// flies the FIRST listed band containing a speed and blends nothing across an overlap
+/// (`bc_estimation.rs`), so an overlapping ladder would fly differently by listing order.
+/// Compared in the request's `velocity_unit`: the fps conversion is monotonic, so a ladder that
+/// does not overlap here cannot overlap after it. Messages quote the caller's own indices.
+fn reject_overlapping_bc_segments(
+    segments: &[CardBcSegmentV1],
+    u: &Units,
+) -> Result<(), CardServiceError> {
+    let mut order: Vec<usize> = (0..segments.len()).collect();
+    // Stable sort: equal velocity_min keep request order, so the later-listed band is reported.
+    order.sort_by(|&a, &b| {
+        segments[a]
+            .velocity_min
+            .total_cmp(&segments[b].velocity_min)
+    });
+    for pair in order.windows(2) {
+        let (lower, upper) = (pair[0], pair[1]);
+        let (lo, hi) = (&segments[lower], &segments[upper]);
+        if hi.velocity_min < lo.velocity_max {
+            let unit = u.velocity_label();
+            return Err(CardServiceError::InvalidRequest(format!(
+                "bc_segments[{upper}] ({} to {} {unit}) overlaps bc_segments[{lower}] ({} to {} \
+                 {unit}): bands may touch or leave gaps but must not overlap",
+                hi.velocity_min, hi.velocity_max, lo.velocity_min, lo.velocity_max
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn solve_zero(req: &CardRequestV1, r: &Resolved) -> Result<f64, CardServiceError> {

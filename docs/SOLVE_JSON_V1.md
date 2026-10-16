@@ -375,15 +375,16 @@ rules, so a ladder stored for one is not always valid for the other:
 | --- | --- | --- |
 | Band members | `velocity_min_mps`, `velocity_max_mps`, `ballistic_coefficient` | `velocity_min`, `velocity_max`, `bc` |
 | Speed unit | m/s, always | the request's `velocity_unit` (fps imperial, m/s metric by default) |
-| Order | fastest first, no overlaps | any order; overlaps are not refused |
+| Order | fastest first, no overlaps | any order; no overlaps (touching edges and gaps are fine) |
 | `[]` | refused | read as no ladder |
 | With a correction table | `conflicting_fields` | the ladder wins and the table is ignored |
-| Band BC | `0.0001` to `100` | above 0 |
-| Band count | 1 to 64 | no cap of its own |
+| Band BC | `0.0001` to `100` | `0.0001` to `100` |
+| Band count | 1 to 64 | up to 64 |
 
 Both are converted to the engine's fps ladder and fly through the same lookup. The CLI's
-`--bc-segment` behaves like `card.*` here: its speeds follow `--units`, any order is accepted, and
-it overrides the correction tables.
+`--bc-segment` follows `card.*` in units, order and precedence: its speeds follow `--units`, any
+order is accepted, and it overrides the correction tables. Unlike `card.*`, it still accepts
+overlapping bands, more than 64 bands and any positive band BC.
 
 ### `rifle`
 

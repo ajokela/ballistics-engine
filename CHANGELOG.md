@@ -40,6 +40,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a literal must add `bc_segments: None`. The JSON wire format is unaffected: requests and
   responses that omit the member decode and encode exactly as before.
 
+### Changed
+- **`card.*` refuses BC ladders it could not fly as written (MBA-1600).** `card.come_ups`,
+  `card.range_table`, `card.wind` and `card.pdf` (when it solves) now hold `bc_segments` to the
+  three rules solve-json's `projectile.bc_segments` already enforces: bands must not overlap, a
+  ladder holds at most 64 bands, and each band's `bc` must lie between 0.0001 and 100. Until now
+  an overlapping ladder flew whichever containing band was listed first, so the same bands in
+  another order gave a different card (0.9 mil apart at 1000 yd for a .308 test load), a band
+  nested inside an earlier one was silently ignored, and the edge between overlapping bands was
+  never blended. A band BC of 1e6 flew a vacuum card, a band BC of 1e-9 failed as an unexplained
+  `zero solve failed`, and a 9000-band ladder took about 100 times as long to solve.
+
+  Card's own conventions are unchanged: `velocity_min`/`velocity_max`/`bc` in the request's
+  `velocity_unit`, bands in any order with touching edges and gaps allowed, `[]` and `null` read
+  as no ladder, and an explicit ladder still wins over `bc5d_table_path`. A refused ladder is
+  `command_failed` with a message naming the band, e.g. `invalid request: bc_segments[0] (2000 to
+  3500 fps) overlaps bc_segments[1] (1000 to 2200 fps): bands may touch or leave gaps but must not
+  overlap`. Messages for ladders that were already refused are unchanged. This tightens the
+  `card.*` request contract. The iOS and Android apps send no ladder and are unaffected, and
+  `card.pdf` reprinting `stored_card` rows does not re-check the ladder, so a card saved before
+  this change still prints.
+
 ### Fixed
 - **The test suite compiles and passes clippy on current nightly Rust again (MBA-1604).**
   `cargo +nightly clippy --all-targets --all-features -- -D warnings` stopped at

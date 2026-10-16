@@ -1555,7 +1555,9 @@ pub fn decode_solve_request_v1(input: &str) -> Result<SolveRequestV1, SolveError
 /// output, so the request did not survive a JSON round trip and broke the protocol's stability
 /// invariant. Tightening the float handling would have addressed the symptom; the actual defect
 /// is that a number no projectile could have was accepted as a projectile.
-mod limits {
+///
+/// Also bounds each `card.*` `bc_segments` band BC (MBA-1600).
+pub(crate) mod limits {
     /// 1 mg to 100 kg. A .17 cal pellet is ~500 mg; a 16-inch naval shell is ~1200 kg, so the
     /// upper bound is the one a caller might conceivably reach — it is set past small artillery
     /// on purpose and can be raised without ceremony.

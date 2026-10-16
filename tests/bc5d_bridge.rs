@@ -867,3 +867,199 @@ fn explain_compares_a_corrected_308_with_a_224_instead_of_aborting() {
     let report = report.expect("a foreign diameter must never meet the table mid-swap");
     assert!(report.rows[0].interaction_remainder.drop_m.abs() < 1e-9);
 }
+
+// ---------------------------------------------------------------------------
+// MBA-1600: card.* refuses a BC ladder it could not fly as written
+// ---------------------------------------------------------------------------
+
+/// The refusal `command` gives for `extra` on the shared card load, checked to be a typed
+/// `command_failed` envelope rather than a card.
+fn card_refusal(command: &str, extra: Value) -> String {
+    let out = bridge_raw(command, card_request(extra));
+    assert_eq!(out["ok"], false, "{command} must refuse this ladder: {out}");
+    assert_eq!(out["error"]["code"], "command_failed", "{out}");
+    out["error"]["message"].as_str().unwrap().to_string()
+}
+
+fn band(velocity_min: f64, velocity_max: f64, bc: f64) -> Value {
+    json!({"velocity_min": velocity_min, "velocity_max": velocity_max, "bc": bc})
+}
+
+/// The engine's lookup flies the FIRST listed band containing a speed and builds no blend
+/// across an overlap, so an overlapping ladder used to fly differently by listing order alone
+/// (0.9 mil apart at 1000 yd for this load), and a nested band was silently dead.
+#[test]
+fn card_refuses_overlapping_bc_segments_in_any_order() {
+    const RULE: &str = "bands may touch or leave gaps but must not overlap";
+    let cases = [
+        (
+            json!({"bc_segments": [band(2000.0, 3500.0, 0.5), band(1000.0, 2200.0, 0.3)]}),
+            "bc_segments[0] (2000 to 3500 fps) overlaps bc_segments[1] (1000 to 2200 fps)",
+        ),
+        (
+            json!({"bc_segments": [band(1000.0, 2200.0, 0.3), band(2000.0, 3500.0, 0.5)]}),
+            "bc_segments[1] (2000 to 3500 fps) overlaps bc_segments[0] (1000 to 2200 fps)",
+        ),
+        (
+            json!({"bc_segments": [band(1000.0, 3500.0, 0.5), band(1800.0, 2200.0, 0.3)]}),
+            "bc_segments[1] (1800 to 2200 fps) overlaps bc_segments[0] (1000 to 3500 fps)",
+        ),
+        (
+            json!({"bc_segments": [band(1000.0, 2000.0, 0.4), band(1000.0, 1500.0, 0.3)]}),
+            "bc_segments[1] (1000 to 1500 fps) overlaps bc_segments[0] (1000 to 2000 fps)",
+        ),
+        (
+            json!({
+                "velocity_unit": "mps",
+                "muzzle_velocity": 853.0,
+                "bc_segments": [band(600.0, 1100.0, 0.5), band(300.0, 650.0, 0.3)]
+            }),
+            "bc_segments[0] (600 to 1100 m/s) overlaps bc_segments[1] (300 to 650 m/s)",
+        ),
+    ];
+    for (extra, expected) in cases {
+        assert_eq!(
+            card_refusal("card.range_table", extra),
+            format!("card.range_table failed: invalid request: {expected}: {RULE}")
+        );
+    }
+
+    // Every surface that flies the ladder refuses it the same way.
+    let overlap = [band(2000.0, 3500.0, 0.5), band(1000.0, 2200.0, 0.3)];
+    let mut surfaces = vec![
+        ("card.come_ups", json!({"bc_segments": overlap})),
+        (
+            "card.wind",
+            json!({"wind_speeds": [10.0], "bc_segments": overlap}),
+        ),
+    ];
+    if cfg!(feature = "pdf") {
+        surfaces.push(("card.pdf", json!({"bc_segments": overlap})));
+    }
+    for (command, extra) in surfaces {
+        let message = card_refusal(command, extra);
+        assert!(
+            message.starts_with(&format!(
+                "{command} failed: invalid request: bc_segments[0] (2000 to 3500 fps) overlaps"
+            )),
+            "{message}"
+        );
+    }
+}
+
+/// The tightening stops at overlaps: card's own conventions (any order, touching edges, gaps,
+/// `[]` and `null` as no ladder) are unchanged, and so are the cards they give.
+#[test]
+fn card_still_accepts_touching_gapped_and_reordered_bc_segments() {
+    let touching = bridge_ok(
+        "card.range_table",
+        card_request(json!({
+            "bc_segments": [band(2000.0, 3500.0, 0.5), band(1000.0, 2000.0, 0.3)]
+        })),
+    );
+    let touching_reversed = bridge_ok(
+        "card.range_table",
+        card_request(json!({
+            "bc_segments": [band(1000.0, 2000.0, 0.3), band(2000.0, 3500.0, 0.5)]
+        })),
+    );
+    assert_eq!(
+        serde_json::to_string(&touching).unwrap(),
+        serde_json::to_string(&touching_reversed).unwrap()
+    );
+
+    bridge_ok(
+        "card.range_table",
+        card_request(json!({
+            "bc_segments": [
+                band(2400.0, 3500.0, 0.5),
+                band(1500.0, 2000.0, 0.3),
+                band(0.0, 1200.0, 0.25)
+            ]
+        })),
+    );
+
+    let plain =
+        serde_json::to_string(&bridge_ok("card.range_table", card_request(json!({})))).unwrap();
+    for empty in [json!([]), Value::Null] {
+        let out = bridge_ok(
+            "card.range_table",
+            card_request(json!({ "bc_segments": empty })),
+        );
+        assert_eq!(serde_json::to_string(&out).unwrap(), plain);
+    }
+}
+
+/// A band BC is held to the bound solve-json puts on any BC. 1e6 used to fly a vacuum card,
+/// and 1e-9 failed as an unexplained `zero solve failed`.
+#[test]
+fn card_bounds_each_band_bc_like_solve_json() {
+    let cases = [
+        (
+            json!([band(0.0, 5000.0, 1e6)]),
+            "bc_segments[0]: bc must be between 0.0001 and 100, got 1000000",
+        ),
+        (
+            json!([band(0.0, 5000.0, 1e-9)]),
+            "bc_segments[0]: bc must be between 0.0001 and 100, got 0.000000001",
+        ),
+        (
+            json!([band(2000.0, 5000.0, 0.4), band(0.0, 500.0, 9.99e-5)]),
+            "bc_segments[1]: bc must be between 0.0001 and 100, got 0.0000999",
+        ),
+    ];
+    for (ladder, expected) in cases {
+        assert_eq!(
+            card_refusal("card.range_table", json!({ "bc_segments": ladder })),
+            format!("card.range_table failed: invalid request: {expected}")
+        );
+    }
+
+    // Both edges are inclusive, as in solve-json.
+    for ladder in [
+        json!([band(0.0, 5000.0, 100.0)]),
+        json!([band(2000.0, 5000.0, 0.4), band(0.0, 500.0, 1e-4)]),
+    ] {
+        bridge_ok(
+            "card.range_table",
+            card_request(json!({ "bc_segments": ladder })),
+        );
+    }
+}
+
+/// The lookup scans the ladder on every derivative evaluation, so solve time grew with the
+/// band count and nothing capped it (9000 bands took about 100 times as long as one).
+#[test]
+fn card_caps_bc_segments_at_the_solve_json_band_limit() {
+    use ballistics_engine::solve_json::MAX_BC_SEGMENTS_V1;
+
+    // Contiguous, fastest first, 0 to 4000 fps, every band at the scalar's 0.4.
+    let ladder = |n: usize| -> Value {
+        (0..n)
+            .map(|i| {
+                band(
+                    4000.0 * (n - i - 1) as f64 / n as f64,
+                    4000.0 * (n - i) as f64 / n as f64,
+                    0.4,
+                )
+            })
+            .collect()
+    };
+
+    bridge_ok(
+        "card.range_table",
+        card_request(json!({ "bc_segments": ladder(MAX_BC_SEGMENTS_V1) })),
+    );
+    assert_eq!(
+        card_refusal(
+            "card.range_table",
+            json!({ "bc_segments": ladder(MAX_BC_SEGMENTS_V1 + 1) })
+        ),
+        format!(
+            "card.range_table failed: invalid request: bc_segments must have at most {} bands, \
+             got {}",
+            MAX_BC_SEGMENTS_V1,
+            MAX_BC_SEGMENTS_V1 + 1
+        )
+    );
+}

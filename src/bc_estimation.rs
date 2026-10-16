@@ -183,10 +183,10 @@ fn transition_boundaries(segments: &[BCSegmentData]) -> Vec<(f64, f64)> {
             ));
         }
         // Overlapping bands (right.velocity_min < left.velocity_max) are an ambiguous shape
-        // for raw()'s first-match lookup. solve-json's `projectile.bc_segments` refuses them
-        // (MBA-1598), but `card.*` and the CLI's `--bc-segment` can still pass them: there the
-        // first band in slice order that contains the speed wins, and no blend is built
-        // across the overlap.
+        // for raw()'s first-match lookup. solve-json's `projectile.bc_segments` (MBA-1598) and
+        // `card.*`'s `bc_segments` (MBA-1600) refuse them, but the CLI's `--bc-segment` can
+        // still pass them: there the first band in slice order that contains the speed wins,
+        // and no blend is built across the overlap.
     }
 
     boundaries

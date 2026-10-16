@@ -1101,4 +1101,34 @@ mod pdf_present {
             );
         }
     }
+
+    /// (MBA-1600) `card.*` refuses an overlapping ladder, but a reprint of stored rows never
+    /// flies the ladder and so never re-checks it: a card saved before the tightening still
+    /// prints. The same request without `stored_card` solves, and is refused.
+    #[test]
+    fn a_stored_card_reprint_does_not_recheck_its_ladder() {
+        let mut request = stored_request();
+        request["bc_segments"] = json!([
+            {"velocity_min": 2000.0, "velocity_max": 3500.0, "bc": 0.5},
+            {"velocity_min": 1000.0, "velocity_max": 2200.0, "bc": 0.3}
+        ]);
+        let out = call("card.pdf", request.clone());
+        assert_eq!(
+            out["ok"], true,
+            "a reprint must not re-check the ladder: {out}"
+        );
+        assert_eq!(out["result"]["source"], "stored_rows", "{out}");
+
+        request.as_object_mut().unwrap().remove("stored_card");
+        let out = call("card.pdf", request);
+        assert_eq!(out["ok"], false, "a solve must refuse the overlap: {out}");
+        assert_eq!(out["error"]["code"], "command_failed", "{out}");
+        assert!(
+            out["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("overlaps bc_segments[1]"),
+            "{out}"
+        );
+    }
 }
