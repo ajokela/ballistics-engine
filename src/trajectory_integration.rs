@@ -959,7 +959,7 @@ mod tests {
     #[test]
     fn derivative_inputs_preserve_initial_velocity_as_muzzle_speed() {
         let params = create_test_params(1_000.0);
-        let launch_velocity = Vector3::new(700.0, 30.0, -20.0);
+        let launch_velocity: Vector3<f64> = Vector3::new(700.0, 30.0, -20.0);
         let inputs = build_inputs(&params, launch_velocity.norm());
 
         assert_eq!(

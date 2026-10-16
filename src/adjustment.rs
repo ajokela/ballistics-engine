@@ -180,6 +180,7 @@ pub fn tracking_cf_in_range(value: f64) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)] // Keep the adjustment display layer below in place.
 mod tests {
     use super::*;
 

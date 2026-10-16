@@ -39,6 +39,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a literal must add `bc_segments: None`. The JSON wire format is unaffected: requests and
   responses that omit the member decode and encode exactly as before.
 
+### Fixed
+- **The test suite compiles and passes clippy on current nightly Rust again (MBA-1604).**
+  `cargo +nightly clippy --all-targets --all-features -- -D warnings` stopped at
+  `error[E0282]: type annotations needed` in a `trajectory_integration` unit test. Nightly now
+  type-checks with the next-generation trait solver, which no longer lets a second
+  `Vector3::norm()` call reuse the `f64` that the first call settled, so the test now names its
+  vector `Vector3<f64>`. Behind that error, nightly clippy also began flagging
+  `items_after_test_module` in `src/adjustment.rs`, because it no longer skips modules followed
+  by derive-generated items. That test module now carries the same `allow` that `src/drag.rs`
+  already uses. Only test code changed: library, CLI, bridge, FFI and WASM behavior and output
+  are unchanged, and stable Rust was never affected.
+
 ## [0.45.0] - 2026-10-07
 
 ### Added
