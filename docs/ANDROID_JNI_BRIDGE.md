@@ -171,6 +171,43 @@ you linked against — here an absolute host path — in your own `DT_NEEDED`, a
 If you are linking a library from elsewhere, `llvm-readelf -d libballistics_engine.so | grep
 SONAME` says whether it has one.
 
+## Sending a BC ladder with `solve`
+
+A `solve` request can carry a velocity-banded BC ladder as `projectile.bc_segments`. Speeds are
+in m/s, and the bands go fastest first without overlapping. The rules, and how the scalar
+`ballistic_coefficient` still matters, are in
+[`projectile.bc_segments`](SOLVE_JSON_V1.md#projectilebc_segments-mba-1598).
+
+```kotlin
+import org.json.JSONArray
+import org.json.JSONObject
+
+/** One band: [bc] flies while the bullet's airspeed is in [minMps, maxMps). */
+data class BcBand(val minMps: Double, val maxMps: Double, val bc: Double)
+
+/** Fastest band first. A ladder kept in fps converts with `fps * 0.3048`. */
+fun bcSegments(bands: List<BcBand>): JSONArray =
+    JSONArray(bands.sortedByDescending { it.minMps }.map { band ->
+        JSONObject()
+            .put("velocity_min_mps", band.minMps)
+            .put("velocity_max_mps", band.maxMps)
+            .put("ballistic_coefficient", band.bc)
+    })
+
+// projectile: the request's "projectile" JSONObject
+projectile.put("bc_segments", bcSegments(listOf(
+    BcBand(640.0, 1200.0, 0.462),
+    BcBand(490.0, 640.0, 0.447),
+    BcBand(0.0, 490.0, 0.424),
+)))
+```
+
+A ladder the contract refuses comes back as an ordinary `{"ok":false}` envelope, and
+`error.details.error.path` names the entry at fault, such as
+`$.projectile.bc_segments[1].velocity_max_mps`. The `card.*` commands take a ladder too, but with
+other member names, the request's `velocity_unit` and no order rule, so a stored ladder has to be
+written out for each command. The table at the end of that section lists the differences.
+
 ## See also
 
 - [`include/ballistics_bridge.h`](../include/ballistics_bridge.h) — the ABI contract:
