@@ -792,3 +792,78 @@ fn golden_cli_trajectory_and_bridge_solve_agree_on_bc5d_drops() {
          CLI {cli_delta} in vs bridge {bridge_delta} in"
     );
 }
+
+// ---------------------------------------------------------------------------
+// MBA-1603: `explain` carries the correction table with ProjectileDrag
+// ---------------------------------------------------------------------------
+
+fn resolved_request(request: Value) -> ballistics_engine::solve_json::ResolvedSolveRequestV1 {
+    let decoded = ballistics_engine::solve_json::decode_solve_request_v1(&request.to_string())
+        .expect("request decodes");
+    ballistics_engine::solve_v1(decoded)
+        .expect("request solves")
+        .resolved_request
+}
+
+/// Before MBA-1603 no group swapped `corrections`, so a table's whole effect sat in the
+/// interaction remainder with `skipped_axes` empty: an unexplained difference, unexplained.
+#[test]
+fn explain_attributes_a_correction_table_to_projectile_drag() {
+    use ballistics_engine::explain::explain_difference;
+    use ballistics_engine::perturbation::InputGroup;
+
+    let (dir, file) = write_fixture("explain-attribution", &bc5d_fixture());
+    let plain = resolved_request(solve_request(None));
+    let corrected = resolved_request(solve_request(Some(
+        json!({"bc5d_table_path": file.to_str().unwrap()}),
+    )));
+    let report = explain_difference(&plain, &corrected, &[300.0, 500.0]);
+    std::fs::remove_dir_all(&dir).unwrap();
+    let report = report.expect("explain runs");
+
+    assert!(report.skipped_axes.is_empty(), "{:?}", report.skipped_axes);
+    for row in &report.rows {
+        let drag = row
+            .contributions
+            .iter()
+            .find(|c| c.group == InputGroup::ProjectileDrag)
+            .unwrap()
+            .delta;
+        assert!(
+            row.total.drop_m > 1e-3,
+            "the 0.8 correction must add drop at {} m: {:?}",
+            row.range_m,
+            row.total
+        );
+        assert!(
+            (drag.drop_m - row.total.drop_m).abs() < 1e-9,
+            "range {}: ProjectileDrag {} vs total {} (remainder {})",
+            row.range_m,
+            drag.drop_m,
+            row.total.drop_m,
+            row.interaction_remainder.drop_m
+        );
+        assert!(row.interaction_remainder.drop_m.abs() < 1e-9);
+    }
+}
+
+/// The swap used to write the OTHER request's diameter onto a request still carrying its own
+/// .308 table, which the caliber check refuses, so the whole comparison aborted with
+/// `invalid_value` at `bc5d_table_path`. The table now leaves before the diameter arrives.
+#[test]
+fn explain_compares_a_corrected_308_with_a_224_instead_of_aborting() {
+    use ballistics_engine::explain::explain_difference;
+
+    let (dir, file) = write_fixture("explain-caliber", &bc5d_fixture());
+    let corrected_308 = resolved_request(solve_request(Some(
+        json!({"bc5d_table_path": file.to_str().unwrap()}),
+    )));
+    let mut plain_224 = solve_request(None);
+    plain_224["projectile"]["diameter_m"] = json!(0.224 * 0.0254);
+    let plain_224 = resolved_request(plain_224);
+    let report = explain_difference(&corrected_308, &plain_224, &[300.0]);
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    let report = report.expect("a foreign diameter must never meet the table mid-swap");
+    assert!(report.rows[0].interaction_remainder.drop_m.abs() < 1e-9);
+}

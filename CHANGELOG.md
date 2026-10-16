@@ -26,9 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`conflicting_fields`).
 
   The resolved request echoes the ladder verbatim, so `explain`, `error-budget` and `tolerance`,
-  which re-solve from that echo, keep it. They perturb only the scalar BC, though, so under a
-  gapless ladder they see a BC slope of exactly 0, the same blind spot as a `kind: "projectile"`
-  drag table. Omitting the member changes nothing, and the key never appears in a response. The
+  which re-solve from that echo, keep it. `error-budget` and `tolerance` perturb only the scalar
+  BC, though, so under a gapless ladder they see a BC slope of exactly 0, the same blind spot as a
+  `kind: "projectile"` drag table. `explain` swaps the whole ladder with `drag_model` (MBA-1603,
+  under Fixed). Omitting the member changes nothing, and the key never appears in a response. The
   MCP `solve` schema lists the new member, and the fuzz harness generates valid and hostile
   ladders. `BcSegmentV1`, `MIN_BC_SEGMENTS_V1` and `MAX_BC_SEGMENTS_V1` are new in
   `ballistics_engine::solve_json`. See
@@ -102,6 +103,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   finishes. Engine, CLI and binding users: a stalled flight's `points` (CLI `trajectory --full`,
   the bindings' point lists) no longer repeat the stall distance thousands of times. Summary
   values, sampled tables and range cards are unchanged.
+- **`explain` attributes a drag-table, BC-ladder or correction-table difference to
+  `ProjectileDrag` (MBA-1603).** The group swap carried only the scalar projectile members
+  (`drag_model`, `ballistic_coefficient`, mass, diameter, length, twist), so a difference in
+  `projectile.drag_table`, `projectile.bc_segments` or `corrections.bc5d_table_path` was never
+  swapped. Its whole effect sat in `interaction_remainder`, with `skipped_axes` empty to say why.
+  When two requests also differed in `drag_model`, the swap flew one request's band BCs against
+  the other's reference curve, so the `ProjectileDrag` row described a projectile neither request
+  had. At 600 m, comparing a .308 on a G7 ladder with one on a G1 ladder gave `ProjectileDrag`
+  +1.540 m of drop against a total of +0.042 m, with -1.498 m in the remainder. The three members
+  now travel with the group as one unit, so that comparison reports +0.042 m and a zero
+  remainder. Comparing a request that carries a BC5D table with one of a different caliber no
+  longer aborts with `InvalidValue` ("BC5D table caliber does not match the shot"): the swap had
+  written the other request's diameter onto a request still holding its own table.
+
+  The report's shape is unchanged. Numbers move from `interaction_remainder` into the
+  `projectile_drag` contribution, and only for requests whose drag descriptions differ; every
+  other comparison is byte-identical. Inputs that belong to no group (`effects.aerodynamic_jump`,
+  `effects.wind_shear_model`, `solver.*`, `shot.ground_threshold_m`) are still not swapped, and a
+  difference in one of them still lands in the remainder.
 
 ## [0.45.0] - 2026-10-07
 

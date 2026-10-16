@@ -181,6 +181,11 @@ pub fn axis_meta(axis: InputAxis) -> AxisMeta {
 pub fn axes_in_group(group: InputGroup) -> &'static [InputAxis] {
     use InputAxis::*;
     match group {
+        // explain.rs's ProjectileDrag swap also carries the drag description that is NOT an
+        // axis here: projectile.drag_table, projectile.bc_segments and
+        // corrections.bc5d_table_path travel with this group as one unit (MBA-1603; see that
+        // module's doc). They are deliberately not axes, so error-budget and tolerance never
+        // perturb them.
         InputGroup::ProjectileDrag => &[
             Mass,
             Diameter,

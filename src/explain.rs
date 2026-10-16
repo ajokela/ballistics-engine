@@ -189,6 +189,38 @@
 //! however many earlier axes in the same group have already re-resolved it. The test
 //! `shot_azimuth_is_refused_even_when_other_shot_geometry_axes_are_applied_first` pins this down
 //! by exercising exactly that four-axis ordering.
+//!
+//! # The drag description travels with ProjectileDrag (MBA-1603)
+//!
+//! Three resolved inputs describe the projectile's drag without being taxonomy axes:
+//! `projectile.drag_table` (MBA-1597), `projectile.bc_segments` (MBA-1598) and
+//! `corrections.bc5d_table_path`. They are deliberately not axes, so `error-budget` and
+//! `tolerance` never perturb them, but they are projectile drag all the same. Before MBA-1603 no
+//! group swapped them: every counterfactual kept the destination's own copy, so a difference in
+//! any of them landed whole in `interaction_remainder` with nothing in `skipped_axes` to say why.
+//! Worse, when `drag_model` or the BC also differed, the swap flew one request's band BCs against
+//! the other request's reference curve, so the `ProjectileDrag` contribution described a
+//! projectile neither request had.
+//!
+//! `swap_group` therefore carries the three as one unit with `ProjectileDrag` whenever the two
+//! requests' descriptions differ (`drag_descriptions_differ`). It clears them from the
+//! destination BEFORE the scalar axes are written and writes the source's AFTER them, in one
+//! final re-resolve under `with_axis`'s re-zero rule. Clearing first keeps every intermediate
+//! re-resolve legal: a BC5D table never meets a foreign diameter, which its caliber check
+//! refuses, and no ladder-plus-table request is ever formed, which `solve_v1` refuses as
+//! `conflicting_fields`. Writing last puts the ladder or table onto a projectile whose
+//! `drag_model`, BC, mass and diameter are already the source's, so band BCs always fly against
+//! the curve they were measured against. When the descriptions are equal nothing changes, and
+//! the comparison is exactly what it was before.
+//!
+//! A BC5D table is not a derived-value hazard in the sense of the rule above. The resolved
+//! request echoes only the table's path; `solve_v1` regenerates the table's ladder on every
+//! re-solve from that request's own BC, drag model, mass and muzzle velocity, and never copies a
+//! ladder from the other request.
+//!
+//! Other inputs that belong to no group are still swapped by none: `effects.aerodynamic_jump`,
+//! `effects.wind_shear_model`, `solver.*` and `shot.ground_threshold_m`. A difference in one of
+//! them lands in `interaction_remainder`.
 
 use serde::{Deserialize, Serialize};
 
@@ -196,7 +228,8 @@ use crate::perturbation::access::{read_axis, with_axis, KernelError};
 use crate::perturbation::taxonomy::{axes_in_group, InputAxis, InputGroup};
 use crate::perturbation::{evaluate, kernel_solve_error, Observation};
 use crate::solve_json::{
-    PressureReferenceV1, ResolvedSolveRequestV1, SolveRequestV1, WindReferenceV1,
+    CorrectionsV1, PressureReferenceV1, ResolvedProjectileV1, ResolvedSolveRequestV1,
+    SolveRequestV1, WindReferenceV1,
 };
 
 /// Schema version for [`SolutionDiffReportV1`].
@@ -676,6 +709,36 @@ fn plan_exclusions(
     Ok((excluded, skipped))
 }
 
+/// True when `a` and `b` describe the projectile's drag differently in a way no
+/// `ProjectileDrag` taxonomy axis carries: a caller drag curve (`projectile.drag_table`,
+/// MBA-1597), a BC ladder (`projectile.bc_segments`, MBA-1598), or an offline BC correction
+/// table (`corrections.bc5d_table_path`). `swap_group` carries these three as one unit with
+/// `ProjectileDrag` whenever this is true (MBA-1603); see the module doc.
+///
+/// The destructuring is exhaustive on purpose (no `..`): a new member of
+/// `ResolvedProjectileV1` or `CorrectionsV1` fails to compile here until someone decides
+/// whether it is part of the drag description, instead of silently landing in
+/// `interaction_remainder` the way these three did.
+fn drag_descriptions_differ(a: &ResolvedSolveRequestV1, b: &ResolvedSolveRequestV1) -> bool {
+    let ResolvedProjectileV1 {
+        mass_kg: _,
+        diameter_m: _,
+        length_m: _,
+        drag_model: _,
+        ballistic_coefficient: _,
+        drag_table: _,
+        bc_segments: _,
+    } = &a.projectile;
+    fn correction_table(r: &ResolvedSolveRequestV1) -> Option<&str> {
+        r.corrections
+            .as_ref()
+            .and_then(|CorrectionsV1 { bc5d_table_path }| bc5d_table_path.as_deref())
+    }
+    a.projectile.drag_table != b.projectile.drag_table
+        || a.projectile.bc_segments != b.projectile.bc_segments
+        || correction_table(a) != correction_table(b)
+}
+
 /// Build the [`SolveRequestV1`] representing `dst` with every NON-EXCLUDED axis of `group`
 /// copied from `src`, applying each axis one at a time and re-resolving between writes (via a
 /// real `solve_v1` call) so a later axis in the same group sees the effect of an earlier one --
@@ -709,6 +772,20 @@ fn swap_group(
     excluded: &[InputAxis],
 ) -> Result<SolveRequestV1, KernelError> {
     let mut current = dst.clone();
+    // MBA-1603: the drag description travels with ProjectileDrag as one unit, cleared from the
+    // destination BEFORE the scalar axes are written and replaced by the source's AFTER them.
+    // Clearing first keeps every intermediate re-resolve legal (a BC5D table never sees a
+    // foreign diameter, which its caliber check refuses); writing last means the ladder or
+    // table arrives on a projectile whose drag_model, BC, mass and diameter are already the
+    // source's, so band BCs never fly against the wrong reference curve. Skipped entirely when
+    // the two descriptions are equal, which leaves every such comparison exactly as before.
+    let carry_drag_description =
+        group == InputGroup::ProjectileDrag && drag_descriptions_differ(dst, src);
+    if carry_drag_description {
+        current.projectile.drag_table = None;
+        current.projectile.bc_segments = None;
+        current.corrections = None;
+    }
     for &axis in axes_in_group(group) {
         if excluded.contains(&axis) {
             continue;
@@ -719,6 +796,20 @@ fn swap_group(
             continue;
         };
         let req = with_axis(&current, axis, v)?;
+        current = crate::solve_v1::solve_v1(req)
+            .map_err(kernel_solve_error)?
+            .resolved_request;
+    }
+    if carry_drag_description {
+        let mut req: SolveRequestV1 = (&current).into();
+        req.projectile.drag_table = src.projectile.drag_table.clone();
+        req.projectile.bc_segments = src.projectile.bc_segments.clone();
+        req.corrections = src.corrections.clone();
+        // The same re-zero rule `with_axis` applies to a requires_rezero axis: a new drag
+        // description invalidates the destination's searched elevation.
+        if req.shot.zero_distance_m.is_some() {
+            req.shot.muzzle_angle_rad = None;
+        }
         current = crate::solve_v1::solve_v1(req)
             .map_err(kernel_solve_error)?
             .resolved_request;
@@ -751,7 +842,10 @@ fn swap_group(
 /// up to N solves per direction, 2N total, ON TOP of the 16 -- so a typical call costs on the
 /// order of 16 + 2*27 = 70 solves, not 16. `plan_exclusions` itself adds no solves (it only
 /// calls [`read_axis`]/[`with_axis`], never `solve_v1`), so excluding an axis only ever reduces
-/// this total, never increases it.
+/// this total, never increases it. When the two requests' drag descriptions differ (a drag
+/// table, BC ladder or correction table; see the module doc's MBA-1603 section),
+/// `ProjectileDrag`'s swap re-resolves once more per direction to write the source's
+/// description, so such a call costs 2 solves more.
 ///
 /// # Axes that cannot be swapped
 ///
@@ -2406,5 +2500,189 @@ mod tests {
         assert!(reason.contains("enhanced_spin_drift"), "{reason}");
 
         assert_eq!(rep.rows.len(), 1);
+    }
+
+    // ---- MBA-1603: the drag description beyond the scalar ProjectileDrag axes ----
+
+    /// The `resolved_with_bc_and_wind_speed(0.243, 3.0)` baseline with `projectile` members
+    /// overwritten or added from `projectile_extra`. Every OTHER input stays byte-identical, so
+    /// any difference between two of these is a ProjectileDrag difference and nothing else.
+    fn resolved_with_projectile(
+        projectile_extra: serde_json::Value,
+    ) -> crate::solve_json::ResolvedSolveRequestV1 {
+        let mut json = serde_json::json!({
+            "schema_version": 1,
+            "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
+                           "ballistic_coefficient": 0.243},
+            "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05},
+            "shot": {"max_range_m": 900.0, "zero_distance_m": 100.0},
+            "atmosphere": {"temperature_k": 288.0},
+            "wind": {"speed_mps": 3.0, "direction_from_rad": std::f64::consts::FRAC_PI_2},
+            "solver": {}, "effects": {}, "sampling": {"interval_m": 25.0}
+        });
+        for (key, value) in projectile_extra.as_object().unwrap() {
+            json["projectile"][key] = value.clone();
+        }
+        let req = crate::solve_json::decode_solve_request_v1(&json.to_string()).unwrap();
+        crate::solve_v1::solve_v1(req).unwrap().resolved_request
+    }
+
+    fn mba1603_band(min: f64, max: f64, bc: f64) -> serde_json::Value {
+        serde_json::json!({"velocity_min_mps": min, "velocity_max_mps": max,
+                           "ballistic_coefficient": bc})
+    }
+
+    /// A five-point G1-shaped curve: far enough from G7 that flying it moves the 600 m drop by
+    /// metres, not millimetres.
+    fn mba1603_g1ish_points() -> serde_json::Value {
+        serde_json::json!([
+            {"mach": 0.0, "cd": 0.2629}, {"mach": 0.9, "cd": 0.3085},
+            {"mach": 1.0, "cd": 0.4805}, {"mach": 1.5, "cd": 0.6573},
+            {"mach": 3.0, "cd": 0.5250}
+        ])
+    }
+
+    /// The whole of a pure projectile-drag difference must land in ProjectileDrag: every other
+    /// group swaps byte-identical values (exactly zero), so the remainder must be zero too, and
+    /// nothing may be reported as skipped. Before MBA-1603 the swap never carried
+    /// `drag_table`/`bc_segments`/`corrections`, so all of it sat in the remainder instead.
+    fn assert_all_of_it_is_projectile_drag(
+        a: &crate::solve_json::ResolvedSolveRequestV1,
+        b: &crate::solve_json::ResolvedSolveRequestV1,
+    ) {
+        let rep = explain_difference(a, b, &[300.0, 600.0]).unwrap();
+        assert!(rep.skipped_axes.is_empty(), "{:?}", rep.skipped_axes);
+        for row in &rep.rows {
+            assert!(
+                row.total.drop_m.abs() > 1e-3,
+                "fixture must really differ at {} m: {:?}",
+                row.range_m,
+                row.total
+            );
+            let drag = row
+                .contributions
+                .iter()
+                .find(|c| c.group == InputGroup::ProjectileDrag)
+                .unwrap()
+                .delta;
+            assert!(
+                (drag.drop_m - row.total.drop_m).abs() < 1e-9
+                    && (drag.windage_m - row.total.windage_m).abs() < 1e-9,
+                "range {}: ProjectileDrag {:?} must equal the total {:?} (remainder {:?})",
+                row.range_m,
+                drag,
+                row.total,
+                row.interaction_remainder
+            );
+            assert!(
+                row.interaction_remainder.drop_m.abs() < 1e-9
+                    && row.interaction_remainder.windage_m.abs() < 1e-9,
+                "range {}: remainder {:?}",
+                row.range_m,
+                row.interaction_remainder
+            );
+            for c in row
+                .contributions
+                .iter()
+                .filter(|c| c.group != InputGroup::ProjectileDrag)
+            {
+                assert!(
+                    c.delta.drop_m.abs() < 1e-9,
+                    "{:?} {}",
+                    c.group,
+                    c.delta.drop_m
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_bc_ladder_difference_is_attributed_to_projectile_drag() {
+        let a = resolved_with_projectile(serde_json::json!({}));
+        let b = resolved_with_projectile(serde_json::json!({
+            "bc_segments": [mba1603_band(600.0, 999.0, 0.260), mba1603_band(0.0, 600.0, 0.220)]
+        }));
+        assert_all_of_it_is_projectile_drag(&a, &b);
+    }
+
+    #[test]
+    fn a_drag_table_difference_is_attributed_to_projectile_drag() {
+        let a = resolved_with_projectile(serde_json::json!({}));
+        let b = resolved_with_projectile(serde_json::json!({
+            "drag_table": {"kind": "reference", "points": mba1603_g1ish_points()}
+        }));
+        assert_all_of_it_is_projectile_drag(&a, &b);
+    }
+
+    /// The reference-curve hazard: swapping `drag_model` alone flew A's G7-referenced band BCs
+    /// against G1 (and B's G1 bands against G7), a projectile neither request describes. The
+    /// ladder must travel with the model it is measured against.
+    #[test]
+    fn a_drag_model_swap_carries_the_ladder_measured_against_it() {
+        let a = resolved_with_projectile(serde_json::json!({
+            "drag_model": "G7",
+            "bc_segments": [mba1603_band(600.0, 999.0, 0.260), mba1603_band(0.0, 600.0, 0.220)]
+        }));
+        let b = resolved_with_projectile(serde_json::json!({
+            "drag_model": "G1",
+            "bc_segments": [mba1603_band(600.0, 999.0, 0.500), mba1603_band(0.0, 600.0, 0.450)]
+        }));
+        assert_all_of_it_is_projectile_drag(&a, &b);
+    }
+
+    /// A drag table on one side and a ladder on the other must swap as one unit: carrying
+    /// either member alone onto the other request would build a ladder-plus-table request that
+    /// solve_v1 refuses (`conflicting_fields`), aborting the whole report.
+    #[test]
+    fn a_drag_table_versus_a_bc_ladder_swaps_as_one_unit() {
+        let a = resolved_with_projectile(serde_json::json!({
+            "drag_table": {"kind": "reference", "points": mba1603_g1ish_points()}
+        }));
+        let b = resolved_with_projectile(serde_json::json!({
+            "bc_segments": [mba1603_band(600.0, 999.0, 0.260), mba1603_band(0.0, 600.0, 0.220)]
+        }));
+        assert_all_of_it_is_projectile_drag(&a, &b);
+    }
+
+    /// Equal drag descriptions keep the pre-MBA-1603 path exactly: a scalar BC difference
+    /// under the SAME ladder still attributes to ProjectileDrag, and the report matches a
+    /// recomputation that never touches the drag description at all.
+    #[test]
+    fn equal_drag_descriptions_leave_the_existing_swap_untouched() {
+        // An interior gap (500-700 m/s) is where the scalar BC flies under a ladder.
+        let ladder = serde_json::json!([
+            mba1603_band(700.0, 999.0, 0.260),
+            mba1603_band(0.0, 500.0, 0.220)
+        ]);
+        let a = resolved_with_projectile(serde_json::json!({"bc_segments": ladder.clone()}));
+        let b = resolved_with_projectile(serde_json::json!({
+            "ballistic_coefficient": 0.300, "bc_segments": ladder
+        }));
+        let rep = explain_difference(&a, &b, &[600.0]).unwrap();
+        let (excluded, _) = plan_exclusions(&a, &b, InputGroup::ProjectileDrag).unwrap();
+        let fwd = evaluate(
+            &swap_group(&a, &b, InputGroup::ProjectileDrag, &excluded).unwrap(),
+            &[600.0],
+        )
+        .unwrap();
+        let bwd = evaluate(
+            &swap_group(&b, &a, InputGroup::ProjectileDrag, &excluded).unwrap(),
+            &[600.0],
+        )
+        .unwrap();
+        let obs_a = evaluate(&(&a).into(), &[600.0]).unwrap();
+        let obs_b = evaluate(&(&b).into(), &[600.0]).unwrap();
+        let expected = DeltaV1::mean(
+            DeltaV1::between(&obs_a[0], &fwd[0]),
+            DeltaV1::between(&obs_b[0], &bwd[0]).neg(),
+        );
+        let drag = rep.rows[0]
+            .contributions
+            .iter()
+            .find(|c| c.group == InputGroup::ProjectileDrag)
+            .unwrap()
+            .delta;
+        assert_eq!(drag, expected);
+        assert!(drag.drop_m.abs() > 1e-4, "the gap BC must fly: {drag:?}");
     }
 }

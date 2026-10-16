@@ -349,6 +349,58 @@ fn explain_table_labels_the_remainder_and_renders_skipped_axes() {
     assert!(skipped.iter().any(|s| s["axis"] == "latitude"), "{json}");
 }
 
+/// MBA-1603, end to end: two request files that differ ONLY in a `projectile.bc_segments`
+/// ladder (HEAD wire names, fastest band first). The ladder is projectile drag, so the whole
+/// difference must land in the `projectile_drag` contribution, not in the interaction
+/// remainder, and nothing may be reported as skipped. Before the fix no group swapped the
+/// ladder, so `projectile_drag` read exactly 0 and the remainder carried all of it.
+#[test]
+fn explain_attributes_a_bc_ladder_to_projectile_drag() {
+    let dir = tempfile_dir();
+    let mut laddered = small_request(823.0);
+    laddered["projectile"]["bc_segments"] = serde_json::json!([
+        {"velocity_min_mps": 600.0, "velocity_max_mps": 999.0, "ballistic_coefficient": 0.260},
+        {"velocity_min_mps": 0.0, "velocity_max_mps": 600.0, "ballistic_coefficient": 0.220}
+    ]);
+    let a_path = write_json(&dir, "a.json", &small_request(823.0));
+    let b_path = write_json(&dir, "b.json", &laddered);
+
+    let (stdout, stderr, ok) = run(&[
+        "explain",
+        "--a",
+        a_path.to_str().unwrap(),
+        "--b",
+        b_path.to_str().unwrap(),
+        "--ranges",
+        "600",
+        "-o",
+        "json",
+    ]);
+    assert!(ok, "stderr: {stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+    assert!(v["skipped_axes"].as_array().unwrap().is_empty(), "{stdout}");
+    let row = &v["rows"][0];
+    let total = row["total"]["drop_m"].as_f64().unwrap();
+    assert!(
+        total.abs() > 1e-3,
+        "the ladder must move the drop: {stdout}"
+    );
+    let drag = row["contributions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["group"] == "projectile_drag")
+        .expect("a projectile_drag contribution")["delta"]["drop_m"]
+        .as_f64()
+        .unwrap();
+    assert!(
+        (drag - total).abs() < 1e-9,
+        "projectile_drag {drag} must carry the whole total {total}: {stdout}"
+    );
+    let remainder = row["interaction_remainder"]["drop_m"].as_f64().unwrap();
+    assert!(remainder.abs() < 1e-9, "remainder {remainder}: {stdout}");
+}
+
 /// Review I2: `explain` reads TWO files, so a decode/solve error must name WHICH one failed --
 /// `describe_solve_error` alone has no path, so without this the error for a broken `--a` is
 /// indistinguishable from the same error for a broken `--b`. Checked in both positions so the

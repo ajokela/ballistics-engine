@@ -356,12 +356,13 @@ drag-table-with-correction-table check first, so it is `conflicting_fields` at
 rebuilt from a resolved request re-solves on the same ladder. The zero search and the trajectory
 both fly it. Omitting the member changes nothing, and the key never appears in a response.
 
-**Known limitation: BC sensitivity.** The perturbation kernels behind the CLI's `explain`,
-`error-budget` and `tolerance` perturb and swap only the scalar `ballistic_coefficient`; no input
-axis carries the band BCs. Under a gapless ladder the scalar never flies, so its slope is exactly
-0, and `error-budget` reports a declared BC sigma as contributing nothing rather than listing BC
-under `unavailable_sources`. This is the same blind spot as a `kind: "projectile"` drag table.
-With an interior gap, the scalar moves the result only through the gap.
+**Known limitation: BC sensitivity.** The CLI's `error-budget` and `tolerance` perturb only the
+scalar `ballistic_coefficient`; no input axis carries the band BCs. Under a gapless ladder the
+scalar never flies, so its slope is exactly 0, and `error-budget` reports a declared BC sigma as
+contributing nothing rather than listing BC under `unavailable_sources`. This is the same blind
+spot as a `kind: "projectile"` drag table. With an interior gap, the scalar moves the result only
+through the gap. `explain` is not affected: its `ProjectileDrag` swap carries the whole ladder
+with `drag_model` (MBA-1603).
 
 **Platforms.** The ladder is plain request data and no file is read, so it works wherever
 `solve` runs, including through the WASM module's `bridgeCall`, where `corrections.bc5d_table_path`
