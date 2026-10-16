@@ -496,6 +496,45 @@ fn solve_refuses_a_correction_table_alongside_a_drag_table() {
     );
 }
 
+/// MBA-1598: a correction table builds its own BC ladder from `ballistic_coefficient`, so a
+/// caller's `projectile.bc_segments` beside it is refused. The refusal comes before the table
+/// is opened: a corrupt table on disk would otherwise answer with its own CRC error at
+/// `$.corrections.bc5d_table_path`, and a valid one gets the same refusal.
+#[test]
+fn solve_refuses_a_correction_table_alongside_a_bc_ladder() {
+    let mut corrupt = bc5d_fixture();
+    let last = corrupt.len() - 1;
+    corrupt[last] ^= 0xFF;
+    for (label, bytes) in [
+        ("solve-with-ladder", bc5d_fixture()),
+        ("solve-with-ladder-corrupt", corrupt),
+    ] {
+        let (dir, file) = write_fixture(label, &bytes);
+        let mut request = solve_request(Some(json!({"bc5d_table_path": file.to_str().unwrap()})));
+        request["projectile"]["bc_segments"] = json!([
+            {"velocity_min_mps": 600.0, "velocity_max_mps": 999.0, "ballistic_coefficient": 0.42},
+            {"velocity_min_mps": 0.0, "velocity_max_mps": 600.0, "ballistic_coefficient": 0.38}
+        ]);
+        let out = bridge_raw("solve", request);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(out["ok"], false, "{label}: {out}");
+        assert_eq!(
+            out["error"]["details"]["error"]["code"], "conflicting_fields",
+            "{label}: {out}"
+        );
+        assert_eq!(
+            out["error"]["details"]["error"]["path"], "$.projectile.bc_segments",
+            "{label}: {out}"
+        );
+        assert_eq!(
+            out["error"]["details"]["error"]["message"],
+            "projectile.bc_segments cannot be combined with corrections.bc5d_table_path: the \
+             correction table builds its own BC ladder from ballistic_coefficient",
+            "{label}: {out}"
+        );
+    }
+}
+
 #[test]
 fn solve_rejects_corrupt_and_missing_tables_with_typed_envelopes() {
     // Corrupt CRC -> invalid_value at the corrections path.

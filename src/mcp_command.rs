@@ -36,8 +36,8 @@
 //! `-32602`; anything [`ballistics_engine::solve_v1()`] rejects after that is `isError: true`.
 
 use ballistics_engine::solve_json::{
-    decode_solve_request_v1, DRAG_MODEL_WIRE_NAMES_V1, MAX_DRAG_TABLE_POINTS_V1,
-    MIN_DRAG_TABLE_POINTS_V1,
+    decode_solve_request_v1, DRAG_MODEL_WIRE_NAMES_V1, MAX_BC_SEGMENTS_V1,
+    MAX_DRAG_TABLE_POINTS_V1, MIN_BC_SEGMENTS_V1, MIN_DRAG_TABLE_POINTS_V1,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -476,6 +476,25 @@ fn solve_input_schema() -> Value {
                                         "cd": {"type": "number", "exclusiveMinimum": 0}
                                     }
                                 }
+                            }
+                        }
+                    },
+                    // MBA-1598. The band BC carries exactly the scalar's schema; the decoder
+                    // holds both to the same bounds and the strict order/no-overlap rules.
+                    "bc_segments": {
+                        "type": "array",
+                        "minItems": MIN_BC_SEGMENTS_V1,
+                        "maxItems": MAX_BC_SEGMENTS_V1,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                                "velocity_min_mps", "velocity_max_mps", "ballistic_coefficient"
+                            ],
+                            "properties": {
+                                "velocity_min_mps": {"type": "number", "minimum": 0},
+                                "velocity_max_mps": {"type": "number"},
+                                "ballistic_coefficient": {"type": "number"}
                             }
                         }
                     }
@@ -983,6 +1002,28 @@ mod tests {
         assert_eq!(
             drag_table["properties"]["points"]["maxItems"],
             json!(MAX_DRAG_TABLE_POINTS_V1)
+        );
+        // MBA-1598: the BC ladder's band limits and members mirror the decoder's, and its
+        // band BC carries the scalar BC's own schema entry.
+        let projectile = &tools[0]["inputSchema"]["properties"]["projectile"]["properties"];
+        let bc_segments = &projectile["bc_segments"];
+        assert_eq!(bc_segments["type"], json!("array"));
+        assert_eq!(bc_segments["minItems"], json!(MIN_BC_SEGMENTS_V1));
+        assert_eq!(bc_segments["maxItems"], json!(MAX_BC_SEGMENTS_V1));
+        let band = &bc_segments["items"];
+        assert_eq!(band["additionalProperties"], json!(false));
+        assert_eq!(
+            band["required"],
+            json!([
+                "velocity_min_mps",
+                "velocity_max_mps",
+                "ballistic_coefficient"
+            ])
+        );
+        assert_eq!(band["properties"]["velocity_min_mps"]["minimum"], json!(0));
+        assert_eq!(
+            band["properties"]["ballistic_coefficient"],
+            projectile["ballistic_coefficient"]
         );
     }
 

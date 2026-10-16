@@ -270,6 +270,7 @@ fn wez_resolved_request(
             ballistic_coefficient: base_inputs.bc_value,
             // Unreachable with a table: this function returns `None` for one above.
             drag_table: None,
+            // WEZ builds from engine inputs and flies the scalar BC only.
             bc_segments: None,
         },
         rifle: ResolvedRifleV1 {

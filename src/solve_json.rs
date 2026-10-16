@@ -243,10 +243,16 @@ pub struct ProjectileV1 {
         deserialize_with = "deserialize_present"
     )]
     pub drag_table: Option<DragTableV1>,
-    /// Velocity-segmented BCs for multi-BC flight. Mutually exclusive with `drag_table`
-    /// and `corrections.bc5d_table_path`. When present, `ballistic_coefficient` acts as
-    /// the gap-coverage fallback for any velocity not covered by a segment.
-    /// Segments must be in **descending** order of `velocity_from_mps` (highest first).
+    /// A velocity-banded BC ladder (MBA-1598): solve-json's form of the CLI's `--bc-segment`.
+    /// See [`BcSegmentV1`] for the band rules.
+    ///
+    /// `ballistic_coefficient` stays required and validated beside it, but flies only in an
+    /// interior gap between two bands. Below the lowest band, or at or above the highest, the
+    /// nearest edge band applies, so under a gapless ladder the scalar never flies. Band BCs
+    /// are referenced to `drag_model`, and bands are selected by airspeed. Refused alongside
+    /// `drag_table`, which replaces the `drag_model` curve the band BCs are measured against,
+    /// and alongside `corrections.bc5d_table_path`, which builds its own ladder from
+    /// `ballistic_coefficient`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -255,21 +261,34 @@ pub struct ProjectileV1 {
     pub bc_segments: Option<Vec<BcSegmentV1>>,
 }
 
-/// One velocity-segmented ballistic coefficient for multi-BC flight (JSON bridge path).
+/// One band of a [`ProjectileV1::bc_segments`] ladder: the BC that flies while the bullet's
+/// airspeed lies in `[velocity_min_mps, velocity_max_mps)`.
 ///
-/// Segments must be supplied in **descending** order of `velocity_from_mps`
-/// (highest velocity first), matching `BCSegmentData` conventions internally.
-///
-/// When `projectile.bc_segments` is present, the scalar `ballistic_coefficient`
-/// is used only as the gap-coverage fallback; it is otherwise not flown.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// - Band BCs are in lb/in² and referenced to `projectile.drag_model`, exactly as the scalar
+///   `ballistic_coefficient` is, and are held to the same bounds.
+/// - Bands are selected by airspeed: the bullet's speed relative to the air mass, not over the
+///   ground.
+/// - The array runs from the fastest band to the slowest. `velocity_min_mps` strictly
+///   descends, and each band ends at or below the start of the band before it: touching edges
+///   and gaps are legal, overlaps are not. The order is only a validation rule; the lookup
+///   itself does not depend on it.
+/// - A ladder holds [`MIN_BC_SEGMENTS_V1`] to [`MAX_BC_SEGMENTS_V1`] bands.
+/// - In an interior gap between two bands the scalar `ballistic_coefficient` flies. Below the
+///   lowest band, or at or above the highest, the nearest edge band applies, so under a
+///   gapless ladder the scalar never flies.
+/// - Every interior band-to-band edge and every gap edge is blended with a smoothstep across
+///   a narrow window centred on it, so the integrator never sees the drag jump in one step
+///   (`velocity_segment_bc` in `src/bc_estimation.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BcSegmentV1 {
-    /// Lower bound of this velocity band, m/s (inclusive). Must be finite and >= 0.
-    pub velocity_from_mps: f64,
-    /// Upper bound, m/s (exclusive). Must be finite and > velocity_from_mps.
-    pub velocity_to_mps: f64,
-    /// Ballistic coefficient for this band (lb/in²). Must be finite and > 0.
+    /// Lower edge of the band, m/s, inclusive. Finite and >= 0.
+    pub velocity_min_mps: f64,
+    /// Upper edge of the band, m/s, exclusive. Finite and > `velocity_min_mps`; there is no
+    /// upper bound.
+    pub velocity_max_mps: f64,
+    /// This band's BC, lb/in² against `projectile.drag_model`. Same bounds as the scalar
+    /// `ballistic_coefficient`.
     pub ballistic_coefficient: f64,
 }
 
@@ -279,6 +298,15 @@ pub const MIN_DRAG_TABLE_POINTS_V1: usize = 2;
 /// The most points a [`DragTableV1`] may hold. Matches the `.drg`/CSV loader behind the CLI's
 /// `--drag-table` and the array FFI's `MAX_FFI_DRAG_TABLE_LEN`.
 pub const MAX_DRAG_TABLE_POINTS_V1: usize = 4096;
+
+/// The fewest bands a [`ProjectileV1::bc_segments`] ladder may hold. An empty array is refused
+/// rather than read as "no ladder"; omit the field for that.
+pub const MIN_BC_SEGMENTS_V1: usize = 1;
+
+/// The most bands a [`ProjectileV1::bc_segments`] ladder may hold. The BC lookup scans the
+/// ladder on every derivative evaluation, so the cap bounds the per-step cost; it is far past
+/// the handful of bands a published multi-BC schedule lists.
+pub const MAX_BC_SEGMENTS_V1: usize = 64;
 
 /// A caller-supplied Cd-vs-Mach drag curve (MBA-1597): solve-json's form of the CLI's
 /// `--drag-table`.
@@ -961,8 +989,9 @@ pub struct ResolvedProjectileV1 {
     /// silently fly their re-solves on `drag_model`'s curve instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drag_table: Option<DragTableV1>,
-    /// Verbatim echo of `bc_segments` when supplied, so a resolved-request
-    /// re-solve (perturbation, round-trip) re-applies the same ladder.
+    /// Verbatim echo of the request's BC ladder (MBA-1598), omitted when none was supplied. It
+    /// is carried for the same reason as `drag_table`: the perturbation kernels re-solve from
+    /// this resolved request, and dropping it would fly their re-solves on the scalar BC.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bc_segments: Option<Vec<BcSegmentV1>>,
 }
@@ -1592,6 +1621,9 @@ fn validate_request_ranges(request: &SolveRequestV1) -> Result<(), SolveErrorEnv
     if let Some(drag_table) = &request.projectile.drag_table {
         validate_drag_table_v1(drag_table)?;
     }
+    if let Some(bc_segments) = &request.projectile.bc_segments {
+        validate_bc_segments_v1(bc_segments)?;
+    }
     Ok(())
 }
 
@@ -1744,7 +1776,7 @@ fn validate_projectile(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
             "ballistic_coefficient",
             // MBA-1597: optional caller-supplied drag curve.
             "drag_table",
-            // Multi-BC velocity-segmented ladder.
+            // MBA-1598: optional velocity-banded BC ladder.
             "bc_segments",
         ],
         &[
@@ -1774,10 +1806,18 @@ fn validate_projectile(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
     Ok(())
 }
 
-/// Shape-validate an optional `projectile.bc_segments`: a non-empty array where each element
-/// is a strict object with exactly `{velocity_from_mps, velocity_to_mps, ballistic_coefficient}`,
-/// all numbers. Value-level rules (ordering, positivity, band validity) are deferred to
-/// [`validate_bc_segments_v1`] once the request is typed.
+/// The members of one [`BcSegmentV1`], all required numbers.
+const BC_SEGMENT_FIELDS_V1: [&str; 3] = [
+    "velocity_min_mps",
+    "velocity_max_mps",
+    "ballistic_coefficient",
+];
+
+/// Shape-validate an optional `projectile.bc_segments` (MBA-1598): a non-empty array of strict
+/// `{velocity_min_mps, velocity_max_mps, ballistic_coefficient}` objects, all numbers. `null`
+/// is refused here, not read as omission. The values themselves (the band count, the bounds,
+/// the order and the no-overlap rule) are range rules, checked by [`validate_bc_segments_v1`]
+/// once the request is typed.
 fn validate_bc_segments_shape(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
     let segments_path = "$.projectile.bc_segments";
     let Some(segments) = value.as_array() else {
@@ -1790,7 +1830,7 @@ fn validate_bc_segments_shape(value: &Value) -> Result<(), SolveErrorEnvelopeV1>
     if segments.is_empty() {
         return Err(protocol_error(
             SolveErrorCodeV1::InvalidValue,
-            "bc_segments must contain at least one segment",
+            bc_segment_count_message(0),
             segments_path,
         ));
     }
@@ -1800,86 +1840,101 @@ fn validate_bc_segments_shape(value: &Value) -> Result<(), SolveErrorEnvelopeV1>
         validate_members(
             segment,
             &seg_path,
-            &["velocity_from_mps", "velocity_to_mps", "ballistic_coefficient"],
-            &["velocity_from_mps", "velocity_to_mps", "ballistic_coefficient"],
+            &BC_SEGMENT_FIELDS_V1,
+            &BC_SEGMENT_FIELDS_V1,
         )?;
-        validate_required_numbers(
-            segment,
-            &seg_path,
-            &["velocity_from_mps", "velocity_to_mps", "ballistic_coefficient"],
-        )?;
+        validate_required_numbers(segment, &seg_path, &BC_SEGMENT_FIELDS_V1)?;
     }
     Ok(())
 }
 
-/// Value-validate a [`Vec<BcSegmentV1>`] after deserialization: each field must be finite and
-/// in range, bands must not be degenerate, and segments must be in strictly descending order
-/// of `velocity_from_mps` (highest velocity first).
+fn bc_segment_count_message(count: usize) -> String {
+    format!("bc_segments must have {MIN_BC_SEGMENTS_V1} to {MAX_BC_SEGMENTS_V1} bands, got {count}")
+}
+
+/// Check a [`ProjectileV1::bc_segments`] ladder's values: the band count, then each band in
+/// order, naming the exact entry at fault.
+///
+/// Each band needs a finite `velocity_min_mps` >= 0, a finite `velocity_max_mps` above it, and
+/// a `ballistic_coefficient` inside the scalar BC's own bounds. From the second band on,
+/// `velocity_min_mps` must be below the previous band's (fastest band first), and
+/// `velocity_max_mps` must not reach above the previous band's `velocity_min_mps` (no
+/// overlaps; touching edges and gaps are legal).
 ///
 /// Called from both the decoder and the solve service, so a Rust caller that builds a request
-/// without [`decode_solve_request_v1`] hears about a bad segment at the same path.
+/// without [`decode_solve_request_v1`] hears about a bad band at the same path.
 pub(crate) fn validate_bc_segments_v1(
     segments: &[BcSegmentV1],
 ) -> Result<(), SolveErrorEnvelopeV1> {
     let base = "$.projectile.bc_segments";
-    if segments.is_empty() {
+    let count = segments.len();
+    if !(MIN_BC_SEGMENTS_V1..=MAX_BC_SEGMENTS_V1).contains(&count) {
         return Err(protocol_error(
             SolveErrorCodeV1::InvalidValue,
-            "bc_segments must contain at least one segment",
+            bc_segment_count_message(count),
             base,
         ));
     }
-    let mut previous_from: Option<f64> = None;
+    let mut previous: Option<BcSegmentV1> = None;
     for (index, seg) in segments.iter().enumerate() {
         let seg_path = format!("{base}[{index}]");
-        if !seg.velocity_from_mps.is_finite() || seg.velocity_from_mps < 0.0 {
+        let min_path = format!("{seg_path}.velocity_min_mps");
+        let max_path = format!("{seg_path}.velocity_max_mps");
+        if !seg.velocity_min_mps.is_finite() || seg.velocity_min_mps < 0.0 {
             return Err(protocol_error(
                 SolveErrorCodeV1::InvalidValue,
                 format!(
-                    "velocity_from_mps must be finite and >= 0, got {}",
-                    seg.velocity_from_mps
+                    "velocity_min_mps must be finite and >= 0, got {}",
+                    seg.velocity_min_mps
                 ),
-                format!("{seg_path}.velocity_from_mps"),
+                min_path,
             ));
         }
-        if !seg.velocity_to_mps.is_finite() || seg.velocity_to_mps <= seg.velocity_from_mps {
+        if !seg.velocity_max_mps.is_finite() || seg.velocity_max_mps <= seg.velocity_min_mps {
             return Err(protocol_error(
                 SolveErrorCodeV1::InvalidValue,
                 format!(
-                    "velocity_to_mps must be finite and > velocity_from_mps ({}), got {}",
-                    seg.velocity_from_mps, seg.velocity_to_mps
+                    "velocity_max_mps must be finite and > velocity_min_mps ({}), got {}",
+                    seg.velocity_min_mps, seg.velocity_max_mps
                 ),
-                format!("{seg_path}.velocity_to_mps"),
+                max_path,
             ));
         }
-        if !seg.ballistic_coefficient.is_finite() || seg.ballistic_coefficient <= 0.0 {
-            return Err(protocol_error(
-                SolveErrorCodeV1::InvalidValue,
-                format!(
-                    "ballistic_coefficient must be finite and > 0, got {}",
-                    seg.ballistic_coefficient
-                ),
-                format!("{seg_path}.ballistic_coefficient"),
-            ));
-        }
-        // Segments must be in descending order of velocity_from_mps (highest velocity first).
-        if let Some(prev_from) = previous_from {
-            if seg.velocity_from_mps >= prev_from {
+        require_range(
+            seg.ballistic_coefficient,
+            limits::BALLISTIC_COEFFICIENT,
+            &format!("{seg_path}.ballistic_coefficient"),
+        )?;
+        if let Some(prev) = previous {
+            if seg.velocity_min_mps >= prev.velocity_min_mps {
                 return Err(protocol_error(
                     SolveErrorCodeV1::InvalidValue,
                     format!(
-                        "bc_segments must be in strictly descending order of velocity_from_mps; \
-                         segment[{index}] velocity_from_mps ({}) is not less than \
-                         segment[{}] velocity_from_mps ({})",
-                        seg.velocity_from_mps,
+                        "velocity_min_mps must be below bc_segments[{}].velocity_min_mps ({}), \
+                         got {}: list the bands from the highest speed to the lowest, or \
+                         reverse the array",
                         index - 1,
-                        prev_from
+                        prev.velocity_min_mps,
+                        seg.velocity_min_mps
                     ),
-                    format!("{seg_path}.velocity_from_mps"),
+                    min_path,
+                ));
+            }
+            if seg.velocity_max_mps > prev.velocity_min_mps {
+                return Err(protocol_error(
+                    SolveErrorCodeV1::InvalidValue,
+                    format!(
+                        "velocity_max_mps ({}) overlaps bc_segments[{}], which starts at {} m/s: \
+                         a band must end at or below the start of the faster band before it",
+                        seg.velocity_max_mps,
+                        index - 1,
+                        prev.velocity_min_mps
+                    ),
+                    max_path,
                 ));
             }
         }
-        previous_from = Some(seg.velocity_from_mps);
+        previous = Some(*seg);
     }
     Ok(())
 }

@@ -277,6 +277,7 @@ pub fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
             ballistic_coefficient: ranged(u, 0.1, 1.2)?,
             // Drawn last, below, so adding it left every earlier draw where it was.
             drag_table: None,
+            bc_segments: None,
         },
         rifle: RifleV1 {
             muzzle_velocity_mps: ranged(u, 300.0, 1_200.0)?,
