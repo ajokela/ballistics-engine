@@ -208,11 +208,13 @@
 //! destination BEFORE the scalar axes are written and writes the source's AFTER them, in one
 //! final re-resolve under `with_axis`'s re-zero rule. Clearing first keeps every intermediate
 //! re-resolve legal: a BC5D table never meets a foreign diameter, which its caliber check
-//! refuses, and no ladder-plus-table request is ever formed, which `solve_v1` refuses as
-//! `conflicting_fields`. Writing last puts the ladder or table onto a projectile whose
-//! `drag_model`, BC, mass and diameter are already the source's, so band BCs always fly against
-//! the curve they were measured against. When the descriptions are equal nothing changes, and
-//! the comparison is exactly what it was before.
+//! refuses, and no request ever pairs one side's ladder with the other side's table, which
+//! `solve_v1` refuses as `conflicting_fields` when the table is of kind `projectile` (a
+//! `reference` table would fly a foreign ladder silently). Writing last puts the ladder, the
+//! table, or both together, onto a projectile whose `drag_model`, BC, mass and diameter are
+//! already the source's, so band BCs always fly against the curve they were measured against:
+//! `drag_model`'s, or the source's own reference table. When the descriptions are equal
+//! nothing changes, and the comparison is exactly what it was before.
 //!
 //! A BC5D table is not a derived-value hazard in the sense of the rule above. The resolved
 //! request echoes only the table's path; `solve_v1` regenerates the table's ladder on every
@@ -2632,8 +2634,10 @@ mod tests {
     }
 
     /// A drag table on one side and a ladder on the other must swap as one unit: carrying
-    /// either member alone onto the other request would build a ladder-plus-table request that
-    /// solve_v1 refuses (`conflicting_fields`), aborting the whole report.
+    /// either member alone onto the other request would pair one request's ladder with the
+    /// other's table. Beside a `projectile`-kind table solve_v1 refuses that pair
+    /// (`conflicting_fields`), aborting the whole report; beside this `reference`-kind table it
+    /// would fly G7-measured band BCs over a G1-shaped curve, a projectile neither request has.
     #[test]
     fn a_drag_table_versus_a_bc_ladder_swaps_as_one_unit() {
         let a = resolved_with_projectile(serde_json::json!({
@@ -2642,6 +2646,23 @@ mod tests {
         let b = resolved_with_projectile(serde_json::json!({
             "bc_segments": [mba1603_band(600.0, 999.0, 0.260), mba1603_band(0.0, 600.0, 0.220)]
         }));
+        assert_all_of_it_is_projectile_drag(&a, &b);
+    }
+
+    /// A reference table carrying a ladder is one drag description: against the same ladder on
+    /// `drag_model`'s curve, the table travels with the ladder measured against it, and the
+    /// whole difference is projectile drag.
+    #[test]
+    fn a_reference_table_carrying_a_ladder_swaps_as_one_unit() {
+        let ladder = serde_json::json!([
+            mba1603_band(600.0, 999.0, 0.260),
+            mba1603_band(0.0, 600.0, 0.220)
+        ]);
+        let a = resolved_with_projectile(serde_json::json!({
+            "drag_table": {"kind": "reference", "points": mba1603_g1ish_points()},
+            "bc_segments": ladder.clone()
+        }));
+        let b = resolved_with_projectile(serde_json::json!({"bc_segments": ladder}));
         assert_all_of_it_is_projectile_drag(&a, &b);
     }
 

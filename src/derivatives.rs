@@ -385,9 +385,11 @@ pub fn compute_derivatives(
         // as-is — no reference-table transonic correction or name-derived form-factor multiplier
         // is applied to it (the curve already encodes the projectile's true drag, so applying one
         // would distort/double-count it).
-        // The custom table's Cd is the projectile's ACTUAL drag coefficient, so the
-        // retardation denominator must be the sectional density (lb/in²), not a BC:
-        // Cd_own / SD == Cd_ref / BC (see BallisticInputs::custom_drag_denominator).
+        // When the table is the projectile's own curve its Cd is the ACTUAL drag coefficient,
+        // so the retardation denominator must be the sectional density (lb/in²), not a BC:
+        // Cd_own / SD == Cd_ref / BC. A reference curve (custom_drag_reference) divides by
+        // bc_val, the BC resolved above (band BC under a ladder), exactly as the G-model branch
+        // does (see BallisticInputs::custom_drag_denominator).
         let (drag_factor, retard_denom) = match inputs.custom_drag_table {
             Some(ref table) => (
                 // MBA-1357: cd_scale is a single whole-curve drag multiplier applied here, at
@@ -1535,5 +1537,78 @@ mod tests {
             accel(1.5).to_bits(),
             "cd_scale must not affect the G-model/BC drag path"
         );
+    }
+
+    /// A reference curve (`custom_drag_reference`) is divided by the BC this kernel resolves,
+    /// band BC and all, exactly as the G-model branch is, so it equals the own-curve path with
+    /// the curve pre-scaled by SD / BC. solve-json never drives this kernel, so this is where
+    /// the flag is proven to arrive: dropped, it would divide by sectional density and ignore
+    /// the band.
+    #[test]
+    fn a_reference_table_divides_by_the_resolved_band_bc() {
+        let table = || {
+            Some(crate::drag::DragTable::new(
+                vec![0.5, 1.0, 2.0, 3.0],
+                vec![0.23, 0.40, 0.30, 0.26],
+            ))
+        };
+        let reference = BallisticInputs {
+            custom_drag_table: table(),
+            custom_drag_reference: true,
+            use_bc_segments: true,
+            bc_segments_data: Some(vec![
+                crate::BCSegmentData {
+                    velocity_min: 2000.0,
+                    velocity_max: 4000.0,
+                    bc_value: 0.30,
+                },
+                crate::BCSegmentData {
+                    velocity_min: 0.0,
+                    velocity_max: 2000.0,
+                    bc_value: 0.20,
+                },
+            ]),
+            ..create_test_inputs()
+        };
+        let sd = reference.sectional_density_lb_in2().expect("SD");
+        let accel_x = |inputs: &BallisticInputs, speed: f64| {
+            compute_derivatives(
+                Vector3::zeros(),
+                Vector3::new(speed, 0.0, 0.0),
+                inputs,
+                Vector3::zeros(),
+                (1.225, 340.0, 0.0, 0.0),
+                inputs.bc_value,
+                None,
+                0.0,
+                None,
+            )[3]
+        };
+
+        // 700 m/s (2297 fps) flies the fast band and 450 m/s (1476 fps) the slow one, each far
+        // outside the 2000 fps edge's blend window. Both BCs differ from the scalar 0.5.
+        for (speed, band_bc) in [(700.0, 0.30), (450.0, 0.20)] {
+            let own_curve_oracle = BallisticInputs {
+                custom_drag_table: table(),
+                cd_scale: sd / band_bc,
+                ..create_test_inputs()
+            };
+            let flown = accel_x(&reference, speed);
+            let expected = accel_x(&own_curve_oracle, speed);
+            assert!(
+                (flown - expected).abs() <= 1e-12 * expected.abs(),
+                "{speed} m/s must fly Cd / {band_bc}: flown {flown}, expected {expected}"
+            );
+
+            let dropped = BallisticInputs {
+                custom_drag_reference: false,
+                ..reference.clone()
+            };
+            let own_curve = accel_x(&dropped, speed);
+            assert!(
+                (own_curve - flown).abs() > 0.1 * flown.abs(),
+                "{speed} m/s: the fixture must tell the readings apart: {own_curve} vs {flown}"
+            );
+        }
     }
 }

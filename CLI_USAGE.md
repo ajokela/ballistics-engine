@@ -272,7 +272,7 @@ EOF
 
 `-b`/`--bc` may still be supplied but its value is ignored once `--drag-table` is set. (On `trajectory` it is optional and defaults to 0.5; on `zero` and `monte-carlo` it remains a required argument, though it is likewise ignored for drag when a table is active.) — the deck supplies Cd directly. `-m/--mass` and `-d/--diameter` remain **required** (grains/inches under imperial, grams/mm under `--units metric`): the engine divides the deck's Cd by the projectile's sectional density (derived from mass and diameter) in place of the usual BC-based retardation denominator.
 
-**Over the JSON bridge:** an app on solve-json v1 (the bridge's `solve` command, `solve-json`, MCP) sends the same curve inline as `projectile.drag_table`, a `kind` plus a list of `{mach, cd}` points, with the validation rules above. `"kind": "projectile"` is this flag exactly: the projectile's own Cd, BC unused. `"kind": "reference"` is the case this flag cannot express: a standard curve, such as an airgun pellet law like GA2, flown with the BC that was measured against it, exactly as `--drag-model g1` flies with a G1 BC. See [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#projectiledrag_table-mba-1597).
+**Over the JSON bridge:** an app on solve-json v1 (the bridge's `solve` command, `solve-json`, MCP) sends the same curve inline as `projectile.drag_table`, a `kind` plus a list of `{mach, cd}` points, with the validation rules above. `"kind": "projectile"` is this flag exactly: the projectile's own Cd, BC unused. `"kind": "reference"` is the case this flag cannot express: a standard curve, such as an airgun pellet law like GA2, flown with the BC that was measured against it, exactly as `--drag-model g1` flies with a G1 BC. A reference curve can also carry a `projectile.bc_segments` ladder measured against it, flown band by band exactly as `--bc-segment` flies over a built-in model; a `"projectile"` curve beside a ladder is refused. This flag has no kind, so it is unchanged: `--drag-table` is always the projectile's own curve and still ignores `--bc-segment`, with the warning below. See [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#projectiledrag_table-mba-1597).
 
 **Precedence:** a custom drag table completely replaces the G1/G7 model and any BC. It also takes precedence over `--use-bc-segments` / `--bc-segment`; if both are supplied, the drag table wins and a warning is printed:
 
@@ -4365,7 +4365,9 @@ ballistics trajectory -v 2600 -b 0.243 -m 175 -d 0.308 --drag-model g7 --max-ran
   `{velocity_min_mps, velocity_max_mps, ballistic_coefficient}` bands. It flies through the same
   lookup as this flag, but its speeds are always m/s, the bands must be listed fastest first
   without overlaps, a one-band ladder's BC must equal the scalar BC, and it is refused alongside
-  a correction table rather than overriding it. See
+  a correction table rather than overriding it. Where this flag is ignored beside
+  `--drag-table`, the bridge flies its ladder over a `drag_table` of kind `reference` (the band
+  BCs measured against that curve) and refuses it beside one of kind `projectile`. See
   [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#projectilebc_segments-mba-1598).
 - To run BC5D-equivalent corrections on a device that cannot hold the tables (e.g. the
   WASM CLI), run once with `--bc-table-dir ... --use-bc-segments --print-bc-segments`:

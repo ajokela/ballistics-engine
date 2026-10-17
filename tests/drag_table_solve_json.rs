@@ -20,7 +20,9 @@
 //!   (e) validation mirrors `--drag-table` and every error names the exact entry.
 //!
 //! The refusal to combine a table with the offline BC correction (`corrections`) is pinned
-//! beside that correction's own bridge tests.
+//! beside that correction's own bridge tests. A BC ladder beside a table, flown with the band
+//! BCs under the reference kind and refused under the projectile kind, is pinned with the
+//! ladder's own tests in `tests/multi_bc_solve_json.rs`.
 
 use ballistics_engine::drag::DragTable;
 use ballistics_engine::solve_json::{

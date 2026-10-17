@@ -893,9 +893,11 @@ fn compute_derivatives(
         // embed the rise.
         // MBA-940: a user-supplied custom drag table is the final Cd, used as-is (no G-model
         // lookup, transonic, or form-factor correction — the curve already encodes the true drag).
-        // Its Cd is the projectile's ACTUAL drag coefficient, so the retardation denominator
-        // must be the sectional density (lb/in²), not a BC: Cd_own / SD == Cd_ref / BC
-        // (see BallisticInputs::custom_drag_denominator).
+        // When it is the projectile's own curve its Cd is the ACTUAL drag coefficient, so the
+        // retardation denominator must be the sectional density (lb/in²), not a BC:
+        // Cd_own / SD == Cd_ref / BC. A reference curve (custom_drag_reference) divides by
+        // bc_current, the BC resolved above (band BC under a ladder), exactly as the G-model
+        // branch does (see BallisticInputs::custom_drag_denominator).
         let (drag_factor, retard_denom) = if let Some(ref table) = inputs.custom_drag_table {
             (
                 // MBA-1357: cd_scale is a single whole-curve drag multiplier applied here, at
@@ -1039,6 +1041,7 @@ pub fn fast_integrate_with_segments(
         bullet_length: inputs.bullet_length,
         twist_rate: inputs.twist_rate,
         cd_scale: inputs.cd_scale,
+        custom_drag_reference: inputs.custom_drag_reference,
         custom_drag_table: inputs.custom_drag_table.clone(),
         bc_segments: inputs.bc_segments.clone(),
         use_bc_segments: inputs.use_bc_segments,
@@ -2538,6 +2541,108 @@ mod tests {
             segmented_speed_at_1_5_s(&empty).to_bits(),
             segmented_speed_at_1_5_s(&absent).to_bits(),
             "Some(empty) must behave exactly like None"
+        );
+    }
+
+    /// A small reference curve and a one-band ladder whose BC differs from the scalar 0.505.
+    fn reference_table_inputs(band_bc: f64) -> BallisticInputs {
+        BallisticInputs {
+            custom_drag_table: Some(crate::drag::DragTable::new(
+                vec![0.5, 1.0, 2.0, 3.0],
+                vec![0.23, 0.40, 0.30, 0.26],
+            )),
+            custom_drag_reference: true,
+            use_bc_segments: true,
+            bc_segments_data: Some(vec![BCSegmentData {
+                velocity_min: 0.0,
+                velocity_max: 5000.0,
+                bc_value: band_bc,
+            }]),
+            ..mba1602_308_inputs()
+        }
+    }
+
+    /// The same curve read as the projectile's own Cd, pre-scaled by SD / `bc`: algebraically
+    /// `Cd / bc`, the quotient a reference curve flown with BC `bc` must produce.
+    fn own_curve_oracle(bc: f64) -> BallisticInputs {
+        let base = mba1602_308_inputs();
+        // The entry points re-derive the imperial mirrors from the SI mass and diameter, so
+        // read the sectional density they will divide by off normalized inputs.
+        let mut normalized = base.clone();
+        normalized.normalize_for_solve();
+        let sd = normalized.sectional_density_lb_in2().expect("SD");
+        BallisticInputs {
+            custom_drag_table: reference_table_inputs(bc).custom_drag_table,
+            cd_scale: sd / bc,
+            ..base
+        }
+    }
+
+    /// `custom_drag_reference` reaches the binding entry point's kernel (derivatives.rs through
+    /// `TrajectoryParams`), which solve-json never drives. The curve flies over the ladder's band
+    /// BC, not the scalar and not sectional density; a flag dropped on the way would fly it as
+    /// the projectile's own Cd, which is a different trajectory.
+    #[test]
+    fn segmented_fast_path_flies_a_reference_table_over_the_ladder_bc() {
+        for band_bc in [0.30, 0.40] {
+            let flown = segmented_speed_at_1_5_s(&reference_table_inputs(band_bc));
+            let expected = segmented_speed_at_1_5_s(&own_curve_oracle(band_bc));
+            assert!(
+                (flown - expected).abs() < 1e-9 * expected,
+                "band {band_bc}: flown {flown}, expected {expected}"
+            );
+        }
+        let dropped = BallisticInputs {
+            custom_drag_reference: false,
+            ..reference_table_inputs(0.30)
+        };
+        let flown = segmented_speed_at_1_5_s(&reference_table_inputs(0.30));
+        let own_curve = segmented_speed_at_1_5_s(&dropped);
+        assert!(
+            (own_curve - flown).abs() > 5.0,
+            "the fixture must tell the readings apart: own curve {own_curve} vs reference {flown}"
+        );
+    }
+
+    /// The same for `fast_integrate`'s own kernel in this module.
+    #[test]
+    fn fast_path_flies_a_reference_table_over_the_ladder_bc() {
+        let final_speed = |inputs: &BallisticInputs| {
+            let v = inputs.muzzle_velocity;
+            let solution = fast_integrate(
+                inputs,
+                &WindSock::new(vec![]),
+                FastIntegrationParams {
+                    horiz: 500.0,
+                    vert: 0.0,
+                    initial_state: [0.0, 0.0, 0.0, v, 0.0, 0.0],
+                    t_span: (0.0, 5.0),
+                    atmo_params: (0.0, 15.0, 1013.25, 1.0),
+                    atmo_sock: None,
+                },
+            );
+            assert!(solution.success);
+            let last = solution.t.len() - 1;
+            (solution.y[3][last].powi(2)
+                + solution.y[4][last].powi(2)
+                + solution.y[5][last].powi(2))
+            .sqrt()
+        };
+        for band_bc in [0.30, 0.40] {
+            let flown = final_speed(&reference_table_inputs(band_bc));
+            let expected = final_speed(&own_curve_oracle(band_bc));
+            assert!(
+                (flown - expected).abs() < 1e-9 * expected,
+                "band {band_bc}: flown {flown}, expected {expected}"
+            );
+        }
+        let dropped = BallisticInputs {
+            custom_drag_reference: false,
+            ..reference_table_inputs(0.30)
+        };
+        assert!(
+            (final_speed(&dropped) - final_speed(&reference_table_inputs(0.30))).abs() > 5.0,
+            "the fixture must tell the readings apart"
         );
     }
 }

@@ -5,6 +5,48 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **solve-json v1 flies a BC ladder over a reference drag table.** `solve` refused
+  `projectile.bc_segments` beside any `projectile.drag_table` (`conflicting_fields` at
+  `$.projectile.bc_segments`). A `kind: "reference"` table is a standard curve that BCs are
+  measured against, such as an airgun pellet law, so band BCs measured against it are as
+  meaningful as band BCs measured against G7, and the pair is now accepted. The bands fly over
+  the table exactly as they fly over a built-in model: at each airspeed the table's Cd is divided
+  by the band BC that flies there, with the same band selection, the scalar in an interior gap
+  and the same smoothstep blending at every band and gap edge (`velocity_segment_bc`). Sending
+  the engine's own G1 or G7 table as a reference curve beside a ladder gives the same samples as
+  `"drag_model": "G1"` or `"G7"` with that ladder, under every solver method. The resolved
+  request echoes both members verbatim, so `explain`, `error-budget` and `tolerance` keep the
+  pair, and their BC slopes are exactly the built-in model's. A `kind: "projectile"` table is the
+  projectile's own Cd, with no BC for the bands to change, so a ladder beside it is still
+  refused, now with a message that names the kind. Requested by Alfredo (@oa4ajp).
+
+  The band BCs must have been measured against the table's curve. The engine cannot check this,
+  and bands quoted against G1 but flown over a pellet law give confident, wrong drops. Every
+  request 0.46.0 accepts solves byte-identically, a reference table without a ladder included:
+  only a ladder beside a reference table takes the new path. The CLI's `--drag-table` has no kind
+  and is unchanged: it is always the projectile's own curve and still ignores `--bc-segment` with
+  a warning. The fuzz harness now draws ladders beside reference tables, and keeps a ladder
+  beside a projectile table reachable as a refusal. See
+  [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#projectiledrag_table-mba-1597).
+
+  0.46.0 still refuses the pair as `conflicting_fields` at `$.projectile.bc_segments`, and
+  earlier engines refuse `bc_segments` itself as `unknown_field`, so a producer that must also
+  work with older engines must not send it. The
+  contract's versioning section now writes this kind of change down as a fourth growth rule: a
+  combination once refused as `conflicting_fields` may become accepted when it names new
+  behavior, with every request valid before unchanged.
+
+  **Source-breaking for Rust struct literals.** `BallisticInputs::custom_drag_reference` and
+  `trajectory_integration::TrajectoryParams::custom_drag_reference` are new public `bool` fields.
+  When set, the drag sites divide `custom_drag_table`'s Cd by the resolved BC, as they do a
+  built-in model's, instead of by sectional density, and `validate_for_solve` requires a finite
+  positive `bc_value`. Rust code that builds either struct with a literal must add
+  `custom_drag_reference: false`, the previous behavior; a `BallisticInputs` literal that ends in
+  `..Default::default()` already gets it.
+
 ## [0.46.0] - 2026-10-16
 
 ### Added

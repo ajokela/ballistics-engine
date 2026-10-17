@@ -741,6 +741,9 @@ pub fn solve_for_dsf(
 
         custom_drag_table: inputs.custom_drag_table.clone(),
         cd_scale: 1.0,
+        // A profile's or `.a7p`'s drag curve is the projectile's own (the same reading as
+        // `--drag-table`), flown over sectional density; `DsfSolveInputs` has no reference kind.
+        custom_drag_reference: false,
 
         bc_type_str: None,
     };

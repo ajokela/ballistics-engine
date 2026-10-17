@@ -8647,6 +8647,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     bc_type_str: None,
                                     custom_drag_table: custom_drag_table.clone(),
                                     cd_scale,
+                                    // --drag-table has no kind: always the projectile's
+                                    // own curve, over sectional density.
+                                    custom_drag_reference: false,
                                     zero_poi_vertical_m: zero_poi_vertical_metric,
                                     zero_poi_horizontal_m: zero_poi_horizontal_metric,
                                     sight_offset_lateral_m: sight_offset_lateral_metric,
@@ -13172,6 +13175,8 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         bc_type_str: None,
         custom_drag_table: custom_drag_table.clone(),
         cd_scale,
+        // --drag-table has no kind: always the projectile's own curve, over sectional density.
+        custom_drag_reference: false,
     };
 
     // MBA-1359: when the dispatch solved a zero, the muzzle angle above already carries the
