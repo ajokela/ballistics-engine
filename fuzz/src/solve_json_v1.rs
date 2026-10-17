@@ -464,13 +464,27 @@ pub fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
         corrections: None,
     };
     request.projectile.drag_table = maybe_drag_table(u)?;
-    // A ladder beside a drag table is a documented `conflicting_fields` refusal, and every
-    // request this generator produces must solve, so a ladder is drawn only without a table.
-    if request.projectile.drag_table.is_none() {
+    // A ladder beside a projectile-kind table is a documented `conflicting_fields` refusal,
+    // and every request this generator produces must solve, so a ladder is drawn without a
+    // table or beside a reference-kind one, whose curve its band BCs are then measured
+    // against. The hostile generator below keeps the refused pairing reachable.
+    if !beside_a_projectile_table(&request) {
         request.projectile.bc_segments =
             maybe_bc_segments(u, request.projectile.ballistic_coefficient)?;
     }
     Ok(request)
+}
+
+/// True when the request carries a `kind: "projectile"` drag table, beside which the service
+/// refuses a BC ladder.
+fn beside_a_projectile_table(request: &SolveRequestV1) -> bool {
+    matches!(
+        request.projectile.drag_table,
+        Some(DragTableV1 {
+            kind: DragTableKindV1::Projectile,
+            ..
+        })
+    )
 }
 
 fn hostile_wind(u: &mut Unstructured<'_>) -> Result<WindV1> {
@@ -527,7 +541,7 @@ pub fn bounded_hostile_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV
 
     let mutations = usize::from(u.int_in_range(1u8..=6)?);
     for _ in 0..mutations {
-        match u.int_in_range(0u8..=29)? {
+        match u.int_in_range(0u8..=30)? {
             0 => request.projectile.mass_kg = wild(u)?,
             1 => request.projectile.diameter_m = wild(u)?,
             2 => request.projectile.length_m = maybe_wild(u)?,
@@ -573,9 +587,19 @@ pub fn bounded_hostile_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV
                 request.shot.zero_distance_m = Some(ranged(u, 1.0, 100.0)?);
                 request.shot.muzzle_angle_rad = Some(ranged(u, -0.1, 0.3)?);
             }
-            _ => {
+            29 => {
                 request.projectile.bc_segments =
                     hostile_bc_segments(u, request.projectile.ballistic_coefficient)?
+            }
+            _ => {
+                // Explicitly exercise the ladder-beside-a-projectile-table refusal: a valid
+                // ladder and a valid table that are only wrong together. `valid_request` never
+                // draws this pair (it draws the legal reference-kind one instead).
+                let mut table = drag_table(u)?;
+                table.kind = DragTableKindV1::Projectile;
+                request.projectile.drag_table = Some(table);
+                request.projectile.bc_segments =
+                    Some(bc_segments(u, request.projectile.ballistic_coefficient)?);
             }
         }
     }
@@ -819,5 +843,75 @@ mod tests {
                 panic!("seed {seed}: generated ladder {ladder:?} was refused: {error:?}");
             }
         }
+    }
+
+    /// `valid_request` draws a ladder beside a reference-kind table, which the service flies,
+    /// but never beside a projectile-kind table, which it refuses; and it reaches the first.
+    /// A generated request can fail for reasons that have nothing to do with drag (a zero out of
+    /// reach of wild geometry, which fails on a built-in model too, or the documented compass
+    /// wind conflict), so only the pairing itself is held to "never refused at the ladder", and
+    /// most such requests must solve.
+    #[test]
+    fn generated_ladders_sit_beside_reference_tables_only() {
+        let (mut beside_a_reference_table, mut solved) = (0, 0);
+        for seed in 0..1_024 {
+            let input = bytes(seed);
+            let request = valid_request(&mut Unstructured::new(&input)).expect("enough input");
+            let (Some(table), Some(_)) = (
+                &request.projectile.drag_table,
+                &request.projectile.bc_segments,
+            ) else {
+                continue;
+            };
+            assert_eq!(table.kind, DragTableKindV1::Reference, "seed {seed}");
+            beside_a_reference_table += 1;
+            let json = serde_json::to_string(&request).expect("request serializes");
+            let decoded = ballistics_engine::decode_solve_request_v1(&json)
+                .unwrap_or_else(|error| panic!("seed {seed}: refused by the decoder: {error:?}"));
+            match ballistics_engine::solve_v1(decoded) {
+                Ok(_) => solved += 1,
+                Err(error) => assert_ne!(
+                    error.error.path(),
+                    Some("$.projectile.bc_segments"),
+                    "seed {seed}: a ladder beside a reference table must not be refused: {error:?}"
+                ),
+            }
+        }
+        assert!(
+            solved > 0 && solved * 2 > beside_a_reference_table,
+            "the generator must reach ladders beside reference tables that solve: {solved} of \
+             {beside_a_reference_table} solved"
+        );
+    }
+
+    /// The hostile generator keeps the refused pairing reachable: some request carries a valid
+    /// ladder beside a projectile-kind table, and the service refuses it at the ladder.
+    #[test]
+    fn hostile_requests_reach_a_ladder_beside_a_projectile_table() {
+        let mut refused = 0;
+        for seed in 0..2_048 {
+            let input = bytes(seed);
+            let Ok(request) = bounded_hostile_request(&mut Unstructured::new(&input)) else {
+                continue;
+            };
+            if !(beside_a_projectile_table(&request) && request.projectile.bc_segments.is_some()) {
+                continue;
+            }
+            let Ok(json) = serde_json::to_string(&request) else {
+                continue;
+            };
+            let Ok(decoded) = ballistics_engine::decode_solve_request_v1(&json) else {
+                continue;
+            };
+            if let Err(error) = ballistics_engine::solve_v1(decoded) {
+                if error.error.path() == Some("$.projectile.bc_segments") {
+                    refused += 1;
+                }
+            }
+        }
+        assert!(
+            refused > 0,
+            "some hostile request must reach the ladder-beside-a-projectile-table refusal"
+        );
     }
 }
