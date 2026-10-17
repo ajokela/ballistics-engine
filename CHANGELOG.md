@@ -5,7 +5,7 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.47.0] - 2026-10-17
 
 ### Added
 - **solve-json v1 flies a BC ladder over a reference drag table.** `solve` refused
@@ -34,10 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   0.46.0 still refuses the pair as `conflicting_fields` at `$.projectile.bc_segments`, and
   earlier engines refuse `bc_segments` itself as `unknown_field`, so a producer that must also
-  work with older engines must not send it. The
-  contract's versioning section now writes this kind of change down as a fourth growth rule: a
-  combination once refused as `conflicting_fields` may become accepted when it names new
-  behavior, with every request valid before unchanged.
+  work with older engines must not send it. The contract's versioning section now writes this
+  kind of change down as a fourth growth rule: a combination once refused as
+  `conflicting_fields` may become accepted when it names new behavior, with every request valid
+  before unchanged.
 
   **Source-breaking for Rust struct literals.** `BallisticInputs::custom_drag_reference` and
   `trajectory_integration::TrajectoryParams::custom_drag_reference` are new public `bool` fields.
