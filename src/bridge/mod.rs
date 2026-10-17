@@ -655,8 +655,9 @@ const STORED_CARD_KEY: &str = "stored_card";
 ///   command PRINTS THOSE ROWS: no zero solve, no trajectory, and `bc5d_table_path` is never
 ///   opened, so a saved card reprints identically after an engine bump, after the correction
 ///   table at that path is overwritten in place, and even after it is deleted. The footer's
-///   `BC:` is the stored card's own `bc_for_solve`, and its `Engine:`/`Table:` are the two
-///   provenance strings, so paper and screen can be reconciled afterwards.
+///   `BC:` is the stored card's ladder range when its `bc_ladder` is present (MBA-1601),
+///   otherwise its own `bc_for_solve`, and its `Engine:`/`Table:` are the two provenance
+///   strings, so paper and screen can be reconciled afterwards.
 /// * Omit it (or send `null`, which means the same thing) and the rows are solved here, from
 ///   the same `card_service::range_table_rows` call `card.range_table` makes — the
 ///   pre-existing behaviour, unchanged.

@@ -381,7 +381,16 @@ pub fn with_axis(
         Mass => req.projectile.mass_kg = scalar(v)?,
         Diameter => req.projectile.diameter_m = scalar(v)?,
         Length => req.projectile.length_m = Some(scalar(v)?),
-        BallisticCoefficient => req.projectile.ballistic_coefficient = scalar(v)?,
+        BallisticCoefficient => {
+            let bc = scalar(v)?;
+            req.projectile.ballistic_coefficient = bc;
+            // A one-band ladder's BC must equal the scalar (MBA-1598), and it is the BC that
+            // flies at every speed, so the axis moves the band with the scalar. A longer
+            // ladder's bands are not an axis (see `axes_in_group`).
+            if let Some([band]) = req.projectile.bc_segments.as_deref_mut() {
+                band.ballistic_coefficient = bc;
+            }
+        }
         TwistRate => req.rifle.twist_rate_m_per_turn = Some(scalar(v)?),
         TwistDirection => req.rifle.twist_direction = Some(twist_direction(v)?),
         DragModel => req.projectile.drag_model = drag_model(v)?,

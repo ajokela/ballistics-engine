@@ -480,7 +480,8 @@ fn solve_input_schema() -> Value {
                         }
                     },
                     // MBA-1598. The band BC carries exactly the scalar's schema; the decoder
-                    // holds both to the same bounds and the strict order/no-overlap rules.
+                    // holds both to the same bounds and the strict order/no-overlap rules, and
+                    // holds a one-band ladder's BC to the scalar itself.
                     "bc_segments": {
                         "type": "array",
                         "minItems": MIN_BC_SEGMENTS_V1,

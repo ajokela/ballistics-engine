@@ -100,8 +100,9 @@ pub const MAX_FUZZ_BC_SEGMENTS: u8 = 8;
 /// fastest first, each band ending at or below the start of the one before it (touching edges
 /// and gaps both drawn), every BC in the same range as the scalar BC above. The top band
 /// starts above or below the muzzle velocity, so ladders that clamp to an edge band are
-/// covered too.
-fn bc_segments(u: &mut Unstructured<'_>) -> Result<Vec<BcSegmentV1>> {
+/// covered too. A one-band ladder carries `scalar_bc` itself, because the decoder refuses a
+/// single band that disagrees with the scalar BC.
+fn bc_segments(u: &mut Unstructured<'_>, scalar_bc: f64) -> Result<Vec<BcSegmentV1>> {
     let count = u.int_in_range(1u8..=MAX_FUZZ_BC_SEGMENTS)?;
     let mut upper = ranged(u, 200.0, 1_500.0)?;
     let mut segments = Vec::with_capacity(usize::from(count));
@@ -122,13 +123,16 @@ fn bc_segments(u: &mut Unstructured<'_>) -> Result<Vec<BcSegmentV1>> {
             break;
         }
     }
+    if let [band] = segments.as_mut_slice() {
+        band.ballistic_coefficient = scalar_bc;
+    }
     Ok(segments)
 }
 
 /// Absent three times in four, like the drag table, so the scalar BC keeps most of the coverage.
-fn maybe_bc_segments(u: &mut Unstructured<'_>) -> Result<Option<Vec<BcSegmentV1>>> {
+fn maybe_bc_segments(u: &mut Unstructured<'_>, scalar_bc: f64) -> Result<Option<Vec<BcSegmentV1>>> {
     Ok(if u.int_in_range(0u8..=3)? == 0 {
-        Some(bc_segments(u)?)
+        Some(bc_segments(u, scalar_bc)?)
     } else {
         None
     })
@@ -138,11 +142,14 @@ fn maybe_bc_segments(u: &mut Unstructured<'_>) -> Result<Option<Vec<BcSegmentV1>
 /// zero or 1e6) in one band's speed or BC, the bands listed slowest first, two bands
 /// overlapping, or one band more than the decoder admits. A few wild draws stay legal (a zero
 /// floor on the slowest band, a 1e6 m/s top on the fastest), which the service must solve.
-fn hostile_bc_segments(u: &mut Unstructured<'_>) -> Result<Option<Vec<BcSegmentV1>>> {
+fn hostile_bc_segments(
+    u: &mut Unstructured<'_>,
+    scalar_bc: f64,
+) -> Result<Option<Vec<BcSegmentV1>>> {
     if u.int_in_range(0u8..=5)? == 0 {
         return Ok(None);
     }
-    let mut segments = bc_segments(u)?;
+    let mut segments = bc_segments(u, scalar_bc)?;
     match u.int_in_range(0u8..=4)? {
         0 => segments.clear(),
         1 => {
@@ -460,7 +467,8 @@ pub fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
     // A ladder beside a drag table is a documented `conflicting_fields` refusal, and every
     // request this generator produces must solve, so a ladder is drawn only without a table.
     if request.projectile.drag_table.is_none() {
-        request.projectile.bc_segments = maybe_bc_segments(u)?;
+        request.projectile.bc_segments =
+            maybe_bc_segments(u, request.projectile.ballistic_coefficient)?;
     }
     Ok(request)
 }
@@ -565,7 +573,10 @@ pub fn bounded_hostile_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV
                 request.shot.zero_distance_m = Some(ranged(u, 1.0, 100.0)?);
                 request.shot.muzzle_angle_rad = Some(ranged(u, -0.1, 0.3)?);
             }
-            _ => request.projectile.bc_segments = hostile_bc_segments(u)?,
+            _ => {
+                request.projectile.bc_segments =
+                    hostile_bc_segments(u, request.projectile.ballistic_coefficient)?
+            }
         }
     }
     Ok(request)
@@ -786,16 +797,21 @@ mod tests {
     }
 
     /// `valid_request` promises a request that solves, so every ladder `bc_segments` draws
-    /// must pass the decoder's order, no-overlap, count and bound rules.
+    /// must pass the decoder's order, no-overlap, count and bound rules, and a one-band ladder
+    /// must carry the request's scalar BC.
     #[test]
     fn generated_bc_ladders_pass_the_decoder() {
         let base_bytes = vec![0x5A; 16_384];
         for seed in 0..256 {
             let ladder_bytes = bytes(seed);
-            let ladder = bc_segments(&mut Unstructured::new(&ladder_bytes)).expect("enough input");
-            assert!(!ladder.is_empty() && ladder.len() <= usize::from(MAX_FUZZ_BC_SEGMENTS));
             let mut request =
                 valid_request(&mut Unstructured::new(&base_bytes)).expect("enough input");
+            let ladder = bc_segments(
+                &mut Unstructured::new(&ladder_bytes),
+                request.projectile.ballistic_coefficient,
+            )
+            .expect("enough input");
+            assert!(!ladder.is_empty() && ladder.len() <= usize::from(MAX_FUZZ_BC_SEGMENTS));
             request.projectile.drag_table = None;
             request.projectile.bc_segments = Some(ladder.clone());
             let json = serde_json::to_string(&request).expect("request serializes");

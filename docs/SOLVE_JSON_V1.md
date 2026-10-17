@@ -194,7 +194,7 @@ A representative request is:
 | `diameter_m` | yes | Projectile diameter. |
 | `length_m` | no | Projectile length; required by effects that need geometry. |
 | `drag_model` | yes | One of `G1`, `G2`, `G5`, `G6`, `G7`, `G8`, `GI`, `GS`, or `RA4`. Does not drive drag while `drag_table` is present. `bc_segments` band BCs are referenced to it. |
-| `ballistic_coefficient` | yes | BC for the selected reference drag model, or for `drag_table` when its `kind` is `reference`. Still required beside `bc_segments`, but then it flies only in an interior gap between bands. |
+| `ballistic_coefficient` | yes | BC for the selected reference drag model, or for `drag_table` when its `kind` is `reference`. Still required beside `bc_segments`, but then it flies only in an interior gap between bands, and blended into the bands within up to 25 fps either side of a gap edge. |
 | `drag_table` | no | A caller-supplied drag curve replacing the built-in model; see below. |
 | `bc_segments` | no | A velocity-banded BC ladder, the wire form of the CLI's `--bc-segment`; see below. |
 
@@ -247,7 +247,8 @@ table replaces the curve, so the pair is `conflicting_fields` at
 `$.corrections.bc5d_table_path`. A table also cannot be combined with
 [`projectile.bc_segments`](#projectilebc_segments-mba-1598), whose band BCs are measured against
 the `drag_model` curve the table replaces; that pair is `conflicting_fields` at
-`$.projectile.bc_segments`.
+`$.projectile.bc_segments`. A ladder that breaks one of its own rules, including a one-band
+ladder whose BC does not match the scalar, is refused at that band first, by the decoder.
 
 The table is echoed verbatim at `resolved_request.projectile.drag_table`, so a resolved request
 re-solves on the same curve. The engine ships no airgun curves: the caller supplies the table.
@@ -299,9 +300,22 @@ the faster band. At any speed:
   The ladder is clamped at its ends, not padded with the scalar.
 
 `ballistic_coefficient` therefore stays required and validated, but under a gapless ladder (the
-example above) it never flies. A one-band ladder flies that band's BC at every speed. A fastest
-band that ends below the muzzle velocity still applies from the muzzle down. Band BCs are
-referenced to `drag_model` exactly as the scalar is, so a G7 ladder needs `"drag_model": "G7"`.
+example above) it never flies. A one-band ladder flies that band's BC at every speed, so its BC
+must match `ballistic_coefficient` (see **Errors** below), and its two edges change nothing as
+long as they are valid. A fastest band that ends below the muzzle velocity still
+applies from the muzzle down. Band BCs are referenced to `drag_model` exactly as the scalar is, so
+a G7 ladder needs `"drag_model": "G7"`.
+
+**Floor-style tables.** Many calculators take one speed per BC row, meaning "this BC from this
+speed up to the next faster row", and show a single row with a speed of 0. Such a table maps onto
+bands directly. List the rows fastest first, and give each band the row's speed as
+`velocity_min_mps` (0 for the last row) and the next faster row's speed as `velocity_max_mps`. The
+fastest band's `velocity_max_mps` only has to be valid, because the ladder is clamped above it. A
+value at least 200 fps (60.96 m/s) above its `velocity_min_mps` keeps that band from narrowing the
+blend at the edge below it (see **Edges are blended**). The CLI applies the same floor rule to
+the BC tables in saved profiles, ending the fastest band just above 5000 fps (1524 m/s). Send a
+one-row table as one band from 0 to 1524 m/s with the row's BC as `ballistic_coefficient` too, or
+simply send the scalar alone: both fly the same.
 
 **Airspeed, not ground speed.** Bands are selected by airspeed, the bullet's speed relative to the
 air mass. That is the same speed the drag is computed from, so in a wind the band edges are
@@ -334,10 +348,17 @@ names the exact entry:
   overlap message names that band.
 - `$.projectile.bc_segments[2].ballistic_coefficient`: `invalid_value` outside `0.0001` to `100`,
   in the same form as the scalar's message.
+- `$.projectile.bc_segments[0].ballistic_coefficient`: `conflicting_fields` when the ladder has
+  exactly one band and its BC differs from the scalar `ballistic_coefficient` by more than one
+  part in a million of the larger (`ONE_BAND_BC_RELATIVE_TOLERANCE_V1`). A one-band ladder flies
+  its band at every speed, so the two would be two different BCs for one projectile. The
+  tolerance forgives rounding nobody chose, such as a BC held as a 32-bit float or converted
+  between units and back, and within it the band's BC flies; 0.172 against 0.1724 is still
+  refused. The message names both values. Send the same value in both, or omit the ladder.
 
 The values are checked band by band in array order, and the first fault is reported. A band
 nested inside the one before it starts above that band's start, so the order rule reports it, at
-its `velocity_min_mps`.
+its `velocity_min_mps`. The one-band check runs after the band's own value rules.
 
 **Conflicts.** A ladder cannot be combined with either of these. The service refuses both as
 `conflicting_fields` at `$.projectile.bc_segments`, before any correction table is opened:
@@ -350,18 +371,24 @@ its `velocity_min_mps`.
 
 A request that carries a ladder, a drag table and a correction table together fails the older
 drag-table-with-correction-table check first, so it is `conflicting_fields` at
-`$.corrections.bc5d_table_path` instead.
+`$.corrections.bc5d_table_path` instead. All of these conflicts are checked after the ladder's own
+rules: a band that breaks one, including a one-band BC that does not match the scalar, is refused
+at that band first, by the decoder.
 
 **Echo.** The ladder is echoed verbatim at `resolved_request.projectile.bc_segments`, so a request
 rebuilt from a resolved request re-solves on the same ladder. The zero search and the trajectory
 both fly it. Omitting the member changes nothing, and the key never appears in a response.
 
-**Known limitation: BC sensitivity.** The perturbation kernels behind the CLI's `explain`,
-`error-budget` and `tolerance` perturb and swap only the scalar `ballistic_coefficient`; no input
-axis carries the band BCs. Under a gapless ladder the scalar never flies, so its slope is exactly
-0, and `error-budget` reports a declared BC sigma as contributing nothing rather than listing BC
-under `unavailable_sources`. This is the same blind spot as a `kind: "projectile"` drag table.
-With an interior gap, the scalar moves the result only through the gap.
+**Known limitation: BC sensitivity.** The CLI's `error-budget` and `tolerance` perturb the scalar
+`ballistic_coefficient`, and no input axis carries the band BCs of a ladder with two or more
+bands. A one-band ladder is the exception: its BC must equal the scalar, so the BC axis moves the
+band with it, and the slope is exactly that of the same request without the ladder. Under a
+gapless ladder of two or more bands the scalar never flies, so its slope is exactly 0, and `error-budget` reports a declared BC sigma as
+contributing nothing rather than listing BC under `unavailable_sources`. This is the same blind
+spot as a `kind: "projectile"` drag table. With an interior gap, the scalar moves the result only
+through the gap and the band speeds within up to 25 fps of a gap edge, where it is blended into
+the bands. `explain` is not affected: its `ProjectileDrag` swap carries the whole ladder with
+`drag_model` (MBA-1603).
 
 **Platforms.** The ladder is plain request data and no file is read, so it works wherever
 `solve` runs, including through the WASM module's `bridgeCall`, where `corrections.bc5d_table_path`
@@ -374,15 +401,17 @@ rules, so a ladder stored for one is not always valid for the other:
 | --- | --- | --- |
 | Band members | `velocity_min_mps`, `velocity_max_mps`, `ballistic_coefficient` | `velocity_min`, `velocity_max`, `bc` |
 | Speed unit | m/s, always | the request's `velocity_unit` (fps imperial, m/s metric by default) |
-| Order | fastest first, no overlaps | any order; overlaps are not refused |
+| Order | fastest first, no overlaps | any order; no overlaps (touching edges and gaps are fine) |
 | `[]` | refused | read as no ladder |
 | With a correction table | `conflicting_fields` | the ladder wins and the table is ignored |
-| Band BC | `0.0001` to `100` | above 0 |
-| Band count | 1 to 64 | no cap of its own |
+| Band BC | `0.0001` to `100` | `0.0001` to `100` |
+| One band beside the scalar BC | must match it (within one part in a million) | not compared; the band flies |
+| Band count | 1 to 64 | up to 64 |
 
 Both are converted to the engine's fps ladder and fly through the same lookup. The CLI's
-`--bc-segment` behaves like `card.*` here: its speeds follow `--units`, any order is accepted, and
-it overrides the correction tables.
+`--bc-segment` follows `card.*` in units, order and precedence: its speeds follow `--units`, any
+order is accepted, and it overrides the correction tables. Unlike `card.*`, it still accepts
+overlapping bands, more than 64 bands and any positive band BC.
 
 ### `rifle`
 
@@ -944,6 +973,20 @@ extrapolates a hold off a trajectory that did not get there.
 `summary.termination` is one of `max_range`, `ground_threshold`, `time_limit`, or
 `velocity_floor`. The solve service must populate it from explicit termination metadata returned
 by the engine. It must not infer a reason heuristically from the last distance, height, or speed.
+No current solver emits `velocity_floor`; the value is reserved.
+
+A projectile that loses all of its downrange speed, such as one at the bottom of the accepted
+`ballistic_coefficient` range, a `bc_segments` band that low, or a long fall toward a very low
+`ground_threshold_m`, ends like any other early termination (MBA-1599). The response is
+`status: ok`, `termination` is `ground_threshold` (or `time_limit` if it is still falling at
+100 s), and `actual_range_m` is the distance at which downrange motion stopped, with the terminal
+sample at the impact state. Every integration step counts against the engine's 250,000-point
+limit, including the steps spent at the stall distance, so with a fine `euler` or `rk4`
+`time_step_s` a stall can reach that limit before the ground and return `solve_failed` with
+the message `trajectory point limit of 250000 exceeded`. A trajectory that moves back toward
+the muzzle before it terminates (a headwind carrying a stalled projectile back, a launch past
+vertical, or an explicit `euler`/`rk4` time step too coarse for the drag) cannot be reported
+against downrange distance and returns `solve_failed`.
 
 Regular interval sampling never drops the terminal observation. `samples` includes the terminal
 sample exactly once even when its distance is not an interval boundary, and that sample carries

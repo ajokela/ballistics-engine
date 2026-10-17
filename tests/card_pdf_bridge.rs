@@ -799,6 +799,11 @@ mod pdf_present {
             !printed.iter().any(|t| t.starts_with("Table:")),
             "no table version is known for a solve, so none is claimed: {printed:?}"
         );
+        // A card that flew no ladder prints its scalar exactly as before (MBA-1601).
+        assert!(
+            printed.iter().any(|t| t == "BC:0.243") && printed.iter().any(|t| t == "(g7)"),
+            "a no-ladder card's footer must be unchanged: {printed:?}"
+        );
     }
 
     /// (MBA-1477) A truncated card is DESCRIBED as truncated in the response, additively and
@@ -1098,6 +1103,143 @@ mod pdf_present {
                 out["result"]["unprintable_title_chars"],
                 json!(""),
                 "{title} prints correctly, so nothing may be reported: {out}"
+            );
+        }
+    }
+
+    /// (MBA-1600) `card.*` refuses an overlapping ladder, but a reprint of stored rows never
+    /// flies the ladder and so never re-checks it: a card saved before the tightening still
+    /// prints. The same request without `stored_card` solves, and is refused.
+    #[test]
+    fn a_stored_card_reprint_does_not_recheck_its_ladder() {
+        let mut request = stored_request();
+        request["bc_segments"] = json!([
+            {"velocity_min": 2000.0, "velocity_max": 3500.0, "bc": 0.5},
+            {"velocity_min": 1000.0, "velocity_max": 2200.0, "bc": 0.3}
+        ]);
+        let out = call("card.pdf", request.clone());
+        assert_eq!(
+            out["ok"], true,
+            "a reprint must not re-check the ladder: {out}"
+        );
+        assert_eq!(out["result"]["source"], "stored_rows", "{out}");
+
+        request.as_object_mut().unwrap().remove("stored_card");
+        let out = call("card.pdf", request);
+        assert_eq!(out["ok"], false, "a solve must refuse the overlap: {out}");
+        assert_eq!(out["error"]["code"], "command_failed", "{out}");
+        assert!(
+            out["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("overlaps bc_segments[1]"),
+            "{out}"
+        );
+    }
+
+    /// (MBA-1601) Under a gapless ladder the scalar never flies, so the footer states the
+    /// ladder's BC range instead, on the solve and on a reprint of the card it returned.
+    #[test]
+    fn a_ladder_cards_footer_states_the_ladder_not_the_scalar() {
+        let mut request = fixture_request();
+        request["bc_segments"] = json!([
+            {"velocity_min": 2000.0, "velocity_max": 4000.0, "bc": 0.250},
+            {"velocity_min": 500.0, "velocity_max": 2000.0, "bc": 0.235}
+        ]);
+
+        let (bytes, _pages) = generate(request.clone());
+        let printed = tokens(&bytes, "ladder card");
+        assert!(
+            printed.iter().any(|t| t == "BC:0.235-0.250"),
+            "the footer must state the ladder's range: {printed:?}"
+        );
+        assert!(printed.iter().any(|t| t == "ladder)"), "{printed:?}");
+        assert!(
+            !printed.iter().any(|t| t == "BC:0.243"),
+            "the scalar never flew on this card: {printed:?}"
+        );
+
+        let screen = call("card.range_table", request.clone());
+        assert_eq!(screen["ok"], true, "{screen}");
+        request["stored_card"] = json!({"card": screen["result"]});
+        let out = call("card.pdf", request);
+        assert_eq!(out["ok"], true, "{out}");
+        assert_eq!(out["result"]["source"], "stored_rows", "{out}");
+        let printed = tokens(&pdf_bytes(&out["result"]), "reprinted ladder card");
+        assert!(
+            printed.iter().any(|t| t == "BC:0.235-0.250"),
+            "a reprint states the stored ladder's range: {printed:?}"
+        );
+    }
+
+    /// (MBA-1601) With an interior gap the scalar does fly, between the bands, so the printed
+    /// range includes it and says so.
+    #[test]
+    fn a_ladder_with_an_interior_gap_counts_the_scalar_in_its_range() {
+        let mut request = fixture_request();
+        request["bc_segments"] = json!([
+            {"velocity_min": 2200.0, "velocity_max": 4000.0, "bc": 0.250},
+            {"velocity_min": 500.0, "velocity_max": 1800.0, "bc": 0.245}
+        ]);
+        let (bytes, _pages) = generate(request);
+        let printed = tokens(&bytes, "gapped ladder card");
+        assert!(printed.iter().any(|t| t == "BC:0.243-0.250"), "{printed:?}");
+        assert!(printed.iter().any(|t| t == "ladder+gap)"), "{printed:?}");
+    }
+
+    /// (MBA-1601) A card saved before the ladder block existed carries none, and a reprint
+    /// never re-derives one from the request: it prints its stored scalar exactly as before,
+    /// whatever ladder or table the request names. Regenerating the card prints the range.
+    #[test]
+    fn a_card_saved_before_the_ladder_block_reprints_its_stored_scalar() {
+        let mut with_ladder = stored_request();
+        with_ladder["bc_segments"] = json!([
+            {"velocity_min": 2000.0, "velocity_max": 4000.0, "bc": 0.250},
+            {"velocity_min": 500.0, "velocity_max": 2000.0, "bc": 0.235}
+        ]);
+        let mut with_table = stored_request();
+        with_table["bc5d_table_path"] = json!("/nonexistent/bc_table_308.bin");
+        for (label, request) in [
+            ("plain", stored_request()),
+            ("request ladder", with_ladder),
+            ("request table", with_table),
+        ] {
+            let (bytes, _pages) = generate(request);
+            let printed = tokens(&bytes, label);
+            assert!(
+                printed.iter().any(|t| t == "BC:0.238"),
+                "{label}: {printed:?}"
+            );
+            assert!(printed.iter().any(|t| t == "(g7)"), "{label}: {printed:?}");
+            assert!(
+                !printed.iter().any(|t| t.contains("ladder")),
+                "{label}: {printed:?}"
+            );
+        }
+    }
+
+    /// (MBA-1601) A stored ladder block with nothing printable in it is refused rather than
+    /// printed as a blank or nonsensical `BC:`.
+    #[test]
+    fn a_stored_ladder_block_that_cannot_be_printed_is_refused() {
+        for ladder in [
+            json!({"segments": [], "interior_gap": false}),
+            json!({
+                "segments": [{"velocity_min": 500.0, "velocity_max": 4000.0, "bc": 0.0}],
+                "interior_gap": false
+            }),
+        ] {
+            let mut request = stored_request();
+            request["stored_card"]["card"]["bc_ladder"] = ladder;
+            let out = call("card.pdf", request);
+            assert_eq!(out["ok"], false, "{out}");
+            assert_eq!(out["error"]["code"], "command_failed", "{out}");
+            assert!(
+                out["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("bc_ladder"),
+                "{out}"
             );
         }
     }

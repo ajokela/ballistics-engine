@@ -20,17 +20,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are selected by airspeed, band BCs are referenced to `drag_model`, and every interior band edge
   and gap edge is smoothstep-blended over at most 25 fps (7.62 m/s) either side. Below the
   slowest band, or at or above the top of the fastest, the edge band applies. The scalar
-  `ballistic_coefficient` is still required, but flies only in an interior gap between bands. A
-  ladder cannot be combined with `projectile.drag_table`, which replaces the curve the band BCs
-  are measured against, or with `corrections.bc5d_table_path`, which builds its own ladder
+  `ballistic_coefficient` is still required, but flies only in an interior gap between bands,
+  and blended into the bands within up to 25 fps either side of a gap edge. A one-band ladder
+  flies its band at every speed, so its band BC must match `ballistic_coefficient` to within one
+  part in a million (`ONE_BAND_BC_RELATIVE_TOLERANCE_V1`, which forgives `f32` and unit-conversion
+  noise); a larger difference is refused as `conflicting_fields` at
+  `$.projectile.bc_segments[0].ballistic_coefficient` rather than silently flying the band. The
+  docs show how to send a floor-style table, one speed per BC row. A ladder cannot be
+  combined with `projectile.drag_table`, which replaces the curve the band BCs are measured
+  against, or with `corrections.bc5d_table_path`, which builds its own ladder
   (`conflicting_fields`).
 
   The resolved request echoes the ladder verbatim, so `explain`, `error-budget` and `tolerance`,
-  which re-solve from that echo, keep it. They perturb only the scalar BC, though, so under a
-  gapless ladder they see a BC slope of exactly 0, the same blind spot as a `kind: "projectile"`
-  drag table. Omitting the member changes nothing, and the key never appears in a response. The
+  which re-solve from that echo, keep it. `error-budget` and `tolerance` perturb only the scalar
+  BC, though (moving a one-band ladder's band with it), so under a gapless ladder of two or more
+  bands they see a BC slope of exactly 0, the same blind spot as a
+  `kind: "projectile"` drag table. `explain` swaps the whole ladder with `drag_model` (MBA-1603,
+  under Fixed). Omitting the member changes nothing, and the key never appears in a response. The
   MCP `solve` schema lists the new member, and the fuzz harness generates valid and hostile
-  ladders. `BcSegmentV1`, `MIN_BC_SEGMENTS_V1` and `MAX_BC_SEGMENTS_V1` are new in
+  ladders. `BcSegmentV1`, `MIN_BC_SEGMENTS_V1`, `MAX_BC_SEGMENTS_V1` and
+  `ONE_BAND_BC_RELATIVE_TOLERANCE_V1` are new in
   `ballistics_engine::solve_json`. See
   [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#projectilebc_segments-mba-1598).
 
@@ -38,6 +47,141 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   public `bc_segments: Option<Vec<BcSegmentV1>>` field, so Rust code that builds either struct
   with a literal must add `bc_segments: None`. The JSON wire format is unaffected: requests and
   responses that omit the member decode and encode exactly as before.
+
+### Changed
+- **`card.*` refuses BC ladders it could not fly as written (MBA-1600).** `card.come_ups`,
+  `card.range_table`, `card.wind` and `card.pdf` (when it solves) now hold `bc_segments` to the
+  three rules solve-json's `projectile.bc_segments` already enforces: bands must not overlap, a
+  ladder holds at most 64 bands, and each band's `bc` must lie between 0.0001 and 100. Until now
+  an overlapping ladder flew whichever containing band was listed first, so the same bands in
+  another order gave a different card (0.9 mil apart at 1000 yd for a .308 test load), a band
+  nested inside an earlier one was silently ignored, and the edge between overlapping bands was
+  never blended. A band BC of 1e6 flew a vacuum card, a band BC of 1e-9 failed as an unexplained
+  `zero solve failed`, and a 9000-band ladder took about 100 times as long to solve.
+
+  Card's own conventions are unchanged: `velocity_min`/`velocity_max`/`bc` in the request's
+  `velocity_unit`, bands in any order with touching edges and gaps allowed, `[]` and `null` read
+  as no ladder, and an explicit ladder still wins over `bc5d_table_path`. A refused ladder is
+  `command_failed` with a message naming the band, e.g. `invalid request: bc_segments[0] (2000 to
+  3500 fps) overlaps bc_segments[1] (1000 to 2200 fps): bands may touch or leave gaps but must not
+  overlap`. The three existing per-band messages (`velocity_min, velocity_max, and bc must be
+  finite`, `velocity_min must be < velocity_max` and `bc must be > 0`) keep their wording, but a
+  ladder that also breaks a new rule is now reported by that rule: more than 64 bands is reported
+  before any band is checked, and a band BC outside 0.0001 to 100 before a fault in a later band.
+  This tightens the `card.*` request contract. The iOS and Android apps send no ladder and are
+  unaffected, and `card.pdf` reprinting `stored_card` rows does not re-check the ladder, so a card
+  saved before this change still prints.
+
+### Fixed
+- **The test suite compiles and passes clippy on current nightly Rust again (MBA-1604).**
+  `cargo +nightly clippy --all-targets --all-features -- -D warnings` stopped at
+  `error[E0282]: type annotations needed` in a `trajectory_integration` unit test. Nightly now
+  type-checks with the next-generation trait solver, which no longer lets a second
+  `Vector3::norm()` call reuse the `f64` that the first call settled, so the test now names its
+  vector `Vector3<f64>`. Behind that error, nightly clippy also began flagging
+  `items_after_test_module` in `src/adjustment.rs`, because it no longer skips modules followed
+  by derive-generated items. That test module now carries the same `allow` that `src/drag.rs`
+  already uses. Only test code changed: library, CLI, bridge, FFI and WASM behavior and output
+  are unchanged, and stable Rust was never affected.
+- **`fast_integrate_with_segments` flies the caller's BC ladder (MBA-1602).** The RK45 entry
+  point behind the Python binding's `fast_integrate` built its derivative inputs with
+  `bc_segments_data: None`, so a velocity-keyed ladder sent with `use_bc_segments` on was dropped
+  and, with no Mach `bc_segments`, silently replaced by a ladder auto-estimated from diameter,
+  mass and BC. The ladder now reaches the kernel through a new
+  `TrajectoryParams::bc_segments_data` field, Army-Standard-Metro ladders arrive ICAO-converted
+  like the scalar, and this path flies it exactly as `TrajectorySolver`,
+  `fast_trajectory::fast_integrate`, `--bc-segment`, `card.*` and solve-json's
+  `projectile.bc_segments` already do. An empty ladder now means no ladder everywhere: in
+  `derivatives::compute_derivatives` with `use_bc_segments` on, an empty `bc_segments_data` no
+  longer routes to the auto-estimator. Beside a non-empty Mach `bc_segments` table it now flies
+  that table, and beside an empty one (`Some([])`) it flies the scalar BC, both exactly as `None`
+  already did.
+
+  **Numeric change, only for callers who send a ladder.** Results move from the estimated ladder
+  (or, beside a Mach `bc_segments` table, from that table) to the caller's. A .308 175 gr, G1
+  0.505 at 792.48 m/s with a 0.505/0.496/0.485/0.470 ladder (breaks at 2800/1800/1500 fps) now
+  impacts 30.98 mm lower at 1000 m and 1.910 m/s slower. A .177 8.44 gr pellet, G1 0.021 at
+  274.32 m/s with a 0.0215/0.0205/0.0195 ladder (breaks at 800 and 600 fps) now impacts 23.89 mm
+  higher at 50 m and 23.204 m/s faster, because the estimator's rifle bands had cut its BC to
+  0.015 for the whole flight. On this path, inputs without a ladder, or with an empty one, are
+  byte-identical: with `use_bc_segments` on and no ladder it still auto-estimates, while
+  `TrajectorySolver` and `fast_trajectory::fast_integrate` still fly the scalar BC.
+
+  **Source-breaking for Rust struct literals.** `trajectory_integration::TrajectoryParams` gains
+  a public `bc_segments_data: Option<Vec<BCSegmentData>>` field, so Rust code that builds it
+  with a literal must add `bc_segments_data: None` (the previous behavior).
+- **solve-json no longer returns `internal_error` when a projectile stops moving downrange
+  (MBA-1599).** At the documented bottom of the BC range (`ballistic_coefficient` 0.0001, failing
+  up to about 0.00025 at the default -100 m `ground_threshold_m` and up to about 0.009 with a very
+  low one), and for a `bc_segments` band that low, the bullet sheds its downrange speed and falls
+  almost straight down. Its downrange position then stops changing in floating point. The engine
+  stored many trajectory points at the same distance, and the checked sampling rejected them as
+  `internal_error` ("trajectory distance is not strictly increasing"). The engine now keeps one
+  point per downrange distance, the newest, which is the rule it already applied to the final
+  point. The solve now completes as an ordinary early termination: `status: ok`,
+  `summary.termination` `ground_threshold` (or `time_limit`), and `actual_range_m` where
+  downrange motion stopped (7.38 m for the calm-air fixture at BC 0.0001).
+
+  A trajectory that really moves back toward the muzzle before it terminates now returns
+  `solve_failed` instead of `internal_error`; explicit `euler` at the default 1 ms step does this
+  at BC 0.0001. That is the code the engine already returned when such a reversal lasts to the
+  end. `explain`, `tolerance` and `error-budget` stop failing on these requests too.
+  [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md) describes both outcomes, and now also says that
+  no current solver emits `summary.termination` `velocity_floor`; the value is reserved.
+
+  Nothing that solved before changes: no fields, units or BC limits change, and every previously
+  successful response is byte-identical. No request that failed on the 250,000-point limit
+  changes either. A step collapsed onto the stall distance still counts against that limit, so a
+  stalled request that hit it, such as `rk4` or `euler` at BC 0.0001 with `time_step_s` 0.0001,
+  still fails at the same step with the same `solve_failed` response. Engine, CLI and binding
+  users: a stalled flight's `points` (CLI `trajectory --full`, the bindings' point lists) no
+  longer repeat the stall distance thousands of times. Summary values, sampled tables and range
+  cards are unchanged.
+- **`explain` attributes a drag-table, BC-ladder or correction-table difference to
+  `ProjectileDrag` (MBA-1603).** The group swap carried only the scalar projectile members
+  (`drag_model`, `ballistic_coefficient`, mass, diameter, length, twist), so a difference in
+  `projectile.drag_table`, `projectile.bc_segments` or `corrections.bc5d_table_path` was never
+  swapped. Its whole effect sat in `interaction_remainder`, with `skipped_axes` empty to say why.
+  When two requests also differed in `drag_model`, the swap flew one request's band BCs against
+  the other's reference curve, so the `ProjectileDrag` row described a projectile neither request
+  had. At 600 m, comparing a .308 on a G7 ladder with one on a G1 ladder gave `ProjectileDrag`
+  +1.540 m of drop against a total of +0.042 m, with -1.498 m in the remainder. The three members
+  now travel with the group as one unit, so that comparison reports +0.042 m and a zero
+  remainder. Comparing a request that carries a BC5D table with one of a different caliber no
+  longer aborts with `InvalidValue` ("BC5D table caliber does not match the shot"): the swap had
+  written the other request's diameter onto a request still holding its own table.
+
+  The report's shape is unchanged. Numbers move from `interaction_remainder` into the
+  `projectile_drag` contribution, and only for requests whose drag descriptions differ; every
+  other comparison is byte-identical. Inputs that belong to no group (`effects.aerodynamic_jump`,
+  `effects.wind_shear_model`, `solver.*`, `shot.ground_threshold_m`) are still not swapped, and a
+  difference in one of them still lands in the remainder.
+- **A dope card no longer prints a BC its rows did not fly (MBA-1601).** With a BC ladder
+  (`card.*`'s `bc_segments`, or the ladder a `bc5d_table_path` builds), the scalar BC flies only
+  in interior gaps between bands, and blended into the bands within up to 25 fps either side of a
+  gap edge. Under a gapless ladder, which includes every ladder a correction table builds, it
+  never flies. `card.pdf` still printed it as the card's `BC:`, and
+  `bc_for_solve` was documented as the BC the rows were computed with. The footer now prints the
+  ladder's BC range, e.g. `BC:0.420-0.450 (g1 ladder)`, or `(g1 ladder+gap)` when an interior gap
+  lets the scalar fly too, in which case the range includes it. A card without a ladder prints
+  `BC:0.400 (g1)` exactly as before. A reprint reads the range from the stored card. A card saved
+  before this release has no `bc_ladder` and reprints its stored scalar as before; regenerate it
+  to print the ladder range.
+
+  `card.range_table`, `card.come_ups` and `card.wind` responses gain an additive `bc_ladder` block
+  whenever a ladder fed the solve. It carries `source` (`"bc_segments"` or `"bc5d_table"`),
+  `segments` (the bands as flown, `{velocity_min, velocity_max, bc}` in `units.velocity`; a
+  request's own bands are echoed in request order, a table's generated ladder is listed fastest
+  first) and `interior_gap`, which describes the ladder rather than the flight: a gap the card's
+  airspeeds never reach still counts. The key is absent on every card without a ladder, so those
+  responses are byte-identical. `bc_for_solve` keeps its value; only its documentation changes.
+  A `stored_card` may carry the block back, and one with no segments or a non-positive band BC
+  is refused rather than printed.
+
+  **Source-breaking for Rust struct literals.** `pdf_dope_card::DopeCardConfig` gains
+  `bc_label: String` (empty prints the scalar as before; see `pdf_dope_card::ladder_bc_label`).
+  `CardResponseV1` and `StoredCardResponseV1` gain `bc_ladder`. JSON without a ladder is
+  unaffected, and the CLI's PDF cards print as before.
 
 ## [0.45.0] - 2026-10-07
 

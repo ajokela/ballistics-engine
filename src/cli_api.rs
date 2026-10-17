@@ -250,6 +250,13 @@ pub struct BallisticInputs {
     pub cd_delta2: f64,
     /// Enables velocity-keyed `bc_segments_data`. Explicit Mach-keyed `bc_segments` retain their
     /// legacy behavior and remain active when this flag is false.
+    ///
+    /// An empty `bc_segments_data` is the same as `None`. With the flag on and no velocity
+    /// ladder, every solver flies a non-empty Mach `bc_segments` table. Without one,
+    /// `TrajectorySolver` and `fast_trajectory::fast_integrate` fly the scalar BC, while the RK45
+    /// kernel behind `fast_integrate_with_segments` /
+    /// `trajectory_integration::integrate_trajectory` / `derivatives::compute_derivatives`
+    /// auto-estimates a ladder when `bc_segments` is `None` (MBA-955, legacy opt-in).
     pub use_bc_segments: bool,
     pub bc_segments: Option<Vec<(f64, f64)>>, // Mach-BC pairs
     pub bc_segments_data: Option<Vec<crate::BCSegmentData>>, // Velocity-BC segments
@@ -1908,17 +1915,41 @@ impl TrajectorySolver {
             + crate::constants::G_ACCEL_MPS2 * time
     }
 
-    /// Store one public trajectory point without exceeding the per-solve resource budget.
+    /// Store one public trajectory point, collapsing a downrange stall, without exceeding the
+    /// per-solve resource budget. `collapsed_steps` is the solve's own count of earlier calls that
+    /// replaced the previous point instead of storing a new one.
     fn push_trajectory_point(
         &self,
         points: &mut Vec<TrajectoryPoint>,
         point: TrajectoryPoint,
+        collapsed_steps: &mut usize,
     ) -> Result<(), BallisticsError> {
-        if points.len() >= self.max_trajectory_points {
+        // The budget counts calls, not stored points. Every earlier call either stored a point or
+        // collapsed one, so points.len() + collapsed_steps is the number of earlier calls, which
+        // is what points.len() was when every call stored a point. The limit therefore fires at
+        // the same step, with the same message, whether or not the flight stalled (MBA-1599).
+        if points.len() + *collapsed_steps >= self.max_trajectory_points {
             return Err(BallisticsError::from(format!(
                 "trajectory point limit of {} exceeded",
                 self.max_trajectory_points
             )));
+        }
+        // MBA-1599: the public trajectory is indexed by downrange distance, so stored x must
+        // strictly increase. A drag-dominated flight (the bottom of the BC range, a slow
+        // bc_segments band, or a long fall to a deep ground_threshold) can shed so much downrange
+        // speed that a whole step moves x by less than half a ULP: x + vx*dt == x while y keeps
+        // falling. Two states cannot both be kept at one representable range, so the newer state
+        // wins, the same rule append_terminal_endpoint applies to the terminal point. The
+        // collapsed step is still counted against max_trajectory_points above, so a stall that
+        // outlasts the budget fails at the step where it always did; only the stored points
+        // shrink. A strict DECREASE is deliberately still pushed: that is a reversal, which the
+        // checked observation API reports.
+        if let Some(last) = points.last_mut() {
+            if point.position.x == last.position.x {
+                *last = point;
+                *collapsed_steps += 1;
+                return Ok(());
+            }
         }
         points.push(point);
         Ok(())
@@ -2124,6 +2155,8 @@ impl TrajectorySolver {
     /// exits indistinguishable from ordinary integration knots, and historically left the
     /// reported endpoint one step short. Interpolating all supported boundaries here gives every
     /// solver one explicit terminal point and one authoritative termination reason.
+    /// `collapsed_steps` is the solve's running count from push_trajectory_point, so a stored
+    /// terminal point is checked against the same budget as every integration step.
     fn append_terminal_endpoint(
         &self,
         points: &mut Vec<TrajectoryPoint>,
@@ -2131,6 +2164,7 @@ impl TrajectorySolver {
         post_velocity: Vector3<f64>,
         post_time: f64,
         max_height: &mut f64,
+        collapsed_steps: &mut usize,
     ) -> Result<TrajectoryTermination, BallisticsError> {
         let previous = points
             .last()
@@ -2225,13 +2259,13 @@ impl TrajectorySolver {
             // A very early ground/time crossing can be distinct in time but less than one ULP
             // downrange. There is no representable range at which to retain both states, so make
             // the terminal state authoritative instead of creating a duplicate-X trajectory that
-            // the checked observation API must reject.
+            // the checked observation API must reject (see push_trajectory_point).
             let last = points.last_mut().ok_or_else(|| {
                 BallisticsError::from("trajectory points disappeared during terminal finalization")
             })?;
             *last = terminal_point;
         } else {
-            self.push_trajectory_point(points, terminal_point)?;
+            self.push_trajectory_point(points, terminal_point, collapsed_steps)?;
         }
         Ok(termination)
     }
@@ -2486,6 +2520,9 @@ impl TrajectorySolver {
         );
 
         let mut points = Vec::new();
+        // Steps push_trajectory_point collapsed onto the previous point; they still count
+        // against the point budget (MBA-1599).
+        let mut collapsed_steps = 0;
         let mut max_height = position.y;
         let mut min_pitch_damping = f64::INFINITY; // Track minimum pitch damping coefficient
         let mut transonic_mach = None; // Track when we enter transonic
@@ -2556,6 +2593,7 @@ impl TrajectorySolver {
                     kinetic_energy,
                     drag_coefficient: None,
                 },
+                &mut collapsed_steps,
             )?;
 
             // Record Mach-transition distances (constant sea-level speed of sound, matching the
@@ -2645,8 +2683,14 @@ impl TrajectorySolver {
             self.validate_integration_state(&position, &velocity, time)?;
         }
 
-        let termination =
-            self.append_terminal_endpoint(&mut points, position, velocity, time, &mut max_height)?;
+        let termination = self.append_terminal_endpoint(
+            &mut points,
+            position,
+            velocity,
+            time,
+            &mut max_height,
+            &mut collapsed_steps,
+        )?;
 
         // Get final values
         // MBA-1423: fill the per-point Cd here, once, rather than inside each integrator loop.
@@ -2720,6 +2764,9 @@ impl TrajectorySolver {
         );
 
         let mut points = Vec::new();
+        // Steps push_trajectory_point collapsed onto the previous point; they still count
+        // against the point budget (MBA-1599).
+        let mut collapsed_steps = 0;
         let mut max_height = position.y;
         let mut min_pitch_damping = f64::INFINITY; // Track minimum pitch damping coefficient
         let mut transonic_mach = None; // Track when we enter transonic
@@ -2790,6 +2837,7 @@ impl TrajectorySolver {
                     kinetic_energy,
                     drag_coefficient: None,
                 },
+                &mut collapsed_steps,
             )?;
 
             // Record Mach-transition distances (constant sea-level speed of sound, matching the
@@ -2906,8 +2954,14 @@ impl TrajectorySolver {
             self.validate_integration_state(&position, &velocity, time)?;
         }
 
-        let termination =
-            self.append_terminal_endpoint(&mut points, position, velocity, time, &mut max_height)?;
+        let termination = self.append_terminal_endpoint(
+            &mut points,
+            position,
+            velocity,
+            time,
+            &mut max_height,
+            &mut collapsed_steps,
+        )?;
 
         // Get final values
         // MBA-1423: fill the per-point Cd here, once, rather than inside each integrator loop.
@@ -2980,6 +3034,9 @@ impl TrajectorySolver {
         );
 
         let mut points = Vec::new();
+        // Steps push_trajectory_point collapsed onto the previous point; they still count
+        // against the point budget (MBA-1599).
+        let mut collapsed_steps = 0;
         let mut max_height = position.y;
         let mut dt = 0.001; // Initial step size
 
@@ -3047,6 +3104,7 @@ impl TrajectorySolver {
                     kinetic_energy,
                     drag_coefficient: None,
                 },
+                &mut collapsed_steps,
             )?;
 
             // Record Mach-transition distances (constant sea-level speed of sound, matching the
@@ -3137,8 +3195,14 @@ impl TrajectorySolver {
         }
 
         // Shared MBA-968/MBA-1218 range-crossing interpolation for all solver modes.
-        let termination =
-            self.append_terminal_endpoint(&mut points, position, velocity, time, &mut max_height)?;
+        let termination = self.append_terminal_endpoint(
+            &mut points,
+            position,
+            velocity,
+            time,
+            &mut max_height,
+            &mut collapsed_steps,
+        )?;
 
         // MBA-1423: see the sibling solvers — fill the per-point Cd before the borrow below.
         self.annotate_drag_coefficients(&mut points, speed_of_sound);
@@ -5536,6 +5600,125 @@ mod trajectory_point_budget_tests {
         }
     }
 
+    /// MBA-1599: a stalled flight stores one point per downrange distance, but every step it
+    /// collapses still counts against the point budget. The budget here is one more than the
+    /// points the flight stores, so the stored points alone can never reach it and only the
+    /// collapsed steps can. It is still far smaller than the steps the flight took, so the solve
+    /// fails at the budget as it did when every step was stored, instead of running on to the
+    /// ground threshold. (A budget of exactly the stored points would fail on the first collapse
+    /// after the last stored point whether or not collapsed steps were counted.)
+    #[test]
+    fn mba1599_collapsed_stall_steps_count_toward_point_budget() {
+        for (mode, use_rk4, use_adaptive_rk45, bc_value) in [
+            ("Euler", false, false, 2.0e-4),
+            ("RK4", true, false, 1.0e-4),
+            ("RK45", true, true, 1.0e-4),
+        ] {
+            let stalled = |point_budget: usize| {
+                let inputs = BallisticInputs {
+                    bc_value,
+                    bc_type: DragModel::G7,
+                    bullet_mass: 0.01134,
+                    bullet_diameter: 0.00782,
+                    muzzle_velocity: 823.0,
+                    use_rk4,
+                    use_adaptive_rk45,
+                    ground_threshold: -100.0,
+                    ..BallisticInputs::default()
+                };
+                let mut solver = TrajectorySolver::new(
+                    inputs,
+                    WindConditions::default(),
+                    AtmosphericConditions::default(),
+                );
+                solver.max_trajectory_points = point_budget;
+                solver.set_max_range(300.0);
+                solver.set_time_step(0.001);
+                solver.solve()
+            };
+
+            let flown = stalled(MAX_TRAJECTORY_POINTS)
+                .unwrap_or_else(|error| panic!("{mode}: the stall ends inside the cap: {error}"));
+            assert_eq!(
+                flown.termination,
+                TrajectoryTermination::GroundThreshold,
+                "{mode}"
+            );
+            let stored = flown.points.len();
+            let budget = stored + 1;
+            let Err(error) = stalled(budget) else {
+                panic!("{mode}: the flight fit a {budget}-point budget with {stored} stored points, so the collapsed steps were not counted");
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("trajectory point limit of {budget} exceeded")),
+                "unexpected {mode} stall-budget error: {error}"
+            );
+        }
+    }
+
+    /// MBA-1599: the budget counts calls, stored or collapsed, so the call that fails is call
+    /// budget + 1 however many earlier calls collapsed. That is the call that failed when every
+    /// call stored a point. The stored terminal point is held to the same count.
+    #[test]
+    fn mba1599_point_budget_fails_on_the_same_call_with_or_without_collapsing() {
+        let solver = solver_with_budget(true, false, 4, 10.0);
+        let point = |x: f64| TrajectoryPoint {
+            time: x,
+            position: Vector3::new(x, 0.0, 0.0),
+            velocity_magnitude: 1.0,
+            kinetic_energy: 0.0,
+            drag_coefficient: None,
+        };
+        let assert_over_budget = |error: BallisticsError| {
+            assert!(
+                error
+                    .to_string()
+                    .contains("trajectory point limit of 4 exceeded"),
+                "unexpected point-budget error: {error}"
+            );
+        };
+        for distances in [
+            [0.0, 1.0, 2.0, 3.0],
+            [0.0, 1.0, 1.0, 2.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ] {
+            let mut points = Vec::new();
+            let mut collapsed_steps = 0;
+            for x in distances {
+                solver
+                    .push_trajectory_point(&mut points, point(x), &mut collapsed_steps)
+                    .expect("four calls fit a four-point budget");
+            }
+            assert_eq!(points.len() + collapsed_steps, 4, "{distances:?}");
+
+            // A fifth call fails whether it would collapse or store a point.
+            for x in [distances[3], 5.0] {
+                let error = solver
+                    .push_trajectory_point(
+                        &mut points.clone(),
+                        point(x),
+                        &mut collapsed_steps.clone(),
+                    )
+                    .expect_err("a fifth call exceeds a four-point budget");
+                assert_over_budget(error);
+            }
+            // So does a terminal point stored after four integration steps.
+            let error = solver
+                .append_terminal_endpoint(
+                    &mut points.clone(),
+                    Vector3::new(20.0, 0.0, 0.0),
+                    Vector3::new(1.0, 0.0, 0.0),
+                    10.0,
+                    &mut 0.0,
+                    &mut collapsed_steps.clone(),
+                )
+                .expect_err("the terminal point is a fifth call");
+            assert_over_budget(error);
+        }
+    }
+
     #[test]
     fn mba1299_every_solver_preflights_the_sample_budget() {
         for (mode, use_rk4, use_adaptive_rk45) in [
@@ -7408,6 +7591,7 @@ mod terminal_range_interpolation_tests {
                 Vector3::new(600.0, 0.0, 0.0),
                 101.0,
                 &mut max_height,
+                &mut 0,
             )
             .expect("the final step brackets supported boundaries");
 
@@ -7433,6 +7617,7 @@ mod terminal_range_interpolation_tests {
                     Vector3::new(600.0, 0.0, 0.0),
                     101.0,
                     &mut max_height,
+                    &mut 0,
                 )
                 .expect("tied boundaries remain a valid terminal"),
             TrajectoryTermination::GroundThreshold
@@ -7469,6 +7654,7 @@ mod terminal_range_interpolation_tests {
                 Vector3::new(699.0, 0.0, 0.0),
                 1.0,
                 &mut max_height,
+                &mut 0,
             )
             .expect("sub-ULP ground crossing remains representable as one terminal state");
 
@@ -7477,6 +7663,65 @@ mod terminal_range_interpolation_tests {
         assert_eq!(points[0].position.x, 100.0);
         assert_eq!(points[0].position.y.to_bits(), ground_threshold.to_bits());
         assert!(points[0].time > 0.0);
+    }
+
+    /// MBA-1599: at the bottom of the BC range the projectile sheds its downrange speed within a
+    /// few metres and then falls almost straight down. Once a whole step moves x by less than half
+    /// a ULP, `x + vx*dt == x` while y keeps falling. Every solver must keep one stored point per
+    /// downrange distance and still end at the real boundary, so the checked observation API
+    /// accepts the flight. Euler flies 2e-4 because explicit Euler at 1 ms is unstable at 1e-4.
+    #[test]
+    fn downrange_stall_replaces_instead_of_duplicating_range() {
+        for (name, use_rk4, use_adaptive_rk45, bc_value) in [
+            ("Euler", false, false, 2.0e-4),
+            ("RK4", true, false, 1.0e-4),
+            ("RK45", true, true, 1.0e-4),
+        ] {
+            let inputs = BallisticInputs {
+                bc_value,
+                bc_type: DragModel::G7,
+                bullet_mass: 0.01134,
+                bullet_diameter: 0.00782,
+                muzzle_velocity: 823.0,
+                use_rk4,
+                use_adaptive_rk45,
+                ground_threshold: -100.0,
+                ..BallisticInputs::default()
+            };
+            let mut solver = TrajectorySolver::new(
+                inputs,
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            );
+            solver.set_max_range(300.0);
+            solver.set_time_step(0.001);
+
+            let result = solver
+                .solve()
+                .unwrap_or_else(|error| panic!("{name}: a stalled flight still solves: {error}"));
+            assert!(
+                result
+                    .points
+                    .windows(2)
+                    .all(|pair| pair[1].position.x > pair[0].position.x),
+                "{name}: stored downrange distances must strictly increase"
+            );
+            assert_eq!(
+                result.termination,
+                TrajectoryTermination::GroundThreshold,
+                "{name}"
+            );
+            assert!(
+                result.max_range > 0.0 && result.max_range < 300.0,
+                "{name}: the stall ends short of max_range, got {} m",
+                result.max_range
+            );
+            let terminal = result.points.last().expect("terminal point");
+            assert_eq!(terminal.position.y, -100.0, "{name}");
+            result
+                .sample_observations(50.0, 100)
+                .unwrap_or_else(|error| panic!("{name}: checked sampling refused: {error}"));
+        }
     }
 
     #[test]

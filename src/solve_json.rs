@@ -247,9 +247,10 @@ pub struct ProjectileV1 {
     /// See [`BcSegmentV1`] for the band rules.
     ///
     /// `ballistic_coefficient` stays required and validated beside it, but flies only in an
-    /// interior gap between two bands. Below the lowest band, or at or above the highest, the
-    /// nearest edge band applies, so under a gapless ladder the scalar never flies. Band BCs
-    /// are referenced to `drag_model`, and bands are selected by airspeed (speed relative to
+    /// interior gap between two bands, and blended into the bands within up to 25 fps either
+    /// side of a gap edge. Below the lowest band, or at or above the highest, the nearest edge
+    /// band applies, so under a gapless ladder the scalar never flies. A one-band ladder's BC
+    /// must match `ballistic_coefficient` (see [`ONE_BAND_BC_RELATIVE_TOLERANCE_V1`]). Band BCs are referenced to `drag_model`, and bands are selected by airspeed (speed relative to
     /// the air mass). Interior band and gap edges are smoothstep-blended
     /// (`velocity_segment_bc` in `src/bc_estimation.rs`). Refused alongside
     /// `drag_table`, which replaces the `drag_model` curve the band BCs are measured against,
@@ -278,6 +279,9 @@ pub struct ProjectileV1 {
 /// - In an interior gap between two bands the scalar `ballistic_coefficient` flies. Below the
 ///   lowest band, or at or above the highest, the nearest edge band applies, so under a
 ///   gapless ladder the scalar never flies.
+/// - A one-band ladder flies its band's BC at every speed, so that BC must match the scalar
+///   `ballistic_coefficient` to within [`ONE_BAND_BC_RELATIVE_TOLERANCE_V1`]; the band's edges
+///   then change nothing.
 /// - Every interior band-to-band edge and every gap edge is blended with a smoothstep across
 ///   a narrow window centred on it, so the integrator never sees the drag jump in one step
 ///   (`velocity_segment_bc` in `src/bc_estimation.rs`).
@@ -309,6 +313,13 @@ pub const MIN_BC_SEGMENTS_V1: usize = 1;
 /// ladder on every derivative evaluation, so the cap bounds the per-step cost; it is far past
 /// the handful of bands a published multi-BC schedule lists.
 pub const MAX_BC_SEGMENTS_V1: usize = 64;
+
+/// How closely a one-band [`ProjectileV1::bc_segments`] ladder's BC must match the scalar
+/// `ballistic_coefficient`, relative to the larger of the two: one part in a million. That
+/// forgives rounding nobody chose, such as a BC held as an `f32` (`0.243f32` reads back as
+/// `0.24300000071525574`) or converted between units and back, but not a different value: 0.172
+/// against 0.1724 is still refused. Within it, the band's BC is the one that flies.
+pub const ONE_BAND_BC_RELATIVE_TOLERANCE_V1: f64 = 1.0e-6;
 
 /// A caller-supplied Cd-vs-Mach drag curve (MBA-1597): solve-json's form of the CLI's
 /// `--drag-table`.
@@ -1555,7 +1566,9 @@ pub fn decode_solve_request_v1(input: &str) -> Result<SolveRequestV1, SolveError
 /// output, so the request did not survive a JSON round trip and broke the protocol's stability
 /// invariant. Tightening the float handling would have addressed the symptom; the actual defect
 /// is that a number no projectile could have was accepted as a projectile.
-mod limits {
+///
+/// Also bounds each `card.*` `bc_segments` band BC (MBA-1600).
+pub(crate) mod limits {
     /// 1 mg to 100 kg. A .17 cal pellet is ~500 mg; a 16-inch naval shell is ~1200 kg, so the
     /// upper bound is the one a caller might conceivably reach — it is set past small artillery
     /// on purpose and can be raised without ceremony.
@@ -1624,7 +1637,7 @@ fn validate_request_ranges(request: &SolveRequestV1) -> Result<(), SolveErrorEnv
         validate_drag_table_v1(drag_table)?;
     }
     if let Some(bc_segments) = &request.projectile.bc_segments {
-        validate_bc_segments_v1(bc_segments)?;
+        validate_bc_segments_v1(bc_segments, request.projectile.ballistic_coefficient)?;
     }
     Ok(())
 }
@@ -1863,10 +1876,17 @@ fn bc_segment_count_message(count: usize) -> String {
 /// `velocity_max_mps` must not reach above the previous band's `velocity_min_mps` (no
 /// overlaps; touching edges and gaps are legal).
 ///
+/// A one-band ladder flies its band at every speed, so the scalar `ballistic_coefficient`
+/// never flies beside it. Its band BC must match `scalar_bc` to within
+/// [`ONE_BAND_BC_RELATIVE_TOLERANCE_V1`], or the pair is refused as `conflicting_fields` at the
+/// band's BC: two different BCs for one projectile can only be a caller mistake, and flying
+/// either one silently hides it.
+///
 /// Called from both the decoder and the solve service, so a Rust caller that builds a request
 /// without [`decode_solve_request_v1`] hears about a bad band at the same path.
 pub(crate) fn validate_bc_segments_v1(
     segments: &[BcSegmentV1],
+    scalar_bc: f64,
 ) -> Result<(), SolveErrorEnvelopeV1> {
     let base = "$.projectile.bc_segments";
     let count = segments.len();
@@ -1937,6 +1957,23 @@ pub(crate) fn validate_bc_segments_v1(
             }
         }
         previous = Some(*seg);
+    }
+    if let [band] = segments {
+        let difference = (band.ballistic_coefficient - scalar_bc).abs();
+        let allowed = ONE_BAND_BC_RELATIVE_TOLERANCE_V1 * band.ballistic_coefficient.max(scalar_bc);
+        if difference > allowed {
+            return Err(protocol_error(
+                SolveErrorCodeV1::ConflictingFields,
+                format!(
+                    "a one-band ladder flies its band's BC at every speed, so \
+                     bc_segments[0].ballistic_coefficient ({}) must match \
+                     projectile.ballistic_coefficient ({scalar_bc}): send the same value in \
+                     both, or omit bc_segments",
+                    band.ballistic_coefficient
+                ),
+                format!("{base}[0].ballistic_coefficient"),
+            ));
+        }
     }
     Ok(())
 }

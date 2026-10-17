@@ -3581,6 +3581,14 @@ almost additively at this range. `-o json` carries the identical numbers as a ve
 input that could not be swapped on one or both requests at all, e.g. a wind axis absent under
 segmented wind) with the group and reason.
 
+**Drag description.** `ProjectileDrag` covers the projectile's whole drag description, not only
+its scalar members: a `projectile.drag_table`, a `projectile.bc_segments` ladder and a
+`corrections.bc5d_table_path` table travel with `drag_model` and `ballistic_coefficient` as one
+unit, so a ladder is never flown against the other request's reference curve, and a difference in
+any of them is attributed to projectile drag. Inputs that belong to no group
+(`effects.aerodynamic_jump`, `effects.wind_shear_model`, `solver.*`, `shot.ground_threshold_m`)
+are not swapped, and a difference in one of them lands in the interaction remainder.
+
 **Units.** `--ranges` is always meters, solve-json v1's own SI unit, and is never affected by
 `--units` -- `explain` has no `--target`/`--sigma`/`--domain`-style flag for the global `--units`
 flag to apply to, so it is simply inert here.
@@ -4356,7 +4364,8 @@ ballistics trajectory -v 2600 -b 0.243 -m 175 -d 0.308 --drag-model g7 --max-ran
   MCP) sends the same ladder inline as `projectile.bc_segments`, a list of
   `{velocity_min_mps, velocity_max_mps, ballistic_coefficient}` bands. It flies through the same
   lookup as this flag, but its speeds are always m/s, the bands must be listed fastest first
-  without overlaps, and it is refused alongside a correction table rather than overriding it. See
+  without overlaps, a one-band ladder's BC must equal the scalar BC, and it is refused alongside
+  a correction table rather than overriding it. See
   [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#projectilebc_segments-mba-1598).
 - To run BC5D-equivalent corrections on a device that cannot hold the tables (e.g. the
   WASM CLI), run once with `--bc-table-dir ... --use-bc-segments --print-bc-segments`:

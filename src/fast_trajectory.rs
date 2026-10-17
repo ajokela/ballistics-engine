@@ -948,6 +948,11 @@ fn compute_derivatives(
 
 /// Fast integration with explicit wind segments using RK45
 /// MBA-155: Upstreamed from ballistics_rust
+///
+/// A velocity-keyed `bc_segments_data` ladder is flown when `use_bc_segments` is on
+/// (MBA-1602). With the flag on and no ladder (None or empty) and no Mach `bc_segments`, this
+/// RK45 path auto-estimates a ladder from diameter, mass and BC, unlike `TrajectorySolver` and
+/// [`fast_integrate`], which fly the scalar BC.
 pub fn fast_integrate_with_segments(
     inputs: &BallisticInputs,
     wind_segments: Vec<crate::wind::WindSegment>,
@@ -1037,6 +1042,9 @@ pub fn fast_integrate_with_segments(
         custom_drag_table: inputs.custom_drag_table.clone(),
         bc_segments: inputs.bc_segments.clone(),
         use_bc_segments: inputs.use_bc_segments,
+        // MBA-1602: the caller's velocity ladder, read from the normalized inputs so an
+        // Army-Standard-Metro ladder arrives ICAO-converted like the scalar.
+        bc_segments_data: inputs.bc_segments_data.clone(),
         // MBA-954: keep the historical -1000.0 here (behavior-preserving for this binding path);
         // threading inputs.ground_threshold would change the default ground plane for existing
         // callers. Direct TrajectoryParams constructors can now configure it.
@@ -2422,6 +2430,114 @@ mod tests {
             accel(1.0).to_bits(),
             accel(1.5).to_bits(),
             "cd_scale must not affect the G-model/BC drag path"
+        );
+    }
+
+    /// Fly `inputs` through the binding entry point and return the airspeed at t = 1.5 s.
+    fn segmented_speed_at_1_5_s(inputs: &BallisticInputs) -> f64 {
+        let v = inputs.muzzle_velocity;
+        let elev = 0.012_f64;
+        let solution = fast_integrate_with_segments(
+            inputs,
+            vec![],
+            FastIntegrationParams {
+                horiz: 1000.0,
+                vert: 0.0,
+                initial_state: [0.0, 0.0, 0.0, v * elev.cos(), v * elev.sin(), 0.0],
+                t_span: (0.0, 5.0),
+                atmo_params: (0.0, 15.0, 1013.25, 1.0),
+                atmo_sock: None,
+            },
+        );
+        assert!(solution.success);
+        let s = solution.sol(&[1.5]);
+        (s[3][0].powi(2) + s[4][0].powi(2) + s[5][0].powi(2)).sqrt()
+    }
+
+    fn mba1602_308_inputs() -> BallisticInputs {
+        BallisticInputs {
+            muzzle_velocity: 792.48,
+            bullet_mass: 0.01134,
+            bullet_diameter: 0.0078232,
+            bullet_length: 0.031496,
+            bc_value: 0.505,
+            bc_type: DragModel::G1,
+            ..BallisticInputs::default()
+        }
+    }
+
+    #[test]
+    fn segmented_fast_path_flies_caller_velocity_bc_ladder() {
+        // MBA-1602: fast_integrate_with_segments (the Python binding's fast_integrate) built
+        // its derivative inputs with bc_segments_data: None, so a caller's ladder was dropped
+        // and, with use_bc_segments on, silently replaced by the auto-estimated one. A one-band
+        // ladder at BC X must fly exactly like the scalar BC X.
+        let base = mba1602_308_inputs();
+        let mut ladder = base.clone();
+        ladder.use_bc_segments = true;
+        ladder.bc_segments_data = Some(vec![BCSegmentData {
+            velocity_min: 0.0,
+            velocity_max: 5000.0,
+            bc_value: 0.300,
+        }]);
+        let scalar = BallisticInputs {
+            bc_value: 0.300,
+            ..base.clone()
+        };
+        let mut estimated = base.clone();
+        estimated.use_bc_segments = true;
+
+        let flown = segmented_speed_at_1_5_s(&ladder);
+        let expected = segmented_speed_at_1_5_s(&scalar);
+        let auto = segmented_speed_at_1_5_s(&estimated);
+        assert!(
+            (flown - expected).abs() < 1e-9,
+            "a one-band 0.300 ladder must fly as scalar BC 0.300: ladder={flown} scalar={expected}"
+        );
+        assert!(
+            (flown - auto).abs() > 10.0,
+            "the caller's ladder must not be replaced by the auto-estimate: ladder={flown} estimate={auto}"
+        );
+    }
+
+    #[test]
+    fn segmented_fast_path_converts_army_standard_metro_caller_ladder() {
+        // MBA-1602 + MBA-1365: the ladder is threaded AFTER normalize_for_solve, so an ASM ladder
+        // flies as its ICAO equivalent, exactly like an ASM scalar.
+        let base = mba1602_308_inputs();
+        let mut ladder = base.clone();
+        ladder.bc_reference_standard = crate::cli_api::BcReferenceStandard::ArmyStandardMetro;
+        ladder.use_bc_segments = true;
+        ladder.bc_segments_data = Some(vec![BCSegmentData {
+            velocity_min: 0.0,
+            velocity_max: 5000.0,
+            bc_value: 0.300,
+        }]);
+        let scalar = BallisticInputs {
+            bc_value: 0.300,
+            bc_reference_standard: crate::cli_api::BcReferenceStandard::ArmyStandardMetro,
+            ..base
+        };
+        let flown = segmented_speed_at_1_5_s(&ladder);
+        let expected = segmented_speed_at_1_5_s(&scalar);
+        assert!(
+            (flown - expected).abs() < 1e-9,
+            "an ASM ladder must be converted like an ASM scalar: ladder={flown} scalar={expected}"
+        );
+    }
+
+    #[test]
+    fn segmented_fast_path_empty_ladder_matches_absent_ladder() {
+        // MBA-1602: an empty ladder is no ladder. With use_bc_segments on, Some([]) must give the
+        // byte-identical result None gives (today's auto-estimate on this path).
+        let mut absent = mba1602_308_inputs();
+        absent.use_bc_segments = true;
+        let mut empty = absent.clone();
+        empty.bc_segments_data = Some(Vec::new());
+        assert_eq!(
+            segmented_speed_at_1_5_s(&empty).to_bits(),
+            segmented_speed_at_1_5_s(&absent).to_bits(),
+            "Some(empty) must behave exactly like None"
         );
     }
 }

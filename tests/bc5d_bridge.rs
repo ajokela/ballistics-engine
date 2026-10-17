@@ -18,6 +18,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "pdf")]
+#[path = "support/pdf_text.rs"]
+mod pdf_text;
+
 // ---------------------------------------------------------------------------
 // Synthesized BC5D v2 fixture (see module doc for provenance)
 // ---------------------------------------------------------------------------
@@ -545,8 +549,9 @@ fn solve_refuses_a_ladder_drag_table_and_correction_table_at_the_older_path() {
         "kind": "reference",
         "points": [{"mach": 0.0, "cd": 0.25}, {"mach": 3.0, "cd": 0.25}]
     });
+    // One band, so its BC is the scalar 0.4: a one-band ladder must match the scalar.
     request["projectile"]["bc_segments"] = json!([
-        {"velocity_min_mps": 0.0, "velocity_max_mps": 999.0, "ballistic_coefficient": 0.42}
+        {"velocity_min_mps": 0.0, "velocity_max_mps": 999.0, "ballistic_coefficient": 0.4}
     ]);
     let out = bridge_raw("solve", request);
     std::fs::remove_dir_all(&dir).unwrap();
@@ -790,5 +795,454 @@ fn golden_cli_trajectory_and_bridge_solve_agree_on_bc5d_drops() {
         (cli_delta - bridge_delta).abs() < 0.05,
         "CLI and bridge must attribute the same drop change to the table at {far_m:.0} m: \
          CLI {cli_delta} in vs bridge {bridge_delta} in"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// MBA-1603: `explain` carries the correction table with ProjectileDrag
+// ---------------------------------------------------------------------------
+
+fn resolved_request(request: Value) -> ballistics_engine::solve_json::ResolvedSolveRequestV1 {
+    let decoded = ballistics_engine::solve_json::decode_solve_request_v1(&request.to_string())
+        .expect("request decodes");
+    ballistics_engine::solve_v1(decoded)
+        .expect("request solves")
+        .resolved_request
+}
+
+/// Before MBA-1603 no group swapped `corrections`, so a table's whole effect sat in the
+/// interaction remainder with `skipped_axes` empty: an unexplained difference, unexplained.
+#[test]
+fn explain_attributes_a_correction_table_to_projectile_drag() {
+    use ballistics_engine::explain::explain_difference;
+    use ballistics_engine::perturbation::InputGroup;
+
+    let (dir, file) = write_fixture("explain-attribution", &bc5d_fixture());
+    let plain = resolved_request(solve_request(None));
+    let corrected = resolved_request(solve_request(Some(
+        json!({"bc5d_table_path": file.to_str().unwrap()}),
+    )));
+    let report = explain_difference(&plain, &corrected, &[300.0, 500.0]);
+    std::fs::remove_dir_all(&dir).unwrap();
+    let report = report.expect("explain runs");
+
+    assert!(report.skipped_axes.is_empty(), "{:?}", report.skipped_axes);
+    for row in &report.rows {
+        let drag = row
+            .contributions
+            .iter()
+            .find(|c| c.group == InputGroup::ProjectileDrag)
+            .unwrap()
+            .delta;
+        assert!(
+            row.total.drop_m > 1e-3,
+            "the 0.8 correction must add drop at {} m: {:?}",
+            row.range_m,
+            row.total
+        );
+        assert!(
+            (drag.drop_m - row.total.drop_m).abs() < 1e-9,
+            "range {}: ProjectileDrag {} vs total {} (remainder {})",
+            row.range_m,
+            drag.drop_m,
+            row.total.drop_m,
+            row.interaction_remainder.drop_m
+        );
+        assert!(row.interaction_remainder.drop_m.abs() < 1e-9);
+    }
+}
+
+/// The swap used to write the OTHER request's diameter onto a request still carrying its own
+/// .308 table, which the caliber check refuses, so the whole comparison aborted with
+/// `invalid_value` at `bc5d_table_path`. The table now leaves before the diameter arrives.
+#[test]
+fn explain_compares_a_corrected_308_with_a_224_instead_of_aborting() {
+    use ballistics_engine::explain::explain_difference;
+
+    let (dir, file) = write_fixture("explain-caliber", &bc5d_fixture());
+    let corrected_308 = resolved_request(solve_request(Some(
+        json!({"bc5d_table_path": file.to_str().unwrap()}),
+    )));
+    let mut plain_224 = solve_request(None);
+    plain_224["projectile"]["diameter_m"] = json!(0.224 * 0.0254);
+    let plain_224 = resolved_request(plain_224);
+    let report = explain_difference(&corrected_308, &plain_224, &[300.0]);
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    let report = report.expect("a foreign diameter must never meet the table mid-swap");
+    assert!(report.rows[0].interaction_remainder.drop_m.abs() < 1e-9);
+}
+
+// ---------------------------------------------------------------------------
+// MBA-1600: card.* refuses a BC ladder it could not fly as written
+// ---------------------------------------------------------------------------
+
+/// The refusal `command` gives for `extra` on the shared card load, checked to be a typed
+/// `command_failed` envelope rather than a card.
+fn card_refusal(command: &str, extra: Value) -> String {
+    let out = bridge_raw(command, card_request(extra));
+    assert_eq!(out["ok"], false, "{command} must refuse this ladder: {out}");
+    assert_eq!(out["error"]["code"], "command_failed", "{out}");
+    out["error"]["message"].as_str().unwrap().to_string()
+}
+
+fn band(velocity_min: f64, velocity_max: f64, bc: f64) -> Value {
+    json!({"velocity_min": velocity_min, "velocity_max": velocity_max, "bc": bc})
+}
+
+/// The engine's lookup flies the FIRST listed band containing a speed and builds no blend
+/// across an overlap, so an overlapping ladder used to fly differently by listing order alone
+/// (0.9 mil apart at 1000 yd for this load), and a nested band was silently dead.
+#[test]
+fn card_refuses_overlapping_bc_segments_in_any_order() {
+    const RULE: &str = "bands may touch or leave gaps but must not overlap";
+    let cases = [
+        (
+            json!({"bc_segments": [band(2000.0, 3500.0, 0.5), band(1000.0, 2200.0, 0.3)]}),
+            "bc_segments[0] (2000 to 3500 fps) overlaps bc_segments[1] (1000 to 2200 fps)",
+        ),
+        (
+            json!({"bc_segments": [band(1000.0, 2200.0, 0.3), band(2000.0, 3500.0, 0.5)]}),
+            "bc_segments[1] (2000 to 3500 fps) overlaps bc_segments[0] (1000 to 2200 fps)",
+        ),
+        (
+            json!({"bc_segments": [band(1000.0, 3500.0, 0.5), band(1800.0, 2200.0, 0.3)]}),
+            "bc_segments[1] (1800 to 2200 fps) overlaps bc_segments[0] (1000 to 3500 fps)",
+        ),
+        (
+            json!({"bc_segments": [band(1000.0, 2000.0, 0.4), band(1000.0, 1500.0, 0.3)]}),
+            "bc_segments[1] (1000 to 1500 fps) overlaps bc_segments[0] (1000 to 2000 fps)",
+        ),
+        (
+            json!({
+                "velocity_unit": "mps",
+                "muzzle_velocity": 853.0,
+                "bc_segments": [band(600.0, 1100.0, 0.5), band(300.0, 650.0, 0.3)]
+            }),
+            "bc_segments[0] (600 to 1100 m/s) overlaps bc_segments[1] (300 to 650 m/s)",
+        ),
+    ];
+    for (extra, expected) in cases {
+        assert_eq!(
+            card_refusal("card.range_table", extra),
+            format!("card.range_table failed: invalid request: {expected}: {RULE}")
+        );
+    }
+
+    // Every surface that flies the ladder refuses it the same way.
+    let overlap = [band(2000.0, 3500.0, 0.5), band(1000.0, 2200.0, 0.3)];
+    let mut surfaces = vec![
+        ("card.come_ups", json!({"bc_segments": overlap})),
+        (
+            "card.wind",
+            json!({"wind_speeds": [10.0], "bc_segments": overlap}),
+        ),
+    ];
+    if cfg!(feature = "pdf") {
+        surfaces.push(("card.pdf", json!({"bc_segments": overlap})));
+    }
+    for (command, extra) in surfaces {
+        let message = card_refusal(command, extra);
+        assert!(
+            message.starts_with(&format!(
+                "{command} failed: invalid request: bc_segments[0] (2000 to 3500 fps) overlaps"
+            )),
+            "{message}"
+        );
+    }
+}
+
+/// The tightening stops at overlaps: card's own conventions (any order, touching edges, gaps,
+/// `[]` and `null` as no ladder) are unchanged, and so are the cards they give.
+#[test]
+fn card_still_accepts_touching_gapped_and_reordered_bc_segments() {
+    let touching = bridge_ok(
+        "card.range_table",
+        card_request(json!({
+            "bc_segments": [band(2000.0, 3500.0, 0.5), band(1000.0, 2000.0, 0.3)]
+        })),
+    );
+    let touching_reversed = bridge_ok(
+        "card.range_table",
+        card_request(json!({
+            "bc_segments": [band(1000.0, 2000.0, 0.3), band(2000.0, 3500.0, 0.5)]
+        })),
+    );
+    // The rows, not the whole response: `bc_ladder` echoes the bands in request order
+    // (MBA-1601), so the two responses differ there and only there.
+    assert_eq!(
+        serde_json::to_string(&touching["rows"]).unwrap(),
+        serde_json::to_string(&touching_reversed["rows"]).unwrap()
+    );
+
+    bridge_ok(
+        "card.range_table",
+        card_request(json!({
+            "bc_segments": [
+                band(2400.0, 3500.0, 0.5),
+                band(1500.0, 2000.0, 0.3),
+                band(0.0, 1200.0, 0.25)
+            ]
+        })),
+    );
+
+    let plain =
+        serde_json::to_string(&bridge_ok("card.range_table", card_request(json!({})))).unwrap();
+    for empty in [json!([]), Value::Null] {
+        let out = bridge_ok(
+            "card.range_table",
+            card_request(json!({ "bc_segments": empty })),
+        );
+        assert_eq!(serde_json::to_string(&out).unwrap(), plain);
+    }
+}
+
+/// A band BC is held to the bound solve-json puts on any BC. 1e6 used to fly a vacuum card,
+/// and 1e-9 failed as an unexplained `zero solve failed`.
+#[test]
+fn card_bounds_each_band_bc_like_solve_json() {
+    let cases = [
+        (
+            json!([band(0.0, 5000.0, 1e6)]),
+            "bc_segments[0]: bc must be between 0.0001 and 100, got 1000000",
+        ),
+        (
+            json!([band(0.0, 5000.0, 1e-9)]),
+            "bc_segments[0]: bc must be between 0.0001 and 100, got 0.000000001",
+        ),
+        (
+            json!([band(2000.0, 5000.0, 0.4), band(0.0, 500.0, 9.99e-5)]),
+            "bc_segments[1]: bc must be between 0.0001 and 100, got 0.0000999",
+        ),
+    ];
+    for (ladder, expected) in cases {
+        assert_eq!(
+            card_refusal("card.range_table", json!({ "bc_segments": ladder })),
+            format!("card.range_table failed: invalid request: {expected}")
+        );
+    }
+
+    // Both edges are inclusive, as in solve-json.
+    for ladder in [
+        json!([band(0.0, 5000.0, 100.0)]),
+        json!([band(2000.0, 5000.0, 0.4), band(0.0, 500.0, 1e-4)]),
+    ] {
+        bridge_ok(
+            "card.range_table",
+            card_request(json!({ "bc_segments": ladder })),
+        );
+    }
+}
+
+/// The lookup scans the ladder on every derivative evaluation, so solve time grew with the
+/// band count and nothing capped it (9000 bands took about 100 times as long as one).
+#[test]
+fn card_caps_bc_segments_at_the_solve_json_band_limit() {
+    use ballistics_engine::solve_json::MAX_BC_SEGMENTS_V1;
+
+    // Contiguous, fastest first, 0 to 4000 fps, every band at the scalar's 0.4.
+    let ladder = |n: usize| -> Value {
+        (0..n)
+            .map(|i| {
+                band(
+                    4000.0 * (n - i - 1) as f64 / n as f64,
+                    4000.0 * (n - i) as f64 / n as f64,
+                    0.4,
+                )
+            })
+            .collect()
+    };
+
+    bridge_ok(
+        "card.range_table",
+        card_request(json!({ "bc_segments": ladder(MAX_BC_SEGMENTS_V1) })),
+    );
+    assert_eq!(
+        card_refusal(
+            "card.range_table",
+            json!({ "bc_segments": ladder(MAX_BC_SEGMENTS_V1 + 1) })
+        ),
+        format!(
+            "card.range_table failed: invalid request: bc_segments must have at most {} bands, \
+             got {}",
+            MAX_BC_SEGMENTS_V1,
+            MAX_BC_SEGMENTS_V1 + 1
+        )
+    );
+}
+
+// ---------------------------------------------------------------------------
+// MBA-1601: a card states the BC ladder that flew, not only the scalar
+// ---------------------------------------------------------------------------
+
+/// The velocity-varying correction: G1 plane, BC 0.4 corrected 0.8 at 1000 fps and 1.0 at
+/// 2800 fps (BC 0.5: 1.0 and 1.2). A 0.4 load at 2800 fps keeps its scalar at the muzzle,
+/// while every band below it flies a smaller BC.
+fn bc5d_velocity_fixture() -> Vec<u8> {
+    let weight_bins = [168.0_f32];
+    let bc_bins = [0.4_f32, 0.5_f32];
+    let muzzle_bins = [2_800.0_f32];
+    let current_bins = [1_000.0_f32, 2_800.0_f32];
+    let data = [0.8_f32, 1.0_f32, 1.0_f32, 1.2_f32];
+
+    let mut checksum_data = Vec::new();
+    push_f32s(&mut checksum_data, &weight_bins);
+    push_f32s(&mut checksum_data, &bc_bins);
+    push_f32s(&mut checksum_data, &muzzle_bins);
+    push_f32s(&mut checksum_data, &current_bins);
+    push_f32s(&mut checksum_data, &data);
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"BC5D");
+    bytes.extend_from_slice(&2_u32.to_le_bytes()); // format version
+    bytes.extend_from_slice(&0.308_f32.to_le_bytes()); // caliber
+    bytes.extend_from_slice(&0_u32.to_le_bytes()); // flags
+    bytes.extend_from_slice(&0_u32.to_le_bytes()); // padding
+    bytes.extend_from_slice(&(weight_bins.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&(bc_bins.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&(muzzle_bins.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&(current_bins.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&1_u32.to_le_bytes()); // drag types
+    bytes.extend_from_slice(&0_u64.to_le_bytes()); // timestamp
+    bytes.extend_from_slice(&crc32_ieee(&checksum_data).to_le_bytes());
+    let mut api_version = [0_u8; 16];
+    api_version[..4].copy_from_slice(b"test");
+    bytes.extend_from_slice(&api_version);
+    bytes.extend_from_slice(&[0_u8; 12]);
+    bytes.extend_from_slice(&checksum_data);
+    // 80 header bytes plus 10 f32 cells: one current bin and two data cells more than
+    // `bc5d_fixture`.
+    assert_eq!(bytes.len(), 120);
+    bytes
+}
+
+/// Under a gapless ladder the scalar never flies (the rows are identical at 0.4 and 0.2), yet
+/// `bc_for_solve` was the only BC a card response stated.
+#[test]
+fn card_responses_carry_the_ladder_that_flew() {
+    let ladder = json!([band(2000.0, 4000.0, 0.45), band(500.0, 2000.0, 0.42)]);
+    for (command, extra) in [
+        ("card.range_table", json!({})),
+        ("card.come_ups", json!({})),
+        ("card.wind", json!({"wind_speeds": [10.0]})),
+    ] {
+        let mut request = card_request(extra);
+        request["bc_segments"] = ladder.clone();
+        let out = bridge_ok(command, request.clone());
+        assert_eq!(out["bc_for_solve"], json!(0.4), "{command}: {out}");
+        assert_eq!(
+            out["bc_ladder"]["source"], "bc_segments",
+            "{command}: {out}"
+        );
+        assert_eq!(out["bc_ladder"]["segments"], ladder, "{command}: {out}");
+        assert_eq!(out["bc_ladder"]["interior_gap"], false, "{command}: {out}");
+
+        request["ballistic_coefficient"] = json!(0.2);
+        let other_scalar = bridge_ok(command, request);
+        assert_eq!(
+            out["rows"], other_scalar["rows"],
+            "{command}: the scalar must not fly under a gapless ladder"
+        );
+    }
+
+    // No ladder, no block: those responses are byte-identical to before.
+    for (command, extra) in [
+        ("card.range_table", json!({})),
+        ("card.come_ups", json!({})),
+        ("card.wind", json!({"wind_speeds": [10.0]})),
+    ] {
+        let out = bridge_ok(command, card_request(extra));
+        assert!(out.get("bc_ladder").is_none(), "{command}: {out}");
+    }
+}
+
+#[test]
+fn an_interior_gap_is_reported_because_the_scalar_flies_there() {
+    let ladder = json!([band(2300.0, 4000.0, 0.45), band(500.0, 1800.0, 0.42)]);
+    let at = |bc: f64| {
+        bridge_ok(
+            "card.range_table",
+            card_request(json!({"bc_segments": ladder, "ballistic_coefficient": bc})),
+        )
+    };
+    let (published, halved) = (at(0.4), at(0.2));
+    assert_eq!(published["bc_ladder"]["interior_gap"], true, "{published}");
+    assert_ne!(
+        published["rows"], halved["rows"],
+        "the scalar flies in the 1800-2300 fps gap, so it must move the rows"
+    );
+}
+
+#[test]
+fn a_correction_table_card_reports_its_generated_ladder() {
+    let (dir, file) = write_fixture("card-ladder", &bc5d_velocity_fixture());
+    let table = file.to_str().unwrap();
+    let out = bridge_ok(
+        "card.range_table",
+        card_request(json!({ "bc5d_table_path": table })),
+    );
+    let metric = bridge_ok(
+        "card.range_table",
+        card_request(json!({
+            "units": "metric",
+            "muzzle_velocity": 853.44,
+            "mass": 10.886,
+            "diameter": 7.8232,
+            "sight_height": 38.1,
+            "bc5d_table_path": table
+        })),
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    let ladder = &out["bc_ladder"];
+    assert_eq!(ladder["source"], "bc5d_table", "{out}");
+    assert_eq!(ladder["interior_gap"], false, "{out}");
+    let segments = ladder["segments"].as_array().unwrap();
+    assert_eq!(segments.len(), 26, "{out}");
+    assert_eq!(segments[0]["velocity_max"], json!(2800.0), "{out}");
+    assert_eq!(segments[25]["velocity_min"], json!(500.0), "{out}");
+    // The muzzle correction is 1.0, so the scalar is the published 0.4 and every band flies
+    // less: the scalar was never the card's BC.
+    let scalar = out["bc_for_solve"].as_f64().unwrap();
+    assert_eq!(scalar, 0.4, "{out}");
+    for segment in segments {
+        assert!(segment["bc"].as_f64().unwrap() < scalar - 1e-3, "{segment}");
+    }
+
+    // The same ladder in the request's own velocity unit: the top band ends at the metric
+    // muzzle velocity, round-tripped.
+    let segments = metric["bc_ladder"]["segments"].as_array().unwrap();
+    assert_eq!(segments.len(), 26, "{metric}");
+    assert!(
+        (segments[0]["velocity_max"].as_f64().unwrap() - 853.44).abs() < 1e-9,
+        "{metric}"
+    );
+}
+
+/// The printed footer of a correction-table card states the ladder the table generated, not the
+/// scalar (MBA-1601). The apps send `bc5d_table_path`, so this is the footer on their printed
+/// cards. Under the velocity fixture the ladder runs 0.320 to 0.398 and the 0.400 scalar never
+/// flies, yet the footer used to read `BC:0.400 (g1)`.
+#[cfg(feature = "pdf")]
+#[test]
+fn a_correction_table_cards_pdf_footer_states_the_generated_ladder() {
+    let (dir, file) = write_fixture("card-ladder-pdf", &bc5d_velocity_fixture());
+    let request: ballistics_engine::card_service::CardRequestV1 = serde_json::from_value(
+        card_request(json!({ "bc5d_table_path": file.to_str().unwrap() })),
+    )
+    .unwrap();
+    let card = ballistics_engine::card_service::pdf_card_v1(&request, None);
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    let card = card.expect("a correction-table card must print");
+    let printed = pdf_text::tokens(&card.pdf_bytes, "correction-table card");
+    assert!(
+        printed.iter().any(|t| t == "BC:0.320-0.398"),
+        "the footer must state the generated ladder's range: {printed:?}"
+    );
+    assert!(printed.iter().any(|t| t == "ladder)"), "{printed:?}");
+    assert!(
+        !printed.iter().any(|t| t == "BC:0.400"),
+        "the scalar never flew on this card: {printed:?}"
     );
 }

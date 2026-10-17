@@ -38,6 +38,13 @@ pub struct DopeCardConfig {
     pub weight_gr: f64,
     pub bc: f64,
     pub drag_model: String,
+    /// Footer text after `BC:`, in place of the `bc` figure and its drag-model group
+    /// (MBA-1601). EMPTY prints `{bc:.3} ({drag_model lowercased})` exactly as before.
+    ///
+    /// Pre-formatted, like `truncation_note`: supply [`ladder_bc_label`] when the rows flew a
+    /// BC ladder. Under a ladder `bc` is at most the interior-gap fallback, so printing it
+    /// alone states a BC the rows may never have flown.
+    pub bc_label: String,
     pub velocity_fps: f64,
     pub font_scale: f32,
     pub bold_data: bool,
@@ -73,6 +80,39 @@ pub struct DopeCardConfig {
     /// with no screen beside it, so a card that stopped short of the range it was asked for
     /// has to say so in the shooter's hand.
     pub truncation_note: String,
+}
+
+/// The footer's `BC:` text for rows that flew a velocity-keyed BC ladder (MBA-1601), for
+/// [`DopeCardConfig::bc_label`].
+///
+/// Under a ladder the scalar BC flies only in an interior gap between bands (and, blended,
+/// within up to 25 fps either side of a gap edge), and never under a gapless ladder (every
+/// ladder a correction table builds), so it is not the card's BC. This states the range of the
+/// band BCs instead, widened to include `fallback_bc` when `interior_gap` says the scalar can
+/// fly too, to three decimals:
+/// `0.420-0.450 (g1 ladder)`, `0.400-0.450 (g1 ladder+gap)`, or `0.250 (g7 ladder)` when the
+/// range prints as one figure. No bands returns an empty string, which prints the scalar
+/// exactly as before.
+pub fn ladder_bc_label(
+    drag_model: &str,
+    band_bcs: &[f64],
+    fallback_bc: f64,
+    interior_gap: bool,
+) -> String {
+    if band_bcs.is_empty() {
+        return String::new();
+    }
+    let (lo, hi) = band_bcs
+        .iter()
+        .copied()
+        .chain(interior_gap.then_some(fallback_bc))
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), bc| {
+            (lo.min(bc), hi.max(bc))
+        });
+    let (lo, hi) = (format!("{lo:.3}"), format!("{hi:.3}"));
+    let figure = if lo == hi { lo } else { format!("{lo}-{hi}") };
+    let kind = if interior_gap { "ladder+gap" } else { "ladder" };
+    format!("{figure} ({} {kind})", drag_model.to_lowercase())
 }
 
 /// Preset font size profiles for dope cards
@@ -384,6 +424,7 @@ fn substituting_unprintable(config: &DopeCardConfig, font: &ParsedFont) -> DopeC
         powder: sub(&config.powder),
         bullet: sub(&config.bullet),
         drag_model: sub(&config.drag_model),
+        bc_label: sub(&config.bc_label),
         elevation_unit_label: sub(&config.elevation_unit_label),
         windage_unit_label: sub(&config.windage_unit_label),
         engine_version: sub(&config.engine_version),
@@ -666,15 +707,16 @@ fn render_page(
     draw_separator_line(ops, y - 1.0);
     y -= 5.0;
 
-    // Footer line 1: load data
+    // Footer line 1: load data. A ladder card's `bc_label` replaces the scalar BC group
+    // (MBA-1601); an empty one prints exactly the old text.
+    let bc_group = if config.bc_label.is_empty() {
+        format!("{:.3} ({})", config.bc, config.drag_model.to_lowercase())
+    } else {
+        config.bc_label.clone()
+    };
     let footer1 = format!(
-        "Powder:{} Bullet:{} Weight:{:.0}gr BC:{:.3} ({}) Vel:{:.0}fps",
-        config.powder,
-        config.bullet,
-        config.weight_gr,
-        config.bc,
-        config.drag_model.to_lowercase(),
-        config.velocity_fps,
+        "Powder:{} Bullet:{} Weight:{:.0}gr BC:{} Vel:{:.0}fps",
+        config.powder, config.bullet, config.weight_gr, bc_group, config.velocity_fps,
     );
     draw_centered_text(ops, font, footer_size, y, &footer1, COLOR_BLACK);
     y -= 4.0;
@@ -1208,6 +1250,28 @@ mod tests {
         assert_eq!(format_range(400.05), "400.1");
     }
 
+    #[test]
+    fn ladder_bc_label_states_the_band_range() {
+        assert_eq!(
+            ladder_bc_label("G1", &[0.45, 0.42], 0.4, false),
+            "0.420-0.450 (g1 ladder)"
+        );
+        assert_eq!(
+            ladder_bc_label("G1", &[0.45, 0.42], 0.4, true),
+            "0.400-0.450 (g1 ladder+gap)"
+        );
+        assert_eq!(
+            ladder_bc_label("G7", &[0.25], 0.243, false),
+            "0.250 (g7 ladder)"
+        );
+        // Bands that differ only past the printed precision print as one figure.
+        assert_eq!(
+            ladder_bc_label("G7", &[0.2504, 0.2496], 0.243, false),
+            "0.250 (g7 ladder)"
+        );
+        assert_eq!(ladder_bc_label("G1", &[], 0.4, false), "");
+    }
+
     fn test_config() -> DopeCardConfig {
         DopeCardConfig {
             rifle_name: "Test Rifle".to_string(),
@@ -1225,6 +1289,7 @@ mod tests {
             weight_gr: 175.0,
             bc: 0.5,
             drag_model: "g7".to_string(),
+            bc_label: String::new(),
             velocity_fps: 2700.0,
             font_scale: 1.0,
             bold_data: false,

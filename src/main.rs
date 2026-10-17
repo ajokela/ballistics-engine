@@ -14178,6 +14178,10 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                 weight_gr: pdf_meta.weight_gr,
                 bc,
                 drag_model: drag_model.to_string(),
+                // The scalar, as before. Under a BC ladder (--bc-segment, --bc-table-dir,
+                // --use-bc-segments) it may not be the BC the rows flew; printing the ladder
+                // range here with pdf_dope_card::ladder_bc_label is a separate follow-up.
+                bc_label: String::new(),
                 velocity_fps: pdf_meta.velocity_fps,
                 font_scale: pdf_meta.font_scale,
                 bold_data: pdf_meta.bold_data,
@@ -26593,6 +26597,9 @@ fn handle_adaptive_card(
                 weight_gr,
                 bc: load.bc,
                 drag_model: load.drag_model.to_string(),
+                // The scalar, as before: HoldCurve::solve flies no BC ladder, so it is the
+                // BC every row of this card flew.
+                bc_label: String::new(),
                 velocity_fps,
                 font_scale: 1.0,
                 bold_data: false,

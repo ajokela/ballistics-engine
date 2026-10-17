@@ -205,7 +205,8 @@ projectile.put("bc_segments", bcSegments(listOf(
 A ladder the contract refuses comes back as an ordinary `{"ok":false}` envelope, and
 `error.details.error.path` names the entry at fault, such as
 `$.projectile.bc_segments[1].velocity_max_mps`. The `card.*` commands take a ladder too, but with
-other member names, the request's `velocity_unit` and no order rule, so a stored ladder has to be
+other member names, the request's `velocity_unit` and no order rule (they still refuse overlapping
+bands, more than 64 bands and band BCs outside 0.0001 to 100), so a stored ladder has to be
 written out for each command. The table at the end of that section lists the differences.
 
 ## See also

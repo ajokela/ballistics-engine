@@ -906,8 +906,9 @@ fn apply_bc5d_correction(
 ///
 /// The scalar `bc_value` is left untouched, exactly as the CLI's `--bc-segment` and `card.*`
 /// leave it; the correction path above, by contrast, rewrites `bc_value`. The engine flies the
-/// scalar only in an interior gap between two bands: below the lowest band, or at or above the
-/// highest, the nearest edge band applies, so under a gapless ladder the scalar never flies.
+/// scalar only in an interior gap between two bands, and blended into the bands within up to
+/// 25 fps either side of a gap edge. Below the lowest band, or at or above the highest, the
+/// nearest edge band applies, so under a gapless ladder the scalar never flies.
 /// Band BCs are referenced to `drag_model`, bands are selected by airspeed (speed relative to
 /// the air mass), and every interior band edge and gap edge is smoothstep-blended
 /// (`velocity_segment_bc` in `src/bc_estimation.rs`). The lookup does not depend on the array
@@ -951,7 +952,7 @@ fn resolve_projectile(
         crate::solve_json::validate_drag_table_v1(drag_table)?;
     }
     if let Some(bc_segments) = &projectile.bc_segments {
-        crate::solve_json::validate_bc_segments_v1(bc_segments)?;
+        crate::solve_json::validate_bc_segments_v1(bc_segments, projectile.ballistic_coefficient)?;
     }
 
     let bullet_length_m = match projectile.length_m {
@@ -1937,6 +1938,21 @@ fn map_observation_error(error: TrajectoryObservationError) -> SolveErrorEnvelop
             message,
             "$.sampling.interval_m",
         ),
+        // MBA-1599: a trajectory that really moves back toward the muzzle (a headwind carrying a
+        // stalled projectile back, a launch past vertical, or an explicit-Euler/RK4 step too
+        // coarse for the drag) cannot be reported against downrange distance. That is a failed
+        // solve, the code the engine already returns when such a reversal lasts until
+        // termination. Equal distances stay internal_error below: the engine collapses a
+        // downrange stall, so a repeated distance would be a broken engine invariant.
+        TrajectoryObservationError::NonMonotonicTrajectory {
+            previous_distance_m,
+            distance_m,
+            ..
+        } if distance_m < previous_distance_m => solve_failed_message(format!(
+            "the projectile moved back toward the muzzle ({previous_distance_m} m then \
+             {distance_m} m downrange) before reaching a termination boundary, so the \
+             trajectory cannot be reported against downrange distance"
+        )),
         TrajectoryObservationError::EmptyTrajectory
         | TrajectoryObservationError::NonFiniteQuery { .. }
         | TrajectoryObservationError::OutOfRange { .. }
