@@ -193,7 +193,7 @@ A representative request is:
 | `mass_kg` | yes | Projectile mass. |
 | `diameter_m` | yes | Projectile diameter. |
 | `length_m` | no | Projectile length; required by effects that need geometry. |
-| `drag_model` | yes | One of `G1`, `G2`, `G5`, `G6`, `G7`, `G8`, `GI`, `GS`, or `RA4`. Does not drive drag while `drag_table` is present. `bc_segments` band BCs are referenced to it. |
+| `drag_model` | yes | One of `G1`, `G2`, `G5`, `G6`, `G7`, `G8`, `GI`, `GS`, or `RA4`. Does not drive drag while `drag_table` is present. `bc_segments` band BCs are referenced to it, or to a `drag_table` of kind `reference` when one is sent. |
 | `ballistic_coefficient` | yes | BC for the selected reference drag model, or for `drag_table` when its `kind` is `reference`. Still required beside `bc_segments`, but then it flies only in an interior gap between bands, and blended into the bands within up to 25 fps either side of a gap edge. |
 | `drag_table` | no | A caller-supplied drag curve replacing the built-in model; see below. |
 | `bc_segments` | no | A velocity-banded BC ladder, the wire form of the CLI's `--bc-segment`; see below. |
@@ -230,11 +230,13 @@ readings differ by the projectile's form factor — a wrong guess gives confiden
   with the GA2 curve). The pair flies exactly as a built-in model flies with its own BC: sending
   the engine's own G1 table as a `reference` curve with a G1 BC gives the same trajectory as
   `"drag_model": "G1"` to rounding. The BC still matters, so the error budget and the other
-  kernels that perturb it move the result as they do for a built-in model.
+  kernels that perturb it move the result as they do for a built-in model. A
+  [`bc_segments`](#projectilebc_segments-mba-1598) ladder measured against the same curve can be
+  sent beside it; see **With a BC ladder** below.
 - **`projectile`** — this projectile's own measured drag coefficient (Doppler radar, for
   instance). `ballistic_coefficient` is not used, exactly as with `--drag-table`; the engine
   divides the curve's Cd by the sectional density from `mass_kg` and `diameter_m`. Since the BC
-  is unused, perturbing it moves nothing.
+  is unused, perturbing it moves nothing, and a `bc_segments` ladder is refused beside it.
 
 Outside the table the nearest end value is held, so give a curve covering every Mach the flight
 reaches. With either kind, `drag_model` is still required and echoed but has no effect on drag.
@@ -244,14 +246,27 @@ Errors name the exact entry: `$.projectile.drag_table.kind` for a missing or unk
 `$.projectile.drag_table.points[3].mach` (or `.cd`) for a bad value. A table cannot be combined
 with [`corrections.bc5d_table_path`](#optional-corrections-block): BC5D corrects a G1/G7 BC and a
 table replaces the curve, so the pair is `conflicting_fields` at
-`$.corrections.bc5d_table_path`. A table also cannot be combined with
-[`projectile.bc_segments`](#projectilebc_segments-mba-1598), whose band BCs are measured against
-the `drag_model` curve the table replaces; that pair is `conflicting_fields` at
+`$.corrections.bc5d_table_path`. A `projectile`-kind table also cannot be combined with
+[`projectile.bc_segments`](#projectilebc_segments-mba-1598): its curve is the projectile's own
+Cd, with no BC for the bands to change, so that pair is `conflicting_fields` at
 `$.projectile.bc_segments`. A ladder that breaks one of its own rules, including a one-band
-ladder whose BC does not match the scalar, is refused at that band first, by the decoder.
+ladder whose BC does not match the scalar, is refused at that band first, by the decoder, beside
+either kind.
 
-The table is echoed verbatim at `resolved_request.projectile.drag_table`, so a resolved request
-re-solves on the same curve. The engine ships no airgun curves: the caller supplies the table.
+**With a BC ladder.** A `reference` table and a `bc_segments` ladder may be sent together. Use
+the pair when BCs are published per velocity band against a curve the engine does not ship,
+such as an airgun pellet law. The table replaces `drag_model`'s curve for the bands as it does
+for the scalar, and the bands are selected, gapped and blended exactly as on a built-in model:
+at each airspeed the engine divides the table's Cd by the band BC that flies there, or by the
+scalar `ballistic_coefficient` in an interior gap. Sending the engine's own G7 table as a
+`reference` curve beside a ladder gives the same samples as `"drag_model": "G7"` with the same
+ladder, under every solver method. The band BCs must have been measured against this table's
+curve. The engine cannot check that, and bands quoted against G1 but flown over a pellet law
+give confident, wrong drops.
+
+The table is echoed verbatim at `resolved_request.projectile.drag_table`, beside any ladder at
+`resolved_request.projectile.bc_segments`, so a resolved request re-solves on the same curve and
+bands. The engine ships no airgun curves: the caller supplies the table.
 
 ### `projectile.bc_segments` (MBA-1598)
 
@@ -281,7 +296,7 @@ required numbers:
 | --- | --- |
 | `velocity_min_mps` | The band's lower edge, in m/s, inclusive. Finite and at least 0. |
 | `velocity_max_mps` | The band's upper edge, in m/s, exclusive. Finite and above `velocity_min_mps`. There is no upper bound. |
-| `ballistic_coefficient` | The BC that flies inside the band. Same units as the scalar `ballistic_coefficient` (lb/in²), referenced to the same `drag_model`, and held to the same bounds, `0.0001` to `100`. |
+| `ballistic_coefficient` | The BC that flies inside the band. Same units as the scalar `ballistic_coefficient` (lb/in²), referenced to the same curve (`drag_model`, or a `reference`-kind `drag_table`), and held to the same bounds, `0.0001` to `100`. |
 
 **Order.** List the bands from the fastest to the slowest. `velocity_min_mps` must strictly
 descend, and each band must end at or below the start of the band before it:
@@ -303,8 +318,10 @@ the faster band. At any speed:
 example above) it never flies. A one-band ladder flies that band's BC at every speed, so its BC
 must match `ballistic_coefficient` (see **Errors** below), and its two edges change nothing as
 long as they are valid. A fastest band that ends below the muzzle velocity still
-applies from the muzzle down. Band BCs are referenced to `drag_model` exactly as the scalar is, so
-a G7 ladder needs `"drag_model": "G7"`.
+applies from the muzzle down. Band BCs are referenced to the same curve as the scalar:
+`drag_model`'s, so a G7 ladder needs `"drag_model": "G7"`, or a `reference`-kind `drag_table`'s
+when one is sent (see [`projectile.drag_table`](#projectiledrag_table-mba-1597), **With a BC
+ladder**).
 
 **Floor-style tables.** Many calculators take one speed per BC row, meaning "this BC from this
 speed up to the next faster row", and show a single row with a speed of 0. Such a table maps onto
@@ -363,14 +380,15 @@ its `velocity_min_mps`. The one-band check runs after the band's own value rules
 **Conflicts.** A ladder cannot be combined with either of these. The service refuses both as
 `conflicting_fields` at `$.projectile.bc_segments`, before any correction table is opened:
 
-- [`projectile.drag_table`](#projectiledrag_table-mba-1597): a drag table replaces the
-  `drag_model` curve that the band BCs are measured against, and a present table takes over the
-  drag, so the bands would change nothing.
+- a [`projectile.drag_table`](#projectiledrag_table-mba-1597) of kind `projectile`: that curve is
+  the projectile's own Cd, divided by its sectional density, so no BC reaches the drag and the
+  bands would change nothing. A `reference`-kind table is accepted, and the band BCs are then
+  measured against its curve instead of `drag_model`'s.
 - [`corrections.bc5d_table_path`](#optional-corrections-block): the correction table builds its own
   BC ladder from `ballistic_coefficient`. Send one ladder or the other.
 
-A request that carries a ladder, a drag table and a correction table together fails the older
-drag-table-with-correction-table check first, so it is `conflicting_fields` at
+A request that carries a ladder, a drag table of either kind and a correction table together
+fails the older drag-table-with-correction-table check first, so it is `conflicting_fields` at
 `$.corrections.bc5d_table_path` instead. All of these conflicts are checked after the ladder's own
 rules: a band that breaks one, including a one-band BC that does not match the scalar, is refused
 at that band first, by the decoder.
@@ -387,7 +405,9 @@ gapless ladder of two or more bands the scalar never flies, so its slope is exac
 contributing nothing rather than listing BC under `unavailable_sources`. This is the same blind
 spot as a `kind: "projectile"` drag table. With an interior gap, the scalar moves the result only
 through the gap and the band speeds within up to 25 fps of a gap edge, where it is blended into
-the bands. `explain` is not affected: its `ProjectileDrag` swap carries the whole ladder with
+the bands. Beside a `reference`-kind drag table all of this holds unchanged: the slopes are
+exactly those of the built-in model of the same curve with the same ladder. `explain` is not
+affected: its `ProjectileDrag` swap carries the whole ladder, and any drag table, with
 `drag_model` (MBA-1603).
 
 **Platforms.** The ladder is plain request data and no file is read, so it works wherever
