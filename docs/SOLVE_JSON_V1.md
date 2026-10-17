@@ -269,8 +269,9 @@ scalar `ballistic_coefficient` in an interior gap. Sending the engine's own G7 t
 `reference` curve beside a ladder gives the same samples as `"drag_model": "G7"` with the same
 ladder, under every solver method. The band BCs must have been measured against this table's
 curve. The engine cannot check that, and bands quoted against G1 but flown over a pellet law
-give confident, wrong drops. Engines up to 0.46.0 refuse the pair as `conflicting_fields` at
-`$.projectile.bc_segments`, so a producer that must also work with them must not send it
+give confident, wrong drops. 0.46.0 refuses the pair as `conflicting_fields` at
+`$.projectile.bc_segments`, and earlier engines refuse `bc_segments` itself as `unknown_field`,
+so a producer that must also work with older engines must not send it
 ([versioning rule 4](#versioning-and-compatibility)).
 
 The table is echoed verbatim at `resolved_request.projectile.drag_table`, beside any ladder at
@@ -414,8 +415,10 @@ gapless ladder of two or more bands the scalar never flies, so its slope is exac
 contributing nothing rather than listing BC under `unavailable_sources`. This is the same blind
 spot as a `kind: "projectile"` drag table. With an interior gap, the scalar moves the result only
 through the gap and the band speeds within up to 25 fps of a gap edge, where it is blended into
-the bands. Beside a `reference`-kind drag table all of this holds unchanged: the slopes are
-exactly those of the built-in model of the same curve with the same ladder. `explain` is not
+the bands. Beside a `reference`-kind drag table all of this holds: the slopes are exactly those
+of the built-in model of the same curve with the same ladder. The one difference is in the last
+digits: there a one-band ladder matches the same request without a ladder only to rounding,
+because a reference table without a ladder keeps its older scaled path. `explain` is not
 affected: its `ProjectileDrag` swap carries the whole ladder, and any drag table, with
 `drag_model` (MBA-1603).
 
