@@ -266,6 +266,14 @@ pub struct TrajectoryParams {
     /// MBA-1356: whole-curve scale for the custom deck (1.0 = neutral). Threaded so the
     /// binding entry point (fast_integrate_with_segments) cannot silently drop it.
     pub cd_scale: f64,
+    /// Whether `custom_drag_table` is a reference curve that the BCs were measured against,
+    /// flown as `Cd / BC` with the BC the kernel resolves (a ladder's band BC, else the scalar
+    /// `bc`), rather than the projectile's own Cd over sectional density. Mirrors
+    /// `BallisticInputs::custom_drag_reference` and is threaded beside `cd_scale` for the same
+    /// reason: `build_inputs` copies it onto the derivative inputs, and a flag dropped beside
+    /// `cd_scale = 1.0` would fly a reference curve as the projectile's own Cd. `false` for a
+    /// caller with no table, or with the projectile's own curve.
+    pub custom_drag_reference: bool,
     pub bc_segments: Option<Vec<(f64, f64)>>, // Mach-based BC segments: (mach, bc)
     pub use_bc_segments: bool,                // Whether to use BC segment interpolation
     /// MBA-1602: the caller's velocity-keyed BC ladder (fps bands), flown when
@@ -362,6 +370,7 @@ fn build_inputs(params: &TrajectoryParams, muzzle_velocity_mps: f64) -> Ballisti
         bullet_cluster: None,
         custom_drag_table: params.custom_drag_table.clone(),
         cd_scale: params.cd_scale,
+        custom_drag_reference: params.custom_drag_reference,
         bc_type_str: None,
         enable_pitch_damping: false,
         enable_precession_nutation: false,
@@ -801,6 +810,7 @@ pub fn solve_trajectory_rust(
         twist_rate: 10.0,
         custom_drag_table: None, // No CDM for test function
         cd_scale: 1.0,
+        custom_drag_reference: false,
         bc_segments: None, // No BC segments for legacy function
         use_bc_segments: false,
         bc_segments_data: None,
@@ -854,11 +864,33 @@ mod tests {
             shooting_angle: 0.0,
             custom_drag_table: None,
             cd_scale: 1.0,
+            custom_drag_reference: false,
             bc_segments: None,
             use_bc_segments: false,
             bc_segments_data: None,
             ground_threshold: -1000.0,
             atmo_sock: None,
+        }
+    }
+
+    /// `build_inputs` is where the derivative kernel's inputs are rebuilt from the params, so a
+    /// field it forgets is silently dropped (MBA-1356). Both custom-table fields arrive as set.
+    #[test]
+    fn build_inputs_carries_the_custom_table_fields() {
+        for (cd_scale, reference) in [(1.0, false), (1.25, false), (1.0, true), (0.8, true)] {
+            let params = TrajectoryParams {
+                custom_drag_table: Some(crate::drag::DragTable::new(
+                    vec![0.5, 3.0],
+                    vec![0.2, 0.3],
+                )),
+                cd_scale,
+                custom_drag_reference: reference,
+                ..create_test_params(300.0)
+            };
+            let inputs = build_inputs(&params, 800.0);
+            assert!(inputs.custom_drag_table.is_some());
+            assert_eq!(inputs.cd_scale, cd_scale);
+            assert_eq!(inputs.custom_drag_reference, reference);
         }
     }
 
@@ -1304,6 +1336,7 @@ mod tests {
             shooting_angle: 0.0,
             custom_drag_table: None,
             cd_scale: 1.0,
+            custom_drag_reference: false,
             bc_segments: None,
             use_bc_segments: false,
             bc_segments_data: None,

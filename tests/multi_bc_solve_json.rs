@@ -13,11 +13,16 @@
 //!   (d) the perturbation kernels behind `explain`, `error-budget` and `tolerance` see the
 //!       scalar BC only where it flies: in an interior gap, never under a gapless ladder of
 //!       two or more bands. Under a one-band ladder the BC axis moves the band with the scalar;
-//!   (e) the ladder cannot be combined with `projectile.drag_table`, and a one-band ladder's BC
-//!       must equal the scalar BC;
+//!   (e) the ladder cannot be combined with a `projectile.drag_table` of kind `projectile`,
+//!       whose curve is the projectile's own Cd with no BC for the bands to change, and a
+//!       one-band ladder's BC must equal the scalar BC, a rule the decoder applies first;
 //!   (f) the decoder itself refuses every bad ladder at the exact entry, and the service
 //!       refuses the same ladders when a Rust caller skips the decoder;
-//!   (g) the bridge `solve` command accepts and echoes a ladder.
+//!   (g) the bridge `solve` command accepts and echoes a ladder;
+//!   (h) beside a `projectile.drag_table` of kind `reference`, a standard curve the band BCs
+//!       are measured against, the ladder flies exactly as it does on the built-in model of the
+//!       same curve: the same bands, gap and edge blending, the same echo and re-solve, the same
+//!       BC slope in the perturbation kernels, and the same bridge result.
 //!
 //! The m/s-to-fps conversion is pinned in `src/solve_v1.rs`'s unit tests, against a solve
 //! built directly from engine `BCSegmentData` in fps.
@@ -80,6 +85,38 @@ fn with_bc_segments(mut request: Value, segments: Value) -> Value {
     request["projectile"]["bc_segments"] = segments;
     request
 }
+
+/// Two bands with a 550-650 m/s gap between them, which the fixture crosses between about
+/// 260 m and 440 m, so the scalar BC flies there and is blended into both bands at its edges.
+fn gapped_ladder() -> Value {
+    json!([band(650.0, 999.0, 0.260), band(0.0, 550.0, 0.220)])
+}
+
+/// The engine's own G7 table as wire points: a reference curve whose built-in twin is
+/// `"drag_model": "G7"`, so every reference-table result below has a trusted answer to match.
+fn g7_points() -> Value {
+    let table = ballistics_engine::drag::DragTable::from_csv_str(include_str!("../data/g7.csv"))
+        .expect("bundled table parses");
+    Value::Array(
+        table
+            .mach_values
+            .iter()
+            .zip(&table.cd_values)
+            .map(|(mach, cd)| json!({"mach": mach, "cd": cd}))
+            .collect(),
+    )
+}
+
+fn with_drag_table(mut request: Value, kind: &str, points: Value) -> Value {
+    request["projectile"]["drag_table"] = json!({"kind": kind, "points": points});
+    request
+}
+
+/// The message for a ladder beside a projectile-kind table.
+const PROJECTILE_KIND_CONFLICT: &str =
+    "projectile.bc_segments cannot be combined with a projectile.drag_table of kind \
+     \"projectile\": that curve is the projectile's own Cd and has no BC for the bands to \
+     change";
 
 fn decode(request: &Value) -> Result<SolveRequestV1, SolveErrorEnvelopeV1> {
     decode_solve_request_v1(&request.to_string())
@@ -346,28 +383,64 @@ fn the_perturbation_kernel_moves_a_one_band_ladder_with_the_scalar_bc() {
 }
 
 // ---------------------------------------------------------------------------
-// (e) Conflicts: projectile.drag_table, and a one-band ladder against the scalar BC
+// (e) Conflicts: a projectile-kind drag table, and a one-band ladder against the scalar BC
 // ---------------------------------------------------------------------------
 
+/// A projectile-kind table is the projectile's own Cd, divided by sectional density, so no BC
+/// reaches the drag and a ladder would change nothing. Every ladder shape is refused beside it,
+/// a one-band ladder carrying the scalar BC included, by the service at the ladder's path.
 #[test]
-fn a_ladder_cannot_be_combined_with_a_drag_table() {
-    let mut request = with_bc_segments(base_request(), two_band_ladder());
-    request["projectile"]["drag_table"] = json!({
-        "kind": "reference",
-        "points": [
-            {"mach": 0.0, "cd": 0.2},
-            {"mach": 2.0, "cd": 0.3}
-        ]
-    });
-    let error = solve_v1(decode(&request).expect("each field is valid on its own"))
-        .expect_err("the pair must be refused");
-    assert_eq!(error.error.code, SolveErrorCodeV1::ConflictingFields);
-    assert_eq!(error.error.path(), Some("$.projectile.bc_segments"));
-    assert_eq!(
-        error.error.message,
-        "projectile.bc_segments cannot be combined with projectile.drag_table: a drag table \
-         replaces the drag_model curve that the band BCs are measured against"
-    );
+fn a_ladder_cannot_be_combined_with_a_projectile_kind_table() {
+    let ladders = [
+        two_band_ladder(),
+        gapped_ladder(),
+        json!([band(0.0, 999.0, 0.243)]),
+    ];
+    for ladder in ladders {
+        let request = with_drag_table(
+            with_bc_segments(base_request(), ladder.clone()),
+            "projectile",
+            json!([{"mach": 0.0, "cd": 0.2}, {"mach": 2.0, "cd": 0.3}]),
+        );
+        let error = solve_v1(decode(&request).expect("each field is valid on its own"))
+            .expect_err("the pair must be refused");
+        assert_eq!(
+            error.error.code,
+            SolveErrorCodeV1::ConflictingFields,
+            "{ladder}"
+        );
+        assert_eq!(
+            error.error.path(),
+            Some("$.projectile.bc_segments"),
+            "{ladder}"
+        );
+        assert_eq!(error.error.message, PROJECTILE_KIND_CONFLICT, "{ladder}");
+    }
+}
+
+/// The one-band rule is the ladder's own, so the decoder applies it before the service ever
+/// weighs the ladder against a drag table, under either kind: a reference curve does not make
+/// two different BCs for one projectile legal.
+#[test]
+fn a_one_band_ladder_that_disagrees_with_the_scalar_is_refused_first_beside_either_kind() {
+    for kind in ["reference", "projectile"] {
+        let request = with_drag_table(
+            with_bc_segments(base_request(), json!([band(0.0, 999.0, 0.260)])),
+            kind,
+            g7_points(),
+        );
+        let error = decode(&request).expect_err("the decoder must refuse two different BCs");
+        assert_eq!(
+            error.error.code,
+            SolveErrorCodeV1::ConflictingFields,
+            "{kind}"
+        );
+        assert_eq!(
+            error.error.path(),
+            Some("$.projectile.bc_segments[0].ballistic_coefficient"),
+            "{kind}"
+        );
+    }
 }
 
 /// A one-band ladder flies its band's BC at every speed, so the scalar never flies beside it,
@@ -811,4 +884,159 @@ fn the_bridge_rejects_a_one_band_ladder_that_disagrees_with_the_scalar() {
             .is_some_and(|message| message.contains("rejected")),
         "{out}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// (h) Beside a reference-kind drag table
+// ---------------------------------------------------------------------------
+
+/// A reference-kind table is a standard curve the band BCs are measured against, so the
+/// engine's own G7 table sent as one flies every ladder shape exactly as the built-in G7 model
+/// flies it, under every integrator: the gapless ladder's bands, the gapped ladder's scalar in
+/// the gap and the smoothstep blend at each gap edge, and a one-band ladder.
+#[test]
+fn a_reference_table_flies_a_ladder_exactly_as_its_builtin_model() {
+    let ladders = [
+        two_band_ladder(),
+        gapped_ladder(),
+        json!([band(0.0, 999.0, 0.243)]),
+    ];
+    for method in ["rk4", "rk45", "euler"] {
+        for ladder in &ladders {
+            let mut builtin = with_bc_segments(base_request(), ladder.clone());
+            builtin["solver"]["method"] = json!(method);
+            let with_table = with_drag_table(builtin.clone(), "reference", g7_points());
+            let (table, builtin) = (solve(&with_table), solve(&builtin));
+            assert_eq!(table.samples, builtin.samples, "{method} {ladder}");
+            assert_eq!(table.summary, builtin.summary, "{method} {ladder}");
+        }
+    }
+
+    // The gap really flies the scalar: moving it moves the reference-table solve.
+    let mut other_scalar = with_drag_table(
+        with_bc_segments(base_request(), gapped_ladder()),
+        "reference",
+        g7_points(),
+    );
+    other_scalar["projectile"]["ballistic_coefficient"] = json!(0.300);
+    let gapped = solve(&with_drag_table(
+        with_bc_segments(base_request(), gapped_ladder()),
+        "reference",
+        g7_points(),
+    ));
+    let moved = solve(&other_scalar);
+    assert!(
+        moved.samples.last().unwrap().speed_mps > gapped.samples.last().unwrap().speed_mps,
+        "a higher scalar BC flown through the gap must keep more speed"
+    );
+}
+
+/// The resolved request echoes the table and the ladder verbatim, side by side, and a request
+/// rebuilt from it passes the decoder and re-solves identically: the zero search and the
+/// trajectory both fly the pair again.
+#[test]
+fn the_echo_carries_the_table_and_the_ladder_and_re_solves_identically() {
+    let request = with_drag_table(
+        with_bc_segments(base_request(), gapped_ladder()),
+        "reference",
+        g7_points(),
+    );
+    let first = solve(&request);
+
+    let echoed = serde_json::to_value(&first.resolved_request).unwrap();
+    assert_eq!(
+        echoed["projectile"]["drag_table"],
+        request["projectile"]["drag_table"]
+    );
+    assert_eq!(
+        echoed["projectile"]["bc_segments"],
+        request["projectile"]["bc_segments"]
+    );
+
+    let rebuilt = SolveRequestV1::from(&first.resolved_request);
+    let redecoded = decode_solve_request_v1(&serde_json::to_string(&rebuilt).unwrap())
+        .expect("a rebuilt request must pass the decoder");
+    assert_eq!(redecoded, rebuilt);
+    assert!(redecoded.projectile.drag_table.is_some());
+    assert!(redecoded.projectile.bc_segments.is_some());
+
+    let second = solve_v1(redecoded).expect("the rebuilt request must solve");
+    assert_eq!(first.samples, second.samples);
+    assert_eq!(first.summary, second.summary);
+}
+
+/// The kernels behind `explain`, `error-budget` and `tolerance` perturb the scalar BC on the
+/// resolved request and re-solve it. Beside a reference table that slope is exactly the
+/// built-in model's for every ladder shape: 0 under the gapless ladder, real through the gap,
+/// and the plain scalar's under a one-band ladder, whose band moves with the scalar.
+#[test]
+fn the_perturbation_kernel_sees_a_reference_table_ladder_as_the_builtin_one() {
+    use ballistics_engine::perturbation::{central_difference, InputAxis};
+
+    let bc_slope = |request: &Value| {
+        central_difference(
+            &solve(request).resolved_request,
+            InputAxis::BallisticCoefficient,
+            &[600.0],
+            None,
+        )
+        .expect("the BC axis is continuous")[0]
+            .d_drop_d_x
+    };
+
+    for ladder in [
+        two_band_ladder(),
+        gapped_ladder(),
+        json!([band(0.0, 999.0, 0.243)]),
+    ] {
+        let builtin = with_bc_segments(base_request(), ladder.clone());
+        let with_table = with_drag_table(builtin.clone(), "reference", g7_points());
+        assert_eq!(bc_slope(&with_table), bc_slope(&builtin), "{ladder}");
+    }
+    assert_eq!(
+        bc_slope(&with_drag_table(
+            with_bc_segments(base_request(), two_band_ladder()),
+            "reference",
+            g7_points(),
+        )),
+        0.0
+    );
+    let gapped = bc_slope(&with_drag_table(
+        with_bc_segments(base_request(), gapped_ladder()),
+        "reference",
+        g7_points(),
+    ));
+    assert!(
+        gapped < 0.0,
+        "a higher scalar BC flown through the gap must reduce the drop: dDrop/dBC = {gapped}"
+    );
+}
+
+/// The bridge `solve` command takes the pair, echoes both members, and returns exactly the
+/// samples the built-in model gives with the same ladder.
+#[cfg(feature = "bridge")]
+#[test]
+fn the_bridge_solve_command_accepts_a_ladder_beside_a_reference_table() {
+    let call = |request: Value| -> Value {
+        let envelope = json!({"api_version": 1, "command": "solve", "request": request});
+        serde_json::from_str(&ballistics_engine::bridge::bridge_call(
+            &envelope.to_string(),
+        ))
+        .unwrap()
+    };
+    let builtin = with_bc_segments(base_request(), gapped_ladder());
+    let request = with_drag_table(builtin.clone(), "reference", g7_points());
+
+    let out = call(request.clone());
+    assert_eq!(out["ok"], json!(true), "bridge solve must succeed: {out}");
+    let projectile = &out["result"]["resolved_request"]["projectile"];
+    assert_eq!(
+        projectile["drag_table"],
+        request["projectile"]["drag_table"]
+    );
+    assert_eq!(projectile["bc_segments"], gapped_ladder());
+
+    let reference = call(builtin);
+    assert_eq!(reference["ok"], json!(true), "{reference}");
+    assert_eq!(out["result"]["samples"], reference["result"]["samples"]);
 }

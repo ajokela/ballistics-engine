@@ -56,10 +56,12 @@ pub enum OutputFormat {
 /// `ArmyStandardMetro` here corrects for that exactly once, at input normalization (see
 /// [`crate::constants::ASM_TO_ICAO_BC`] and `TrajectorySolver::new`).
 ///
-/// Does not apply when a custom drag table (`BallisticInputs::custom_drag_table`) is
-/// active: that path divides by sectional density, not a BC value, so no BC reference
-/// conversion is physically meaningful there (see
-/// `BallisticInputs::bc_reference_standard_inert_warning`).
+/// Does not apply when a custom drag table (`BallisticInputs::custom_drag_table`) is flown as
+/// the projectile's own curve: that path divides by sectional density, not a BC value, so no
+/// BC reference conversion is physically meaningful there (see
+/// `BallisticInputs::bc_reference_standard_inert_warning`). A table flown as a reference curve
+/// (`BallisticInputs::custom_drag_reference`) divides by the BC exactly as a built-in model
+/// does, so the conversion applies to it as it does to a G-model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 pub enum BcReferenceStandard {
@@ -285,15 +287,54 @@ pub struct BallisticInputs {
     pub use_cluster_bc: bool, // Use cluster-based BC degradation
 
     // Custom drag model support
+    /// A caller-supplied Cd-vs-Mach curve that replaces the `bc_type` G-model curve at every
+    /// drag site (MBA-940). It is used as-is: no transonic correction and no form factor is
+    /// applied to it, and outside its Mach range the nearest end value is held. What the curve
+    /// describes, and so what it is divided by, is decided by [`Self::custom_drag_reference`]:
+    ///
+    /// * `false` (the default): the projectile's OWN drag coefficient, divided by its
+    ///   sectional density. `bc_value` and any BC segments are unused for drag. This is the
+    ///   only reading the CLI's `--drag-table`, the WASM terminal, the array FFI and saved
+    ///   profiles have, and solve-json v1's `kind: "projectile"`.
+    /// * `true`: a REFERENCE curve, such as an airgun pellet law, that the BCs were measured
+    ///   against, divided by the resolved BC exactly as a built-in model's curve is.
+    ///
+    /// See [`Self::custom_drag_denominator`].
     pub custom_drag_table: Option<crate::drag::DragTable>,
     /// Whole-curve multiplier applied to the custom deck's interpolated Cd (MBA-1356):
     /// `Cd_used = table.interpolate(mach) * cd_scale`. Meaningful only alongside
     /// `custom_drag_table` — it is read at the three custom-deck interpolation sites in
     /// cli_api.rs/derivatives.rs/fast_trajectory.rs and left untouched on the standard
     /// G-model/BC path (those users true their drag via `--bc-adjustment` instead; scaling
-    /// a reference table too would double-count). Default `1.0` is neutral (byte-identical
-    /// to the pre-MBA-1356 behavior). Validated finite and > 0 by `validate_for_solve`.
+    /// a G-model's reference table too would double-count). It multiplies the curve before
+    /// the division, under either reading of [`Self::custom_drag_reference`]. solve-json v1's
+    /// `kind: "reference"` table without a BC ladder is installed as the own-curve path with
+    /// `cd_scale = SD / BC`, which flies `Cd_ref / BC`; with a ladder it is installed with
+    /// `custom_drag_reference` set and `cd_scale = 1.0` instead, since one whole-curve scale
+    /// cannot carry a BC that changes from band to band. Default `1.0` is neutral
+    /// (byte-identical to the pre-MBA-1356 behavior). Validated finite and > 0 by
+    /// `validate_for_solve`.
     pub cd_scale: f64,
+    /// Whether `custom_drag_table` is a REFERENCE curve that the BCs were measured against
+    /// (`true`), rather than the projectile's own Cd (`false`, the default). Inert without a
+    /// table.
+    ///
+    /// When set, the drag sites in cli_api.rs, derivatives.rs and fast_trajectory.rs divide the
+    /// table's Cd (times `cd_scale`) by the BC each of them has already resolved for the current
+    /// speed, exactly as they divide a built-in model's Cd: a velocity ladder's band BC
+    /// (`bc_segments_data` under `use_bc_segments`, selected and smoothstep-blended by
+    /// `velocity_segment_bc`), a Mach-keyed `bc_segments` BC, or the scalar `bc_value` in an
+    /// interior gap or without a ladder. The BC matters again on this path, so
+    /// `validate_for_solve` requires a finite positive `bc_value`, and an `ArmyStandardMetro`
+    /// `bc_reference_standard` is converted exactly as it is for a built-in model.
+    ///
+    /// solve-json v1 sets it for a `kind: "reference"` `projectile.drag_table` sent with a
+    /// `projectile.bc_segments` ladder; no other front end sets it. Every path that copies a
+    /// table between input structs must carry it alongside `cd_scale`
+    /// (`TrajectoryParams::custom_drag_reference`): dropped beside `cd_scale = 1.0`, it would fly
+    /// the reference curve as the projectile's own Cd over sectional density, wrong by the
+    /// projectile's whole form factor (the MBA-1356 dropped-field class).
+    pub custom_drag_reference: bool,
 
     // Legacy field for compatibility
     pub bc_type_str: Option<String>,
@@ -355,16 +396,25 @@ impl BallisticInputs {
 
     /// Retardation denominator to use when `custom_drag_table` is active.
     ///
-    /// A custom drag table supplies the projectile's ACTUAL drag coefficient, so the
-    /// point-mass retardation formula must divide it by the projectile's SECTIONAL DENSITY
-    /// (lb/in²), not by a ballistic coefficient: BC = SD / i (form factor i vs the reference
-    /// projectile), and with the projectile's own curve i == 1, so Cd_own / SD == Cd_ref / BC.
-    /// Dividing the curve's Cd by `bc_value` made custom-table trajectories wrongly scale
-    /// with whatever BC happened to be set.
+    /// `resolved_bc` is the BC the calling drag site has already resolved for the current
+    /// speed, by the same precedence it applies to a built-in model: a velocity ladder's band
+    /// BC, else a Mach-segment BC, else the scalar `bc_value`.
     ///
-    /// Falls back to `fallback_bc` (with a one-time stderr warning) when mass/diameter are
-    /// unavailable, so degenerate inputs degrade to the old behavior instead of panicking.
-    pub fn custom_drag_denominator(&self, fallback_bc: f64) -> f64 {
+    /// * **Reference curve** ([`Self::custom_drag_reference`]): returns `resolved_bc`, the very
+    ///   denominator a built-in model divides by, so the table flies `Cd_ref / BC` and a BC
+    ///   ladder's band BCs reach it.
+    /// * **The projectile's own curve** (the default): the table supplies the projectile's
+    ///   ACTUAL drag coefficient, so the point-mass retardation formula must divide it by the
+    ///   projectile's SECTIONAL DENSITY (lb/in²), not by a ballistic coefficient: BC = SD / i
+    ///   (form factor i vs the reference projectile), and with the projectile's own curve
+    ///   i == 1, so Cd_own / SD == Cd_ref / BC. Dividing the curve's Cd by `bc_value` made
+    ///   custom-table trajectories wrongly scale with whatever BC happened to be set. Falls back
+    ///   to `resolved_bc` (with a one-time stderr warning) when mass/diameter are unavailable,
+    ///   so degenerate inputs degrade to the old behavior instead of panicking.
+    pub fn custom_drag_denominator(&self, resolved_bc: f64) -> f64 {
+        if self.custom_drag_reference {
+            return resolved_bc;
+        }
         match self.sectional_density_lb_in2() {
             Some(sd) => sd,
             None => {
@@ -375,7 +425,7 @@ impl BallisticInputs {
                          unavailable; falling back to bc_value for the retardation denominator"
                     );
                 });
-                fallback_bc
+                resolved_bc
             }
         }
     }
@@ -383,15 +433,18 @@ impl BallisticInputs {
     /// Whether a declared `bc_reference_standard` is inert on this configuration
     /// (MBA-1365), and if so, the message explaining why.
     ///
-    /// A custom drag table (`custom_drag_table`) supplies the projectile's actual Cd and
-    /// divides by sectional density, not by a BC value (see `custom_drag_denominator`),
-    /// so an `ArmyStandardMetro` reference has no physical effect once a table is active.
-    /// Pure and side-effect-free — same shape as `main.rs`'s `adjustment_unit_noop_warning`
-    /// (MBA-1414) — so each surface decides how to surface it: the native CLI prints it to
-    /// stderr once per run, while the WASM browser terminal (no visible stderr) splices it
-    /// into its table-output text instead.
+    /// A custom drag table (`custom_drag_table`) flown as the projectile's own curve supplies
+    /// its actual Cd and divides by sectional density, not by a BC value (see
+    /// `custom_drag_denominator`), so an `ArmyStandardMetro` reference has no physical effect
+    /// once such a table is active. A table flown as a reference curve
+    /// (`custom_drag_reference`) divides by the BC like a built-in model, so the conversion
+    /// is meaningful there and this returns `None`. Pure and side-effect-free — same shape as
+    /// `main.rs`'s `adjustment_unit_noop_warning` (MBA-1414) — so each surface decides how to
+    /// surface it: the native CLI prints it to stderr once per run, while the WASM browser
+    /// terminal (no visible stderr) splices it into its table-output text instead.
     pub fn bc_reference_standard_inert_warning(&self) -> Option<&'static str> {
         if self.custom_drag_table.is_some()
+            && !self.custom_drag_reference
             && matches!(
                 self.bc_reference_standard,
                 BcReferenceStandard::ArmyStandardMetro
@@ -427,11 +480,13 @@ impl BallisticInputs {
         // before any retardation math runs. Every BC representation on these inputs (the
         // scalar, explicit Mach segments, and velocity segments) is a real BC and gets the
         // same treatment. `Icao` (the default) takes this branch never, so callers that never
-        // set the field are byte-identical to pre-MBA-1365 behavior. A custom drag table
-        // divides by sectional density rather than a BC, so the conversion is physically inert
-        // there — see `bc_reference_standard_inert_warning`, which callers surface at their own
-        // display sites (native stderr / WASM table text) from their OWN copy of the inputs,
-        // before this runs.
+        // set the field are byte-identical to pre-MBA-1365 behavior. A custom drag table flown
+        // as the projectile's own curve divides by sectional density rather than a BC, so the
+        // conversion is physically inert there — see `bc_reference_standard_inert_warning`,
+        // which callers surface at their own display sites (native stderr / WASM table text)
+        // from their OWN copy of the inputs, before this runs. A table flown as a reference
+        // curve (`custom_drag_reference`) divides by these same BCs, so it needs the conversion
+        // exactly as a built-in model does.
         if matches!(
             self.bc_reference_standard,
             BcReferenceStandard::ArmyStandardMetro
@@ -572,6 +627,7 @@ impl Default for BallisticInputs {
             // Custom drag model support
             custom_drag_table: None,
             cd_scale: 1.0,
+            custom_drag_reference: false,
 
             // Legacy field for compatibility
             bc_type_str: None,
@@ -1586,10 +1642,13 @@ impl TrajectorySolver {
 
         // These four quantities are required by every point-mass solve. In particular, validate
         // muzzle_velocity after `new` has applied a measured curve or linear powder correction.
-        // A custom drag table supplies the actual Cd and divides by sectional density, so bc_value
-        // is physically ignored (see custom_drag_denominator). Require it only in the no-table case;
-        // mass + diameter are always required (they drive the SD denominator when a table is set).
-        if self.inputs.custom_drag_table.is_none() {
+        // A custom drag table flown as the projectile's own curve supplies the actual Cd and
+        // divides by sectional density, so bc_value is physically ignored there (see
+        // custom_drag_denominator). A table flown as a reference curve (custom_drag_reference)
+        // divides by the BC exactly as a G-model does, so bc_value is required in every case but
+        // the own-curve one; mass + diameter are always required (they drive the SD denominator
+        // when an own-curve table is set).
+        if self.inputs.custom_drag_table.is_none() || self.inputs.custom_drag_reference {
             require_positive("bc_value", self.inputs.bc_value)?;
         }
         require_positive("bullet_mass", self.inputs.bullet_mass)?;
@@ -3664,8 +3723,10 @@ impl TrajectorySolver {
     /// deliberate: a second copy of the BC-precedence ladder below is exactly the kind of
     /// duplicate that drifts silently once someone edits one of them.
     ///
-    /// The denominator is a BC (lb/in²) for a G-model and the sectional density for a custom
-    /// drag table, because that table already supplies the projectile's actual Cd.
+    /// The denominator is a BC (lb/in²) for a G-model and for a custom table flown as a
+    /// reference curve (`custom_drag_reference`), and the sectional density for a custom table
+    /// flown as the projectile's own curve, because that table already supplies the
+    /// projectile's actual Cd (see [`BallisticInputs::custom_drag_denominator`]).
     fn drag_terms(&self, velocity_magnitude: f64, speed_of_sound: f64) -> (f64, f64) {
         let cd = self.calculate_drag_coefficient(velocity_magnitude, speed_of_sound);
 
@@ -3721,9 +3782,10 @@ impl TrajectorySolver {
         // explicit segment tables, whose interpolated values are independent caller data.
         let effective_bc = effective_bc.max(1e-6);
 
-        // When a custom drag table is active, calculate_drag_coefficient returned the
-        // projectile's ACTUAL Cd, so the retardation denominator must be the sectional
-        // density (lb/in²), not a BC: Cd_own / SD == Cd_ref / BC
+        // When a custom drag table is active, calculate_drag_coefficient returned the table's
+        // Cd. For the projectile's own curve the retardation denominator must be the sectional
+        // density (lb/in²), not a BC: Cd_own / SD == Cd_ref / BC. A reference curve divides by
+        // the BC resolved above instead, band and all, exactly as a G-model does
         // (see BallisticInputs::custom_drag_denominator).
         let retard_denom = if self.inputs.custom_drag_table.is_some() {
             self.inputs.custom_drag_denominator(effective_bc)
@@ -3749,8 +3811,10 @@ impl TrajectorySolver {
     /// Because the denominator comes from the same internal resolver the integrator divides by,
     /// a velocity- or Mach-segmented BC
     /// carries into the result and its band steps appear in the reported curve. The same
-    /// expression is already correct for a custom drag table, where the denominator *is* the
-    /// sectional density and the scale factor collapses to 1.
+    /// expression is correct for both readings of a custom drag table: for the projectile's own
+    /// curve the denominator *is* the sectional density and the scale factor collapses to 1,
+    /// and for a reference curve (`custom_drag_reference`) the denominator is the resolved BC,
+    /// exactly as for a G-model.
     ///
     /// Returns `None` when the projectile's mass or diameter is unavailable, since sectional
     /// density — and therefore the projectile's own Cd — is undefined without both.
@@ -7369,6 +7433,210 @@ mod cd_scale_tests {
             fast_scaled < fast_baseline,
             "fast_trajectory: cd_scale=1.10 must lower final speed: base={fast_baseline} scaled={fast_scaled}"
         );
+    }
+}
+
+/// `custom_drag_reference`: a custom table flown as a reference curve, divided by the resolved
+/// BC exactly as a built-in model's curve is, instead of the projectile's own Cd over sectional
+/// density.
+#[cfg(test)]
+mod custom_drag_reference_tests {
+    use super::*;
+
+    /// The engine's own G7 table, as a caller would send it.
+    fn g7_table() -> crate::drag::DragTable {
+        crate::drag::DragTable::from_csv_str(include_str!("../data/g7.csv"))
+            .expect("bundled table parses")
+    }
+
+    /// A .308 175 gr G7 0.243 at 823 m/s with a two-band ladder (edge at 2400 fps) whose BCs both
+    /// differ from the scalar. The imperial mirrors are set too, so the sectional density read
+    /// off these inputs is the one `TrajectorySolver::new` re-derives from the SI fields.
+    fn laddered_inputs() -> BallisticInputs {
+        BallisticInputs {
+            bc_value: 0.243,
+            bc_type: DragModel::G7,
+            bullet_mass: 175.0 * crate::constants::GRAINS_TO_KG,
+            bullet_diameter: 0.308 * 0.0254,
+            weight_grains: 175.0,
+            caliber_inches: 0.308,
+            muzzle_velocity: 823.0,
+            use_bc_segments: true,
+            bc_segments_data: Some(vec![
+                crate::BCSegmentData {
+                    velocity_min: 2400.0,
+                    velocity_max: 4000.0,
+                    bc_value: 0.260,
+                },
+                crate::BCSegmentData {
+                    velocity_min: 0.0,
+                    velocity_max: 2400.0,
+                    bc_value: 0.220,
+                },
+            ]),
+            ..BallisticInputs::default()
+        }
+    }
+
+    fn reference(inputs: BallisticInputs) -> BallisticInputs {
+        BallisticInputs {
+            custom_drag_table: Some(g7_table()),
+            custom_drag_reference: true,
+            ..inputs
+        }
+    }
+
+    fn solve(inputs: BallisticInputs) -> TrajectoryResult {
+        let mut solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        solver.set_max_range(800.0);
+        solver.solve().expect("solve")
+    }
+
+    #[test]
+    fn default_is_the_projectiles_own_curve() {
+        assert!(!BallisticInputs::default().custom_drag_reference);
+    }
+
+    #[test]
+    fn the_denominator_is_the_resolved_bc_for_a_reference_curve() {
+        let own = BallisticInputs {
+            custom_drag_table: Some(g7_table()),
+            ..laddered_inputs()
+        };
+        let sd = own.sectional_density_lb_in2().expect("SD");
+        assert_eq!(own.custom_drag_denominator(0.220), sd);
+        let reference = reference(laddered_inputs());
+        assert_eq!(reference.custom_drag_denominator(0.220), 0.220);
+        assert_eq!(reference.custom_drag_denominator(0.260), 0.260);
+    }
+
+    /// The same ladder on the built-in G7 model and on the engine's G7 table sent as a reference
+    /// curve is the same arithmetic, so the two fly bit-identically. Without the flag the table
+    /// is read as the projectile's own Cd over sectional density, a different projectile.
+    #[test]
+    fn a_reference_curve_flies_a_ladder_exactly_as_the_builtin_model() {
+        let builtin = solve(laddered_inputs());
+        let table = solve(reference(laddered_inputs()));
+        assert_eq!(table.points.len(), builtin.points.len());
+        for (t, b) in table.points.iter().zip(&builtin.points) {
+            assert_eq!(t.position, b.position);
+            assert_eq!(
+                t.velocity_magnitude.to_bits(),
+                b.velocity_magnitude.to_bits()
+            );
+        }
+
+        let own_curve = solve(BallisticInputs {
+            custom_drag_reference: false,
+            ..reference(laddered_inputs())
+        });
+        assert!(
+            (own_curve.impact_velocity - builtin.impact_velocity).abs() > 10.0,
+            "the fixture must tell the readings apart: {} vs {}",
+            own_curve.impact_velocity,
+            builtin.impact_velocity
+        );
+    }
+
+    /// The BC divides the curve again, so it is held to the built-in model's rule, while the
+    /// own-curve reading still ignores it.
+    #[test]
+    fn validate_for_solve_requires_a_bc_for_a_reference_curve() {
+        for bad in [0.0, -0.1, f64::NAN, f64::INFINITY] {
+            let inputs = BallisticInputs {
+                bc_value: bad,
+                ..reference(laddered_inputs())
+            };
+            let error = TrajectorySolver::new(
+                inputs.clone(),
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            )
+            .solve()
+            .expect_err("a reference curve needs a finite positive BC");
+            assert!(error.to_string().contains("bc_value"), "{error}");
+
+            let own_curve = BallisticInputs {
+                custom_drag_reference: false,
+                use_bc_segments: false,
+                bc_segments_data: None,
+                ..inputs
+            };
+            assert!(
+                TrajectorySolver::new(
+                    own_curve,
+                    WindConditions::default(),
+                    AtmosphericConditions::default(),
+                )
+                .solve()
+                .is_ok(),
+                "bc_value={bad} is still ignored by the own-curve reading"
+            );
+        }
+    }
+
+    /// An Army Standard Metro BC divides a reference curve, so its conversion is real: the
+    /// scalar and every band convert exactly as they would on the built-in model, and no inert
+    /// warning is raised.
+    #[test]
+    fn army_standard_metro_converts_a_reference_curves_bcs() {
+        let asm = BallisticInputs {
+            bc_reference_standard: BcReferenceStandard::ArmyStandardMetro,
+            ..reference(laddered_inputs())
+        };
+        assert!(asm.bc_reference_standard_inert_warning().is_none());
+        assert!(BallisticInputs {
+            custom_drag_reference: false,
+            ..asm.clone()
+        }
+        .bc_reference_standard_inert_warning()
+        .is_some());
+
+        let converted = solve(asm);
+        let builtin_asm = solve(BallisticInputs {
+            bc_reference_standard: BcReferenceStandard::ArmyStandardMetro,
+            ..laddered_inputs()
+        });
+        let icao = solve(reference(laddered_inputs()));
+        assert_eq!(
+            converted.impact_velocity.to_bits(),
+            builtin_asm.impact_velocity.to_bits()
+        );
+        assert!(
+            converted.impact_velocity < icao.impact_velocity,
+            "the ASM BCs are smaller once converted, so the bullet must slow more: {} vs {}",
+            converted.impact_velocity,
+            icao.impact_velocity
+        );
+    }
+
+    /// The reported Cd is the projectile's own: the reference curve times SD over the band BC
+    /// that flies, exactly as for a built-in model.
+    #[test]
+    fn the_reported_cd_is_the_projectiles_own() {
+        let inputs = reference(laddered_inputs());
+        let sd = inputs.sectional_density_lb_in2().expect("SD");
+        let solver = TrajectorySolver::new(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions::default(),
+        );
+        let sos = 340.0;
+        for (fps, band_bc) in [(2600.0, 0.260), (2200.0, 0.220)] {
+            let velocity = fps / 3.28084;
+            let expected = g7_table().interpolate(velocity / sos) * sd / band_bc;
+            let reported = solver
+                .effective_drag_coefficient(velocity, sos)
+                .expect("mass and diameter are set");
+            assert!(
+                (reported - expected).abs() < 1e-12,
+                "{fps} fps: reported {reported}, expected {expected}"
+            );
+        }
     }
 }
 

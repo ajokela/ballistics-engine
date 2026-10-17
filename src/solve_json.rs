@@ -237,6 +237,8 @@ pub struct ProjectileV1 {
     pub drag_model: DragModelV1,
     pub ballistic_coefficient: f64,
     /// A caller-supplied drag curve replacing `drag_model`'s (MBA-1597). See [`DragTableV1`].
+    /// Beside `bc_segments` it must be a [`DragTableKindV1::Reference`] curve, which the band
+    /// BCs are then measured against.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -250,12 +252,17 @@ pub struct ProjectileV1 {
     /// interior gap between two bands, and blended into the bands within up to 25 fps either
     /// side of a gap edge. Below the lowest band, or at or above the highest, the nearest edge
     /// band applies, so under a gapless ladder the scalar never flies. A one-band ladder's BC
-    /// must match `ballistic_coefficient` (see [`ONE_BAND_BC_RELATIVE_TOLERANCE_V1`]). Band BCs are referenced to `drag_model`, and bands are selected by airspeed (speed relative to
-    /// the air mass). Interior band and gap edges are smoothstep-blended
-    /// (`velocity_segment_bc` in `src/bc_estimation.rs`). Refused alongside
-    /// `drag_table`, which replaces the `drag_model` curve the band BCs are measured against,
-    /// and alongside `corrections.bc5d_table_path`, which builds its own ladder from
-    /// `ballistic_coefficient`.
+    /// must match `ballistic_coefficient` (see [`ONE_BAND_BC_RELATIVE_TOLERANCE_V1`]).
+    ///
+    /// Band BCs are referenced to the same curve as the scalar: `drag_model`'s, or a
+    /// [`DragTableKindV1::Reference`] `drag_table`'s, which then flies the bands exactly as a
+    /// built-in model does. The engine cannot check which curve a published band BC was
+    /// measured against; the caller must send the matching one. Bands are selected by airspeed
+    /// (speed relative to the air mass), and interior band and gap edges are smoothstep-blended
+    /// (`velocity_segment_bc` in `src/bc_estimation.rs`). Refused (`conflicting_fields`)
+    /// alongside a [`DragTableKindV1::Projectile`] `drag_table`, whose curve is the projectile's
+    /// own Cd with no BC for the bands to change, and alongside `corrections.bc5d_table_path`,
+    /// which builds its own ladder from `ballistic_coefficient`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -267,8 +274,9 @@ pub struct ProjectileV1 {
 /// One band of a [`ProjectileV1::bc_segments`] ladder: the BC that flies while the bullet's
 /// airspeed lies in `[velocity_min_mps, velocity_max_mps)`.
 ///
-/// - Band BCs are in lb/in² and referenced to `projectile.drag_model`, exactly as the scalar
-///   `ballistic_coefficient` is, and are held to the same bounds.
+/// - Band BCs are in lb/in², referenced to the same curve as the scalar
+///   `ballistic_coefficient` (`projectile.drag_model`, or a reference-kind
+///   `projectile.drag_table`), and held to the same bounds.
 /// - Bands are selected by airspeed: the bullet's speed relative to the air mass, not over the
 ///   ground.
 /// - The array runs from the fastest band to the slowest. `velocity_min_mps` strictly
@@ -293,8 +301,9 @@ pub struct BcSegmentV1 {
     /// Upper edge of the band, m/s, exclusive. Finite and > `velocity_min_mps`; there is no
     /// upper bound.
     pub velocity_max_mps: f64,
-    /// This band's BC, lb/in² against `projectile.drag_model`. Same bounds as the scalar
-    /// `ballistic_coefficient`.
+    /// This band's BC, lb/in² against the same curve as the scalar `ballistic_coefficient`
+    /// (`projectile.drag_model`, or a reference-kind `projectile.drag_table`). Same bounds as
+    /// the scalar.
     pub ballistic_coefficient: f64,
 }
 
@@ -326,7 +335,9 @@ pub const ONE_BAND_BC_RELATIVE_TOLERANCE_V1: f64 = 1.0e-6;
 ///
 /// `kind` says what `ballistic_coefficient` means beside it, and has no default: the two
 /// readings differ by the projectile's form factor, so a guess gives confident, wrong drops.
-/// While a table is present `drag_model` does not drive drag under either kind.
+/// While a table is present `drag_model` does not drive drag under either kind. Only a
+/// [`DragTableKindV1::Reference`] curve may be sent with a [`ProjectileV1::bc_segments`]
+/// ladder.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DragTableV1 {
@@ -341,10 +352,14 @@ pub struct DragTableV1 {
 #[serde(rename_all = "snake_case")]
 pub enum DragTableKindV1 {
     /// A standard curve — an airgun pellet law such as GA2, say — that `ballistic_coefficient`
-    /// was measured against. Flown exactly as a built-in model is flown with its own BC.
+    /// was measured against. Flown exactly as a built-in model is flown with its own BC, and so
+    /// is a [`ProjectileV1::bc_segments`] ladder measured against it: at each airspeed the
+    /// curve is divided by the band BC that flies there.
     Reference,
     /// This projectile's own measured Cd (Doppler radar, for instance).
-    /// `ballistic_coefficient` is not used, exactly as with the CLI's `--drag-table`.
+    /// `ballistic_coefficient` is not used, exactly as with the CLI's `--drag-table`, and a
+    /// [`ProjectileV1::bc_segments`] ladder is refused beside it (`conflicting_fields`), since
+    /// no BC reaches the drag.
     Projectile,
 }
 

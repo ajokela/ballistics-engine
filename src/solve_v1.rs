@@ -517,16 +517,24 @@ pub(crate) fn prepare_request(
         ));
     }
 
-    // MBA-1598: a BC ladder's band BCs are measured against drag_model's curve. A drag table
-    // replaces that curve, and the solver flies a present table whatever else is set, so the
-    // bands would have nothing to scale. The correction table builds its own ladder from
-    // ballistic_coefficient, so a caller ladder beside it is two answers to one question.
-    // Both pairs are refused here, before the correction table path is ever opened.
-    if projectile.bc_segments.is_some() && projectile.drag_table.is_some() {
+    // MBA-1598: a BC ladder's band BCs are measured against a reference curve: drag_model's,
+    // or a `reference`-kind drag table's, which replaces it and is flown as Cd_ref / BC with
+    // the band BC exactly as a built-in model is (install_drag_table). A `projectile`-kind
+    // table is the projectile's own Cd, divided by sectional density, so it has no BC for the
+    // bands to change, and that pair is refused. The correction table builds its own ladder
+    // from ballistic_coefficient, so a caller ladder beside it is two answers to one question.
+    // Both refusals happen here, before the correction table path is ever opened.
+    if projectile.bc_segments.is_some()
+        && projectile
+            .drag_table
+            .as_ref()
+            .is_some_and(|table| table.kind == DragTableKindV1::Projectile)
+    {
         return Err(conflicting_fields(
             "$.projectile.bc_segments",
-            "projectile.bc_segments cannot be combined with projectile.drag_table: a drag \
-             table replaces the drag_model curve that the band BCs are measured against",
+            "projectile.bc_segments cannot be combined with a projectile.drag_table of kind \
+             \"projectile\": that curve is the projectile's own Cd and has no BC for the bands \
+             to change",
         ));
     }
     if projectile.bc_segments.is_some()
@@ -724,9 +732,11 @@ pub(crate) fn prepare_request(
         enable_aerodynamic_jump: resolved_request.effects.aerodynamic_jump.unwrap_or(false),
         use_cluster_bc: false,
         // MBA-1597: `projectile.drag_table` is installed just below, once these inputs exist —
-        // the reference kind's scale reads their own sectional density.
+        // the reference kind's scale reads their own sectional density, and a reference table
+        // flown beside a BC ladder sets `custom_drag_reference` there instead.
         custom_drag_table: None,
         cd_scale: 1.0,
+        custom_drag_reference: false,
         bc_type_str: None,
     };
 
@@ -734,6 +744,7 @@ pub(crate) fn prepare_request(
         install_drag_table(
             drag_table,
             resolved_request.projectile.ballistic_coefficient,
+            resolved_request.projectile.bc_segments.is_some(),
             &mut inputs,
         )?;
     }
@@ -764,15 +775,26 @@ pub(crate) fn prepare_request(
 /// The engine flies a custom table as the projectile's OWN drag coefficient divided by its
 /// sectional density ([`BallisticInputs::custom_drag_denominator`]): the `projectile` kind, BC
 /// unused, exactly as the CLI's `--drag-table`. A `reference` curve is instead a standard the
-/// BC was measured against, which a built-in model flies as `Cd_ref / BC`. Since BC = SD / i,
-/// that equals the own-curve path with `Cd_own = Cd_ref * SD / BC`, so the reference kind is
-/// the same path with `cd_scale = SD / BC` — no second retardation formula, and the SD is the
-/// very one the denominator divides by. The scale is rebuilt from the request's BC on every
-/// prepare, so a kernel that perturbs `ballistic_coefficient` and re-solves moves a
-/// reference-kind trajectory as it moves a built-in one.
+/// BC was measured against, which a built-in model flies as `Cd_ref / BC`. It is installed in
+/// one of two ways, which fly that same quotient:
+///
+/// * Without a BC ladder, as the own-curve path with `cd_scale = SD / BC`. Since BC = SD / i,
+///   `Cd_ref * SD / BC` is the projectile's own Cd, and the SD it is divided by is the very one
+///   the scale was built from — no second retardation formula. This is the original MBA-1597
+///   installation, kept unchanged so a request without a ladder solves byte-identically.
+/// * With a BC ladder (`has_bc_ladder`), with [`BallisticInputs::custom_drag_reference`] set
+///   and `cd_scale = 1.0`. The drag sites then divide the curve by the BC they resolve at each
+///   speed, so the band BCs, the scalar in an interior gap and the smoothstep blending at the
+///   band edges reach the table exactly as they reach a built-in model. One whole-curve scale
+///   cannot carry a BC that changes from band to band.
+///
+/// Either installation is rebuilt from the request's BC on every prepare, so a kernel that
+/// perturbs `ballistic_coefficient` and re-solves moves a reference-kind trajectory as it
+/// moves a built-in one.
 fn install_drag_table(
     drag_table: &DragTableV1,
     ballistic_coefficient: f64,
+    has_bc_ladder: bool,
     inputs: &mut BallisticInputs,
 ) -> Result<(), SolveErrorEnvelopeV1> {
     let (mach, cd): (Vec<f64>, Vec<f64>) = drag_table
@@ -786,6 +808,14 @@ fn install_drag_table(
         .map_err(|message| invalid_value("$.projectile.drag_table.points", message))?;
     inputs.cd_scale = match drag_table.kind {
         DragTableKindV1::Projectile => 1.0,
+        // A ladder's band BC must reach the denominator at every speed, which the whole-curve
+        // SD / BC scale below cannot carry, so the curve is flown as a built-in model is:
+        // unscaled, over the BC each drag site resolves. Without a ladder the SD / BC arm
+        // below is kept exactly as it was, so those solves stay byte-identical.
+        DragTableKindV1::Reference if has_bc_ladder => {
+            inputs.custom_drag_reference = true;
+            1.0
+        }
         DragTableKindV1::Reference => {
             let sectional_density = inputs.sectional_density_lb_in2().ok_or_else(|| {
                 internal_error("projectile mass and diameter gave no sectional density")
@@ -2616,6 +2646,61 @@ mod tests {
                 terminal_drop(other)
             );
         }
+    }
+
+    /// How `install_drag_table` installs each kind, with and without a BC ladder. Only a
+    /// reference table beside a ladder takes the reference-curve path (`custom_drag_reference`
+    /// set, `cd_scale` 1.0). A reference table alone keeps the original `cd_scale = SD / BC`
+    /// installation, so every request accepted before ladders could sit beside a reference
+    /// table solves byte-identically, and a projectile table beside a ladder is refused.
+    #[test]
+    fn install_drag_table_takes_the_reference_curve_path_only_beside_a_ladder() {
+        let prepare = |kind: DragTableKindV1, with_ladder: bool| {
+            let mut request = minimal_request();
+            request.projectile.drag_table = Some(DragTableV1 {
+                kind,
+                points: vec![
+                    crate::solve_json::DragPointV1 { mach: 0.0, cd: 0.2 },
+                    crate::solve_json::DragPointV1 { mach: 2.0, cd: 0.3 },
+                ],
+            });
+            if with_ladder {
+                request.projectile.bc_segments = Some(vec![
+                    crate::solve_json::BcSegmentV1 {
+                        velocity_min_mps: 600.0,
+                        velocity_max_mps: 999.0,
+                        ballistic_coefficient: 0.260,
+                    },
+                    crate::solve_json::BcSegmentV1 {
+                        velocity_min_mps: 0.0,
+                        velocity_max_mps: 600.0,
+                        ballistic_coefficient: 0.220,
+                    },
+                ]);
+            }
+            prepare_request(&request)
+        };
+
+        let alone = prepare(DragTableKindV1::Reference, false).unwrap().inputs;
+        let sd = alone.sectional_density_lb_in2().expect("SD");
+        assert!(!alone.custom_drag_reference);
+        assert_eq!(alone.cd_scale, sd / 0.243);
+
+        let laddered = prepare(DragTableKindV1::Reference, true).unwrap().inputs;
+        assert!(laddered.custom_drag_reference);
+        assert_eq!(laddered.cd_scale, 1.0);
+        assert!(laddered.custom_drag_table.is_some());
+        assert!(laddered.use_bc_segments && laddered.bc_segments_data.is_some());
+        assert_eq!(laddered.bc_value, 0.243, "the scalar still flies in a gap");
+
+        let own = prepare(DragTableKindV1::Projectile, false).unwrap().inputs;
+        assert!(!own.custom_drag_reference);
+        assert_eq!(own.cd_scale, 1.0);
+
+        let refused = prepare(DragTableKindV1::Projectile, true)
+            .expect_err("a ladder beside a projectile table is refused");
+        assert_eq!(refused.error.code, SolveErrorCodeV1::ConflictingFields);
+        assert_eq!(refused.error.path(), Some("$.projectile.bc_segments"));
     }
 
     #[test]
