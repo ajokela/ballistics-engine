@@ -32,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   beside a projectile table reachable as a refusal. See
   [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#projectiledrag_table-mba-1597).
 
+  Engines up to 0.46.0 still refuse the pair as `conflicting_fields` at
+  `$.projectile.bc_segments`, so a producer that must also work with them must not send it. The
+  contract's versioning section now writes this kind of change down as a fourth growth rule: a
+  combination once refused as `conflicting_fields` may become accepted when it names new
+  behavior, with every request valid before unchanged.
+
   **Source-breaking for Rust struct literals.** `BallisticInputs::custom_drag_reference` and
   `trajectory_integration::TrajectoryParams::custom_drag_reference` are new public `bool` fields.
   When set, the drag sites divide `custom_drag_table`'s Cd by the resolved BC, as they do a

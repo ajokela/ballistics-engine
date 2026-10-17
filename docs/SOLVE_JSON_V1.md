@@ -56,7 +56,7 @@ and a consumer must not silently reinterpret a v1 field. Removing a field, chang
 sign, renaming an enum value, or changing a field's meaning requires a new schema version — these
 are the invariants v1 guarantees and they hold absolutely.
 
-v1 does, however, grow by ADDITION under three strict rules, so that a feature need not force a
+v1 does, however, grow by ADDITION under four strict rules, so that a feature need not force a
 whole new schema:
 
 1. A new REQUEST field must be optional and default to the exact pre-existing behavior when
@@ -70,6 +70,13 @@ whole new schema:
    The new value is opt-in and may be echoed in the resolved response; requests using older values
    keep identical behavior and output. Producers that must work with older engines must not send
    the new value (`G2`, `G5`, `GI`, `GS`, and `RA4` drag models were added this way in MBA-1442).
+4. A combination of individually valid request fields that was refused as `conflicting_fields`
+   may become accepted when it names newly supported behavior. Every request valid before keeps
+   identical behavior and output. Producers that must work with older engines must not send the
+   combination, since those engines still refuse it (`shot.zero_distance_m` beside
+   `shot.muzzle_angle_rad` was accepted this way in 0.33.0, and a `reference`-kind
+   `projectile.drag_table` beside `projectile.bc_segments` after 0.46.0, a pair that engines up
+   to 0.46.0 refuse at `$.projectile.bc_segments`).
 
 Consumers must therefore tolerate response fields they do not recognize (ignore, do not reject) if
 they want to parse across engine versions; a consumer that pins a response DTO with
@@ -262,7 +269,9 @@ scalar `ballistic_coefficient` in an interior gap. Sending the engine's own G7 t
 `reference` curve beside a ladder gives the same samples as `"drag_model": "G7"` with the same
 ladder, under every solver method. The band BCs must have been measured against this table's
 curve. The engine cannot check that, and bands quoted against G1 but flown over a pellet law
-give confident, wrong drops.
+give confident, wrong drops. Engines up to 0.46.0 refuse the pair as `conflicting_fields` at
+`$.projectile.bc_segments`, so a producer that must also work with them must not send it
+([versioning rule 4](#versioning-and-compatibility)).
 
 The table is echoed verbatim at `resolved_request.projectile.drag_table`, beside any ladder at
 `resolved_request.projectile.bc_segments`, so a resolved request re-solves on the same curve and
