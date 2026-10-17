@@ -7449,6 +7449,12 @@ mod custom_drag_reference_tests {
             .expect("bundled table parses")
     }
 
+    /// The engine's own G1 table, a curve far from `bc_type: G7`'s.
+    fn g1_table() -> crate::drag::DragTable {
+        crate::drag::DragTable::from_csv_str(include_str!("../data/g1.csv"))
+            .expect("bundled table parses")
+    }
+
     /// A .308 175 gr G7 0.243 at 823 m/s with a two-band ladder (edge at 2400 fps) whose BCs both
     /// differ from the scalar. The imperial mirrors are set too, so the sectional density read
     /// off these inputs is the one `TrajectorySolver::new` re-derives from the SI fields.
@@ -7539,6 +7545,40 @@ mod custom_drag_reference_tests {
             "the fixture must tell the readings apart: {} vs {}",
             own_curve.impact_velocity,
             builtin.impact_velocity
+        );
+    }
+
+    /// The table is what flies, not `bc_type`'s curve: the G7 table above is the same numbers as
+    /// `bc_type: G7`, so it cannot tell them apart. The G1 table flown as a reference curve while
+    /// `bc_type` stays G7 must equal the built-in G1 model with the same ladder, bit for bit; a
+    /// drag site that read `bc_type` beside the flag would give the G7 answer instead.
+    #[test]
+    fn a_reference_curve_flies_the_table_not_bc_types_curve() {
+        let table = solve(BallisticInputs {
+            custom_drag_table: Some(g1_table()),
+            custom_drag_reference: true,
+            bc_type: DragModel::G7,
+            ..laddered_inputs()
+        });
+        let builtin_g1 = solve(BallisticInputs {
+            bc_type: DragModel::G1,
+            ..laddered_inputs()
+        });
+        assert_eq!(table.points.len(), builtin_g1.points.len());
+        for (t, b) in table.points.iter().zip(&builtin_g1.points) {
+            assert_eq!(t.position, b.position);
+            assert_eq!(
+                t.velocity_magnitude.to_bits(),
+                b.velocity_magnitude.to_bits()
+            );
+        }
+
+        let builtin_g7 = solve(laddered_inputs());
+        assert!(
+            (builtin_g1.impact_velocity - builtin_g7.impact_velocity).abs() > 50.0,
+            "the fixture must tell the curves apart: G1 {} vs G7 {}",
+            builtin_g1.impact_velocity,
+            builtin_g7.impact_velocity
         );
     }
 

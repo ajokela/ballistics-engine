@@ -22,7 +22,8 @@
 //!   (h) beside a `projectile.drag_table` of kind `reference`, a standard curve the band BCs
 //!       are measured against, the ladder flies exactly as it does on the built-in model of the
 //!       same curve: the same bands, gap and edge blending, the same echo and re-solve, the same
-//!       BC slope in the perturbation kernels, and the same bridge result.
+//!       BC slope in the perturbation kernels, and the same bridge result. The table's curve is
+//!       the one that flies: a G1 table beside `"drag_model": "G7"` flies as G1.
 //!
 //! The m/s-to-fps conversion is pinned in `src/solve_v1.rs`'s unit tests, against a solve
 //! built directly from engine `BCSegmentData` in fps.
@@ -95,8 +96,18 @@ fn gapped_ladder() -> Value {
 /// The engine's own G7 table as wire points: a reference curve whose built-in twin is
 /// `"drag_model": "G7"`, so every reference-table result below has a trusted answer to match.
 fn g7_points() -> Value {
-    let table = ballistics_engine::drag::DragTable::from_csv_str(include_str!("../data/g7.csv"))
-        .expect("bundled table parses");
+    table_points(include_str!("../data/g7.csv"))
+}
+
+/// The engine's own G1 table as wire points, whose built-in twin is `"drag_model": "G1"`. Sent
+/// beside `"drag_model": "G7"`, it shows which curve flies: the table's, never drag_model's.
+fn g1_points() -> Value {
+    table_points(include_str!("../data/g1.csv"))
+}
+
+fn table_points(csv: &str) -> Value {
+    let table =
+        ballistics_engine::drag::DragTable::from_csv_str(csv).expect("bundled table parses");
     Value::Array(
         table
             .mach_values
@@ -929,6 +940,40 @@ fn a_reference_table_flies_a_ladder_exactly_as_its_builtin_model() {
         moved.samples.last().unwrap().speed_mps > gapped.samples.last().unwrap().speed_mps,
         "a higher scalar BC flown through the gap must keep more speed"
     );
+}
+
+/// The table is the curve that flies, not drag_model's. The G7 table matching `"G7"` above
+/// cannot show that, since the two curves are the same numbers. Here the engine's G1 table goes
+/// out as the reference curve while `drag_model` stays `"G7"`, and the solve must equal
+/// `"drag_model": "G1"` with the same ladder, bit for bit, under every integrator and through
+/// the gapless and the gapped ladder. A solve that flew drag_model's curve beside the ladder
+/// would give the G7 answer, which the fixture keeps far from the G1 one.
+#[test]
+fn a_reference_table_flies_its_own_curve_not_drag_models() {
+    for method in ["rk4", "rk45", "euler"] {
+        for ladder in [two_band_ladder(), gapped_ladder()] {
+            let mut builtin_g1 = with_bc_segments(base_request(), ladder.clone());
+            builtin_g1["projectile"]["drag_model"] = json!("G1");
+            builtin_g1["solver"]["method"] = json!(method);
+            let mut table = with_drag_table(builtin_g1.clone(), "reference", g1_points());
+            table["projectile"]["drag_model"] = json!("G7");
+            let mut builtin_g7 = builtin_g1.clone();
+            builtin_g7["projectile"]["drag_model"] = json!("G7");
+
+            let (table, g1, g7) = (solve(&table), solve(&builtin_g1), solve(&builtin_g7));
+            assert_eq!(table.samples, g1.samples, "{method} {ladder}");
+            assert_eq!(table.summary, g1.summary, "{method} {ladder}");
+
+            let (g1_end, g7_end) = (g1.samples.last().unwrap(), g7.samples.last().unwrap());
+            assert!(
+                (g1_end.speed_mps - g7_end.speed_mps).abs() > 50.0,
+                "{method} {ladder}: the fixture must tell the curves apart: G1 {} m/s vs G7 {} \
+                 m/s",
+                g1_end.speed_mps,
+                g7_end.speed_mps
+            );
+        }
+    }
 }
 
 /// The resolved request echoes the table and the ladder verbatim, side by side, and a request
