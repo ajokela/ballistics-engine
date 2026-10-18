@@ -15231,9 +15231,11 @@ fn run_zero_calculation(
     // `zero_angle` is the bore angle above horizontal. The sight line runs from
     // (0, sight_height) to (target_distance, sight_height + target_height), so its slope is
     // target_height / target_distance: the sight-height translation cancels between endpoints.
+    // Its angle is the arctangent of that slope; the small-angle `slope * 3437.75` overstated
+    // a 26.6 degree line of sight by 125 MOA and reported a negative adjustment.
     // MBA-1358: a dialed correction — scope units (÷CF; /1.0 is exact).
     let sight_adjustment_moa = (zero_angle.to_degrees() * 60.0
-        - (target_height / target_distance * 3437.75))
+        - (target_height / target_distance).atan().to_degrees() * 60.0)
         / elevation_cf;
     // The bullet starts below the sight line by `sight_height`, which can already exceed the
     // 5 cm lower bound at the muzzle. Ignore that initial offset and report only a lower-bound
@@ -15483,7 +15485,7 @@ fn run_zero_range_calculation(
     // referenced against the primary crossing rather than a supplied target distance.
     // MBA-1358: a dialed correction — scope units (÷CF; /1.0 is exact).
     let sight_adjustment_moa = (zero_angle_rad.to_degrees() * 60.0
-        - (target_height / primary_range * 3437.75))
+        - (target_height / primary_range).atan().to_degrees() * 60.0)
         / elevation_cf;
     let mut entered_point_blank_band = false;
     let point_blank_range = trajectory
