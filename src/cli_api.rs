@@ -1241,8 +1241,9 @@ impl TrajectorySolver {
         target_height_m: f64,
         frame: ZeroTargetFrame,
     ) -> Result<f64, BallisticsError> {
-        // Binary search for the angle that hits the target. Use only positive angles to ensure a
-        // proper upward ballistic arc.
+        // Binary search for the angle that hits the target. The bracket starts at [0, 0.2] rad
+        // and widens downward for a target below where a level bore lands, or upward for one
+        // beyond the initial top angle.
         let mut low_angle = 0.0;
         let mut high_angle = 0.2; // about 11 degrees
         let tolerance = 1e-7;
@@ -1258,8 +1259,29 @@ impl TrajectorySolver {
                 let high_error = high_height - target_height_m;
 
                 if low_error > 0.0 && high_error > 0.0 {
-                    // Both angles overshoot. Zero degrees is the lowest supported launch angle;
-                    // retain the historical behavior and let the search choose its best result.
+                    // Both angles overshoot: the target sits below where a level bore lands
+                    // (a shooter above the target), so the bore must point below horizontal.
+                    // The search used to stop at 0 rad and fail. Lower the bottom of the
+                    // bracket in the same steps the undershoot branch raises the top, down to
+                    // 45 degrees. A trial that ends short of the target distance (the ground
+                    // stop) is below the target too, exactly as the bisection below treats it.
+                    let mut expanded = false;
+                    for multiplier in [1.0, 2.0, 3.0, 4.0] {
+                        let new_low = (-0.2_f64 * multiplier).max(-0.785);
+                        match self.zero_trial_height_at(new_low, target_distance_m, frame) {
+                            Ok(Some(height)) if height - target_height_m > 0.0 => {}
+                            Ok(_) => {
+                                high_angle = low_angle;
+                                low_angle = new_low;
+                                expanded = true;
+                                break;
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                    if !expanded {
+                        return Err("Cannot find zero angle: target is below the trajectory even at the steepest downward angle".into());
+                    }
                 } else if low_error < 0.0 && high_error < 0.0 {
                     // Both angles undershoot. Preserve the historical expansion up to 45 degrees.
                     let mut expanded = false;
@@ -5435,6 +5457,48 @@ mod mba1302_solver_seam_tests {
             "zeroing is level-rifle sight geometry; incline must not move the solved zero: \
              level={level_angle}, inclined={inclined_angle}"
         );
+    }
+
+    #[test]
+    fn target_below_the_level_bore_impact_zeroes_with_a_downward_bore() {
+        // A target lower than where a level bore lands needs the bore pointed below
+        // horizontal. The search used to start at 0 rad, so every such target collapsed onto
+        // 0 rad and failed with "residual height error too large".
+        const TARGET_DISTANCE_M: f64 = 457.2; // 500 yd
+        let inputs = BallisticInputs {
+            bc_value: 0.462,
+            bullet_mass: 168.0 * 0.06479891 / 1000.0,
+            bullet_diameter: 0.308 * 0.0254,
+            muzzle_velocity: 2700.0 * 0.3048,
+            sight_height: 0.05,
+            ..Default::default()
+        };
+        let solver = TrajectorySolver::new(inputs, Default::default(), Default::default());
+        let level_impact_m = solver
+            .zero_trial_height_at(0.0, TARGET_DISTANCE_M, ZeroTargetFrame::SightLine)
+            .expect("level trial")
+            .expect("level trial reaches the target distance");
+
+        // From just below the level impact down to a 30-degree depression (still above the
+        // default -100 m ground threshold).
+        for depth_m in [0.005, 1.0, 4.572, 91.44] {
+            let target_m = level_impact_m - depth_m;
+            let angle = solver
+                .find_zero_angle(TARGET_DISTANCE_M, target_m, ZeroTargetFrame::SightLine)
+                .unwrap_or_else(|e| panic!("target {depth_m} m below the level impact: {e}"));
+            assert!(
+                angle < 0.0,
+                "a target below the level impact needs a downward bore: depth={depth_m} m angle={angle}"
+            );
+            let hit_m = solver
+                .zero_trial_height_at(angle, TARGET_DISTANCE_M, ZeroTargetFrame::SightLine)
+                .expect("verify trial")
+                .expect("zeroed trial reaches the target distance");
+            assert!(
+                (hit_m - target_m).abs() < 0.0001,
+                "zero missed a target {depth_m} m below the level impact: hit={hit_m} target={target_m}"
+            );
+        }
     }
 
     #[test]

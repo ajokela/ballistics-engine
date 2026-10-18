@@ -21,6 +21,13 @@ fn get_cli_binary() -> PathBuf {
     path
 }
 
+fn line_of_sight_moa(target_height_yards: f64) -> f64 {
+    (target_height_yards / TARGET_DISTANCE_YARDS)
+        .atan()
+        .to_degrees()
+        * 60.0
+}
+
 fn run_zero(target_height_yards: f64) -> Value {
     let output = Command::new(get_cli_binary())
         .args([
@@ -111,11 +118,31 @@ fn elevated_target_sight_adjustment_removes_los_slope() {
     let result = run_zero(target_height_yards);
     let zero_angle_moa = result["zero_angle_moa"].as_f64().unwrap();
     let actual = result["sight_adjustment_moa"].as_f64().unwrap();
-    let expected = zero_angle_moa - target_height_yards / TARGET_DISTANCE_YARDS * 3437.75;
+    let expected = zero_angle_moa - line_of_sight_moa(target_height_yards);
 
     assert!(
-        (actual - expected).abs() < 1e-12,
+        (actual - expected).abs() < 1e-9,
         "sight adjustment used the wrong LOS frame: actual={actual} expected={expected}"
+    );
+}
+
+#[test]
+fn steep_target_sight_adjustment_uses_the_line_of_sight_angle() {
+    // 50 yd up at 100 yd is a 26.57 degree line of sight (1594 MOA). The small-angle slope
+    // (0.5 rad, 1719 MOA) overstated it by 125 MOA and reported a negative adjustment.
+    let target_height_yards = 50.0;
+    let result = run_zero(target_height_yards);
+    let zero_angle_moa = result["zero_angle_moa"].as_f64().unwrap();
+    let actual = result["sight_adjustment_moa"].as_f64().unwrap();
+    let expected = zero_angle_moa - line_of_sight_moa(target_height_yards);
+
+    assert!(
+        (actual - expected).abs() < 1e-9,
+        "steep sight adjustment did not use the line-of-sight angle: actual={actual} expected={expected}"
+    );
+    assert!(
+        actual > 0.0,
+        "an uphill zero still needs the bore above the line of sight: adjustment={actual} MOA"
     );
 }
 

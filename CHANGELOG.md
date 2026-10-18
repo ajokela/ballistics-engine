@@ -5,6 +5,29 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Zeroing on a target below the shooter.** The zero search never tried a bore angle below
+  horizontal. A target lower than where a level bore lands failed with "Zero angle did not
+  converge: residual height error too large", or, when it was within 1 cm of that point, got a
+  level bore that missed by up to 1 cm. `ballistics zero --target-distance 500
+  --target-height -5` failed, and so did the handbook's 250 yd depression. The search now
+  widens its bracket downward to 45 degrees, the mirror of the existing upward widening. This
+  is in the shared zero solver, so every surface that zeroes (CLI, solve-json, WASM, FFI and
+  the bindings) gains it. Zeros that solved before are byte-identical, except a target within
+  1 cm below the level-bore impact, which now gets its exact (slightly downward) angle.
+- **`zero` reaches targets more than 100 m down.** The command kept the library's -100 m
+  ground stop, which ended every trial short of a deeper target. For a target within 1 m of
+  that stop or deeper, its solves (forward and `--from-angle`) now stop 1 m below the target.
+  Shallower targets keep the default and are unchanged. Like the upward search, the downward
+  one ends at 45 degrees, so a target more than 45 degrees down is still refused.
+- **`zero`'s `sight_adjustment_moa` on steep lines of sight.** It subtracted the line-of-sight
+  slope times 3437.75 instead of the angle of that slope. At 26.6 degrees that is 125 MOA too
+  much: a target 50 yd up at 100 yd reported -121 MOA instead of +3.9. Both the forward and
+  `--from-angle` paths now use the arctangent. On gentle slopes the value moves by about
+  1e-5 MOA (0.25 yd up at 100 yd: 4.30452 to 4.30455).
+
 ## [0.47.0] - 2026-10-17
 
 ### Added
