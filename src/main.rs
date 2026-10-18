@@ -15125,6 +15125,16 @@ fn print_adaptive_mc_summary(report: &AdaptiveMcReportV1) {
     );
 }
 
+/// Ground stop for the `zero` command's solves. The library default (-100 m) stands in for
+/// "no ground", but it ends every trial short of a deeper target, such as one 250 yd below the
+/// shooter, so no zero could be found. Keep the default unless the target is within 1 m of it,
+/// and otherwise sit 1 m under the target so the trials can reach it.
+fn zero_ground_threshold(los_target_height_m: f64) -> f64 {
+    BallisticInputs::default()
+        .ground_threshold
+        .min(los_target_height_m - 1.0)
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "flat arguments mirror the stable zero-calculation CLI command shape"
@@ -15169,6 +15179,7 @@ fn run_zero_calculation(
         altitude,
         custom_drag_table,
         cd_scale,
+        ground_threshold: zero_ground_threshold(sight_height + target_height),
         ..Default::default()
     };
 
@@ -15391,6 +15402,7 @@ fn run_zero_range_calculation(
         altitude,
         custom_drag_table,
         cd_scale,
+        ground_threshold: zero_ground_threshold(sight_height + target_height),
         ..Default::default()
     };
 
