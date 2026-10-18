@@ -1715,6 +1715,25 @@ Output provides:
 - Mrad adjustment
 - Maximum ordinate
 
+#### Targets Above or Below the Shooter (`--target-height`)
+
+`--target-height` is the target's height above the shooter (yards under imperial, meters
+under metric), negative for a target below; `--target-distance` stays the horizontal
+distance. `zero_angle_*` is the bore angle above horizontal, so it is negative when the
+target is far enough below. `sight_adjustment_moa` is the bore angle above the line of sight
+to the target. Targets up to 45 degrees above or below the shooter are solved.
+
+```bash
+# Target 250 yards below the shooter, 500 yards away horizontally: the bore points
+# 26.3012 degrees down, 15.83 MOA above the 26.57-degree line of sight
+./ballistics zero -v 2700 -b 0.462 -m 168 -d 0.308 \
+  --target-distance 500 --target-height -250
+```
+
+Through 0.47.0, any target below where a level bore lands failed with "Zero angle did not
+converge", and `sight_adjustment_moa` used the small-angle slope, which is badly wrong on
+steep lines of sight.
+
 #### Solving Range From a Stored Angle (`--from-angle`)
 
 Hornady and Kestrel 4DOF treat the zero angle as the *portable* quantity: capture it once
