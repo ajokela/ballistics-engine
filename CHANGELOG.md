@@ -5,6 +5,13 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Notes
+- **Credit for the `.reticle` importer.** The 0.40.0 entry for `import_reticle_document` now
+  credits Alfredo (@oa4ajp), who found that the engine could not read `.reticle` reticles and
+  worked out the format. The importer itself was written independently, as that entry says.
+
 ## [0.47.1] - 2026-10-18
 
 ### Fixed
@@ -542,7 +549,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Derived from a sample document and the SVG it renders to — the observable file structure and
   the observable output that pins down what its coordinates mean. No third-party implementation
   was consulted and none is vendored; a file format is not itself copyrightable and this crate
-  stays MIT OR Apache-2.0. Every fixture is invented content.
+  stays MIT OR Apache-2.0. Every fixture is invented content. Credit to Alfredo (@oa4ajp),
+  who found the gap and worked out the format.
 
   **Library-only**, deliberately: it is not wired into the CLI, solve-json, WASM or FFI, so no
   existing surface changes shape. Like the Ventum importer it is fs-free, carries no feature
