@@ -6,7 +6,7 @@ use ballistics_engine::solve_json::{
     DropsReferenceV1, EffectsV1, PressureReferenceV1, ProjectileV1, ResolvedWindV1, RifleV1,
     SamplingV1, SchemaVersionV1, ShotV1, SolveRequestV1, SolveSuccessV1, SolverMethodV1, SolverV1,
     TwistDirectionV1, WindReferenceV1, WindSegmentV1, WindShearModelV1, WindV1, MAX_BC_SEGMENTS_V1,
-    MAX_SOLVE_JSON_SAMPLES_V1,
+    MAX_DRAG_TABLE_NAME_CHARS_V1, MAX_SOLVE_JSON_SAMPLES_V1,
 };
 
 use crate::domain::{ranged, wild};
@@ -58,7 +58,39 @@ fn drag_table(u: &mut Unstructured<'_>) -> Result<DragTableV1> {
     }
     Ok(DragTableV1 {
         kind: drag_table_kind(u)?,
+        name: drag_table_name(u)?,
         points,
+    })
+}
+
+/// What a generated table name is drawn from: letters, digits, punctuation, the space and two
+/// non-ASCII letters, so the decoder's limit is exercised in characters, not bytes. The first
+/// eight never start a name, which keeps every generated name from being blank.
+const DRAG_TABLE_NAME_CHARS: [char; 11] = ['G', 'A', 'a', '2', '(', ')', '-', '.', ' ', 'é', 'ñ'];
+
+/// Absent half the time; otherwise 1 to [`MAX_DRAG_TABLE_NAME_CHARS_V1`] characters that start
+/// with a non-space, which the decoder accepts. A name never reaches the solver.
+fn drag_table_name(u: &mut Unstructured<'_>) -> Result<Option<String>> {
+    if u.int_in_range(0u8..=1)? == 0 {
+        return Ok(None);
+    }
+    let length = u.int_in_range(1..=MAX_DRAG_TABLE_NAME_CHARS_V1)?;
+    let mut name = String::from(*u.choose(&DRAG_TABLE_NAME_CHARS[..8])?);
+    for _ in 1..length {
+        name.push(*u.choose(&DRAG_TABLE_NAME_CHARS)?);
+    }
+    Ok(Some(name))
+}
+
+/// A table name the decoder must refuse: empty, blank, carrying a control character, or one
+/// character past the limit in ASCII and in a two-byte letter.
+fn hostile_drag_table_name(u: &mut Unstructured<'_>) -> Result<String> {
+    Ok(match u.int_in_range(0u8..=4)? {
+        0 => String::new(),
+        1 => "   ".to_owned(),
+        2 => "GA\nMERO".to_owned(),
+        3 => "x".repeat(MAX_DRAG_TABLE_NAME_CHARS_V1 + 1),
+        _ => "é".repeat(MAX_DRAG_TABLE_NAME_CHARS_V1 + 1),
     })
 }
 
@@ -72,22 +104,24 @@ fn maybe_drag_table(u: &mut Unstructured<'_>) -> Result<Option<DragTableV1>> {
 }
 
 /// A drag table the service must refuse or survive: a valid one with one point's Mach or Cd
-/// replaced by an adversarial value, or cut down below the two-point minimum.
+/// replaced by an adversarial value, cut down below the two-point minimum, or given a name the
+/// decoder refuses.
 fn hostile_drag_table(u: &mut Unstructured<'_>) -> Result<Option<DragTableV1>> {
     if u.int_in_range(0u8..=4)? == 0 {
         return Ok(None);
     }
     let mut table = drag_table(u)?;
-    match u.int_in_range(0u8..=2)? {
+    match u.int_in_range(0u8..=3)? {
         0 => table.points.truncate(usize::from(u.int_in_range(0u8..=1)?)),
         1 => {
             let index = u.choose_index(table.points.len())?;
             table.points[index].mach = wild(u)?;
         }
-        _ => {
+        2 => {
             let index = u.choose_index(table.points.len())?;
             table.points[index].cd = wild(u)?;
         }
+        _ => table.name = Some(hostile_drag_table_name(u)?),
     }
     Ok(Some(table))
 }
@@ -842,6 +876,44 @@ mod tests {
             if let Err(error) = ballistics_engine::decode_solve_request_v1(&json) {
                 panic!("seed {seed}: generated ladder {ladder:?} was refused: {error:?}");
             }
+        }
+    }
+
+    /// `valid_request` promises a request that solves, so every name `drag_table` draws must
+    /// pass the decoder, and some draws must carry one; every hostile name must be refused at
+    /// the name.
+    #[test]
+    fn generated_drag_table_names_pass_the_decoder_and_hostile_ones_do_not() {
+        let base_bytes = vec![0x5A; 16_384];
+        let mut base = valid_request(&mut Unstructured::new(&base_bytes)).expect("enough input");
+        base.projectile.bc_segments = None;
+        let mut named = 0;
+        for seed in 0..256 {
+            let table = drag_table(&mut Unstructured::new(&bytes(seed))).expect("enough input");
+            named += usize::from(table.name.is_some());
+            let mut request = base.clone();
+            request.projectile.drag_table = Some(table.clone());
+            let json = serde_json::to_string(&request).expect("request serializes");
+            if let Err(error) = ballistics_engine::decode_solve_request_v1(&json) {
+                panic!("seed {seed}: generated table {table:?} was refused: {error:?}");
+            }
+        }
+        assert!(named > 0, "the generator must reach named tables");
+        for seed in 0..64 {
+            let name =
+                hostile_drag_table_name(&mut Unstructured::new(&bytes(seed))).expect("enough");
+            let mut request = base.clone();
+            let mut table = drag_table(&mut Unstructured::new(&bytes(seed))).expect("enough");
+            table.name = Some(name.clone());
+            request.projectile.drag_table = Some(table);
+            let json = serde_json::to_string(&request).expect("request serializes");
+            let error = ballistics_engine::decode_solve_request_v1(&json)
+                .expect_err("a hostile name must be refused");
+            assert_eq!(
+                error.error.path(),
+                Some("$.projectile.drag_table.name"),
+                "seed {seed}: {name:?}"
+            );
         }
     }
 

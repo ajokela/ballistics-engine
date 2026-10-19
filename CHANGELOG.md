@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`projectile.drag_table.name` on solve-json.** An optional label for a caller's drag curve,
+  such as `"GA (ChairGun Elite)"`, echoed verbatim at `resolved_request.projectile.drag_table.name`
+  and never read by the solver. `drag_model` stays required beside a table and still has no
+  effect on drag, so it cannot say which curve flew, and two programs can ship different curves
+  under the same name; the label is where to say it. 1 to 64 characters
+  (`MAX_DRAG_TABLE_NAME_CHARS_V1`, counted in characters, not bytes), not blank, no control
+  characters; anything else is `invalid_value` at `$.projectile.drag_table.name`, from the
+  decoder and again from the service for a Rust caller that skips it. Kept exactly as sent, with
+  no trimming. Omitted from the echo when absent, so every request without it gets a
+  byte-identical response. `explain` treats two tables that differ only in name as the same
+  drag description. The MCP tool schema lists the field. Engines up to 0.47.1 refuse it as
+  `unknown_field`. Requested by Alfredo (@oa4ajp).
+
+  **Source-breaking for Rust callers:** `DragTableV1` gains the public field
+  `name: Option<String>`, so a struct literal must add `name: None`.
+
 ### Notes
 - **Credit for the `.reticle` importer.** The 0.40.0 entry for `import_reticle_document` now
   credits Alfredo (@oa4ajp), who found that the engine could not read `.reticle` reticles and
