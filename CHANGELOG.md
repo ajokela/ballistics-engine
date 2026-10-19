@@ -13,8 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and never read by the solver. `drag_model` stays required beside a table and still has no
   effect on drag, so it cannot say which curve flew, and two programs can ship different curves
   under the same name; the label is where to say it. 1 to 64 characters
-  (`MAX_DRAG_TABLE_NAME_CHARS_V1`, counted in characters, not bytes), not blank, no control
-  characters; anything else is `invalid_value` at `$.projectile.drag_table.name`, from the
+  (`MAX_DRAG_TABLE_NAME_CHARS_V1`, counted in characters, not bytes), not blank, and one line:
+  no control characters and no U+2028/U+2029 separators. Anything else, including an explicit
+  `null`, is `invalid_value` at `$.projectile.drag_table.name`, from the
   decoder and again from the service for a Rust caller that skips it. Kept exactly as sent, with
   no trimming. Omitted from the echo when absent, so every request without it gets a
   byte-identical response. `explain` treats two tables that differ only in name as the same

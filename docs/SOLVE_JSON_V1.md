@@ -217,7 +217,7 @@ measured curve.
 ```json
 "drag_table": {
   "kind": "reference",
-  "name": "GA2 (MERO)",
+  "name": "Example (invented points)",
   "points": [
     {"mach": 0.0, "cd": 0.210},
     {"mach": 0.5, "cd": 0.200},
@@ -229,7 +229,7 @@ measured curve.
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `kind` | yes | `reference` or `projectile`, below. There is no default. |
-| `name` | no | A label for the curve, such as `"GA (ChairGun Elite)"`: 1 to 64 characters, not blank, no control characters. Echoed verbatim and never read by the solver. |
+| `name` | no | A label for the curve, such as `"GA (ChairGun Elite)"`: 1 to 64 characters (Unicode scalar values), not blank, one line (no control characters and no U+2028/U+2029 separators). Echoed verbatim and never read by the solver. |
 | `points` | yes | 2 to 4096 `{mach, cd}` objects. Mach finite, at least 0 and strictly ascending; Cd finite and above 0. |
 
 `kind` decides what `ballistic_coefficient` means, and there is no default because the two
@@ -259,7 +259,7 @@ also work with older engines must not send it.
 
 Errors name the exact entry: `$.projectile.drag_table.kind` for a missing or unknown kind,
 `$.projectile.drag_table.name` for a name that is not a string, is blank, holds a control
-character or runs past 64 characters, `$.projectile.drag_table.points` for a wrong point count,
+character or line break, or runs past 64 characters, `$.projectile.drag_table.points` for a wrong point count,
 and
 `$.projectile.drag_table.points[3].mach` (or `.cd`) for a bad value. A table cannot be combined
 with [`corrections.bc5d_table_path`](#optional-corrections-block): BC5D corrects a G1/G7 BC and a

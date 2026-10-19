@@ -349,9 +349,15 @@ pub struct DragTableV1 {
     /// Optional free-text label for the curve, such as "GA (ChairGun Elite)", echoed verbatim in
     /// the resolved request and never read by the solver. `drag_model` cannot say which curve
     /// flew, and two programs can ship different curves under one name, so the caller says it
-    /// here. 1 to [`MAX_DRAG_TABLE_NAME_CHARS_V1`] characters, not blank, no control
-    /// characters; omitted from the echo when absent, so requests without it are unchanged.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// here. 1 to [`MAX_DRAG_TABLE_NAME_CHARS_V1`] characters, not blank, one line (no control
+    /// characters, no U+2028/U+2029 line or paragraph separators); omitted from the echo when
+    /// absent, so requests without it are unchanged. Like every optional request member it may be
+    /// omitted but not sent as JSON `null`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
     pub name: Option<String>,
     /// Strictly ascending in Mach, [`MIN_DRAG_TABLE_POINTS_V1`] to
     /// [`MAX_DRAG_TABLE_POINTS_V1`] points. Outside the table the nearest end value is held.
@@ -436,9 +442,11 @@ pub(crate) fn validate_drag_table_v1(table: &DragTableV1) -> Result<(), SolveErr
     Ok(())
 }
 
-/// Check a [`DragTableV1::name`]: not blank, no control characters (a label is one line of
-/// text, and a stray newline or escape would corrupt any table or log it is printed in), and at
-/// most [`MAX_DRAG_TABLE_NAME_CHARS_V1`] characters. Kept verbatim otherwise: no trimming, no
+/// Check a [`DragTableV1::name`]: not blank, one line (no control characters and no U+2028 or
+/// U+2029 separators: a stray line break or escape would corrupt any table or log the label is
+/// printed in), and at most [`MAX_DRAG_TABLE_NAME_CHARS_V1`] characters. Format characters
+/// such as bidi marks are left alone: they are not line breaks, and a right-to-left label may
+/// need them. Kept verbatim otherwise: no trimming, no
 /// normalization, so the echo is exactly what was sent.
 fn validate_drag_table_name_v1(name: &str) -> Result<(), SolveErrorEnvelopeV1> {
     let path = "$.projectile.drag_table.name";
@@ -449,12 +457,15 @@ fn validate_drag_table_name_v1(name: &str) -> Result<(), SolveErrorEnvelopeV1> {
             path,
         ));
     }
-    if let Some(control) = name.chars().find(|c| c.is_control()) {
+    if let Some(breaking) = name
+        .chars()
+        .find(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+    {
         return Err(protocol_error(
             SolveErrorCodeV1::InvalidValue,
             format!(
-                "name must not contain control characters, found U+{:04X}",
-                u32::from(control)
+                "name must be one line, with no control characters or line breaks; found U+{:04X}",
+                u32::from(breaking)
             ),
             path,
         ));

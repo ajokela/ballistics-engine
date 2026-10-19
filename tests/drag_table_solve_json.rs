@@ -546,6 +546,7 @@ fn the_name_is_held_to_one_short_line_of_text() {
         json!("x".repeat(max)),
         json!("é".repeat(max)),
         json!(" GA2 "),
+        json!("\u{202B}GA\u{202C}"),
     ] {
         solve(&named(base(), accepted));
     }
@@ -555,6 +556,8 @@ fn the_name_is_held_to_one_short_line_of_text() {
         json!("GA\nMERO"),
         json!("GA\tMERO"),
         json!("GA\u{7f}"),
+        json!("GA\u{2028}MERO"),
+        json!("GA\u{2029}MERO"),
         json!("x".repeat(max + 1)),
         json!("é".repeat(max + 1)),
     ] {
@@ -571,6 +574,10 @@ fn the_name_is_held_to_one_short_line_of_text() {
             "$.projectile.drag_table.name",
         );
     }
+    // Direct serde must refuse null too, as for every other optional request member, so a Rust
+    // caller that deserializes the DTO itself cannot read `null` as an omitted name.
+    let null_name = named(base(), json!(null));
+    assert!(serde_json::from_value::<SolveRequestV1>(null_name).is_err());
 }
 
 #[test]
