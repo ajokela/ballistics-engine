@@ -5,7 +5,7 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.48.0] - 2026-10-20
 
 ### Added
 - **`projectile.drag_table.name` on solve-json.** An optional label for a caller's drag curve,
@@ -15,9 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   under the same name; the label is where to say it. 1 to 64 characters
   (`MAX_DRAG_TABLE_NAME_CHARS_V1`, counted in characters, not bytes), not blank, and one line:
   no control characters and no U+2028/U+2029 separators. Anything else, including an explicit
-  `null`, is `invalid_value` at `$.projectile.drag_table.name`, from the
-  decoder and again from the service for a Rust caller that skips it. Kept exactly as sent, with
-  no trimming. Omitted from the echo when absent, so every request without it gets a
+  `null`, is `invalid_value` at `$.projectile.drag_table.name`, from the decoder and again from
+  the service for a Rust caller that skips it. Kept exactly as sent, with no trimming. Omitted from the echo when absent, so every request without it gets a
   byte-identical response. `explain` treats two tables that differ only in name as the same
   drag description. The MCP tool schema lists the field. Engines up to 0.47.1 refuse it as
   `unknown_field`. Requested by Alfredo (@oa4ajp).
