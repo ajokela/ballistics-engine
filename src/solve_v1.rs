@@ -2660,6 +2660,7 @@ mod tests {
             let mut request = minimal_request();
             request.projectile.drag_table = Some(DragTableV1 {
                 kind,
+                name: None,
                 points: vec![
                     crate::solve_json::DragPointV1 { mach: 0.0, cd: 0.2 },
                     crate::solve_json::DragPointV1 { mach: 2.0, cd: 0.3 },

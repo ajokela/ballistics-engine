@@ -17,7 +17,10 @@
 //!   (d) the resolved request echoes the table and re-solves identically from it, so the
 //!       explain / error-budget / tolerance kernels, which perturb from that echo, keep it —
 //!       and under the reference kind they see the BC, under the projectile kind they do not;
-//!   (e) validation mirrors `--drag-table` and every error names the exact entry.
+//!   (e) validation mirrors `--drag-table` and every error names the exact entry;
+//!   (f) an optional `name` labels the curve: echoed verbatim, never read by the solver, and
+//!       held to one short line of text. `drag_model` cannot say which curve flew, and two
+//!       programs ship different curves called "GA", so Alfredo asked for a label.
 //!
 //! The refusal to combine a table with the offline BC correction (`corrections`) is pinned
 //! beside that correction's own bridge tests. A BC ladder beside a table, flown with the band
@@ -343,11 +346,11 @@ fn null_table_is_not_omission() {
 #[test]
 fn unknown_fields_are_rejected_with_their_path() {
     let mut request = with_table(rifle_request("G7", 0.243), "reference", g7_points());
-    request["projectile"]["drag_table"]["name"] = json!("GA2");
+    request["projectile"]["drag_table"]["label"] = json!("GA2");
     expect_error(
         &request,
         SolveErrorCodeV1::UnknownField,
-        "$.projectile.drag_table.name",
+        "$.projectile.drag_table.label",
     );
 
     let mut request = with_table(rifle_request("G7", 0.243), "reference", invented_points());
@@ -476,6 +479,119 @@ fn the_service_refuses_a_bad_table_that_skipped_the_decoder() {
         error.error.path(),
         Some("$.projectile.drag_table.points[3].cd")
     );
+}
+
+// (f) ---------------------------------------------------------------------------------------
+
+fn named(request: Value, name: Value) -> Value {
+    let mut request = request;
+    request["projectile"]["drag_table"]["name"] = name;
+    request
+}
+
+#[test]
+fn a_name_is_echoed_verbatim_and_changes_nothing_else() {
+    let plain = with_table(pellet_request("G1", 0.028), "reference", g1_points());
+    let label = "  GA (ChairGun Elite) é ñ  ";
+    let request = named(plain.clone(), json!(label));
+    let (unnamed, labelled) = (solve(&plain), solve(&request));
+
+    let echoed = serde_json::to_value(&labelled.resolved_request).unwrap();
+    assert_eq!(echoed["projectile"]["drag_table"]["name"], json!(label));
+    assert_eq!(
+        echoed["projectile"]["drag_table"],
+        request["projectile"]["drag_table"]
+    );
+    assert_eq!(labelled.samples, unnamed.samples);
+    assert_eq!(labelled.summary, unnamed.summary);
+    assert_eq!(labelled.warnings, unnamed.warnings);
+    assert_eq!(labelled.assumptions, unnamed.assumptions);
+
+    let rebuilt = SolveRequestV1::from(&labelled.resolved_request);
+    assert_eq!(
+        rebuilt
+            .projectile
+            .drag_table
+            .as_ref()
+            .unwrap()
+            .name
+            .as_deref(),
+        Some(label)
+    );
+    let again = solve_v1(rebuilt).expect("resolved request must re-solve");
+    assert_eq!(again.samples, labelled.samples);
+}
+
+#[test]
+fn an_unnamed_table_leaves_no_name_key_in_the_response() {
+    let response = solve(&with_table(
+        pellet_request("G1", 0.028),
+        "reference",
+        g1_points(),
+    ));
+    let echoed = serde_json::to_value(&response.resolved_request).unwrap();
+    let table = echoed["projectile"]["drag_table"].as_object().unwrap();
+    assert_eq!(
+        table.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["kind", "points"]
+    );
+}
+
+#[test]
+fn the_name_is_held_to_one_short_line_of_text() {
+    let base = || with_table(rifle_request("G7", 0.243), "reference", g7_points());
+    let max = ballistics_engine::solve_json::MAX_DRAG_TABLE_NAME_CHARS_V1;
+    for accepted in [
+        json!("G"),
+        json!("x".repeat(max)),
+        json!("é".repeat(max)),
+        json!(" GA2 "),
+        json!("\u{202B}GA\u{202C}"),
+    ] {
+        solve(&named(base(), accepted));
+    }
+    for refused in [
+        json!(""),
+        json!("   "),
+        json!("GA\nMERO"),
+        json!("GA\tMERO"),
+        json!("GA\u{7f}"),
+        json!("GA\u{2028}MERO"),
+        json!("GA\u{2029}MERO"),
+        json!("x".repeat(max + 1)),
+        json!("é".repeat(max + 1)),
+    ] {
+        expect_error(
+            &named(base(), refused),
+            SolveErrorCodeV1::InvalidValue,
+            "$.projectile.drag_table.name",
+        );
+    }
+    for not_a_string in [json!(7), json!(null), json!(["GA"]), json!({"text": "GA"})] {
+        expect_error(
+            &named(base(), not_a_string),
+            SolveErrorCodeV1::InvalidValue,
+            "$.projectile.drag_table.name",
+        );
+    }
+    // Direct serde must refuse null too, as for every other optional request member, so a Rust
+    // caller that deserializes the DTO itself cannot read `null` as an omitted name.
+    let null_name = named(base(), json!(null));
+    assert!(serde_json::from_value::<SolveRequestV1>(null_name).is_err());
+}
+
+#[test]
+fn the_service_refuses_a_bad_name_that_skipped_the_decoder() {
+    let mut request = decode(&with_table(
+        rifle_request("G7", 0.243),
+        "reference",
+        invented_points(),
+    ))
+    .unwrap();
+    request.projectile.drag_table.as_mut().unwrap().name = Some(" ".into());
+    let error = solve_v1(request).expect_err("a blank name must be refused");
+    assert_eq!(error.error.code, SolveErrorCodeV1::InvalidValue);
+    assert_eq!(error.error.path(), Some("$.projectile.drag_table.name"));
 }
 
 // Bridge ------------------------------------------------------------------------------------

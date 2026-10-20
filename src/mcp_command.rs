@@ -37,7 +37,8 @@
 
 use ballistics_engine::solve_json::{
     decode_solve_request_v1, DRAG_MODEL_WIRE_NAMES_V1, MAX_BC_SEGMENTS_V1,
-    MAX_DRAG_TABLE_POINTS_V1, MIN_BC_SEGMENTS_V1, MIN_DRAG_TABLE_POINTS_V1,
+    MAX_DRAG_TABLE_NAME_CHARS_V1, MAX_DRAG_TABLE_POINTS_V1, MIN_BC_SEGMENTS_V1,
+    MIN_DRAG_TABLE_POINTS_V1,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -463,6 +464,11 @@ fn solve_input_schema() -> Value {
                         "required": ["kind", "points"],
                         "properties": {
                             "kind": {"type": "string", "enum": ["reference", "projectile"]},
+                            "name": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": MAX_DRAG_TABLE_NAME_CHARS_V1
+                            },
                             "points": {
                                 "type": "array",
                                 "minItems": MIN_DRAG_TABLE_POINTS_V1,
@@ -1004,6 +1010,11 @@ mod tests {
             drag_table["properties"]["points"]["maxItems"],
             json!(MAX_DRAG_TABLE_POINTS_V1)
         );
+        assert_eq!(
+            drag_table["properties"]["name"]["maxLength"],
+            json!(MAX_DRAG_TABLE_NAME_CHARS_V1)
+        );
+        assert_eq!(drag_table["required"], json!(["kind", "points"]));
         // MBA-1598: the BC ladder's band limits and members mirror the decoder's, and its
         // band BC carries the scalar BC's own schema entry.
         let projectile = &tools[0]["inputSchema"]["properties"]["projectile"]["properties"];

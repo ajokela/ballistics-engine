@@ -217,6 +217,7 @@ measured curve.
 ```json
 "drag_table": {
   "kind": "reference",
+  "name": "Example (invented points)",
   "points": [
     {"mach": 0.0, "cd": 0.210},
     {"mach": 0.5, "cd": 0.200},
@@ -228,6 +229,7 @@ measured curve.
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `kind` | yes | `reference` or `projectile`, below. There is no default. |
+| `name` | no | A label for the curve, such as `"GA (ChairGun Elite)"`: 1 to 64 characters (Unicode scalar values), not blank, one line (no control characters and no U+2028/U+2029 separators). Echoed verbatim and never read by the solver. |
 | `points` | yes | 2 to 4096 `{mach, cd}` objects. Mach finite, at least 0 and strictly ascending; Cd finite and above 0. |
 
 `kind` decides what `ballistic_coefficient` means, and there is no default because the two
@@ -248,8 +250,17 @@ readings differ by the projectile's form factor — a wrong guess gives confiden
 Outside the table the nearest end value is held, so give a curve covering every Mach the flight
 reaches. With either kind, `drag_model` is still required and echoed but has no effect on drag.
 
+`name` is for people reading a request or a response later. `drag_model` cannot say which curve
+flew, and two programs can ship different curves under the same name, so say it here, source
+included. It changes nothing in the result, and `explain` treats two tables that differ only in
+name as the same curve. When it is omitted, nothing about the table's echo changes. Engines up to
+0.47.1 refuse it as `unknown_field` at `$.projectile.drag_table.name`, so a producer that must
+also work with older engines must not send it.
+
 Errors name the exact entry: `$.projectile.drag_table.kind` for a missing or unknown kind,
-`$.projectile.drag_table.points` for a wrong point count, and
+`$.projectile.drag_table.name` for a name that is not a string, is blank, holds a control
+character or line break, or runs past 64 characters, `$.projectile.drag_table.points` for a wrong point count,
+and
 `$.projectile.drag_table.points[3].mach` (or `.cd`) for a bad value. A table cannot be combined
 with [`corrections.bc5d_table_path`](#optional-corrections-block): BC5D corrects a G1/G7 BC and a
 table replaces the curve, so the pair is `conflicting_fields` at

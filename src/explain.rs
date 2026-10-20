@@ -231,8 +231,8 @@ use crate::perturbation::access::{read_axis, with_axis, KernelError};
 use crate::perturbation::taxonomy::{axes_in_group, InputAxis, InputGroup};
 use crate::perturbation::{evaluate, kernel_solve_error, Observation};
 use crate::solve_json::{
-    CorrectionsV1, PressureReferenceV1, ResolvedProjectileV1, ResolvedSolveRequestV1,
-    SolveRequestV1, WindReferenceV1,
+    CorrectionsV1, DragPointV1, DragTableKindV1, DragTableV1, PressureReferenceV1,
+    ResolvedProjectileV1, ResolvedSolveRequestV1, SolveRequestV1, WindReferenceV1,
 };
 
 /// Schema version for [`SolutionDiffReportV1`].
@@ -737,7 +737,18 @@ fn drag_descriptions_differ(a: &ResolvedSolveRequestV1, b: &ResolvedSolveRequest
             .as_ref()
             .and_then(|CorrectionsV1 { bc5d_table_path }| bc5d_table_path.as_deref())
     }
-    a.projectile.drag_table != b.projectile.drag_table
+    // The curve, not its label: a `name` is never read by the solver, so two tables that differ
+    // only in name describe the same drag.
+    fn curve(r: &ResolvedSolveRequestV1) -> Option<(DragTableKindV1, &[DragPointV1])> {
+        r.projectile.drag_table.as_ref().map(
+            |DragTableV1 {
+                 kind,
+                 name: _,
+                 points,
+             }| (*kind, points.as_slice()),
+        )
+    }
+    curve(a) != curve(b)
         || a.projectile.bc_segments != b.projectile.bc_segments
         || correction_table(a) != correction_table(b)
 }
@@ -2615,6 +2626,32 @@ mod tests {
             "drag_table": {"kind": "reference", "points": mba1603_g1ish_points()}
         }));
         assert_all_of_it_is_projectile_drag(&a, &b);
+    }
+
+    /// A table's `name` is a label the solver never reads, so two tables that differ only in
+    /// name are the same drag description: nothing is carried, and the swap is the no-op it
+    /// was before names existed. A different curve under the same name still differs.
+    #[test]
+    fn a_drag_table_name_is_not_part_of_the_drag_description() {
+        let table = |name: &str| {
+            resolved_with_projectile(serde_json::json!({
+                "drag_table": {"kind": "reference", "name": name, "points": mba1603_g1ish_points()}
+            }))
+        };
+        assert!(!drag_descriptions_differ(
+            &table("GA (MERO)"),
+            &table("GA (ChairGun)")
+        ));
+        let unnamed = resolved_with_projectile(serde_json::json!({
+            "drag_table": {"kind": "reference", "points": mba1603_g1ish_points()}
+        }));
+        assert!(!drag_descriptions_differ(&unnamed, &table("GA (MERO)")));
+
+        let mut other_curve = table("GA (MERO)");
+        if let Some(drag_table) = other_curve.projectile.drag_table.as_mut() {
+            drag_table.points[0].cd *= 1.5;
+        }
+        assert!(drag_descriptions_differ(&table("GA (MERO)"), &other_curve));
     }
 
     /// The reference-curve hazard: swapping `drag_model` alone flew A's G7-referenced band BCs

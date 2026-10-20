@@ -314,6 +314,10 @@ pub const MIN_DRAG_TABLE_POINTS_V1: usize = 2;
 /// `--drag-table` and the array FFI's `MAX_FFI_DRAG_TABLE_LEN`.
 pub const MAX_DRAG_TABLE_POINTS_V1: usize = 4096;
 
+/// The longest [`DragTableV1::name`], in characters (Unicode scalar values, not bytes). Room for
+/// a curve's name and where it came from, such as "GA (ChairGun Elite)"; not a document.
+pub const MAX_DRAG_TABLE_NAME_CHARS_V1: usize = 64;
+
 /// The fewest bands a [`ProjectileV1::bc_segments`] ladder may hold. An empty array is refused
 /// rather than read as "no ladder"; omit the field for that.
 pub const MIN_BC_SEGMENTS_V1: usize = 1;
@@ -342,6 +346,19 @@ pub const ONE_BAND_BC_RELATIVE_TOLERANCE_V1: f64 = 1.0e-6;
 #[serde(deny_unknown_fields)]
 pub struct DragTableV1 {
     pub kind: DragTableKindV1,
+    /// Optional free-text label for the curve, such as "GA (ChairGun Elite)", echoed verbatim in
+    /// the resolved request and never read by the solver. `drag_model` cannot say which curve
+    /// flew, and two programs can ship different curves under one name, so the caller says it
+    /// here. 1 to [`MAX_DRAG_TABLE_NAME_CHARS_V1`] characters, not blank, one line (no control
+    /// characters, no U+2028/U+2029 line or paragraph separators); omitted from the echo when
+    /// absent, so requests without it are unchanged. Like every optional request member it may be
+    /// omitted but not sent as JSON `null`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub name: Option<String>,
     /// Strictly ascending in Mach, [`MIN_DRAG_TABLE_POINTS_V1`] to
     /// [`MAX_DRAG_TABLE_POINTS_V1`] points. Outside the table the nearest end value is held.
     pub points: Vec<DragPointV1>,
@@ -377,6 +394,9 @@ pub struct DragPointV1 {
 /// Called from both the decoder and the solve service, so a Rust caller that builds a request
 /// without [`decode_solve_request_v1`] hears about a bad table at the same path.
 pub(crate) fn validate_drag_table_v1(table: &DragTableV1) -> Result<(), SolveErrorEnvelopeV1> {
+    if let Some(name) = &table.name {
+        validate_drag_table_name_v1(name)?;
+    }
     let points_path = "$.projectile.drag_table.points";
     let count = table.points.len();
     if !(MIN_DRAG_TABLE_POINTS_V1..=MAX_DRAG_TABLE_POINTS_V1).contains(&count) {
@@ -418,6 +438,45 @@ pub(crate) fn validate_drag_table_v1(table: &DragTableV1) -> Result<(), SolveErr
             ));
         }
         previous_mach = Some(point.mach);
+    }
+    Ok(())
+}
+
+/// Check a [`DragTableV1::name`]: not blank, one line (no control characters and no U+2028 or
+/// U+2029 separators: a stray line break or escape would corrupt any table or log the label is
+/// printed in), and at most [`MAX_DRAG_TABLE_NAME_CHARS_V1`] characters. Format characters
+/// such as bidi marks are left alone: they are not line breaks, and a right-to-left label may
+/// need them. Kept verbatim otherwise: no trimming, no
+/// normalization, so the echo is exactly what was sent.
+fn validate_drag_table_name_v1(name: &str) -> Result<(), SolveErrorEnvelopeV1> {
+    let path = "$.projectile.drag_table.name";
+    if name.trim().is_empty() {
+        return Err(protocol_error(
+            SolveErrorCodeV1::InvalidValue,
+            "name must not be blank; omit the field for an unnamed table",
+            path,
+        ));
+    }
+    if let Some(breaking) = name
+        .chars()
+        .find(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+    {
+        return Err(protocol_error(
+            SolveErrorCodeV1::InvalidValue,
+            format!(
+                "name must be one line, with no control characters or line breaks; found U+{:04X}",
+                u32::from(breaking)
+            ),
+            path,
+        ));
+    }
+    let length = name.chars().count();
+    if length > MAX_DRAG_TABLE_NAME_CHARS_V1 {
+        return Err(protocol_error(
+            SolveErrorCodeV1::InvalidValue,
+            format!("name must be at most {MAX_DRAG_TABLE_NAME_CHARS_V1} characters, got {length}"),
+            path,
+        ));
     }
     Ok(())
 }
@@ -1994,18 +2053,31 @@ pub(crate) fn validate_bc_segments_v1(
 }
 
 /// Shape-validate an optional `projectile.drag_table` (MBA-1597): a strict object with a
-/// closed `kind` enum and an array of strict `{mach, cd}` points. The values themselves — the
-/// point count, ascending Mach, positive Cd — are range rules, checked by
-/// [`validate_drag_table_v1`] once the request is typed.
+/// closed `kind` enum, an optional string `name`, and an array of strict `{mach, cd}` points.
+/// The values themselves — the point count, ascending Mach, positive Cd, the name's length and
+/// characters — are range rules, checked by [`validate_drag_table_v1`] once the request is
+/// typed.
 fn validate_drag_table_shape(value: &Value) -> Result<(), SolveErrorEnvelopeV1> {
     let path = "$.projectile.drag_table";
     let object = require_object(value, path)?;
-    validate_members(object, path, &["kind", "points"], &["kind", "points"])?;
+    validate_members(
+        object,
+        path,
+        &["kind", "name", "points"],
+        &["kind", "points"],
+    )?;
     validate_string_enum(
         required_value(object, "kind", path)?,
         "$.projectile.drag_table.kind",
         &["reference", "projectile"],
     )?;
+    if object.get("name").is_some_and(|name| !name.is_string()) {
+        return Err(protocol_error(
+            SolveErrorCodeV1::InvalidValue,
+            "expected a string",
+            "$.projectile.drag_table.name",
+        ));
+    }
     let points_path = "$.projectile.drag_table.points";
     let Some(points) = required_value(object, "points", path)?.as_array() else {
         return Err(protocol_error(
