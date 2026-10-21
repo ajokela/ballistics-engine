@@ -5,6 +5,17 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Notes
+- **The solve-json example request now sends a realistic station reading.** The representative
+  request in [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#request) sent `pressure_pa` 101325 Pa
+  and `temperature_k` 288.15 K, the sea-level standards, at `altitude_m` 250. The engine flies an
+  explicit absolute pressure as the real station reading, so the example described a day of
+  unusually high pressure and modelled the placeholder habit that silently stops the altitude
+  from mattering. It now sends 98500 Pa and 291.15 K, and the doc says to omit `pressure_pa` and
+  `temperature_k` when there is no reading. Documentation only; the engine is unchanged.
+
 ## [0.48.0] - 2026-10-20
 
 ### Added

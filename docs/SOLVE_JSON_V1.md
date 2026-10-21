@@ -168,8 +168,8 @@ A representative request is:
   },
   "atmosphere": {
     "altitude_m": 250.0,
-    "temperature_k": 288.15,
-    "pressure_pa": 101325.0,
+    "temperature_k": 291.15,
+    "pressure_pa": 98500.0,
     "relative_humidity": 0.5,
     "latitude_rad": 0.7853981633974483
   },
@@ -192,6 +192,19 @@ A representative request is:
   }
 }
 ```
+
+The `atmosphere` block here is a measured station reading: `pressure_pa` is the absolute pressure
+at the 250 m station, a little above the ICAO standard there (98357.65 Pa), not a
+sea-level-corrected value. Send `pressure_pa` and `temperature_k` only when you have a reading.
+When you do not, omit them: the engine resolves the ICAO standard at `altitude_m` and says so in
+`assumptions` (`icao_standard_pressure`, `icao_standard_temperature`). Do not send the sea-level
+standards `101325 Pa` and `288.15 K` as placeholders. A present value is authoritative, so
+`101325 Pa` at 250 m describes a day of unusually high pressure (about 1044 hPa at sea level), and
+with a temperature also present `altitude_m` no longer sets the air density. An altimeter setting
+(QNH), such as a METAR figure or a weather meter's baro reading, goes in with
+`"pressure_reference": "qnh"`; see [`pressure_reference`](#pressure_reference-mba-1397), and
+[ATMOSPHERE_DENSITY_ALTITUDE.md](ATMOSPHERE_DENSITY_ALTITUDE.md#request) for other pressure
+sources.
 
 ### `projectile`
 
