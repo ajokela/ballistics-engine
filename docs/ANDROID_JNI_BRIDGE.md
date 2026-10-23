@@ -209,6 +209,58 @@ other member names, the request's `velocity_unit` and no order rule (they still 
 bands, more than 64 bands and band BCs outside 0.0001 to 100), so a stored ladder has to be
 written out for each command. The table at the end of that section lists the differences.
 
+## Sight-in (zero-day) conditions with `solve`
+
+A `solve` request has one atmosphere, so a zero made on another day takes two calls: one that
+solves the zero in the sight-in air, and one that flies that angle in today's air. The rules,
+including what the zero request should leave out, are in
+[Sight-in (zero-day) conditions](SOLVE_JSON_V1.md#sight-in-zero-day-conditions).
+
+```kotlin
+import org.json.JSONObject
+
+/**
+ * [request] is a complete solve request for today's shot. [sightIn] is the atmosphere the rifle
+ * was zeroed in: put "pressure_pa" in it only if a pressure was measured on that day. It replaces
+ * the whole "atmosphere", so with effects.coriolis on it must carry the sight-in "latitude_rad"
+ * too: Coriolis without a latitude is refused.
+ */
+fun solveWithSightIn(request: JSONObject, sightIn: JSONObject, zeroDistanceM: Double): JSONObject {
+    // 1. The zero request: sight-in air, still air, level shot.
+    val zero = JSONObject(request.toString())
+    zero.put("atmosphere", sightIn)
+    zero.put("wind", JSONObject())
+    zero.getJSONObject("shot").apply {
+        remove("muzzle_angle_rad")
+        remove("shooting_angle_rad")
+        remove("cant_angle_rad")
+        put("zero_distance_m", zeroDistanceM)
+    }
+    val angle = call(zero).getJSONObject("resolved_request")
+        .getJSONObject("shot").getDouble("muzzle_angle_rad")
+
+    // 2. The shot request: today's air, wind and geometry, flying the pinned angle.
+    val shot = JSONObject(request.toString())
+    shot.getJSONObject("shot").apply {
+        remove("zero_distance_m")
+        put("muzzle_angle_rad", angle)
+    }
+    return call(shot)
+}
+
+/** One solve call; returns "result", or throws with the engine's error envelope. */
+fun call(request: JSONObject): JSONObject {
+    val envelope = JSONObject(BallisticsBridge.call(
+        JSONObject().put("api_version", 1).put("command", "solve")
+            .put("request", request).toString()))
+    if (!envelope.getBoolean("ok")) throw IllegalStateException(envelope.toString())
+    return envelope.getJSONObject("result")
+}
+```
+
+Keep `zero_distance_m` in the second request only when it uses `rifle.sight_offset_lateral_m` or
+`shot.zero_poi_right_m`, which need it.
+
 ## See also
 
 - [`include/ballistics_bridge.h`](../include/ballistics_bridge.h) — the ABI contract:

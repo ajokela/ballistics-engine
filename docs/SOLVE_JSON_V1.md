@@ -620,6 +620,46 @@ absence; explicitly supplying `"los"` solves identically to omitting the field (
 behavioral default), but is no longer byte-identical at the envelope level, since the echo itself
 then appears where an omitted-field response leaves it absent.
 
+#### Sight-in (zero-day) conditions
+
+A request carries one atmosphere, one wind and one set of effects, and the zero search above runs
+in them. A rifle is usually sighted in on another day, often somewhere else: a different
+temperature, pressure, altitude or humidity. The CLI models that with `--zero-temperature`,
+`--zero-pressure`, `--zero-pressure-type`, `--zero-humidity`, `--zero-altitude`,
+`--zero-density-altitude` and `--zero-velocity`: it solves the zero in the sight-in air, in still
+air, and then flies the trajectory in the shot-day air. solve-json has no second atmosphere. Send
+two `solve` requests instead:
+
+1. **The zero request** sends the same projectile and rifle, `shot.zero_distance_m` (and
+   `shot.zero_poi_up_m` for a deliberately high zero), the sight-in atmosphere and still air
+   (`"wind": {}`). Leave `pressure_pa` out when no pressure was measured at the sight-in, so the
+   engine uses the ICAO pressure for that `altitude_m`. Keep it level and uncanted, as a zeroing
+   range usually is: omit `shooting_angle_rad` and `cant_angle_rad`. If the muzzle velocity on the
+   sight-in day differed, for example at another powder temperature, send that velocity here.
+   Coriolis reaches the search, so with `effects.coriolis` on, give this request the sight-in
+   `atmosphere.latitude_rad` and `shot.shot_azimuth_rad`. Read the solved angle from
+   `result.resolved_request.shot.muzzle_angle_rad`.
+2. **The shot request** sends the shot-day atmosphere, wind, geometry and effects, with that angle
+   in `shot.muzzle_angle_rad`. Leave `zero_distance_m` out unless the request relies on the
+   windage-convergence terms (`rifle.sight_offset_lateral_m`, `shot.zero_poi_right_m`), which need
+   it. With both fields present, the `zero_distance_elevation_not_resolved` warning described
+   above is expected.
+
+The pinned angle carries the zero shift: the shot request flies the barrel angle that hit the zero
+in the sight-in air. This reproduces the CLI exactly. Engine 0.48.0 output, for a .308 (11.34 g,
+7.82 mm, G7 0.243, 792.48 m/s, sight height 0.0381 m) zeroed at 91.44 m at sea level, 288.15 K
+and 101325 Pa, then shot at 3500 m, 303.15 K and 65760 Pa, with 50% humidity on both days and
+all effects off:
+
+| | Zero angle | Drop at 914.4 m |
+| --- | --- | --- |
+| Two `solve` requests as above | 0.00116729736328125 rad (0.066881212353°) | 8.1301 m |
+| CLI `trajectory --units metric --auto-zero 91.44 --zero-altitude 0 --zero-temperature 15 --zero-pressure 1013.25 --zero-humidity 50` with the same inputs | 0.066881212353° | 8.13 m |
+| One request, zero solved in the shot-day air | — | 8.1427 m |
+
+Here the sight-in conditions move the solution by 0.047 MOA. One request with `zero_distance_m`
+is the right model only when the rifle was zeroed in the air it is being shot in.
+
 ### `atmosphere`
 
 | Field | Required | Default | Meaning |

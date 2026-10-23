@@ -85,6 +85,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   public gravity option, signature or schema change, and Earth output is byte-identical: 114
   CLI and solve-json runs match the 0.48.0 code exactly. The ICAO tables, geopotential
   conversion, Earth rotation and the empirical aerodynamic calibrations remain Earth models.
+- **Sight-in (zero-day) conditions over the bridge are documented.** solve-json has one
+  atmosphere per request, and the CLI's `--zero-*` flags have no counterpart in it. A new section
+  of [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#sight-in-zero-day-conditions) gives the
+  two-request recipe: solve the zero in the sight-in air, in still air and level, then fly
+  `resolved_request.shot.muzzle_angle_rad` in the shot-day air. Engine output in that section
+  shows it reproduces the CLI's zero angle exactly.
+  [docs/ANDROID_JNI_BRIDGE.md](docs/ANDROID_JNI_BRIDGE.md) carries the Kotlin version.
+  Documentation only; the engine is unchanged.
 
 ## [0.48.0] - 2026-10-20
 
