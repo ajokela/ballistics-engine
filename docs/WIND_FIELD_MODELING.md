@@ -1,0 +1,60 @@
+# Wind field modeling in the `wind` module (planned, additive)
+
+Status: planned, decided 2026-10-24. Not implemented.
+Companion: [winds-engine plan](https://github.com/ajokela/winds-engine/blob/main/docs/winds-engine-plan.md)
+(GRIB acquisition and radiosonde validation live there; this note covers only
+what lands in this crate).
+
+## Decision
+
+Wind **modeling** is upgraded inside this crate's existing `wind` module —
+**additively**. `WindSock`/`WindSegment` and every existing API stay exactly
+as they are; nothing is replaced and no API expectations change. The
+acquisition/validation pipeline (GRIB2/HRRR/GFS ingestion, sounding
+datasets) lives in the separate `winds-engine` crate, scoped to rocket
+modeling, so this crate's release train is not coupled to data-pipeline
+iteration.
+
+## What lands here (one minor release)
+
+All pure additions to the `wind` module:
+
+- **`WindField` trait** — `wind(time_s, position_m) -> Vec3`, stateless and
+  deterministic. Same sampling pattern downstream consumers already rely on
+  for RK4 substeps, snapshots and seed reproduction (rockets-engine's
+  frozen-field turbulence established this pattern).
+- **`ConstantField`** — today's uniform vector as a field.
+- **`ProfileField`** — piecewise-linear vertical profile
+  `Vec<(altitude_m, speed_mps, direction_deg)>`.
+- **Analytic profiles** — `LogProfile` (roughness boundary layer) and
+  `EkmanProfile` (geostrophic wind, latitude, roughness), consistent with
+  this crate's atmosphere tables.
+- **`WindSock` adapter** — so the existing segmented wind satisfies
+  `WindField`; old and new interop with no consumer changes.
+
+## What does not land here
+
+- GRIB2/HRRR/GFS acquisition and decoding, HTTP subset downloads, offline
+  caches, radiosonde validation datasets — winds-engine's job.
+- Diagnostic mass-consistent terrain flow — deferred; revisit only with a
+  concrete artillery (moving-batteries) requirement. If ever built, its
+  home is this crate, not winds-engine.
+- Any change to existing wind APIs.
+
+## Determinism policy
+
+Unchanged: no network, no wall-clock, no unseeded randomness in the crate;
+everything reproducible from inputs.
+
+## Validation
+
+- Unit tests: profile interpolation, analytic-profile sanity (log law
+  reproduces its reference point; Ekman reduces to the log layer near the
+  ground), adapter equivalence with `WindSock` on the segment ladders.
+- Cross-check: winds-engine's radiosonde datasets compare `ProfileField`
+  providers against sounding archives on a handful of station-days.
+
+## Milestone
+
+Kernel `WindField` minor release, then rockets-engine
+`with_wind_field`/`--wind-profile` end to end against two sounding days.
