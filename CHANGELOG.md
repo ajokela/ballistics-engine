@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Wind fields in the `wind` module.** A deterministic, stateless `WindField` trait (the wind at
+  a time and a world-frame position, in m/s) with four implementations: `ConstantField`,
+  `ProfileField` (a piecewise-linear vertical profile of `ProfileLevel`s, speed linear in
+  altitude and direction along the shortest arc), `LogProfile` (log-law boundary layer) and
+  `EkmanProfile` (the constant-eddy-viscosity Ekman spiral, backed near the surface in the
+  northern hemisphere and veered in the southern). `WindSock` implements the trait as exactly
+  `vector_for_range_stateless(position.x)`. Directions use the module's wind-FROM convention
+  (0° headwind, 90° from the right), and a profile level gives the same vector as
+  `wind_vector` for its speed and direction. Constructors return a typed `WindFieldError`.
+  Purely additive: `WindSegment`, `WindSock`, `wind_vector` and every other existing API are
+  unchanged. Design record: [docs/WIND_FIELD_MODELING.md](docs/WIND_FIELD_MODELING.md).
+
 ### Notes
 - **The solve-json example request now sends a realistic station reading.** The representative
   request in [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#request) sent `pressure_pa` 101325 Pa

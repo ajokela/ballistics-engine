@@ -1,7 +1,56 @@
+//! Wind models for trajectory calculations.
+//!
+//! All wind here uses world-frame McCoy coordinates (x downrange, y up, z right) and the
+//! wind-FROM direction convention: 0° is a headwind, 90° wind from the right, 180° a tailwind
+//! and 270° wind from the left. [`wind_vector`] builds a vector from a speed and direction.
+//!
+//! - [`WindSegment`] and [`WindSock`]: downrange-segmented wind, the model the solvers use.
+//!   Segment speeds are km/h.
+//!
+//! # Wind fields
+//!
+//! [`WindField`] is a deterministic, stateless wind field: the wind depends only on the time
+//! and position passed in, so integrator substeps, snapshots and seeded reproduction are exact.
+//! Speeds are m/s.
+//!
+//! - [`ConstantField`]: uniform wind everywhere.
+//! - [`ProfileField`]: a piecewise-linear vertical profile of [`ProfileLevel`]s. Speed
+//!   interpolates linearly in altitude and direction along the shortest arc; the nearest level
+//!   holds outside the range.
+//! - [`LogProfile`]: a log-law boundary layer, zero at and below the roughness length.
+//! - [`EkmanProfile`]: the Ekman spiral for a constant eddy viscosity, calm at the surface and
+//!   geostrophic aloft.
+//! - [`WindSock`] is also a [`WindField`]: the wind at `position_m.x`, exactly
+//!   [`WindSock::vector_for_range_stateless`].
+//!
+//! The profile fields read only the height (`position_m.y`) and have no vertical wind.
+//! Constructors validate their inputs and return a typed [`WindFieldError`].
+//!
+//! ```
+//! use ballistics_engine::wind::{ProfileField, ProfileLevel, WindField};
+//! use nalgebra::Vector3;
+//!
+//! let profile = ProfileField::new(vec![
+//!     ProfileLevel { altitude_m: 0.0, speed_mps: 2.0, direction_from_deg: 90.0 },
+//!     ProfileLevel { altitude_m: 100.0, speed_mps: 6.0, direction_from_deg: 90.0 },
+//! ])
+//! .unwrap();
+//! // Halfway up, 4 m/s from the right, blowing toward -z.
+//! let w = profile.wind(0.0, Vector3::new(500.0, 50.0, 0.0));
+//! assert!((w.z + 4.0).abs() < 1e-12 && w.x.abs() < 1e-12);
+//! ```
+
 use nalgebra::Vector3;
 use std::cmp::Ordering;
 use std::f64::consts::PI;
 use thiserror::Error;
+
+mod field;
+
+pub use field::{
+    ConstantField, EkmanProfile, LogProfile, ProfileField, ProfileLevel, WindField, WindFieldError,
+    WindFieldParam, WindFieldRule,
+};
 
 /// Conversion constant from KMH to MPS
 const KMH_TO_MPS: f64 = 1000.0 / 3600.0;
