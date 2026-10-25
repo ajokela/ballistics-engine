@@ -89,4 +89,3 @@ Kernel `WindField` minor release, then rockets-engine
 - winds-engine's `validate()` takes its own staged `ProfileField`, so the
   radiosonde cross-check above reaches this crate's `ProfileField` only once
   winds-engine moves to these types, which changes winds-engine's API.
-
