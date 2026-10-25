@@ -1506,8 +1506,9 @@ mod tests {
         let ratio = low.x / earth.x;
         assert!(earth.x < 0.0, "drag must oppose flight: {earth:?}");
         assert!(
-            ratio > 1.10 && ratio < 1.25,
-            "drag aloft must follow the simulation's hydrostatic density: low/earth={ratio}"
+            (ratio - 1.162_702).abs() < 1e-4,
+            "drag aloft must follow the simulation's hydrostatic density: low/earth={ratio}, \
+             expected 1.162702 (standard lapse rate, 1000 m station, 2000 m above it)"
         );
     }
 

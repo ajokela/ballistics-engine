@@ -1205,6 +1205,7 @@ pub(crate) fn fast_integrate_with_segments_with_gravity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BCSegmentData;
 
     #[test]
     fn uniform_gravity_reaches_both_fast_integration_paths() {
@@ -1326,8 +1327,9 @@ mod tests {
         let ratio = low.x / earth.x;
         assert!(earth.x < 0.0, "drag must oppose flight: {earth:?}");
         assert!(
-            ratio > 1.10 && ratio < 1.25,
-            "drag aloft must follow the simulation's hydrostatic density: low/earth={ratio}"
+            (ratio - 1.162_702).abs() < 1e-4,
+            "drag aloft must follow the simulation's hydrostatic density: low/earth={ratio}, \
+             expected 1.162702 (standard lapse rate, 1000 m station, 2000 m above it)"
         );
     }
 
@@ -1366,7 +1368,6 @@ mod tests {
             "Magnus must scale with the simulation's gravity: low/earth={ratio}, expected={expected}"
         );
     }
-    use crate::BCSegmentData;
 
     fn expected_shot_frame_vector(level: Vector3<f64>, angle: f64) -> Vector3<f64> {
         let (sin_angle, cos_angle) = angle.sin_cos();
