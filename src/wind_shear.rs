@@ -3,12 +3,22 @@
 //! Wind shear refers to the change in wind speed and/or direction with altitude.
 //! This is important for long-range ballistics where projectiles reach significant
 //! altitudes and experience different wind conditions at different heights.
-
-// Wind shear modeling - now integrated!
+//!
+//! Boundary-layer profiles are keyed off height above the local ground. The public helpers
+//! ([`boundary_layer_speed_ratio`], [`get_wind_at_position`] and
+//! [`WindShearWindSock::vector_for_position`]) take a height relative to the muzzle and add an
+//! assumed 1.5 m muzzle height. The trajectory kernels instead measure y from the level
+//! `BallisticInputs::muzzle_height` is measured from and integrate inclined fire in the shot
+//! frame, so they take the point's world height above y = 0, plus the height of y = 0 above the
+//! ground: nothing when `muzzle_height` is set, since y = 0 is then the ground it was measured
+//! from, and the assumed 1.5 m when it is left at 0, since y = 0 is then the bore.
 
 use nalgebra::Vector3;
 use std::f64::consts::PI;
 
+/// Bore height above the ground assumed when a frame's y = 0 is the bore and its real height
+/// is unknown: the public relative-to-the-muzzle helpers, and a kernel whose `muzzle_height`
+/// is left at 0.
 const APPROX_MUZZLE_HEIGHT_AGL_M: f64 = 1.5;
 
 /// Wind shear model types
@@ -348,11 +358,47 @@ fn profile_boundary_layer_speed_ratio(profile: &WindShearProfile, height_rel_lau
 /// This replaces the previous behaviour where the height-relative-to-line-of-sight (~0 for flat
 /// fire) was treated as a true above-ground altitude and clamped to zero below the roughness
 /// length, which zeroed the crosswind for almost the whole flight (~5x too little drift).
+///
+/// The trajectory kernels do not call this: they know where their y = 0 is and use the
+/// height above ground directly (see the module docs).
 pub fn boundary_layer_speed_ratio(height_rel_launch_m: f64, model: WindShearModel) -> f64 {
+    boundary_layer_speed_ratio_agl(height_rel_launch_m + APPROX_MUZZLE_HEIGHT_AGL_M, model)
+}
+
+/// Height above the ground of a trajectory frame's y = 0: nothing when `muzzle_height_m` is
+/// set (y = 0 is the ground it was measured from), the assumed bore height when it is left at
+/// 0 (y = 0 is the bore, whose real height is unknown).
+///
+/// A nonzero `muzzle_height_m` of either sign states the frame's datum, so only exactly 0 is
+/// read as unset; `BallisticInputs::default()` leaves it there.
+pub(crate) fn frame_datum_height_agl_m(muzzle_height_m: f64) -> f64 {
+    if muzzle_height_m == 0.0 {
+        APPROX_MUZZLE_HEIGHT_AGL_M
+    } else {
+        0.0
+    }
+}
+
+/// Boundary-layer shear height above the ground of a point `(x_m, y_m)` in a trajectory
+/// kernel's shot frame: its world height above y = 0 (x·sin θ + y·cos θ for the shooting
+/// angle θ) plus the height of y = 0 above the ground ([`frame_datum_height_agl_m`]).
+pub(crate) fn shear_height_agl_m(
+    x_m: f64,
+    y_m: f64,
+    shooting_angle_rad: f64,
+    muzzle_height_m: f64,
+) -> f64 {
+    crate::atmosphere::shot_frame_altitude(0.0, x_m, y_m, shooting_angle_rad)
+        + frame_datum_height_agl_m(muzzle_height_m)
+}
+
+/// [`boundary_layer_speed_ratio`] for a height already measured above the ground, as the
+/// trajectory kernels compute it with [`shear_height_agl_m`]. Same profile, same floor at 1.0.
+pub(crate) fn boundary_layer_speed_ratio_agl(height_agl_m: f64, model: WindShearModel) -> f64 {
     const Z0: f64 = 0.03; // surface roughness length (short grass)
     const H_REF: f64 = 10.0; // standard meteorological reference height of the input wind
 
-    let height_agl = (height_rel_launch_m + APPROX_MUZZLE_HEIGHT_AGL_M).max(Z0 * 1.000_1);
+    let height_agl = height_agl_m.max(Z0 * 1.000_1);
     let ratio = match model {
         WindShearModel::PowerLaw => (height_agl / H_REF).powf(1.0 / 7.0),
         WindShearModel::Logarithmic => (height_agl / Z0).ln() / (H_REF / Z0).ln(),
@@ -372,18 +418,35 @@ pub(crate) fn boundary_layer_model_from_name(model: &str) -> WindShearModel {
     }
 }
 
+/// [`apply_boundary_layer_shear_agl`] for a height relative to the muzzle, with the assumed
+/// muzzle height added: the public [`get_wind_at_position`] reading.
 pub(crate) fn apply_boundary_layer_shear(
     base_wind: Vector3<f64>,
     height_rel_launch_m: f64,
+    model: WindShearModel,
+) -> Vector3<f64> {
+    apply_boundary_layer_shear_agl(
+        base_wind,
+        height_rel_launch_m + APPROX_MUZZLE_HEIGHT_AGL_M,
+        model,
+    )
+}
+
+/// Scale `base_wind`'s horizontal components by the boundary-layer multiplier at
+/// `height_agl_m` above the ground. The fast-integrate and RK45 kernels call this with
+/// [`shear_height_agl_m`].
+pub(crate) fn apply_boundary_layer_shear_agl(
+    base_wind: Vector3<f64>,
+    height_agl_m: f64,
     model: WindShearModel,
 ) -> Vector3<f64> {
     // MBA-728 pass-through decision: boundary-layer shear scales HORIZONTAL wind only;
     // vertical wind (WindConditions::vertical_speed / WindSegment::vertical_mps, already
     // carried on `base_wind.y` by the caller) passes through unscaled. Save/restore Y
     // around the uniform scale rather than special-casing the multiply itself, since this
-    // helper is shared by both the cli_api and fast-integrate shear paths.
+    // helper is shared by the fast-integrate and RK45 shear paths and get_wind_at_position.
     let vertical = base_wind.y;
-    let mut sheared = base_wind * boundary_layer_speed_ratio(height_rel_launch_m, model);
+    let mut sheared = base_wind * boundary_layer_speed_ratio_agl(height_agl_m, model);
     sheared.y = vertical;
     sheared
 }
@@ -392,6 +455,10 @@ pub(crate) fn apply_boundary_layer_shear(
 ///
 /// This is a convenience wrapper that handles wind segments, shear models,
 /// and altitude calculations in a single function call.
+///
+/// The shear height is `position[1]` taken as the height relative to the muzzle on a level
+/// shot, plus an assumed 1.5 m muzzle height. The trajectory kernels no longer call this: they
+/// measure the height above the ground from their own frame (see the module docs).
 ///
 /// # Arguments
 /// * `position` - 3D position vector [x_downrange, y_vertical, z_lateral]
@@ -437,11 +504,12 @@ pub fn get_wind_at_position(
     }
 
     // Wind shear enabled: scale the operative (input) wind by a boundary-layer profile keyed off
-    // HEIGHT ABOVE GROUND. `altitude_m` (position[1], McCoy Y) is the bullet's height gained
-    // relative to the muzzle; for flat fire it stays within a few metres of the ground, so the
-    // bullet must experience ~full surface wind. The previous implementation treated this
-    // height-relative-to-line-of-sight as a true above-ground altitude and clamped it to zero
-    // below the roughness length, zeroing the crosswind for almost the whole flight.
+    // HEIGHT ABOVE GROUND. This public helper reads `altitude_m` (position[1], McCoy Y) as the
+    // bullet's height relative to the muzzle and adds the assumed muzzle height; for flat fire
+    // it stays within a few metres of the ground, so the bullet must experience ~full surface
+    // wind. The previous implementation treated this height-relative-to-line-of-sight as a true
+    // above-ground altitude and clamped it to zero below the roughness length, zeroing the
+    // crosswind for almost the whole flight.
     // shooter_altitude_m is height above SEA LEVEL and is intentionally not used for the
     // boundary-layer height (see boundary_layer_speed_ratio); kept in the signature for API
     // stability and for callers that may pass it.

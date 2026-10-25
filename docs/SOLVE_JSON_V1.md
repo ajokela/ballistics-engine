@@ -812,10 +812,13 @@ is a floor, so the profile only ever increases it. Below the 10 m meteorological
 the ratio is exactly 1.0, which means an ordinary flat-fire solve is unaffected by any model; the
 shear becomes visible on lofted, high-angle, and ELR trajectories that climb well clear of it.
 
-The height driving the profile is height above the *muzzle* (plus an assumed 1.5 m muzzle height),
-not above sea level. `atmosphere.altitude_m` is deliberately not an input to it: boundary-layer
-shear is relative to the local ground, and altitude's effect on the shot is air density, which
-`atmosphere.altitude_m` already carries.
+The height driving the profile is height above the *ground*, not above sea level: the projectile's
+world-vertical height above the ground reference `rifle.muzzle_height_m` is measured from. When
+`rifle.muzzle_height_m` is omitted or `0` the bore's real height is unknown, so the bore is taken
+to be 1.5 m above the ground. On an inclined shot the height is world-vertical, not measured
+perpendicular to the line of fire. `atmosphere.altitude_m` is deliberately not an input to it:
+boundary-layer shear is relative to the local ground, and altitude's effect on the shot is air
+density, which `atmosphere.altitude_m` already carries.
 
 | Value | Meaning |
 | --- | --- |

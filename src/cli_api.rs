@@ -2373,10 +2373,14 @@ impl TrajectorySolver {
         self.gravity.in_frame(self.inputs.shooting_angle)
     }
 
-    fn get_wind_at_altitude(&self, altitude_m: f64) -> Vector3<f64> {
-        // Scale the operative surface wind by the boundary-layer multiplier. `altitude_m` is the
-        // bullet's height relative to the muzzle (McCoy Y). The multiplier is floored at 1.0, so
-        // flat-fire trajectories keep ~full wind and only high-arcing shots see increased wind.
+    fn get_wind_at_altitude(&self, height_agl_m: f64) -> Vector3<f64> {
+        // Scale the operative surface wind by the boundary-layer multiplier. `height_agl_m` is
+        // the bullet's height above the GROUND, from wind_shear::shear_height_agl_m: its world
+        // height above y = 0 (y is measured from the level `muzzle_height` is measured from,
+        // and an inclined shot's y is in the shot frame), plus 0 when `muzzle_height` is set or
+        // the assumed 1.5 m bore height when it is left at 0. The multiplier is floored at 1.0,
+        // so flat-fire trajectories keep ~full wind and only high-arcing shots see increased
+        // wind.
         //
         // We build the vector with THIS solver's non-shear sign convention (X=-cos, Z=-sin; see
         // the `wind_vector` used in solve_rk4/solve_euler, matching WindSock) and scale it, so that
@@ -2395,7 +2399,7 @@ impl TrajectorySolver {
             "custom_layers" | "custom" => WindShearModel::CustomLayers,
             _ => WindShearModel::PowerLaw,
         };
-        let speed_ratio = crate::wind_shear::boundary_layer_speed_ratio(altitude_m, model);
+        let speed_ratio = crate::wind_shear::boundary_layer_speed_ratio_agl(height_agl_m, model);
 
         // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
         // WindConditions / WindSock); wind enters drag via velocity - wind.
@@ -3533,7 +3537,12 @@ impl TrajectorySolver {
         let actual_wind = if let Some(ref sock) = self.wind_sock {
             sock.vector_for_range_stateless(position.x)
         } else if self.inputs.enable_wind_shear {
-            self.get_wind_at_altitude(position.y)
+            self.get_wind_at_altitude(crate::wind_shear::shear_height_agl_m(
+                position.x,
+                position.y,
+                self.inputs.shooting_angle,
+                self.inputs.muzzle_height,
+            ))
         } else {
             *wind_vector
         };
@@ -10065,5 +10074,121 @@ mod effective_drag_coefficient_tests {
             result.points.iter().all(|p| p.drag_coefficient.is_some()),
             "the post-integration pass missed at least one point"
         );
+    }
+}
+
+#[cfg(test)]
+mod boundary_layer_shear_height_tests {
+    //! Boundary-layer shear keys off the bullet's height above the GROUND. `TrajectorySolver`
+    //! measures y from the level `muzzle_height` is measured from and integrates an inclined
+    //! shot in the shot frame, so the shear height is the point's world height above y = 0 plus
+    //! the height of y = 0 above the ground: nothing when `muzzle_height` is set (y = 0 is the
+    //! ground it was measured from), the assumed 1.5 m bore height when it is left at 0 (y = 0
+    //! is the bore).
+    use super::*;
+
+    const MODELS: [&str; 2] = ["logarithmic", "power_law"];
+
+    fn ratio_rel_launch(height_rel_launch_m: f64, model: &str) -> f64 {
+        crate::wind_shear::boundary_layer_speed_ratio(
+            height_rel_launch_m,
+            crate::wind_shear::boundary_layer_model_from_name(model),
+        )
+    }
+
+    /// Asserts that the boundary-layer multiplier `TrajectorySolver` applies at `position` is
+    /// `expected_ratio`: its acceleration with shear on equals its acceleration with shear off
+    /// and the wind scaled by that ratio. Both are evaluated at the same point, so the local
+    /// atmosphere is the same in each.
+    fn assert_solver_shear_ratio(
+        model: &str,
+        muzzle_height: f64,
+        shooting_angle: f64,
+        position: Vector3<f64>,
+        expected_ratio: f64,
+    ) {
+        let inputs = BallisticInputs {
+            muzzle_height,
+            shooting_angle,
+            enable_wind_shear: true,
+            wind_shear_model: model.to_string(),
+            ..BallisticInputs::default()
+        };
+        let wind = WindConditions {
+            speed: 10.0,
+            direction: std::f64::consts::FRAC_PI_2,
+            vertical_speed: 0.0,
+        };
+        let sheared = TrajectorySolver::new(
+            inputs.clone(),
+            wind.clone(),
+            AtmosphericConditions::default(),
+        );
+        let uniform = TrajectorySolver::new(
+            BallisticInputs {
+                enable_wind_shear: false,
+                ..inputs
+            },
+            wind.clone(),
+            AtmosphericConditions::default(),
+        );
+        let (density, _, temp_c, pressure_hpa) = sheared.resolved_atmosphere();
+        let resolved_atmo = (temp_c, pressure_hpa, density / 1.225);
+        let velocity = Vector3::new(700.0, 5.0, 0.0);
+        let scaled_wind =
+            crate::wind::wind_vector(wind.speed, wind.direction, 0.0) * expected_ratio;
+
+        let with_shear =
+            sheared.calculate_acceleration(&position, &velocity, &Vector3::zeros(), resolved_atmo);
+        let with_scaled_wind =
+            uniform.calculate_acceleration(&position, &velocity, &scaled_wind, resolved_atmo);
+        assert!(
+            (with_shear - with_scaled_wind).norm() <= 1e-12,
+            "{model}, muzzle_height {muzzle_height} m, shooting angle {shooting_angle} rad, \
+             position {position:?}: the shear multiplier is not {expected_ratio} \
+             (acceleration {with_shear:?}, with the wind scaled by it {with_scaled_wind:?})"
+        );
+    }
+
+    /// (a) One height above the ground reads one multiplier, whatever `muzzle_height` says.
+    /// With `muzzle_height` 1.5 m, y = 60 m is 60 m above the ground; with it left at 0, y = 0
+    /// is the bore, taken as 1.5 m up, so y = 58.5 m is. The bore height used to be counted
+    /// twice in the first case (61.5 m).
+    #[test]
+    fn solver_shear_reads_one_multiplier_at_one_height_above_ground() {
+        for model in MODELS {
+            // Height relative to the bore plus the assumed 1.5 m: 60 m above the ground.
+            let expected = ratio_rel_launch(58.5, model);
+            assert!(
+                expected > 1.2,
+                "{model}: the fixture must be well above the floor"
+            );
+            assert_solver_shear_ratio(model, 1.5, 0.0, Vector3::new(1_000.0, 60.0, 0.0), expected);
+            assert_solver_shear_ratio(model, 0.0, 0.0, Vector3::new(1_000.0, 58.5, 0.0), expected);
+        }
+    }
+
+    /// (b) On an inclined shot the shear height is the point's world height above y = 0,
+    /// x·sin θ + y·cos θ, not the shot-frame y (perpendicular to the line of fire). The fast
+    /// kernel reads the same multiplier at the same point:
+    /// `fast_trajectory::tests::inclined_fast_shear_uses_world_height_like_the_full_solver`
+    /// pins it on this fixture.
+    #[test]
+    fn inclined_solver_shear_uses_world_height_like_the_fast_kernel() {
+        let (angle, x, y) = (0.3_f64, 800.0, 20.0);
+        let world_height = crate::atmosphere::shot_frame_altitude(0.0, x, y, angle);
+        for model in MODELS {
+            // muzzle_height 0: y = 0 is the bore, 1.5 m up, which is the public function's
+            // height-relative-to-launch reading.
+            let bore_frame = ratio_rel_launch(world_height, model);
+            // muzzle_height 1.5 m: y = 0 is the ground.
+            let ground_frame = ratio_rel_launch(world_height - 1.5, model);
+            assert!(
+                bore_frame > 1.3 && ground_frame > 1.3,
+                "{model}: fixture too low"
+            );
+            assert_solver_shear_ratio(model, 0.0, angle, Vector3::new(x, y, 0.0), bore_frame);
+            assert_solver_shear_ratio(model, 1.5, angle, Vector3::new(x, y, 0.0), ground_frame);
+        }
     }
 }

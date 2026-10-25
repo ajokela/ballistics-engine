@@ -202,14 +202,13 @@ fn wind_conditions_default_has_zero_vertical_speed() {
     assert_eq!(WindConditions::default().vertical_speed, 0.0);
 }
 
-// MBA-728 coverage gap: `wind_shear::apply_boundary_layer_shear` preserves the vertical (Y)
+// MBA-728 coverage gap: `wind_shear::apply_boundary_layer_shear_agl` preserves the vertical (Y)
 // wind component unscaled while scaling horizontal (X/Z) wind. `TrajectorySolver::solve()`
 // (used by every other test in this file) never actually calls that function -- its
 // `enable_wind_shear` path applies an independent, hand-rolled equivalent inline in
-// cli_api.rs's `get_wind_at_altitude`. The only public entry point that exercises
-// `apply_boundary_layer_shear` itself is the fast-integration kernel
-// (`fast_trajectory::fast_integrate`, via `compute_derivatives`), so this integration test
-// drives that path directly instead.
+// cli_api.rs's `get_wind_at_altitude`. The fast-integration kernel
+// (`fast_trajectory::fast_integrate`, via `compute_derivatives`) calls it directly, so this
+// integration test drives that path instead.
 fn fast_base_inputs(enable_wind_shear: bool, wind_shear_model: &str) -> BallisticInputs {
     BallisticInputs {
         muzzle_velocity: 800.0,
@@ -312,7 +311,7 @@ fn updraft_deflection_is_unaffected_by_shear_in_the_main_solver() {
     // Sibling of updraft_deflection_is_unaffected_by_shear: the MAIN solver's
     // scalar+shear path composes vertical separately (cli_api::get_wind_at_altitude
     // adds it after the shear ratio), a different implementation from
-    // apply_boundary_layer_shear's save/restore that the fast-path test guards.
+    // apply_boundary_layer_shear_agl's save/restore that the fast-path test guards.
     // Both pass-through sites need their own regression net.
     let wind = WindConditions {
         speed: 3.0,

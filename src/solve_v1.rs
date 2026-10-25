@@ -693,9 +693,10 @@ pub(crate) fn prepare_request(
         //
         // No shooter altitude is passed, and none exists to pass: this solve path runs on
         // `TrajectorySolver`, whose `get_wind_at_altitude` keys the boundary-layer profile off
-        // height above the MUZZLE (McCoy Y plus an assumed 1.5 m muzzle height), and
-        // `wind_shear::get_wind_at_position` -- the fast-integrate path's evaluator, which does
-        // take a `shooter_altitude_m` -- discards it for the same reason. Shear is relative to
+        // height above the GROUND (the world height above y = 0, which is the ground
+        // `rifle.muzzle_height_m` is measured from, or the bore taken as 1.5 m up when that is
+        // left at 0), and `wind_shear::get_wind_at_position`, which does take a
+        // `shooter_altitude_m`, discards it for the same reason. Shear is relative to
         // the local ground; `atmosphere.altitude_m` is height above SEA LEVEL, so feeding it in
         // would treat a shooter standing at 1500 m MSL as a bullet flying 1500 m above the
         // ground and inflate the ratio by an order of magnitude. `atmosphere.altitude_m`

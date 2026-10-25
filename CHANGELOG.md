@@ -29,6 +29,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Purely additive: `WindSegment`, `WindSock`, `wind_vector` and every other existing API are
   unchanged. Design record: [docs/WIND_FIELD_MODELING.md](docs/WIND_FIELD_MODELING.md).
 
+### Fixed
+- **Boundary-layer wind shear measures height from the ground in every kernel.** The shear
+  profiles take height above the ground, but the solvers read y as height above the muzzle and
+  added an assumed 1.5 m, while `TrajectorySolver` starts the bullet at y = `muzzle_height`,
+  measured above the ground. With a real `muzzle_height`, such as the CLI's `--bore-height`
+  (default 1.5 m), the bore height was counted twice. `TrajectorySolver`, `fast_integrate` and
+  the RK45 kernel behind `fast_integrate_with_segments` and `integrate_trajectory` now share one
+  rule: the point's world height above y = 0, plus nothing when `muzzle_height` is set (y = 0
+  is the ground) or the assumed 1.5 m when it is left at 0 (y = 0 is the bore). On inclined
+  fire `TrajectorySolver` and the RK45 kernel now use that world height, x·sin θ + y·cos θ with
+  the ground level at the shooter's elevation, as `fast_integrate` already did, instead of the
+  shot-frame y, which is perpendicular to the line of fire. `fast_integrate` and
+  `fast_integrate_with_segments` take the launch state's y from the level `muzzle_height` is
+  measured from, as the Monte Carlo path already builds it. The public
+  `boundary_layer_speed_ratio`, `get_wind_at_position` and `WindShearWindSock` keep their
+  height-relative-to-the-muzzle meaning.
+  Output moves only with shear on: 27 shear-off CLI runs are byte-identical. Level fire with
+  `muzzle_height` 0, the `BallisticInputs` and solve-json default, is unchanged, and so is level
+  flat fire. With a bore height set, shots that climb above about 8.5 m drift up to about 1% less
+  (CLI, 1500 m, 10 m/s full-value crosswind, 2° and 7° launch: 0.4% to 1.0% at 1.5 m and 3 m
+  bore heights). Inclined shots move the most, because their world height grows with range: in
+  the same runs a 15° uphill shot drifts 14% to 42% more, and a 10° downhill shot loses the
+  shear on everything below the shooter's level, up to 23% less drift.
+
 ### Notes
 - **The solve-json example request now sends a realistic station reading.** The representative
   request in [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#request) sent `pressure_pa` 101325 Pa

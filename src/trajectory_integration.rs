@@ -289,8 +289,14 @@ pub struct TrajectoryParams {
     pub enable_magnus: bool,
     pub enable_coriolis: bool,
     pub target_distance_m: f64, // Target horizontal distance in meters
+    /// Boundary-layer wind shear. Its height above the ground is the point's world height
+    /// (this kernel integrates in the shot frame) with y = 0 at the launch point, taken as 1.5 m
+    /// above the ground. `fast_integrate_with_segments` instead measures y from its inputs'
+    /// `muzzle_height` datum.
     pub enable_wind_shear: bool,
     pub wind_shear_model: String,
+    /// Site elevation above sea level, kept for API compatibility: nothing in this kernel reads
+    /// it, and boundary-layer shear is relative to the local ground.
     pub shooter_altitude_m: f64,
     pub is_twist_right: bool, // True for right-hand twist, false for left-hand
     pub shooting_angle: f64,  // uphill/downhill angle in radians
@@ -462,15 +468,24 @@ fn compute_derivatives_vec_with_gravity(
     let pos = Vector3::new(state[0], state[1], state[2]);
     let vel = Vector3::new(state[3], state[4], state[5]);
 
-    // Calculate wind at current position with shear support
+    // Calculate wind at current position with shear support. Boundary-layer shear reads the
+    // height above the ground: the point's world height above y = 0 (this kernel integrates in
+    // the shot frame), plus 0 when y is measured from the ground the caller's `muzzle_height`
+    // was measured from, or the assumed bore height when y = 0 is the launch point
+    // (`inputs.muzzle_height` 0, which every direct TrajectoryParams caller gets; see
+    // integrate_trajectory_with_gravity). Site elevation (`shooter_altitude_m`) is MSL and does
+    // not enter shear.
     let wind_vector = if !params.wind_segments.is_empty() {
         if params.enable_wind_shear && params.wind_shear_model != "none" {
-            crate::wind_shear::get_wind_at_position(
-                &pos,
-                &params.wind_segments,
-                params.enable_wind_shear,
-                &params.wind_shear_model,
-                params.shooter_altitude_m,
+            crate::wind_shear::apply_boundary_layer_shear_agl(
+                wind_vector_for_range(pos.x, &params.wind_segments),
+                crate::wind_shear::shear_height_agl_m(
+                    pos.x,
+                    pos.y,
+                    params.shooting_angle,
+                    inputs.muzzle_height,
+                ),
+                crate::wind_shear::boundary_layer_model_from_name(&params.wind_shear_model),
             )
         } else {
             wind_vector_for_range(pos.x, &params.wind_segments)
@@ -575,8 +590,39 @@ pub fn integrate_trajectory(
     )
 }
 
+/// [`integrate_trajectory`] with an explicit gravity. `initial_state`'s y = 0 is the launch
+/// point, as for every direct [`TrajectoryParams`] caller; see
+/// [`integrate_trajectory_from_muzzle_height`] for a caller whose y is measured from the
+/// ground.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn integrate_trajectory_with_gravity(
+    initial_state: [f64; 6],
+    t_span: (f64, f64),
+    params: TrajectoryParams,
+    method: &str,
+    tolerance: f64,
+    max_step: f64,
+    gravity: Gravity,
+) -> Vec<(f64, Vector6<f64>)> {
+    integrate_trajectory_from_muzzle_height(
+        initial_state,
+        t_span,
+        params,
+        method,
+        tolerance,
+        max_step,
+        gravity,
+        0.0,
+    )
+}
+
+/// [`integrate_trajectory_with_gravity`] for a launch state whose y is measured from the level
+/// `muzzle_height_m` is measured from, as `BallisticInputs::muzzle_height` states it: the
+/// ground when it is nonzero, the launch point (the bore) when it is 0. Only boundary-layer
+/// shear reads it, to measure the height above the ground; this kernel used to add an assumed
+/// 1.5 m bore height to every y, which counted a real bore height twice.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn integrate_trajectory_from_muzzle_height(
     initial_state: [f64; 6],
     t_span: (f64, f64),
     mut params: TrajectoryParams,
@@ -584,6 +630,7 @@ pub(crate) fn integrate_trajectory_with_gravity(
     tolerance: f64,
     max_step: f64,
     gravity: Gravity,
+    muzzle_height_m: f64,
 ) -> Vec<(f64, Vector6<f64>)> {
     // Normalize once before build_inputs reads the first zone and before any RK stage performs a
     // first-match lookup. Callers may supply zones in any order.
@@ -612,7 +659,11 @@ pub(crate) fn integrate_trajectory_with_gravity(
     // rebuilding the struct on every derivative evaluation.
     let muzzle_velocity_mps =
         Vector3::new(initial_state[3], initial_state[4], initial_state[5]).norm();
-    let inputs = build_inputs(&params, muzzle_velocity_mps);
+    let mut inputs = build_inputs(&params, muzzle_velocity_mps);
+    // The frame datum is the caller's, not a TrajectoryParams field (adding one would break
+    // every struct-literal constructor). The derivative model ignores muzzle_height; only the
+    // shear height in compute_derivatives_vec_with_gravity reads it.
+    inputs.muzzle_height = muzzle_height_m;
 
     match method {
         "RK4" => {
@@ -1710,5 +1761,84 @@ mod tests {
 
         // Both should reach approximately the same downrange distance
         assert!((final_right[2] - final_left[2]).abs() < 10.0);
+    }
+
+    /// Asserts that the boundary-layer multiplier this kernel applies at `(x, y)` is
+    /// `expected_ratio`: its derivatives with shear on equal its derivatives with shear off and
+    /// the wind scaled by that ratio. `muzzle_height` is the level the caller's y is measured
+    /// from, as `integrate_trajectory_with_gravity` sets it on the derivative inputs.
+    fn assert_kernel_shear_ratio(
+        model: &str,
+        muzzle_height: f64,
+        shooting_angle: f64,
+        (x, y): (f64, f64),
+        expected_ratio: f64,
+    ) {
+        let state = Vector6::new(x, y, 0.0, 700.0, 5.0, 0.0);
+        let run = |enable_wind_shear: bool, wind_speed_kmh: f64| {
+            let mut params = create_test_params(2_000.0);
+            params.wind_segments = vec![WindSegment::new(wind_speed_kmh, 90.0, 2_000.0)];
+            params.enable_wind_shear = enable_wind_shear;
+            params.wind_shear_model = model.to_string();
+            params.shooting_angle = shooting_angle;
+            let mut inputs = build_inputs(&params, 700.0);
+            inputs.muzzle_height = muzzle_height;
+            compute_derivatives_vec_with_gravity(&state, 0.0, &params, &inputs, Gravity::EARTH)
+        };
+        let sheared = run(true, 36.0);
+        let scaled = run(false, 36.0 * expected_ratio);
+        for component in 3..6 {
+            assert!(
+                (sheared[component] - scaled[component]).abs() < 1e-12,
+                "{model}, muzzle_height {muzzle_height} m, shooting angle {shooting_angle} rad, \
+                 ({x}, {y}): the shear multiplier is not {expected_ratio} (component \
+                 {component}: {} vs {})",
+                sheared[component],
+                scaled[component]
+            );
+        }
+    }
+
+    fn shear_ratio_rel_launch(height_rel_launch_m: f64, model: &str) -> f64 {
+        crate::wind_shear::boundary_layer_speed_ratio(
+            height_rel_launch_m,
+            crate::wind_shear::boundary_layer_model_from_name(model),
+        )
+    }
+
+    /// A direct `TrajectoryParams` caller's y = 0 is the launch point (the bore), so on a level
+    /// shot the shear height is y plus the assumed 1.5 m bore height, as before. A caller that
+    /// states a real `muzzle_height` (fast_integrate_with_segments forwards its inputs') has
+    /// y = 0 on the ground instead, and the same height above the ground reads the same
+    /// multiplier.
+    #[test]
+    fn kernel_shear_reads_one_multiplier_at_one_height_above_ground() {
+        for model in ["logarithmic", "power_law"] {
+            let expected = shear_ratio_rel_launch(58.5, model);
+            assert!(
+                expected > 1.2,
+                "{model}: the fixture must be well above the floor"
+            );
+            assert_kernel_shear_ratio(model, 0.0, 0.0, (1_000.0, 58.5), expected);
+            assert_kernel_shear_ratio(model, 1.5, 0.0, (1_000.0, 60.0), expected);
+        }
+    }
+
+    /// On an inclined shot this kernel works in the shot frame like the other two, so its
+    /// shear height is the point's world height, x·sin θ + y·cos θ, not the shot-frame y.
+    #[test]
+    fn inclined_kernel_shear_uses_world_height() {
+        let (angle, x, y) = (0.3_f64, 800.0, 20.0);
+        let world_height = crate::atmosphere::shot_frame_altitude(0.0, x, y, angle);
+        for model in ["logarithmic", "power_law"] {
+            let bore_frame = shear_ratio_rel_launch(world_height, model);
+            let ground_frame = shear_ratio_rel_launch(world_height - 1.5, model);
+            assert!(
+                bore_frame > 1.3 && ground_frame > 1.3,
+                "{model}: fixture too low"
+            );
+            assert_kernel_shear_ratio(model, 0.0, angle, (x, y), bore_frame);
+            assert_kernel_shear_ratio(model, 1.5, angle, (x, y), ground_frame);
+        }
     }
 }

@@ -175,6 +175,10 @@ enum FastAtmosphere {
 pub struct FastIntegrationParams {
     pub horiz: f64,
     pub vert: f64,
+    /// Launch state `[x, y, z, vx, vy, vz]` in the shot frame. y is measured from the level
+    /// `BallisticInputs::muzzle_height` is measured from: the ground when it is nonzero (start
+    /// y at `muzzle_height`), the bore when it is 0 (start y at 0). Boundary-layer wind shear
+    /// reads its height above the ground from that datum.
     pub initial_state: [f64; 6],
     pub t_span: (f64, f64),
     /// Dual-mode atmosphere tuple. Standard mode is
@@ -803,13 +807,19 @@ fn compute_derivatives_with_gravity(
     let pos = Vector3::new(state[0], state[1], state[2]);
     let vel = Vector3::new(state[3], state[4], state[5]);
 
-    // Resolve the cached downrange wind in level axes, then apply boundary-layer shear using
-    // height gained above launch. Site elevation is MSL and intentionally does not enter shear.
+    // Resolve the cached downrange wind in level axes, then apply boundary-layer shear at the
+    // height above the ground: the world height above y = 0, plus 0 when the launch state's y is
+    // measured from the ground (`muzzle_height` set) or the assumed bore height when y = 0 is
+    // the bore (`muzzle_height` 0). Site elevation is MSL and intentionally does not enter shear.
     let level_wind = wind_sock.vector_for_range_stateless(pos.x);
     let level_wind = if let Some(model) = wind_shear_model {
-        let height_rel_launch =
-            crate::atmosphere::shot_frame_altitude(0.0, pos.x, pos.y, inputs.shooting_angle);
-        crate::wind_shear::apply_boundary_layer_shear(level_wind, height_rel_launch, model)
+        let height_agl = crate::wind_shear::shear_height_agl_m(
+            pos.x,
+            pos.y,
+            inputs.shooting_angle,
+            inputs.muzzle_height,
+        );
+        crate::wind_shear::apply_boundary_layer_shear_agl(level_wind, height_agl, model)
     } else {
         level_wind
     };
@@ -992,7 +1002,9 @@ pub(crate) fn fast_integrate_with_segments_with_gravity(
     gravity: Gravity,
 ) -> FastSolution {
     // Use the RK45 implementation from trajectory_integration module
-    use crate::trajectory_integration::{integrate_trajectory_with_gravity, TrajectoryParams};
+    use crate::trajectory_integration::{
+        integrate_trajectory_from_muzzle_height, TrajectoryParams,
+    };
 
     // Malformed wind or a degenerate atmosphere would otherwise silently stub or poison the run.
     if crate::wind::validate_wind_segments(&wind_segments).is_err()
@@ -1087,8 +1099,10 @@ pub(crate) fn fast_integrate_with_segments_with_gravity(
         atmo_sock: params.atmo_sock,
     };
 
-    // Use RK45 adaptive integration
-    let trajectory = integrate_trajectory_with_gravity(
+    // Use RK45 adaptive integration. The launch state's y is measured from the level
+    // `muzzle_height` is measured from, as for plain fast_integrate, so the kernel's shear
+    // height starts from the same datum.
+    let trajectory = integrate_trajectory_from_muzzle_height(
         initial_state,
         params.t_span,
         traj_params,
@@ -1096,6 +1110,7 @@ pub(crate) fn fast_integrate_with_segments_with_gravity(
         1e-6,   // tolerance
         0.01,   // max_step
         gravity,
+        inputs.muzzle_height,
     );
 
     // Convert trajectory to FastSolution format
@@ -1710,6 +1725,175 @@ mod tests {
             sheared.abs() > uniform.abs() + 0.01,
             "aloft shear must increase drift magnitude: uniform={uniform}, shear={sheared}"
         );
+    }
+
+    fn shear_ratio_rel_launch(height_rel_launch_m: f64, model: &str) -> f64 {
+        crate::wind_shear::boundary_layer_speed_ratio(
+            height_rel_launch_m,
+            crate::wind_shear::boundary_layer_model_from_name(model),
+        )
+    }
+
+    /// Asserts that the boundary-layer multiplier the fast kernel applies at `(x, y)` is
+    /// `expected_ratio`: its derivatives with shear on equal its derivatives with shear off and
+    /// the wind scaled by that ratio.
+    fn assert_fast_shear_ratio(
+        model: &str,
+        muzzle_height: f64,
+        shooting_angle: f64,
+        (x, y): (f64, f64),
+        expected_ratio: f64,
+    ) {
+        let state = [x, y, 0.0, 700.0, 5.0, 0.0];
+        let run = |enable_wind_shear: bool, wind_speed_kmh: f64| {
+            let inputs = BallisticInputs {
+                bc_value: 0.5,
+                bc_type: DragModel::G7,
+                muzzle_height,
+                shooting_angle,
+                enable_wind_shear,
+                wind_shear_model: model.to_string(),
+                ..BallisticInputs::default()
+            };
+            let wind_shear_model = enable_wind_shear
+                .then(|| crate::wind_shear::boundary_layer_model_from_name(model))
+                .filter(|model| *model != crate::wind_shear::WindShearModel::None);
+            compute_derivatives_with_gravity(
+                &state,
+                &inputs,
+                &WindSock::new(vec![crate::wind::WindSegment::new(
+                    wind_speed_kmh,
+                    90.0,
+                    2_000.0,
+                )]),
+                FastAtmosphere::Direct {
+                    air_density: 1.225,
+                    speed_of_sound: 340.0,
+                },
+                &inputs.bc_type,
+                crate::transonic_drag::ProjectileShape::Spitzer,
+                inputs.bc_value,
+                false,
+                false,
+                None,
+                wind_shear_model,
+                None,
+                Gravity::EARTH,
+            )
+        };
+        let sheared = run(true, 36.0);
+        let scaled = run(false, 36.0 * expected_ratio);
+        for component in 3..6 {
+            assert!(
+                (sheared[component] - scaled[component]).abs() < 1e-12,
+                "{model}, muzzle_height {muzzle_height} m, shooting angle {shooting_angle} rad, \
+                 ({x}, {y}): the shear multiplier is not {expected_ratio} (component \
+                 {component}: {} vs {})",
+                sheared[component],
+                scaled[component]
+            );
+        }
+    }
+
+    /// One height above the ground reads one multiplier, whatever `muzzle_height` says: with
+    /// `muzzle_height` 1.5 m, y = 60 m is 60 m above the ground (y = 0 is the ground); with it
+    /// left at 0, y = 0 is the bore, taken as 1.5 m up, so y = 58.5 m is. The fast kernel used
+    /// to add the 1.5 m to every y, counting a real bore height twice.
+    #[test]
+    fn fast_shear_reads_one_multiplier_at_one_height_above_ground() {
+        for model in ["logarithmic", "power_law"] {
+            let expected = shear_ratio_rel_launch(58.5, model);
+            assert!(
+                expected > 1.2,
+                "{model}: the fixture must be well above the floor"
+            );
+            assert_fast_shear_ratio(model, 1.5, 0.0, (1_000.0, 60.0), expected);
+            assert_fast_shear_ratio(model, 0.0, 0.0, (1_000.0, 58.5), expected);
+        }
+    }
+
+    /// On an inclined shot the shear height is the point's world height above y = 0 plus the
+    /// height of y = 0 above the ground, exactly as `TrajectorySolver` reads it on the same
+    /// fixture (`cli_api::boundary_layer_shear_height_tests::
+    /// inclined_solver_shear_uses_world_height_like_the_fast_kernel`).
+    #[test]
+    fn inclined_fast_shear_uses_world_height_like_the_full_solver() {
+        let (angle, x, y) = (0.3_f64, 800.0, 20.0);
+        let world_height = crate::atmosphere::shot_frame_altitude(0.0, x, y, angle);
+        for model in ["logarithmic", "power_law"] {
+            let bore_frame = shear_ratio_rel_launch(world_height, model);
+            let ground_frame = shear_ratio_rel_launch(world_height - 1.5, model);
+            assert!(
+                bore_frame > 1.3 && ground_frame > 1.3,
+                "{model}: fixture too low"
+            );
+            assert_fast_shear_ratio(model, 0.0, angle, (x, y), bore_frame);
+            assert_fast_shear_ratio(model, 1.5, angle, (x, y), ground_frame);
+        }
+    }
+
+    /// Both public fast entry points take a launch state whose y is measured from the level
+    /// `muzzle_height` is measured from. The same physical shot, a bore 1.5 m above the ground,
+    /// stated as `muzzle_height` 1.5 m with y starting at 1.5 m or as `muzzle_height` 0 with y
+    /// starting at 0, must drift the same with shear on. A fixed air density keeps the 1.5 m
+    /// shift in y out of the drag, so shear is the only height-dependent term.
+    #[test]
+    fn fast_entry_points_shear_one_shot_the_same_whichever_way_its_bore_height_is_stated() {
+        let run = |muzzle_height: f64, segmented: bool| {
+            let inputs = BallisticInputs {
+                muzzle_velocity: 800.0,
+                bc_value: 0.5,
+                bc_type: DragModel::G7,
+                bullet_mass: 168.0 * crate::constants::GRAINS_TO_KG,
+                bullet_diameter: 0.308 * 0.0254,
+                muzzle_height,
+                enable_wind_shear: true,
+                wind_shear_model: "power_law".to_string(),
+                ground_threshold: -1_000.0,
+                ..BallisticInputs::default()
+            };
+            let elevation = 0.12_f64;
+            let params = FastIntegrationParams {
+                horiz: 1_000.0,
+                vert: muzzle_height,
+                initial_state: [
+                    0.0,
+                    muzzle_height,
+                    0.0,
+                    inputs.muzzle_velocity * elevation.cos(),
+                    inputs.muzzle_velocity * elevation.sin(),
+                    0.0,
+                ],
+                t_span: (0.0, 5.0),
+                atmo_params: (1.225, 340.0, 0.0, 0.0),
+                atmo_sock: None,
+            };
+            let wind = vec![crate::wind::WindSegment::new(36.0, 90.0, 2_000.0)];
+            let solution = if segmented {
+                fast_integrate_with_segments(&inputs, wind, params)
+            } else {
+                fast_integrate(&inputs, &WindSock::new(wind), params)
+            };
+            assert!(solution.success);
+            let last = solution.t.len() - 1;
+            assert_eq!(solution.y[0][last].to_bits(), 1_000.0_f64.to_bits());
+            (solution.y[1][last] - muzzle_height, solution.y[2][last])
+        };
+
+        for segmented in [false, true] {
+            let (rise_bore, drift_bore) = run(0.0, segmented);
+            let (rise_ground, drift_ground) = run(1.5, segmented);
+            assert!(drift_bore.abs() > 1.0, "the fixture must drift");
+            assert!(
+                (drift_ground - drift_bore).abs() < 1e-9,
+                "segmented={segmented}: the same shot drifted {drift_bore} m stated from the bore \
+                 and {drift_ground} m stated from the ground"
+            );
+            assert!(
+                (rise_ground - rise_bore).abs() < 1e-9,
+                "segmented={segmented}: height above the bore {rise_bore} vs {rise_ground} m"
+            );
+        }
     }
 
     #[test]
