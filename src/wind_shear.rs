@@ -4,14 +4,26 @@
 //! This is important for long-range ballistics where projectiles reach significant
 //! altitudes and experience different wind conditions at different heights.
 //!
-//! Boundary-layer profiles are keyed off height above the local ground. The public helpers
-//! ([`boundary_layer_speed_ratio`], [`get_wind_at_position`] and
-//! [`WindShearWindSock::vector_for_position`]) take a height relative to the muzzle and add an
-//! assumed 1.5 m muzzle height. The trajectory kernels instead measure y from the level
-//! `BallisticInputs::muzzle_height` is measured from and integrate inclined fire in the shot
-//! frame, so they take the point's world height above y = 0, plus the height of y = 0 above the
-//! ground: nothing when `muzzle_height` is set, since y = 0 is then the ground it was measured
-//! from, and the assumed 1.5 m when it is left at 0, since y = 0 is then the bore.
+//! Boundary-layer profiles are keyed off height above the local ground.
+//!
+//! The public helpers take a height relative to the muzzle. [`boundary_layer_speed_ratio`] and
+//! [`get_wind_at_position`] add an assumed 1.5 m muzzle height to it, and so does
+//! [`WindShearWindSock::vector_for_position`] for a logarithmic or power-law profile. For an
+//! Ekman or custom-layer profile the sock samples the profile at the relative height itself,
+//! with no offset.
+//!
+//! The trajectory kernels measure the height from their own frame instead. They integrate in
+//! the shot frame, whose y is measured perpendicular to the line of sight from the level
+//! `BallisticInputs::muzzle_height` is measured from, and their ground-impact check
+//! (`ground_threshold`) compares that y too, so the ground they model runs parallel to the line
+//! of sight. Boundary-layer shear uses the same ground: the height above it is y plus the height
+//! of y = 0 above the ground, which is nothing when `muzzle_height` is set (y = 0 is then the
+//! ground it was measured from) and the assumed 1.5 m when it is left at 0 (y = 0 is then the
+//! bore). On an inclined shot that ground rises or falls with the line of sight, as it does
+//! between a shooter and a target both standing on it, so the shooting angle does not enter.
+//! Level ground at the shooter's elevation would instead read a bullet arriving at an uphill
+//! target as hundreds of metres above the ground it is about to hit, and a downhill shot as
+//! below the ground.
 
 use nalgebra::Vector3;
 use std::f64::consts::PI;
@@ -271,6 +283,10 @@ impl WindShearWindSock {
 
     /// Get wind vector for 3D position
     /// Standard ballistics coordinate system: X=downrange, Y=vertical, Z=lateral
+    ///
+    /// `position.y` is the height relative to the muzzle. A logarithmic or power-law profile
+    /// adds the assumed 1.5 m muzzle height to it; an Ekman or custom-layer profile is sampled
+    /// at `position.y` as given.
     pub fn vector_for_position(&self, position: Vector3<f64>) -> Vector3<f64> {
         let range_m = position.x; // X is downrange (McCoy)
         let altitude_m = position.y; // Relative to shooter
@@ -379,17 +395,15 @@ pub(crate) fn frame_datum_height_agl_m(muzzle_height_m: f64) -> f64 {
     }
 }
 
-/// Boundary-layer shear height above the ground of a point `(x_m, y_m)` in a trajectory
-/// kernel's shot frame: its world height above y = 0 (x·sin θ + y·cos θ for the shooting
-/// angle θ) plus the height of y = 0 above the ground ([`frame_datum_height_agl_m`]).
-pub(crate) fn shear_height_agl_m(
-    x_m: f64,
-    y_m: f64,
-    shooting_angle_rad: f64,
-    muzzle_height_m: f64,
-) -> f64 {
-    crate::atmosphere::shot_frame_altitude(0.0, x_m, y_m, shooting_angle_rad)
-        + frame_datum_height_agl_m(muzzle_height_m)
+/// Boundary-layer shear height above the ground of a point whose shot-frame y is `y_m` in a
+/// trajectory kernel: y, measured perpendicular to the line of sight, plus the height of y = 0
+/// above the ground ([`frame_datum_height_agl_m`]).
+///
+/// The kernels' ground runs parallel to the line of sight, the plane their `ground_threshold`
+/// check already uses, so neither the downrange distance nor the shooting angle enters (see the
+/// module docs). On a level shot y is the world height.
+pub(crate) fn shear_height_agl_m(y_m: f64, muzzle_height_m: f64) -> f64 {
+    y_m + frame_datum_height_agl_m(muzzle_height_m)
 }
 
 /// [`boundary_layer_speed_ratio`] for a height already measured above the ground, as the

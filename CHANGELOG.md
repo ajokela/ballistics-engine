@@ -36,22 +36,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   measured above the ground. With a real `muzzle_height`, such as the CLI's `--bore-height`
   (default 1.5 m), the bore height was counted twice. `TrajectorySolver`, `fast_integrate` and
   the RK45 kernel behind `fast_integrate_with_segments` and `integrate_trajectory` now share one
-  rule: the point's world height above y = 0, plus nothing when `muzzle_height` is set (y = 0
-  is the ground) or the assumed 1.5 m when it is left at 0 (y = 0 is the bore). On inclined
-  fire `TrajectorySolver` and the RK45 kernel now use that world height, x·sin θ + y·cos θ with
-  the ground level at the shooter's elevation, as `fast_integrate` already did, instead of the
-  shot-frame y, which is perpendicular to the line of fire. `fast_integrate` and
-  `fast_integrate_with_segments` take the launch state's y from the level `muzzle_height` is
-  measured from, as the Monte Carlo path already builds it. The public
-  `boundary_layer_speed_ratio`, `get_wind_at_position` and `WindShearWindSock` keep their
-  height-relative-to-the-muzzle meaning.
-  Output moves only with shear on: 27 shear-off CLI runs are byte-identical. Level fire with
-  `muzzle_height` 0, the `BallisticInputs` and solve-json default, is unchanged, and so is level
-  flat fire. With a bore height set, shots that climb above about 8.5 m drift up to about 1% less
-  (CLI, 1500 m, 10 m/s full-value crosswind, 2° and 7° launch: 0.4% to 1.0% at 1.5 m and 3 m
-  bore heights). Inclined shots move the most, because their world height grows with range: in
-  the same runs a 15° uphill shot drifts 14% to 42% more, and a 10° downhill shot loses the
-  shear on everything below the shooter's level, up to 23% less drift.
+  rule: the shot-frame y, plus nothing when `muzzle_height` is set (y = 0 is the ground) or the
+  assumed 1.5 m when it is left at 0 (y = 0 is the bore). On inclined fire that takes the ground
+  to run along the line of sight, as it does between a shooter and a target both standing on a
+  slope, and as every kernel's `ground_threshold` check already does. `TrajectorySolver` and the
+  RK45 kernel already measured inclined shear that way; `fast_integrate` (the Monte Carlo path)
+  took the world height above the shooter's level, x·sin θ + y·cos θ, which read a bullet
+  arriving at an uphill target as hundreds of metres above the ground and a downhill shot as
+  below it, and now matches them. `fast_integrate` and `fast_integrate_with_segments` take the
+  launch state's y from the level `muzzle_height` is measured from, as the Monte Carlo path
+  already builds it. The public `boundary_layer_speed_ratio`, `get_wind_at_position` and
+  `WindShearWindSock` keep their height-relative-to-the-muzzle meaning.
+  Output moves only with shear on: 108 shear-off CLI runs (three integrators, bore heights
+  0/1.5/3 m, level, 15° up and 10° down, 0° to 20° launch) and 72 shear-off `fast_integrate` /
+  `fast_integrate_with_segments` runs are byte-identical. In `TrajectorySolver` (the CLI and
+  solve-json) and the RK45 kernel, `muzzle_height` 0 (the `BallisticInputs` and solve-json
+  default) and flat fire are unchanged; with a bore height set, shots that climb above about
+  8.5 m drift up to about 1.3% less, level or inclined (CLI, 10 m/s full-value crosswind, 0.8°
+  to 20° launch to 1000, 1500 and 2500 m at 1.5 m and 3 m bore heights; shallow lofts that
+  cruise just above the 10 m reference height move the most, at most −1.28% with the
+  logarithmic model, a 3 m bore and a 1.2° launch to 1500 m). Plain `fast_integrate` moves the
+  same way on level fire. On inclined fire, where it changes ground, it moves the most: to
+  1500 m a 15° uphill shot drifts 6% to 30% less, flat fire included, and a lofted 10° downhill
+  shot up to 30% more.
+- **`wind_shear_model` `"none"` means no shear in `TrajectorySolver`.** With
+  `enable_wind_shear` set, the name fell into the unrecognized-name fallback and applied the
+  power law, while `fast_integrate` and the RK45 kernel applied nothing; the CLI's
+  `--enable-wind-shear --wind-shear-model none` drifted like `power_law`. It is now
+  byte-identical to shear off (108 of 108 CLI runs), as in the other kernels. A Rust caller, or
+  a binding's dict or hash input, that sets `enable_wind_shear` without naming a model leaves it
+  at the default `"none"` and so now gets no shear from `TrajectorySolver` either; name the
+  model. The C ABI already names `power_law`, and an unrecognized name still falls back to the
+  power law in `TrajectorySolver` (and to no shear in the fast kernels), unchanged.
 
 ### Notes
 - **The solve-json example request now sends a realistic station reading.** The representative

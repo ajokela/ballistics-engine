@@ -2373,32 +2373,44 @@ impl TrajectorySolver {
         self.gravity.in_frame(self.inputs.shooting_angle)
     }
 
-    fn get_wind_at_altitude(&self, height_agl_m: f64) -> Vector3<f64> {
+    /// The boundary-layer model this solver applies, or `None` when shear is off: the flag is
+    /// clear, or the model name is `"none"`, which every kernel and front-end reads as no shear.
+    ///
+    /// Names match wind_shear::get_wind_at_position (MBA-965). An unrecognized name falls back
+    /// to the power law, the historical "exponential" behaviour that the Python and Ruby
+    /// bindings document for their dict and hash inputs; the CLI, WASM and solve-json front-ends
+    /// parse an enum, so none of them can send one. `"none"` used to fall into that fallback
+    /// too, so asking for no model applied the power law, while `fast_integrate` and the RK45
+    /// kernel applied nothing.
+    fn boundary_layer_shear_model(&self) -> Option<WindShearModel> {
+        if !self.inputs.enable_wind_shear {
+            return None;
+        }
+        match self.inputs.wind_shear_model.as_str() {
+            "none" => None,
+            "logarithmic" => Some(WindShearModel::Logarithmic),
+            "power_law" | "powerlaw" | "exponential" => Some(WindShearModel::PowerLaw),
+            "ekman_spiral" | "ekman" => Some(WindShearModel::EkmanSpiral),
+            "custom_layers" | "custom" => Some(WindShearModel::CustomLayers),
+            _ => Some(WindShearModel::PowerLaw),
+        }
+    }
+
+    fn get_wind_at_altitude(&self, height_agl_m: f64, model: WindShearModel) -> Vector3<f64> {
         // Scale the operative surface wind by the boundary-layer multiplier. `height_agl_m` is
-        // the bullet's height above the GROUND, from wind_shear::shear_height_agl_m: its world
-        // height above y = 0 (y is measured from the level `muzzle_height` is measured from,
-        // and an inclined shot's y is in the shot frame), plus 0 when `muzzle_height` is set or
-        // the assumed 1.5 m bore height when it is left at 0. The multiplier is floored at 1.0,
-        // so flat-fire trajectories keep ~full wind and only high-arcing shots see increased
-        // wind.
+        // the bullet's height above the GROUND, from wind_shear::shear_height_agl_m: its
+        // shot-frame y (measured perpendicular to the line of sight from the level
+        // `muzzle_height` is measured from), plus 0 when `muzzle_height` is set or the assumed
+        // 1.5 m bore height when it is left at 0. The ground is the one the ground_threshold
+        // check uses, parallel to the line of sight, so an inclined shot's ground follows its
+        // slope. The multiplier is floored at 1.0, so flat-fire trajectories keep ~full wind and
+        // only high-arcing shots see increased wind.
         //
         // We build the vector with THIS solver's non-shear sign convention (X=-cos, Z=-sin; see
         // the `wind_vector` used in solve_rk4/solve_euler, matching WindSock) and scale it, so that
         // "shear on" equals "shear off" * ratio (ratio == 1.0 for flat fire). An earlier revision
         // attenuated the wind near the line of sight and flipped its sign relative to the non-shear
         // path; this keeps them sign-consistent.
-        // Map the requested model name to the boundary-layer model (MBA-965).
-        // Names match wind_shear::get_wind_at_position. Unknown strings should
-        // never reach here (the CLI parses an enum), but default to PowerLaw to
-        // preserve the historical "exponential" behaviour for any caller that
-        // forwards an unexpected value.
-        let model = match self.inputs.wind_shear_model.as_str() {
-            "logarithmic" => WindShearModel::Logarithmic,
-            "power_law" | "powerlaw" | "exponential" => WindShearModel::PowerLaw,
-            "ekman_spiral" | "ekman" => WindShearModel::EkmanSpiral,
-            "custom_layers" | "custom" => WindShearModel::CustomLayers,
-            _ => WindShearModel::PowerLaw,
-        };
         let speed_ratio = crate::wind_shear::boundary_layer_speed_ratio_agl(height_agl_m, model);
 
         // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
@@ -3536,13 +3548,11 @@ impl TrajectorySolver {
         // CLI/WASM front-ends reject that combination), so the order is safe.
         let actual_wind = if let Some(ref sock) = self.wind_sock {
             sock.vector_for_range_stateless(position.x)
-        } else if self.inputs.enable_wind_shear {
-            self.get_wind_at_altitude(crate::wind_shear::shear_height_agl_m(
-                position.x,
-                position.y,
-                self.inputs.shooting_angle,
-                self.inputs.muzzle_height,
-            ))
+        } else if let Some(model) = self.boundary_layer_shear_model() {
+            self.get_wind_at_altitude(
+                crate::wind_shear::shear_height_agl_m(position.y, self.inputs.muzzle_height),
+                model,
+            )
         } else {
             *wind_vector
         };
@@ -10081,10 +10091,10 @@ mod effective_drag_coefficient_tests {
 mod boundary_layer_shear_height_tests {
     //! Boundary-layer shear keys off the bullet's height above the GROUND. `TrajectorySolver`
     //! measures y from the level `muzzle_height` is measured from and integrates an inclined
-    //! shot in the shot frame, so the shear height is the point's world height above y = 0 plus
-    //! the height of y = 0 above the ground: nothing when `muzzle_height` is set (y = 0 is the
-    //! ground it was measured from), the assumed 1.5 m bore height when it is left at 0 (y = 0
-    //! is the bore).
+    //! shot in the shot frame, whose ground runs parallel to the line of sight (the plane its
+    //! ground_threshold check uses), so the shear height is the shot-frame y plus the height of
+    //! y = 0 above the ground: nothing when `muzzle_height` is set (y = 0 is the ground it was
+    //! measured from), the assumed 1.5 m bore height when it is left at 0 (y = 0 is the bore).
     use super::*;
 
     const MODELS: [&str; 2] = ["logarithmic", "power_law"];
@@ -10168,27 +10178,141 @@ mod boundary_layer_shear_height_tests {
         }
     }
 
-    /// (b) On an inclined shot the shear height is the point's world height above y = 0,
-    /// x·sin θ + y·cos θ, not the shot-frame y (perpendicular to the line of fire). The fast
-    /// kernel reads the same multiplier at the same point:
-    /// `fast_trajectory::tests::inclined_fast_shear_uses_world_height_like_the_full_solver`
-    /// pins it on this fixture.
+    /// (b) On an inclined shot the shear height is the shot-frame y plus the height of y = 0
+    /// above the ground: the ground runs parallel to the line of sight, as it does for the
+    /// ground_threshold check, so the shooting angle does not enter. The world height above
+    /// the shooter's level, x·sin θ + y·cos θ, would read this point as hundreds of metres up
+    /// on the uphill shot and below the ground on the downhill one. The fast kernel and the
+    /// RK45 kernel read the same multiplier at the same point:
+    /// `fast_trajectory::tests::inclined_fast_shear_measures_height_along_the_line_of_sight`
+    /// and `trajectory_integration::tests::inclined_kernel_shear_measures_height_along_the_line_of_sight`
+    /// pin it on this fixture.
     #[test]
-    fn inclined_solver_shear_uses_world_height_like_the_fast_kernel() {
-        let (angle, x, y) = (0.3_f64, 800.0, 20.0);
-        let world_height = crate::atmosphere::shot_frame_altitude(0.0, x, y, angle);
-        for model in MODELS {
-            // muzzle_height 0: y = 0 is the bore, 1.5 m up, which is the public function's
-            // height-relative-to-launch reading.
-            let bore_frame = ratio_rel_launch(world_height, model);
-            // muzzle_height 1.5 m: y = 0 is the ground.
-            let ground_frame = ratio_rel_launch(world_height - 1.5, model);
-            assert!(
-                bore_frame > 1.3 && ground_frame > 1.3,
-                "{model}: fixture too low"
-            );
-            assert_solver_shear_ratio(model, 0.0, angle, Vector3::new(x, y, 0.0), bore_frame);
-            assert_solver_shear_ratio(model, 1.5, angle, Vector3::new(x, y, 0.0), ground_frame);
+    fn inclined_solver_shear_measures_height_along_the_line_of_sight() {
+        let (x, y) = (800.0, 60.0);
+        for angle in [0.3_f64, -0.3] {
+            let world_height = crate::atmosphere::shot_frame_altitude(0.0, x, y, angle);
+            for model in MODELS {
+                // muzzle_height 0: y = 0 is the bore, taken as 1.5 m up, which is the public
+                // function's height-relative-to-launch reading.
+                let bore_frame = ratio_rel_launch(y, model);
+                // muzzle_height 1.5 m: y = 0 is the ground.
+                let ground_frame = ratio_rel_launch(y - 1.5, model);
+                assert!(
+                    bore_frame > 1.25 && ground_frame > 1.25,
+                    "{model}: fixture too low"
+                );
+                assert!(
+                    (ratio_rel_launch(world_height, model) - bore_frame).abs() > 0.1,
+                    "{model}, angle {angle}: the fixture must tell the world height apart"
+                );
+                assert_solver_shear_ratio(model, 0.0, angle, Vector3::new(x, y, 0.0), bore_frame);
+                assert_solver_shear_ratio(model, 1.5, angle, Vector3::new(x, y, 0.0), ground_frame);
+            }
         }
+    }
+
+    fn solve_end(inputs: BallisticInputs, max_range: f64) -> (Vector3<f64>, f64) {
+        let mut solver = TrajectorySolver::new(
+            inputs,
+            WindConditions {
+                speed: 10.0,
+                direction: std::f64::consts::FRAC_PI_2,
+                vertical_speed: 0.0,
+            },
+            AtmosphericConditions::default(),
+        );
+        solver.set_max_range(max_range);
+        let result = solver.solve().unwrap();
+        let peak_y = result
+            .points
+            .iter()
+            .map(|p| p.position.y)
+            .fold(f64::NEG_INFINITY, f64::max);
+        (result.points.last().unwrap().position, peak_y)
+    }
+
+    /// A flat shot fired up or down a slope stays within a few metres of the ground running
+    /// along its line of sight, below the 10 m reference height, so shear on must leave it
+    /// exactly where shear off does. Read against level ground at the shooter's elevation, the
+    /// 15° uphill shot climbed into wind nearly 50% stronger by 600 m (155 m up).
+    #[test]
+    fn inclined_flat_fire_keeps_the_operative_wind_with_shear_on() {
+        for shooting_angle in [15.0_f64.to_radians(), (-10.0_f64).to_radians()] {
+            let inputs = BallisticInputs {
+                muzzle_height: 1.5,
+                muzzle_angle: 0.002,
+                shooting_angle,
+                bc_type: DragModel::G7,
+                ..BallisticInputs::default()
+            };
+            let (off, peak_y) = solve_end(inputs.clone(), 600.0);
+            assert!(
+                peak_y < 8.0 && off.z.abs() > 0.5,
+                "the fixture must stay low and drift: peak y {peak_y} m, drift {} m",
+                off.z
+            );
+            for model in MODELS {
+                let (on, _) = solve_end(
+                    BallisticInputs {
+                        enable_wind_shear: true,
+                        wind_shear_model: model.to_string(),
+                        ..inputs.clone()
+                    },
+                    600.0,
+                );
+                assert_eq!(
+                    (on.x.to_bits(), on.y.to_bits(), on.z.to_bits()),
+                    (off.x.to_bits(), off.y.to_bits(), off.z.to_bits()),
+                    "{model}, shooting angle {shooting_angle} rad: shear moved a flat shot \
+                     ({on:?} vs {off:?})"
+                );
+            }
+        }
+    }
+
+    /// `wind_shear_model` `"none"` is no shear, as it is for `fast_integrate`, the RK45 kernel
+    /// and `get_wind_at_position`, even with `enable_wind_shear` set (the CLI's
+    /// `--enable-wind-shear --wind-shear-model none`). It used to fall into the unknown-name
+    /// fallback and apply the power law.
+    #[test]
+    fn model_none_applies_no_shear_with_the_flag_set() {
+        let inputs = BallisticInputs {
+            muzzle_height: 1.5,
+            muzzle_angle: 0.12,
+            bc_type: DragModel::G7,
+            ..BallisticInputs::default()
+        };
+        let (off, peak_y) = solve_end(inputs.clone(), 1_000.0);
+        assert!(
+            peak_y > 100.0,
+            "the fixture must be lofted: peak y {peak_y} m"
+        );
+        let with_model = |model: &str| {
+            solve_end(
+                BallisticInputs {
+                    enable_wind_shear: true,
+                    wind_shear_model: model.to_string(),
+                    ..inputs.clone()
+                },
+                1_000.0,
+            )
+            .0
+        };
+        let none = with_model("none");
+        assert_eq!(
+            (none.x.to_bits(), none.y.to_bits(), none.z.to_bits()),
+            (off.x.to_bits(), off.y.to_bits(), off.z.to_bits()),
+            "model none moved the shot: {none:?} vs shear off {off:?}"
+        );
+        let power_law = with_model("power_law");
+        assert!(
+            (power_law.z - off.z).abs() > 0.05,
+            "the fixture must show shear: power law {} m vs off {} m",
+            power_law.z,
+            off.z
+        );
+        // An unrecognized name keeps the historical power-law fallback.
+        assert_eq!(with_model("typo").z.to_bits(), power_law.z.to_bits());
     }
 }

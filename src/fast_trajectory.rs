@@ -808,17 +808,14 @@ fn compute_derivatives_with_gravity(
     let vel = Vector3::new(state[3], state[4], state[5]);
 
     // Resolve the cached downrange wind in level axes, then apply boundary-layer shear at the
-    // height above the ground: the world height above y = 0, plus 0 when the launch state's y is
-    // measured from the ground (`muzzle_height` set) or the assumed bore height when y = 0 is
-    // the bore (`muzzle_height` 0). Site elevation is MSL and intentionally does not enter shear.
+    // height above the ground: the shot-frame y, plus 0 when the launch state's y is measured
+    // from the ground (`muzzle_height` set) or the assumed bore height when y = 0 is the bore
+    // (`muzzle_height` 0). The ground is the one the ground_threshold check uses, parallel to the
+    // line of sight, so the shooting angle does not enter. Site elevation is MSL and
+    // intentionally does not enter shear.
     let level_wind = wind_sock.vector_for_range_stateless(pos.x);
     let level_wind = if let Some(model) = wind_shear_model {
-        let height_agl = crate::wind_shear::shear_height_agl_m(
-            pos.x,
-            pos.y,
-            inputs.shooting_angle,
-            inputs.muzzle_height,
-        );
+        let height_agl = crate::wind_shear::shear_height_agl_m(pos.y, inputs.muzzle_height);
         crate::wind_shear::apply_boundary_layer_shear_agl(level_wind, height_agl, model)
     } else {
         level_wind
@@ -1812,23 +1809,103 @@ mod tests {
         }
     }
 
-    /// On an inclined shot the shear height is the point's world height above y = 0 plus the
-    /// height of y = 0 above the ground, exactly as `TrajectorySolver` reads it on the same
-    /// fixture (`cli_api::boundary_layer_shear_height_tests::
-    /// inclined_solver_shear_uses_world_height_like_the_fast_kernel`).
+    /// On an inclined shot the shear height is the shot-frame y plus the height of y = 0 above
+    /// the ground, the ground running parallel to the line of sight as it does for the
+    /// ground_threshold check, exactly as `TrajectorySolver` reads it on the same fixture
+    /// (`cli_api::boundary_layer_shear_height_tests::
+    /// inclined_solver_shear_measures_height_along_the_line_of_sight`). This kernel used to take
+    /// the world height above the shooter's level, x·sin θ + y·cos θ.
     #[test]
-    fn inclined_fast_shear_uses_world_height_like_the_full_solver() {
-        let (angle, x, y) = (0.3_f64, 800.0, 20.0);
-        let world_height = crate::atmosphere::shot_frame_altitude(0.0, x, y, angle);
-        for model in ["logarithmic", "power_law"] {
-            let bore_frame = shear_ratio_rel_launch(world_height, model);
-            let ground_frame = shear_ratio_rel_launch(world_height - 1.5, model);
-            assert!(
-                bore_frame > 1.3 && ground_frame > 1.3,
-                "{model}: fixture too low"
-            );
-            assert_fast_shear_ratio(model, 0.0, angle, (x, y), bore_frame);
-            assert_fast_shear_ratio(model, 1.5, angle, (x, y), ground_frame);
+    fn inclined_fast_shear_measures_height_along_the_line_of_sight() {
+        let (x, y) = (800.0, 60.0);
+        for angle in [0.3_f64, -0.3] {
+            let world_height = crate::atmosphere::shot_frame_altitude(0.0, x, y, angle);
+            for model in ["logarithmic", "power_law"] {
+                let bore_frame = shear_ratio_rel_launch(y, model);
+                let ground_frame = shear_ratio_rel_launch(y - 1.5, model);
+                assert!(
+                    bore_frame > 1.25 && ground_frame > 1.25,
+                    "{model}: fixture too low"
+                );
+                assert!(
+                    (shear_ratio_rel_launch(world_height, model) - bore_frame).abs() > 0.1,
+                    "{model}, angle {angle}: the fixture must tell the world height apart"
+                );
+                assert_fast_shear_ratio(model, 0.0, angle, (x, y), bore_frame);
+                assert_fast_shear_ratio(model, 1.5, angle, (x, y), ground_frame);
+            }
+        }
+    }
+
+    /// A flat shot fired up or down a slope stays within a few metres of the ground along its
+    /// line of sight, below the 10 m reference height, so shear on must leave it where shear
+    /// off does through both fast entry points. Read against level ground at the shooter's
+    /// elevation, the 15° uphill shot climbed into wind nearly 50% stronger by 600 m.
+    #[test]
+    fn inclined_flat_fast_fire_keeps_the_operative_wind_with_shear_on() {
+        let run = |shooting_angle: f64, model: Option<&str>, segmented: bool| {
+            let inputs = BallisticInputs {
+                muzzle_velocity: 800.0,
+                bc_value: 0.5,
+                bc_type: DragModel::G7,
+                bullet_mass: 168.0 * crate::constants::GRAINS_TO_KG,
+                bullet_diameter: 0.308 * 0.0254,
+                muzzle_height: 1.5,
+                shooting_angle,
+                enable_wind_shear: model.is_some(),
+                wind_shear_model: model.unwrap_or("none").to_string(),
+                ground_threshold: -1_000.0,
+                ..BallisticInputs::default()
+            };
+            let elevation = 0.002_f64;
+            let params = FastIntegrationParams {
+                horiz: 600.0,
+                vert: 1.5,
+                initial_state: [
+                    0.0,
+                    1.5,
+                    0.0,
+                    inputs.muzzle_velocity * elevation.cos(),
+                    inputs.muzzle_velocity * elevation.sin(),
+                    0.0,
+                ],
+                t_span: (0.0, 3.0),
+                atmo_params: (1.225, 340.0, 0.0, 0.0),
+                atmo_sock: None,
+            };
+            let wind = vec![crate::wind::WindSegment::new(36.0, 90.0, 2_000.0)];
+            let solution = if segmented {
+                fast_integrate_with_segments(&inputs, wind, params)
+            } else {
+                fast_integrate(&inputs, &WindSock::new(wind), params)
+            };
+            assert!(solution.success);
+            let last = solution.t.len() - 1;
+            let peak_y = solution.y[1]
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max);
+            (solution.y[2][last], peak_y)
+        };
+
+        for segmented in [false, true] {
+            for shooting_angle in [15.0_f64.to_radians(), (-10.0_f64).to_radians()] {
+                let (off, peak_y) = run(shooting_angle, None, segmented);
+                assert!(
+                    peak_y < 8.0 && off.abs() > 0.5,
+                    "the fixture must stay low and drift: peak y {peak_y} m, drift {off} m"
+                );
+                for model in ["logarithmic", "power_law"] {
+                    let (on, _) = run(shooting_angle, Some(model), segmented);
+                    // The RK45 kernel takes smaller steps with shear on, so allow for its
+                    // integration tolerance; level ground would move this drift by tens of %.
+                    assert!(
+                        (on - off).abs() <= 1e-4 * off.abs(),
+                        "segmented={segmented}, {model}, shooting angle {shooting_angle} rad: \
+                         shear moved a flat shot ({on} m vs {off} m)"
+                    );
+                }
+            }
         }
     }
 

@@ -813,12 +813,15 @@ the ratio is exactly 1.0, which means an ordinary flat-fire solve is unaffected 
 shear becomes visible on lofted, high-angle, and ELR trajectories that climb well clear of it.
 
 The height driving the profile is height above the *ground*, not above sea level: the projectile's
-world-vertical height above the ground reference `rifle.muzzle_height_m` is measured from. When
+height above the ground reference `rifle.muzzle_height_m` is measured from. When
 `rifle.muzzle_height_m` is omitted or `0` the bore's real height is unknown, so the bore is taken
-to be 1.5 m above the ground. On an inclined shot the height is world-vertical, not measured
-perpendicular to the line of fire. `atmosphere.altitude_m` is deliberately not an input to it:
-boundary-layer shear is relative to the local ground, and altitude's effect on the shot is air
-density, which `atmosphere.altitude_m` already carries.
+to be 1.5 m above the ground. On an inclined shot the ground is taken to run along the line of
+sight, as it does between a shooter and a target both standing on a slope and as
+`shot.ground_threshold_m` already assumes, so the height is measured perpendicular to the line of
+fire. That differs from `summary.maximum_height_m`, which reports a world-vertical height.
+`atmosphere.altitude_m` is deliberately not an input to it: boundary-layer shear is relative to
+the local ground, and altitude's effect on the shot is air density, which `atmosphere.altitude_m`
+already carries.
 
 | Value | Meaning |
 | --- | --- |

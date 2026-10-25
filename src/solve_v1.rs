@@ -686,14 +686,13 @@ pub(crate) fn prepare_request(
         use_enhanced_spin_drift: resolved_request.effects.enhanced_spin_drift,
         use_form_factor: false,
         // Altitude-dependent wind shear (0.36.0). `enable_wind_shear` is derived from the
-        // model rather than carried as its own request flag: `cli_api`'s shear branch maps
-        // any name it does not recognize -- `"none"` included -- to the power law, so an
-        // "enabled, model none" pair would silently run power-law shear. One field cannot
-        // express that state.
+        // model rather than carried as its own request flag, so a request cannot express an
+        // "enabled, model none" pair: `cli_api`'s shear branch once ran power-law shear for
+        // it, and still maps any name it does not recognize to the power law.
         //
         // No shooter altitude is passed, and none exists to pass: this solve path runs on
         // `TrajectorySolver`, whose `get_wind_at_altitude` keys the boundary-layer profile off
-        // height above the GROUND (the world height above y = 0, which is the ground
+        // height above the GROUND (the shot-frame y above y = 0, which is the ground
         // `rifle.muzzle_height_m` is measured from, or the bore taken as 1.5 m up when that is
         // left at 0), and `wind_shear::get_wind_at_position`, which does take a
         // `shooter_altitude_m`, discards it for the same reason. Shear is relative to

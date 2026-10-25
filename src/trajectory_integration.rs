@@ -289,10 +289,10 @@ pub struct TrajectoryParams {
     pub enable_magnus: bool,
     pub enable_coriolis: bool,
     pub target_distance_m: f64, // Target horizontal distance in meters
-    /// Boundary-layer wind shear. Its height above the ground is the point's world height
-    /// (this kernel integrates in the shot frame) with y = 0 at the launch point, taken as 1.5 m
-    /// above the ground. `fast_integrate_with_segments` instead measures y from its inputs'
-    /// `muzzle_height` datum.
+    /// Boundary-layer wind shear. Its height above the ground is the shot-frame y (the ground
+    /// runs parallel to the line of sight, as for `ground_threshold`) with y = 0 at the launch
+    /// point, taken as 1.5 m above the ground. `fast_integrate_with_segments` instead measures y
+    /// from its inputs' `muzzle_height` datum.
     pub enable_wind_shear: bool,
     pub wind_shear_model: String,
     /// Site elevation above sea level, kept for API compatibility: nothing in this kernel reads
@@ -469,22 +469,17 @@ fn compute_derivatives_vec_with_gravity(
     let vel = Vector3::new(state[3], state[4], state[5]);
 
     // Calculate wind at current position with shear support. Boundary-layer shear reads the
-    // height above the ground: the point's world height above y = 0 (this kernel integrates in
-    // the shot frame), plus 0 when y is measured from the ground the caller's `muzzle_height`
-    // was measured from, or the assumed bore height when y = 0 is the launch point
-    // (`inputs.muzzle_height` 0, which every direct TrajectoryParams caller gets; see
-    // integrate_trajectory_with_gravity). Site elevation (`shooter_altitude_m`) is MSL and does
-    // not enter shear.
+    // height above the ground: the shot-frame y, plus 0 when y is measured from the ground the
+    // caller's `muzzle_height` was measured from, or the assumed bore height when y = 0 is the
+    // launch point (`inputs.muzzle_height` 0, which every direct TrajectoryParams caller gets;
+    // see integrate_trajectory_with_gravity). The ground is the one the ground_threshold check
+    // uses, parallel to the line of sight, so the shooting angle does not enter. Site elevation
+    // (`shooter_altitude_m`) is MSL and does not enter shear.
     let wind_vector = if !params.wind_segments.is_empty() {
         if params.enable_wind_shear && params.wind_shear_model != "none" {
             crate::wind_shear::apply_boundary_layer_shear_agl(
                 wind_vector_for_range(pos.x, &params.wind_segments),
-                crate::wind_shear::shear_height_agl_m(
-                    pos.x,
-                    pos.y,
-                    params.shooting_angle,
-                    inputs.muzzle_height,
-                ),
+                crate::wind_shear::shear_height_agl_m(pos.y, inputs.muzzle_height),
                 crate::wind_shear::boundary_layer_model_from_name(&params.wind_shear_model),
             )
         } else {
@@ -1824,21 +1819,29 @@ mod tests {
         }
     }
 
-    /// On an inclined shot this kernel works in the shot frame like the other two, so its
-    /// shear height is the point's world height, x·sin θ + y·cos θ, not the shot-frame y.
+    /// On an inclined shot this kernel works in the shot frame like the other two, so its shear
+    /// height is the shot-frame y plus the height of y = 0 above the ground, the ground running
+    /// parallel to the line of sight as it does for the ground_threshold check, not the world
+    /// height above the shooter's level, x·sin θ + y·cos θ.
     #[test]
-    fn inclined_kernel_shear_uses_world_height() {
-        let (angle, x, y) = (0.3_f64, 800.0, 20.0);
-        let world_height = crate::atmosphere::shot_frame_altitude(0.0, x, y, angle);
-        for model in ["logarithmic", "power_law"] {
-            let bore_frame = shear_ratio_rel_launch(world_height, model);
-            let ground_frame = shear_ratio_rel_launch(world_height - 1.5, model);
-            assert!(
-                bore_frame > 1.3 && ground_frame > 1.3,
-                "{model}: fixture too low"
-            );
-            assert_kernel_shear_ratio(model, 0.0, angle, (x, y), bore_frame);
-            assert_kernel_shear_ratio(model, 1.5, angle, (x, y), ground_frame);
+    fn inclined_kernel_shear_measures_height_along_the_line_of_sight() {
+        let (x, y) = (800.0, 60.0);
+        for angle in [0.3_f64, -0.3] {
+            let world_height = crate::atmosphere::shot_frame_altitude(0.0, x, y, angle);
+            for model in ["logarithmic", "power_law"] {
+                let bore_frame = shear_ratio_rel_launch(y, model);
+                let ground_frame = shear_ratio_rel_launch(y - 1.5, model);
+                assert!(
+                    bore_frame > 1.25 && ground_frame > 1.25,
+                    "{model}: fixture too low"
+                );
+                assert!(
+                    (shear_ratio_rel_launch(world_height, model) - bore_frame).abs() > 0.1,
+                    "{model}, angle {angle}: the fixture must tell the world height apart"
+                );
+                assert_kernel_shear_ratio(model, 0.0, angle, (x, y), bore_frame);
+                assert_kernel_shear_ratio(model, 1.5, angle, (x, y), ground_frame);
+            }
         }
     }
 }

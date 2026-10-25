@@ -356,13 +356,11 @@ fn convert_inputs(inputs: &FFIBallisticInputs) -> BallisticInputs {
     // New advanced physics flags
     ballistic_inputs.enable_wind_shear = inputs.enable_wind_shear != 0;
     // FFIBallisticInputs carries no model name, so a C ABI caller asking for shear
-    // would otherwise inherit BallisticInputs' default "none" — and the two solvers
-    // read that oppositely. TrajectorySolver::get_wind_at_altitude falls unknown
-    // names onto PowerLaw, so the trajectory path has always applied the power law;
-    // fast_integrate resolves them through boundary_layer_model_from_name to
-    // WindShearModel::None and then drops the model entirely, so the Monte Carlo
-    // path applied NOTHING and the caller's flag was silently inert. Name the
-    // profile the trajectory path already used, so both agree.
+    // would otherwise inherit BallisticInputs' default "none", which every solver now
+    // reads as no shear: the flag would be silently inert. (TrajectorySolver used to
+    // fall "none" onto the power law while fast_integrate dropped it, so the
+    // trajectory path applied the power law and the Monte Carlo path nothing.) Name
+    // the profile the trajectory path always applied, so both apply it.
     if ballistic_inputs.enable_wind_shear {
         ballistic_inputs.wind_shear_model = "power_law".to_string();
     }
@@ -1603,12 +1601,12 @@ mod tests {
     ///
     /// `FFIBallisticInputs` carries no model name, so a caller that set the flag
     /// used to inherit `BallisticInputs`' default `"none"` — and the two solvers
-    /// read that oppositely. `TrajectorySolver::get_wind_at_altitude` falls
-    /// unknown names onto `PowerLaw`, so the trajectory path always applied the
-    /// power law; `fast_integrate` resolves them to `WindShearModel::None` and
-    /// then drops the model, so the Monte Carlo path applied nothing at all and
-    /// the flag was silently inert. The assertion that matters is the second one:
-    /// the name has to be one the fast path KEEPS.
+    /// read that oppositely. `TrajectorySolver` fell `"none"` onto `PowerLaw`, so
+    /// the trajectory path always applied the power law; `fast_integrate`
+    /// resolves it to `WindShearModel::None` and then drops the model, so the
+    /// Monte Carlo path applied nothing at all and the flag was silently inert.
+    /// Both now read `"none"` as no shear. The assertion that matters is the
+    /// second one: the name has to be one the fast path KEEPS.
     #[test]
     fn asking_for_shear_over_the_c_abi_names_a_profile_the_fast_path_keeps() {
         let mut inputs = valid_trajectory_inputs();

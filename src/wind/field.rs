@@ -74,7 +74,10 @@ impl WindField for ConstantField {
 ///   sounding takes `+` the `AtmosphericConditions::altitude`, where the solver's own air puts
 ///   y = 0. On an inclined shot the solver works in the shot frame, where y is not a height:
 ///   convert a position to the level frame first (its height is x·sin θ + y·cos θ for the
-///   shooting angle θ) and rotate the returned wind into the shot frame.
+///   shooting angle θ) and rotate the returned wind into the shot frame. A ground-relative
+///   profile read that way takes the ground as level through y = 0; the solver's built-in
+///   boundary-layer shear (`enable_wind_shear`) takes it along the line of sight instead, as
+///   its `ground_threshold` check does (see [`crate::wind_shear`]).
 ///
 /// Elevations are those of the place the positions are, not of the station that measured a
 /// sounding.

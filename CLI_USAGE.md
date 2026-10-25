@@ -1630,11 +1630,14 @@ matters for the scalar `--wind-speed`/`--wind-vertical` + `--enable-wind-shear`
 combination.)
 
 **Shear height.** The logarithmic and power-law models key off the bullet's height above the
-ground: its world-vertical height above the ground `--bore-height` is measured from (with
-`--bore-height 0` the bore is taken to be 1.5 m up). The multiplier is 1.0 below the 10 m
-reference height, so flat fire is unaffected. On an inclined shot the height is world-vertical
-with the ground level at the shooter's elevation, so an uphill shot climbs into stronger wind
-and the part of a downhill shot below the shooter's level gets none.
+ground `--bore-height` is measured from (with `--bore-height 0` the bore is taken to be 1.5 m
+up). The multiplier is 1.0 below the 10 m reference height, so flat fire is unaffected. On an
+inclined shot (`--shooting-angle`) the ground is taken to run along the line of sight, as it
+does between a shooter and a target both standing on a slope, and as ground-impact detection
+already assumes: the height is measured perpendicular to the line of sight, so a flat shot up
+or down a hill keeps the wind you entered and only the arc above the line of sight sees more.
+
+`--wind-shear-model none` applies no shear even with `--enable-wind-shear`.
 
 **Precedence.** `--wind-segment`, when given, overrides the scalar wind entirely —
 including `--wind-vertical`. Once segments are set, each segment's own 4th field is the
