@@ -15,8 +15,6 @@
 //! - FFI bindings for iOS and Android development
 
 // Re-export the main types and functions
-mod gravity;
-
 pub use atmosphere::{AtmoSegment, AtmoSock};
 pub use cli_api::{
     calculate_zero_angle, calculate_zero_angle_with_conditions,
@@ -55,6 +53,7 @@ pub mod cli_api;
 // recommendation, shared by native and WASM front ends. Pure table math; no filesystem I/O.
 pub mod bc_conversion;
 mod drag_model;
+mod gravity;
 pub mod moving_target;
 // The C ABI. Gated behind the default-on `ffi` feature so a binary that links two versions of
 // this crate can disable it on one edge and avoid duplicate #[no_mangle] symbols.

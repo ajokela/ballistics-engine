@@ -1033,16 +1033,12 @@ cargo doc --open
 
 ## Library Usage
 
-Public Rust functions, CLI/JSON commands, FFI, and WASM use standard Earth gravity
-(9.80665 m/s²). Internally, uniform gravity is an immutable per-simulation value;
-the integration kernels accept it explicitly, including zero gravity. No public
-gravity option or input-schema change is introduced.
-
-Gravity is independent of the selected environmental models. ICAO reference tables,
-geopotential-height conversion, Earth rotation, and empirical aerodynamic calibrations
-retain their existing definitions. Changing internal gravity alone does not create a
-complete model of another planet. Local hydrostatic pressure evolution uses the
-simulation's gravity with the existing atmosphere model's prescribed lapse rates.
+Every public entry point (Rust functions, CLI and JSON commands, FFI and WASM) uses
+standard Earth gravity, 9.80665 m/s²; there is no gravity setting. Internally the
+integration kernels take gravity as a per-simulation value rather than a built-in
+constant, and the local hydrostatic pressure evolution uses that value. The ICAO
+reference tables, geopotential-height conversion, Earth rotation and the empirical
+aerodynamic calibrations are Earth models whatever that value is.
 
 Use as a Rust library in your own projects:
 

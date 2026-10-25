@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unusually high pressure and modelled the placeholder habit that silently stops the altitude
   from mattering. It now sends 98500 Pa and 291.15 K, and the doc says to omit `pressure_pa` and
   `temperature_k` when there is no reading. Documentation only; the engine is unchanged.
+- **Gravity is an internal per-simulation value.** The integration kernels take uniform
+  gravity as an explicit, immutable per-simulation value instead of reading the 9.80665 m/s²
+  constant, and the local atmosphere and the Magnus yaw of repose use that same value; zero
+  is valid. Every public entry point still selects standard Earth gravity, there is no
+  public gravity option, signature or schema change, and Earth output is byte-identical: 114
+  CLI and solve-json runs match the 0.48.0 code exactly. The ICAO tables, geopotential
+  conversion, Earth rotation and the empirical aerodynamic calibrations remain Earth models.
 
 ## [0.48.0] - 2026-10-20
 
