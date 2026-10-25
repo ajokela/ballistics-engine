@@ -27,7 +27,11 @@
 //! [`ProfileField`] uses whatever datum its levels' altitudes use. [`LogProfile`] and
 //! [`EkmanProfile`] need the height above the ground; this crate's trajectory frame puts y = 0
 //! at the muzzle, so a caller passing trajectory positions adds the muzzle's height above the
-//! ground. Constructors validate their inputs and return a typed [`WindFieldError`].
+//! ground. [`HeightOffset`] puts any field on the caller's datum by reading it a fixed height
+//! higher: a sounding in metres above sea level read from a launch frame takes the launch
+//! site's elevation; a log or Ekman profile read from the trajectory frame takes the muzzle's
+//! height above the ground. Constructors validate their inputs and return a typed
+//! [`WindFieldError`].
 //!
 //! ```
 //! use ballistics_engine::wind::{ProfileField, ProfileLevel, WindField};
@@ -51,8 +55,8 @@ use thiserror::Error;
 mod field;
 
 pub use field::{
-    ConstantField, EkmanProfile, LogProfile, ProfileField, ProfileLevel, WindField, WindFieldError,
-    WindFieldParam, WindFieldRule,
+    ConstantField, EkmanProfile, HeightOffset, LogProfile, ProfileField, ProfileLevel, WindField,
+    WindFieldError, WindFieldParam, WindFieldRule,
 };
 
 /// Conversion constant from KMH to MPS

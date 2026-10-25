@@ -17,8 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `vector_for_range_stateless(position.x)`. Directions use the module's wind-FROM convention
   (0° headwind, 90° from the right), and every profile level gives exactly the vector
   `wind_vector` gives for its speed and direction. `LogProfile` and `EkmanProfile` take the
-  height above the ground; `ProfileField` uses its levels' datum. Constructors return a typed
-  `WindFieldError`.
+  height above the ground; `ProfileField` uses its levels' datum. `HeightOffset` reads any
+  field a fixed height higher, so two datums meet in one place: a sounding in metres above sea
+  level read from a launch frame takes the site elevation, and a log or Ekman profile read from
+  the trajectory frame takes the muzzle height. Constructors return a typed `WindFieldError`.
   Purely additive: `WindSegment`, `WindSock`, `wind_vector` and every other existing API are
   unchanged. Design record: [docs/WIND_FIELD_MODELING.md](docs/WIND_FIELD_MODELING.md).
 

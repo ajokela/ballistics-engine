@@ -55,6 +55,61 @@ impl WindField for ConstantField {
     }
 }
 
+/// Puts a field on the caller's vertical datum: `wind(t, p)` is the inner field's wind at
+/// `p.y + offset_m`, with time and the horizontal position unchanged.
+///
+/// Use it wherever two height references meet, so the conversion is written once:
+/// - a radiosonde [`ProfileField`] in metres above sea level, read from a frame whose y = 0 is
+///   a launch site at elevation `E`: offset `+E`;
+/// - a [`LogProfile`] or [`EkmanProfile`] (height above the ground), read from this crate's
+///   trajectory frame, whose y = 0 is the muzzle: offset `+` the muzzle's height above the
+///   ground.
+///
+/// Use the elevation of the site where the positions are, not of the station that measured
+/// the sounding.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HeightOffset<F> {
+    field: F,
+    offset_m: f64,
+}
+
+impl<F> HeightOffset<F> {
+    /// Wrap `field` so it is read `offset_m` metres higher. The offset must be finite.
+    pub fn new(field: F, offset_m: f64) -> Result<Self, WindFieldError> {
+        if !offset_m.is_finite() {
+            return Err(WindFieldError::InvalidParameter {
+                param: WindFieldParam::OffsetM,
+                rule: WindFieldRule::Finite,
+            });
+        }
+        Ok(Self { field, offset_m })
+    }
+
+    /// The wrapped field.
+    pub fn field(&self) -> &F {
+        &self.field
+    }
+
+    /// The height added to every query, metres.
+    pub fn offset_m(&self) -> f64 {
+        self.offset_m
+    }
+
+    /// Unwrap the field.
+    pub fn into_inner(self) -> F {
+        self.field
+    }
+}
+
+impl<F: WindField> WindField for HeightOffset<F> {
+    fn wind(&self, time_s: f64, position_m: Vector3<f64>) -> Vector3<f64> {
+        self.field.wind(
+            time_s,
+            Vector3::new(position_m.x, position_m.y + self.offset_m, position_m.z),
+        )
+    }
+}
+
 /// One level of a vertical profile.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ProfileLevel {
@@ -447,6 +502,8 @@ pub enum WindFieldParam {
     LatitudeDeg,
     /// [`EkmanProfile`] eddy viscosity.
     EddyViscosityM2s,
+    /// [`HeightOffset`] offset.
+    OffsetM,
 }
 
 impl WindFieldParam {
@@ -462,6 +519,7 @@ impl WindFieldParam {
             WindFieldParam::GeostrophicMps => "geostrophic_mps",
             WindFieldParam::LatitudeDeg => "latitude_deg",
             WindFieldParam::EddyViscosityM2s => "eddy_viscosity_m2s",
+            WindFieldParam::OffsetM => "offset_m",
         }
     }
 }
@@ -527,7 +585,7 @@ pub enum WindFieldError {
         second_index: usize,
         altitude_m: f64,
     },
-    /// A [`LogProfile`] or [`EkmanProfile`] parameter is invalid.
+    /// A [`LogProfile`], [`EkmanProfile`] or [`HeightOffset`] parameter is invalid.
     #[error("{param} must be {rule}")]
     InvalidParameter {
         param: WindFieldParam,
@@ -1166,6 +1224,82 @@ mod tests {
             assert!((n + 45.0).abs() < 1e-3, "north z {z}: {n}");
             assert!((s - 45.0).abs() < 1e-3, "south z {z}: {s}");
         }
+    }
+
+    // ---- Height datum ----
+
+    #[test]
+    fn height_offset_reads_the_inner_field_higher() {
+        let profile =
+            ProfileField::new(vec![level(0.0, 2.0, 30.0), level(800.0, 9.0, 80.0)]).unwrap();
+        let shifted = HeightOffset::new(&profile, 250.0).unwrap();
+        for (t, x, y, z) in [
+            (0.0, 0.0, 0.0, 0.0),
+            (3.5, 120.0, 40.0, -2.0),
+            (1.0, -5.0, -300.0, 9.0),
+        ] {
+            assert_eq!(
+                shifted.wind(t, Vector3::new(x, y, z)),
+                profile.wind(t, Vector3::new(x, y + 250.0, z))
+            );
+        }
+        assert_eq!(shifted.offset_m(), 250.0);
+        assert_eq!(*shifted.field(), &profile);
+        // A zero offset is the field itself.
+        let same = HeightOffset::new(&profile, 0.0).unwrap();
+        assert_eq!(same.wind(0.0, at_height(123.0)), profile.wind_at(123.0));
+    }
+
+    #[test]
+    fn a_sea_level_sounding_matches_a_ground_frame_through_the_site_elevation() {
+        // Levels in metres above sea level, the first at the station's 287 m surface. A launch
+        // frame with y = 0 on the ground at that elevation reads the surface level at y = 0 and
+        // the 610 m level 323 m up.
+        let msl = ProfileField::new(vec![
+            level(287.0, 0.5, 120.0),
+            level(305.0, 3.0867, 125.0),
+            level(610.0, 3.6011, 145.0),
+        ])
+        .unwrap();
+        let site = HeightOffset::new(msl.clone(), 287.0).unwrap();
+        assert_eq!(site.wind(0.0, Vector3::zeros()), horizontal(0.5, 120.0));
+        assert_eq!(site.wind(0.0, at_height(323.0)), horizontal(3.6011, 145.0));
+        // Without the offset the ground frame would read the surface value up to 287 m.
+        assert_eq!(
+            msl.wind(0.0, at_height(287.0 - 1.0)),
+            horizontal(0.5, 120.0)
+        );
+        assert_ne!(msl.wind(0.0, at_height(323.0)), horizontal(3.6011, 145.0));
+    }
+
+    #[test]
+    fn a_muzzle_frame_reads_a_log_profile_at_its_height_above_ground() {
+        let log = LogProfile::new(8.0, 10.0, 0.03, 90.0).unwrap();
+        let from_muzzle = HeightOffset::new(log, 1.5).unwrap();
+        assert_eq!(from_muzzle.wind(0.0, Vector3::zeros()), log.wind_at(1.5));
+        assert!(speed(from_muzzle.wind(0.0, Vector3::zeros())) > 0.0);
+        assert_eq!(from_muzzle.into_inner(), log);
+    }
+
+    #[test]
+    fn height_offset_must_be_finite() {
+        for offset in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                HeightOffset::new(ConstantField(Vector3::zeros()), offset).unwrap_err(),
+                WindFieldError::InvalidParameter {
+                    param: WindFieldParam::OffsetM,
+                    rule: WindFieldRule::Finite
+                }
+            );
+        }
+        assert_eq!(
+            WindFieldError::InvalidParameter {
+                param: WindFieldParam::OffsetM,
+                rule: WindFieldRule::Finite
+            }
+            .to_string(),
+            "offset_m must be finite"
+        );
     }
 
     #[test]

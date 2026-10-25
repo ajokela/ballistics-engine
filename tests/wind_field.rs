@@ -2,8 +2,8 @@
 //! `WindSock` adapter and the shared direction convention.
 
 use ballistics_engine::wind::{
-    wind_vector, ConstantField, EkmanProfile, LogProfile, ProfileField, ProfileLevel, WindField,
-    WindFieldError, WindSegment, WindSock,
+    wind_vector, ConstantField, EkmanProfile, HeightOffset, LogProfile, ProfileField, ProfileLevel,
+    WindField, WindFieldError, WindSegment, WindSock,
 };
 use nalgebra::Vector3;
 use std::f64::consts::FRAC_PI_2;
@@ -65,5 +65,22 @@ fn constructors_return_typed_errors() {
     assert_eq!(
         err.to_string(),
         "latitude_deg must be finite, nonzero and strictly between -90 and 90 degrees"
+    );
+}
+
+#[test]
+fn a_launch_frame_reads_a_sea_level_profile_through_the_site_elevation() {
+    // A sounding-style profile in metres above sea level and a launch site 1609 m up.
+    let msl =
+        ProfileField::new(vec![level(1609.0, 2.0, 180.0), level(3609.0, 12.0, 270.0)]).unwrap();
+    let launch_frame: Box<dyn WindField> =
+        Box::new(HeightOffset::new(msl.clone(), 1609.0).unwrap());
+    assert_eq!(
+        launch_frame.wind(0.0, Vector3::zeros()),
+        msl.wind_at(1609.0)
+    );
+    assert_eq!(
+        launch_frame.wind(0.0, Vector3::new(0.0, 1000.0, 0.0)),
+        msl.wind_at(2609.0)
     );
 }
