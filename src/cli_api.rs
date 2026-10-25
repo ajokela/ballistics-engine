@@ -5667,6 +5667,118 @@ mod uniform_gravity_tests {
             }
         }
     }
+
+    fn match_308_inputs() -> BallisticInputs {
+        BallisticInputs {
+            muzzle_velocity: 800.0,
+            bullet_mass: 168.0 * crate::constants::GRAINS_TO_KG,
+            bullet_diameter: 0.308 * 0.0254,
+            bullet_length: 1.215 * 0.0254,
+            twist_rate: 10.0,
+            ..BallisticInputs::default()
+        }
+    }
+
+    fn station_1000_m() -> AtmosphericConditions {
+        AtmosphericConditions {
+            temperature: 15.0,
+            pressure: 1013.25,
+            humidity: 0.0,
+            altitude: 1000.0,
+        }
+    }
+
+    /// The solver's acceleration under `gravity`, minus the shot-frame gravity it adds: what is
+    /// left is drag and Magnus, the parts that read gravity through the atmosphere and the yaw
+    /// of repose.
+    fn aerodynamic_acceleration_with_gravity(
+        inputs: &BallisticInputs,
+        gravity: Gravity,
+        position: Vector3<f64>,
+        velocity: Vector3<f64>,
+    ) -> Vector3<f64> {
+        let solver = TrajectorySolver::new_with_station_atmosphere_resolution_with_gravity(
+            inputs.clone(),
+            WindConditions::default(),
+            station_1000_m(),
+            StationAtmosphereResolution::Authoritative,
+            gravity,
+        );
+        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
+        solver.calculate_acceleration(
+            &position,
+            &velocity,
+            &Vector3::zeros(),
+            (temp_c, pressure_hpa, density / 1.225),
+        ) - solver.gravity_acceleration()
+    }
+
+    #[test]
+    fn local_atmosphere_uses_the_simulation_gravity() {
+        let inputs = match_308_inputs(); // Magnus off
+        let velocity = Vector3::new(600.0, 0.0, 0.0);
+        let low_gravity = Gravity::new(3.71).unwrap();
+        let aerodynamic = |position, gravity| {
+            aerodynamic_acceleration_with_gravity(&inputs, gravity, position, velocity)
+        };
+
+        // Control: at the station there is no air column to integrate, so gravity cannot reach
+        // the density.
+        let earth = aerodynamic(Vector3::zeros(), Gravity::EARTH);
+        let low = aerodynamic(Vector3::zeros(), low_gravity);
+        assert!(
+            (earth - low).norm() < 1e-12,
+            "station-altitude drag must not depend on gravity: earth={earth:?}, low={low:?}"
+        );
+
+        // 2000 m above the station, pressure falls more slowly under weaker gravity, so the air is
+        // denser and drag is stronger.
+        let aloft = Vector3::new(0.0, 2_000.0, 0.0);
+        let earth = aerodynamic(aloft, Gravity::EARTH);
+        let low = aerodynamic(aloft, low_gravity);
+        let ratio = low.x / earth.x;
+        assert!(earth.x < 0.0, "drag must oppose flight: {earth:?}");
+        assert!(
+            ratio > 1.10 && ratio < 1.25,
+            "drag aloft must follow the simulation's hydrostatic density: low/earth={ratio}"
+        );
+    }
+
+    #[test]
+    fn magnus_yaw_of_repose_uses_the_simulation_gravity() {
+        let velocity = Vector3::new(800.0, 0.0, 0.0);
+        let low_gravity = Gravity::new(3.71).unwrap();
+        // At the station, so the density cannot depend on gravity.
+        let aerodynamic = |enable_magnus, gravity| {
+            let inputs = BallisticInputs {
+                enable_magnus,
+                ..match_308_inputs()
+            };
+            aerodynamic_acceleration_with_gravity(&inputs, gravity, Vector3::zeros(), velocity)
+        };
+
+        // Control: without Magnus the aerodynamic acceleration is the same under both gravities.
+        let earth = aerodynamic(false, Gravity::EARTH);
+        let low = aerodynamic(false, low_gravity);
+        assert!(
+            (earth - low).norm() < 1e-12,
+            "Magnus-off drag must not depend on gravity: earth={earth:?}, low={low:?}"
+        );
+
+        // Yaw of repose is proportional to g, and the Magnus force to the sine of that small yaw.
+        let earth = aerodynamic(true, Gravity::EARTH) - earth;
+        let low = aerodynamic(true, low_gravity) - low;
+        let ratio = low.y / earth.y;
+        let expected = low_gravity.magnitude() / Gravity::EARTH.magnitude();
+        assert!(
+            earth.y < 0.0,
+            "right-hand Magnus must point down: {earth:?}"
+        );
+        assert!(
+            (ratio - expected).abs() < 1e-6,
+            "Magnus must scale with the simulation's gravity: low/earth={ratio}, expected={expected}"
+        );
+    }
 }
 
 #[cfg(test)]
