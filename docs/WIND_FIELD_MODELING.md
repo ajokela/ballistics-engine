@@ -75,8 +75,11 @@ Kernel `WindField` minor release, then rockets-engine
 - `LogProfile` and `EkmanProfile` take y as height above the ground.
   `ProfileField` uses its levels' datum. `HeightOffset` is the one datum
   conversion: its offset is the height of the caller's y = 0 in the field's
-  datum. rockets-engine's y is height above sea level (its atmosphere is
-  station-referenced to sea level), so a sounding profile in metres above sea
-  level needs no conversion there, while a log or Ekman profile takes minus
-  the ground elevation. Convert in one place only.
+  datum. rockets-engine's y is altitude above sea level and its CLI's ground is
+  sea level, so a sounding profile in metres above sea level needs no
+  conversion there, while a log or Ekman profile takes minus the ground
+  elevation. This crate's `TrajectorySolver` measures y from the level
+  `muzzle_height` is measured from (the bullet starts at y = `muzzle_height`),
+  so a log or Ekman profile there takes the bore's real height above the
+  ground minus `muzzle_height`. Convert in one place only.
 

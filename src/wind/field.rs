@@ -62,13 +62,16 @@ impl WindField for ConstantField {
 /// `offset_m` is the height of the caller's y = 0 in the field's datum. Convert in one place
 /// only: wrapping twice, or also shifting a profile's levels, moves every wind by the offset
 /// again. The usual cases:
-/// - y is height above sea level, as in a frame whose atmosphere is referenced to sea level
-///   (rockets-engine's): a [`LogProfile`] or [`EkmanProfile`], which measure height from the
-///   ground, takes `-` the ground elevation. A sounding [`ProfileField`] in metres above sea
-///   level needs no wrapper there.
-/// - y = 0 is a launch site at elevation `E`: a sea-level sounding [`ProfileField`] takes `+E`.
-/// - this crate's trajectory frame, where y = 0 is the muzzle: a [`LogProfile`] or
-///   [`EkmanProfile`] takes `+` the muzzle's height above the ground.
+/// - y is height above sea level, as in rockets-engine: a [`LogProfile`] or [`EkmanProfile`],
+///   which measure height from the ground, takes `-` the ground elevation. A sounding
+///   [`ProfileField`] in metres above sea level needs no wrapper there.
+/// - y = 0 is the ground at elevation `E`: a sea-level sounding [`ProfileField`] takes `+E`.
+/// - this crate's [`TrajectorySolver`](crate::TrajectorySolver), whose y = 0 is the level
+///   `muzzle_height` is measured from (the bullet starts at y = `muzzle_height`): a
+///   [`LogProfile`] or [`EkmanProfile`] takes the bore's real height above the ground minus
+///   `muzzle_height`, which is 0 when `muzzle_height` is that real height and the real height
+///   when `muzzle_height` is left at 0, as `BallisticInputs::default()` leaves it. A sea-level
+///   sounding there takes `+` the site's `altitude` (plus that same difference).
 ///
 /// Elevations are those of the place the positions are, not of the station that measured a
 /// sounding.
@@ -242,9 +245,8 @@ impl WindField for ProfileField {
 /// Log-law boundary layer: u(z) = u_ref · ln(z/z0) / ln(z_ref/z0), z > z0;
 /// zero below z0. Constant direction with height.
 ///
-/// The field reads only the height (`position_m.y`), which must be the height above the ground.
-/// This crate's trajectory frame puts y = 0 at the muzzle, so a caller passing trajectory
-/// positions must add the muzzle's height above the ground. Vertical wind is zero.
+/// The field reads only the height (`position_m.y`), which must be the height above the ground;
+/// [`HeightOffset`] converts another frame's heights. Vertical wind is zero.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LogProfile {
     reference_speed_mps: f64,
@@ -356,10 +358,9 @@ impl WindField for LogProfile {
 /// height; the southern hemisphere mirrors this. This constant-K solution is linear near the
 /// ground, not logarithmic; [`LogProfile`] is the surface-layer model.
 ///
-/// The field reads only the height (`position_m.y`), which must be the height above the ground.
-/// This crate's trajectory frame puts y = 0 at the muzzle, so a caller passing trajectory
-/// positions must add the muzzle's height above the ground. An infinite height is the
-/// geostrophic limit. Vertical wind is zero.
+/// The field reads only the height (`position_m.y`), which must be the height above the ground;
+/// [`HeightOffset`] converts another frame's heights. An infinite height is the geostrophic
+/// limit. Vertical wind is zero.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EkmanProfile {
     geostrophic_mps: f64,
@@ -1278,12 +1279,12 @@ mod tests {
     }
 
     #[test]
-    fn a_muzzle_frame_reads_a_log_profile_at_its_height_above_ground() {
+    fn a_frame_with_y_zero_at_the_bore_reads_a_log_profile_at_the_bore_height() {
         let log = LogProfile::new(8.0, 10.0, 0.03, 90.0).unwrap();
-        let from_muzzle = HeightOffset::new(log, 1.5).unwrap();
-        assert_eq!(from_muzzle.wind(0.0, Vector3::zeros()), log.wind_at(1.5));
-        assert!(speed(from_muzzle.wind(0.0, Vector3::zeros())) > 0.0);
-        assert_eq!(from_muzzle.into_inner(), log);
+        let from_bore = HeightOffset::new(log, 1.5).unwrap();
+        assert_eq!(from_bore.wind(0.0, Vector3::zeros()), log.wind_at(1.5));
+        assert!(speed(from_bore.wind(0.0, Vector3::zeros())) > 0.0);
+        assert_eq!(from_bore.into_inner(), log);
     }
 
     #[test]

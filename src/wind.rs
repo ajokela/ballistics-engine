@@ -25,14 +25,14 @@
 //!
 //! The profile fields read only the height (`position_m.y`) and have no vertical wind.
 //! [`ProfileField`] uses whatever datum its levels' altitudes use. [`LogProfile`] and
-//! [`EkmanProfile`] need the height above the ground; this crate's trajectory frame puts y = 0
-//! at the muzzle, so a caller passing trajectory positions adds the muzzle's height above the
-//! ground. [`HeightOffset`] reads any field at a shifted height; its offset is the height of the
-//! caller's y = 0 in the field's datum. In a frame whose y is height above sea level, a log or
-//! Ekman profile takes minus the ground elevation and a sea-level sounding needs no offset; in
-//! the trajectory frame a log or Ekman profile takes the muzzle's height above the ground.
-//! Convert in one place only. Constructors validate their inputs and return a typed
-//! [`WindFieldError`].
+//! [`EkmanProfile`] need the height above the ground. [`HeightOffset`] reads any field at a
+//! shifted height; its offset is the height of the caller's y = 0 in the field's datum. In a
+//! frame whose y is height above sea level, a log or Ekman profile takes minus the ground
+//! elevation and a sea-level sounding needs no offset.
+//! [`TrajectorySolver`](crate::TrajectorySolver) measures y from the level `muzzle_height` is
+//! measured from, so a log or Ekman profile takes the bore's real height above the ground minus
+//! `muzzle_height`: nothing when `muzzle_height` is the real bore height. Convert in one place
+//! only. Constructors validate their inputs and return a typed [`WindFieldError`].
 //!
 //! ```
 //! use ballistics_engine::wind::{ProfileField, ProfileLevel, WindField};

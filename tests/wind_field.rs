@@ -5,6 +5,7 @@ use ballistics_engine::wind::{
     wind_vector, ConstantField, EkmanProfile, HeightOffset, LogProfile, ProfileField, ProfileLevel,
     WindField, WindFieldError, WindSegment, WindSock,
 };
+use ballistics_engine::{AtmosphericConditions, BallisticInputs, TrajectorySolver, WindConditions};
 use nalgebra::Vector3;
 use std::f64::consts::FRAC_PI_2;
 
@@ -82,5 +83,49 @@ fn a_launch_frame_reads_a_sea_level_profile_through_the_site_elevation() {
     assert_eq!(
         launch_frame.wind(0.0, Vector3::new(0.0, 1000.0, 0.0)),
         msl.wind_at(2609.0)
+    );
+}
+
+/// The height of the first trajectory point for a given `muzzle_height`.
+fn launch_height_m(muzzle_height: f64) -> f64 {
+    let inputs = BallisticInputs {
+        muzzle_velocity: 800.0,
+        muzzle_angle: 0.01,
+        target_distance: 100.0,
+        muzzle_height,
+        ..BallisticInputs::default()
+    };
+    let mut solver = TrajectorySolver::new(
+        inputs,
+        WindConditions::default(),
+        AtmosphericConditions::default(),
+    );
+    solver.set_max_range(50.0);
+    solver.solve().unwrap().points[0].position.y
+}
+
+#[test]
+fn a_solver_frame_offsets_a_log_profile_by_only_the_bore_height_it_leaves_out() {
+    // TrajectorySolver measures y from the level muzzle_height is measured from, so the offset
+    // for a ground-relative profile is the real bore height minus muzzle_height.
+    let bore_height_m = 1.5;
+    let log = LogProfile::new(8.0, 10.0, 0.03, 90.0).unwrap();
+
+    // muzzle_height is the real bore height: y is already height above the ground.
+    let y = launch_height_m(bore_height_m);
+    assert_eq!(y, bore_height_m);
+    assert_eq!(
+        log.wind(0.0, Vector3::new(0.0, y, 0.0)),
+        log.wind_at(bore_height_m)
+    );
+
+    // muzzle_height left at its default 0: y = 0 is the bore, so the profile takes +1.5.
+    assert_eq!(BallisticInputs::default().muzzle_height, 0.0);
+    let y = launch_height_m(0.0);
+    assert_eq!(y, 0.0);
+    let from_bore = HeightOffset::new(log, bore_height_m - 0.0).unwrap();
+    assert_eq!(
+        from_bore.wind(0.0, Vector3::new(0.0, y, 0.0)),
+        log.wind_at(bore_height_m)
     );
 }
