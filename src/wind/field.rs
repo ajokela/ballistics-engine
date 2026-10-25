@@ -66,18 +66,18 @@ impl WindField for ConstantField {
 ///   which measure height from the ground, takes `-` the ground elevation. A sounding
 ///   [`ProfileField`] in metres above sea level needs no wrapper there.
 /// - y = 0 is the ground at elevation `E`: a sea-level sounding [`ProfileField`] takes `+E`.
-/// - this crate's [`TrajectorySolver`](crate::TrajectorySolver) on a level shot
-///   (`shooting_angle` 0), whose y = 0 is the level `muzzle_height` is measured from: a
-///   [`LogProfile`] or [`EkmanProfile`] takes the bore's real height above the ground minus
-///   `muzzle_height`, which is 0 when `muzzle_height` is that real height and the real height
-///   when `muzzle_height` is left at 0, as `BallisticInputs::default()` leaves it. A sea-level
-///   sounding takes `+` the `AtmosphericConditions::altitude`, where the solver's own air puts
-///   y = 0. On an inclined shot the solver works in the shot frame, where y is not a height:
-///   convert a position to the level frame first (its height is x·sin θ + y·cos θ for the
-///   shooting angle θ) and rotate the returned wind into the shot frame. A ground-relative
-///   profile read that way takes the ground as level through y = 0; the solver's built-in
-///   boundary-layer shear (`enable_wind_shear`) takes it along the line of sight instead, as
-///   its `ground_threshold` check does (see [`crate::wind_shear`]).
+/// - this crate's [`TrajectorySolver`](crate::TrajectorySolver), whose y = 0 is the level
+///   `muzzle_height` is measured from and whose ground runs along the line of sight: its
+///   `ground_threshold` check and its built-in boundary-layer shear (see
+///   [`crate::wind_shear`]) both take the shot-frame y as the height. So a [`LogProfile`] or
+///   [`EkmanProfile`] takes the bore's real height above the ground minus `muzzle_height` on a
+///   level or an inclined shot alike: 0 when `muzzle_height` is that real height, the real
+///   height when `muzzle_height` is left at 0, as `BallisticInputs::default()` leaves it. Sea
+///   level stays level, so a sea-level sounding takes `+` the
+///   `AtmosphericConditions::altitude` on a level shot, where the solver's own air puts y = 0.
+///   On an inclined shot (shooting angle θ) no constant offset fits: read the sounding at the
+///   altitude the solver's air uses, `altitude + x·sin θ + y·cos θ`. Fields return winds in
+///   level axes; rotate them into the shot frame before comparing them with solver output.
 ///
 /// Elevations are those of the place the positions are, not of the station that measured a
 /// sounding.

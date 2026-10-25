@@ -29,13 +29,13 @@
 //! shifted height; its offset is the height of the caller's y = 0 in the field's datum. In a
 //! frame whose y is height above sea level, a log or Ekman profile takes minus the ground
 //! elevation and a sea-level sounding needs no offset.
-//! On a level shot [`TrajectorySolver`](crate::TrajectorySolver) measures y from the level
-//! `muzzle_height` is measured from, so a log or Ekman profile takes the bore's real height
-//! above the ground minus `muzzle_height` (nothing when `muzzle_height` is the real bore height)
-//! and a sea-level sounding takes `AtmosphericConditions::altitude`. On an inclined shot its
-//! positions are in the shot frame and need converting first; [`HeightOffset`] has the details.
-//! Convert in one place only. Constructors validate their inputs and return a typed
-//! [`WindFieldError`].
+//! [`TrajectorySolver`](crate::TrajectorySolver) measures y from the level `muzzle_height` is
+//! measured from and takes the ground to run along the line of sight, so a log or Ekman profile
+//! takes the bore's real height above the ground minus `muzzle_height` (nothing when
+//! `muzzle_height` is the real bore height) on any shot. Sea level stays level: a sea-level
+//! sounding takes `AtmosphericConditions::altitude` on a level shot and the solver's own air
+//! altitude on an inclined one; [`HeightOffset`] has the details. Convert in one place only.
+//! Constructors validate their inputs and return a typed [`WindFieldError`].
 //!
 //! ```
 //! use ballistics_engine::wind::{ProfileField, ProfileLevel, WindField};

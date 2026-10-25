@@ -75,16 +75,17 @@ Kernel `WindField` minor release, then rockets-engine
 - `LogProfile` and `EkmanProfile` take y as height above the ground.
   `ProfileField` uses its levels' datum. `HeightOffset` is the one datum
   conversion: its offset is the height of the caller's y = 0 in the field's
-  datum. rockets-engine's y is altitude above sea level and its CLI's ground is
-  sea level, so a sounding profile in metres above sea level needs no
-  conversion there, while a log or Ekman profile takes minus the ground
-  elevation. On a level shot this crate's `TrajectorySolver` measures y from
-  the level `muzzle_height` is measured from, so a log or Ekman profile there
-  takes the bore's real height above the ground minus `muzzle_height`, and a
-  sea-level sounding takes the atmosphere's `altitude`, where the solver's
-  own air puts y = 0. On an inclined shot the solver works in the shot frame,
-  where y is not a height, so positions need converting first. Convert in
-  one place only.
+  datum. rockets-engine's y is altitude above sea level (its CLI's ground sits
+  at `--ground-altitude-m`, sea level by default), so a sounding profile in
+  metres above sea level needs no conversion there, while a log or Ekman
+  profile takes minus the ground elevation. This crate's `TrajectorySolver`
+  measures y from the level `muzzle_height` is measured from and takes the
+  ground to run along the line of sight, as its ground check and built-in
+  shear do, so a log or Ekman profile there takes the bore's real height
+  above the ground minus `muzzle_height` on any shot. Sea level stays level:
+  a sea-level sounding takes the atmosphere's `altitude` on a level shot and
+  the solver's own air altitude (`altitude + x·sin θ + y·cos θ`) on an
+  inclined one. Convert in one place only.
 - winds-engine's `validate()` takes its own staged `ProfileField`, so the
   radiosonde cross-check above reaches this crate's `ProfileField` only once
   winds-engine moves to these types, which changes winds-engine's API.

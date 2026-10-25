@@ -20,12 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   height above the ground; `ProfileField` uses its levels' datum. `HeightOffset` reads any
   field at a shifted height, the one place two datums meet: its offset is the height of the
   caller's y = 0 in the field's datum, so in a sea-level frame a log or Ekman profile takes
-  minus the ground elevation (a sea-level sounding needs nothing). On a level shot
-  `TrajectorySolver` measures y from the level `muzzle_height` is measured from, so there a log
-  or Ekman profile takes the bore's real height above the ground minus `muzzle_height` (nothing
-  when `muzzle_height` is the real bore height) and a sea-level sounding takes the atmosphere's
-  `altitude`; an inclined shot's positions are in the shot frame and need converting first.
-  Constructors return a typed `WindFieldError`.
+  minus the ground elevation (a sea-level sounding needs nothing). `TrajectorySolver` measures
+  y from the level `muzzle_height` is measured from and takes the ground to run along the line
+  of sight, as its ground check and built-in shear do, so there a log or Ekman profile takes the
+  bore's real height above the ground minus `muzzle_height` on any shot (nothing when
+  `muzzle_height` is the real bore height). Sea level stays level: a sea-level sounding takes
+  the atmosphere's `altitude` on a level shot and the solver's own air altitude on an inclined
+  one. Constructors return a typed `WindFieldError`.
   Purely additive: `WindSegment`, `WindSock`, `wind_vector` and every other existing API are
   unchanged. Design record: [docs/WIND_FIELD_MODELING.md](docs/WIND_FIELD_MODELING.md).
 
