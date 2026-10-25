@@ -66,12 +66,15 @@ impl WindField for ConstantField {
 ///   which measure height from the ground, takes `-` the ground elevation. A sounding
 ///   [`ProfileField`] in metres above sea level needs no wrapper there.
 /// - y = 0 is the ground at elevation `E`: a sea-level sounding [`ProfileField`] takes `+E`.
-/// - this crate's [`TrajectorySolver`](crate::TrajectorySolver), whose y = 0 is the level
-///   `muzzle_height` is measured from (the bullet starts at y = `muzzle_height`): a
+/// - this crate's [`TrajectorySolver`](crate::TrajectorySolver) on a level shot
+///   (`shooting_angle` 0), whose y = 0 is the level `muzzle_height` is measured from: a
 ///   [`LogProfile`] or [`EkmanProfile`] takes the bore's real height above the ground minus
 ///   `muzzle_height`, which is 0 when `muzzle_height` is that real height and the real height
 ///   when `muzzle_height` is left at 0, as `BallisticInputs::default()` leaves it. A sea-level
-///   sounding there takes `+` the site's `altitude` (plus that same difference).
+///   sounding takes `+` the `AtmosphericConditions::altitude`, where the solver's own air puts
+///   y = 0. On an inclined shot the solver works in the shot frame, where y is not a height:
+///   convert a position to the level frame first (its height is x·sin θ + y·cos θ for the
+///   shooting angle θ) and rotate the returned wind into the shot frame.
 ///
 /// Elevations are those of the place the positions are, not of the station that measured a
 /// sounding.

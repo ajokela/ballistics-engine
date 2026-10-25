@@ -106,8 +106,8 @@ fn launch_height_m(muzzle_height: f64) -> f64 {
 
 #[test]
 fn a_solver_frame_offsets_a_log_profile_by_only_the_bore_height_it_leaves_out() {
-    // TrajectorySolver measures y from the level muzzle_height is measured from, so the offset
-    // for a ground-relative profile is the real bore height minus muzzle_height.
+    // On a level shot TrajectorySolver measures y from the level muzzle_height is measured from,
+    // so the offset for a ground-relative profile is the real bore height minus muzzle_height.
     let bore_height_m = 1.5;
     let log = LogProfile::new(8.0, 10.0, 0.03, 90.0).unwrap();
 
