@@ -55,18 +55,23 @@ impl WindField for ConstantField {
     }
 }
 
-/// Puts a field on the caller's vertical datum: `wind(t, p)` is the inner field's wind at
-/// `p.y + offset_m`, with time and the horizontal position unchanged.
+/// Reads a field at a shifted height, so a field and its caller can use different height
+/// datums: `wind(t, p)` is the inner field's wind at `p.y + offset_m`, with time and the
+/// horizontal position unchanged.
 ///
-/// Use it wherever two height references meet, so the conversion is written once:
-/// - a radiosonde [`ProfileField`] in metres above sea level, read from a frame whose y = 0 is
-///   a launch site at elevation `E`: offset `+E`;
-/// - a [`LogProfile`] or [`EkmanProfile`] (height above the ground), read from this crate's
-///   trajectory frame, whose y = 0 is the muzzle: offset `+` the muzzle's height above the
-///   ground.
+/// `offset_m` is the height of the caller's y = 0 in the field's datum. Convert in one place
+/// only: wrapping twice, or also shifting a profile's levels, moves every wind by the offset
+/// again. The usual cases:
+/// - y is height above sea level, as in a frame whose atmosphere is referenced to sea level
+///   (rockets-engine's): a [`LogProfile`] or [`EkmanProfile`], which measure height from the
+///   ground, takes `-` the ground elevation. A sounding [`ProfileField`] in metres above sea
+///   level needs no wrapper there.
+/// - y = 0 is a launch site at elevation `E`: a sea-level sounding [`ProfileField`] takes `+E`.
+/// - this crate's trajectory frame, where y = 0 is the muzzle: a [`LogProfile`] or
+///   [`EkmanProfile`] takes `+` the muzzle's height above the ground.
 ///
-/// Use the elevation of the site where the positions are, not of the station that measured
-/// the sounding.
+/// Elevations are those of the place the positions are, not of the station that measured a
+/// sounding.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HeightOffset<F> {
     field: F,
@@ -1279,6 +1284,38 @@ mod tests {
         assert_eq!(from_muzzle.wind(0.0, Vector3::zeros()), log.wind_at(1.5));
         assert!(speed(from_muzzle.wind(0.0, Vector3::zeros())) > 0.0);
         assert_eq!(from_muzzle.into_inner(), log);
+    }
+
+    #[test]
+    fn a_sea_level_frame_reads_a_log_profile_through_minus_the_ground_elevation() {
+        // y is height above sea level and the ground sits 1609 m up: the log profile, measured
+        // from the ground, takes -1609; a sea-level sounding profile is read as it is.
+        let ground_msl = 1609.0;
+        let log = LogProfile::new(8.0, 10.0, 0.03, 270.0).unwrap();
+        let in_msl_frame = HeightOffset::new(log, -ground_msl).unwrap();
+        assert_eq!(
+            in_msl_frame.wind(0.0, at_height(ground_msl + 10.0)),
+            log.wind_at(10.0)
+        );
+        assert_eq!(
+            in_msl_frame.wind(0.0, at_height(ground_msl)),
+            Vector3::zeros()
+        );
+        assert!((speed(in_msl_frame.wind(0.0, at_height(ground_msl + 10.0))) - 8.0).abs() < 1e-12);
+
+        let sounding_msl =
+            ProfileField::new(vec![level(1609.0, 1.0, 200.0), level(2609.0, 9.0, 250.0)]).unwrap();
+        assert_eq!(
+            sounding_msl.wind(0.0, at_height(2109.0)),
+            sounding_msl.wind_at(2109.0)
+        );
+        // The double-shift trap: wrapping a profile that is already in the frame's datum moves
+        // every wind by the offset.
+        let double = HeightOffset::new(&sounding_msl, ground_msl).unwrap();
+        assert_ne!(
+            double.wind(0.0, at_height(2109.0)),
+            sounding_msl.wind_at(2109.0)
+        );
     }
 
     #[test]

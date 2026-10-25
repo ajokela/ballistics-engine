@@ -73,7 +73,10 @@ Kernel `WindField` minor release, then rockets-engine
   The staged winds-engine version rotated the other way; a test pins both
   hemispheres here.
 - `LogProfile` and `EkmanProfile` take y as height above the ground.
-  `ProfileField` uses its levels' datum, so a sounding in metres above sea
-  level needs the site elevation added to (or subtracted from) heights
-  wherever the data enters.
+  `ProfileField` uses its levels' datum. `HeightOffset` is the one datum
+  conversion: its offset is the height of the caller's y = 0 in the field's
+  datum. rockets-engine's y is height above sea level (its atmosphere is
+  station-referenced to sea level), so a sounding profile in metres above sea
+  level needs no conversion there, while a log or Ekman profile takes minus
+  the ground elevation. Convert in one place only.
 

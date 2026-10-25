@@ -27,10 +27,11 @@
 //! [`ProfileField`] uses whatever datum its levels' altitudes use. [`LogProfile`] and
 //! [`EkmanProfile`] need the height above the ground; this crate's trajectory frame puts y = 0
 //! at the muzzle, so a caller passing trajectory positions adds the muzzle's height above the
-//! ground. [`HeightOffset`] puts any field on the caller's datum by reading it a fixed height
-//! higher: a sounding in metres above sea level read from a launch frame takes the launch
-//! site's elevation; a log or Ekman profile read from the trajectory frame takes the muzzle's
-//! height above the ground. Constructors validate their inputs and return a typed
+//! ground. [`HeightOffset`] reads any field at a shifted height; its offset is the height of the
+//! caller's y = 0 in the field's datum. In a frame whose y is height above sea level, a log or
+//! Ekman profile takes minus the ground elevation and a sea-level sounding needs no offset; in
+//! the trajectory frame a log or Ekman profile takes the muzzle's height above the ground.
+//! Convert in one place only. Constructors validate their inputs and return a typed
 //! [`WindFieldError`].
 //!
 //! ```
