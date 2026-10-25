@@ -6,10 +6,11 @@
 //!
 //! MBA-155: Upstreamed from ballistics_rust for shared use
 
+use crate::gravity::Gravity;
 use nalgebra::{Vector3, Vector6};
 use std::collections::HashMap;
 
-use crate::derivatives::compute_derivatives;
+use crate::derivatives::compute_derivatives_with_gravity;
 use crate::wind::{WindSegment, WindSegmentError};
 use crate::BallisticInputs;
 use crate::DragModel;
@@ -53,18 +54,32 @@ fn wind_vector_for_range(range_m: f64, wind_segments: &[WindSegment]) -> Vector3
 }
 
 /// RK4 integration step
-fn rk4_step(
+fn rk4_step_with_gravity(
     state: &Vector6<f64>,
     t: f64,
     dt: f64,
     params: &TrajectoryParams,
     inputs: &BallisticInputs,
+    gravity: Gravity,
 ) -> Vector6<f64> {
     // RK4 integration
-    let k1 = compute_derivatives_vec(state, t, params, inputs);
-    let k2 = compute_derivatives_vec(&(state + dt * 0.5 * k1), t + dt * 0.5, params, inputs);
-    let k3 = compute_derivatives_vec(&(state + dt * 0.5 * k2), t + dt * 0.5, params, inputs);
-    let k4 = compute_derivatives_vec(&(state + dt * k3), t + dt, params, inputs);
+    let k1 = compute_derivatives_vec_with_gravity(state, t, params, inputs, gravity);
+    let k2 = compute_derivatives_vec_with_gravity(
+        &(state + dt * 0.5 * k1),
+        t + dt * 0.5,
+        params,
+        inputs,
+        gravity,
+    );
+    let k3 = compute_derivatives_vec_with_gravity(
+        &(state + dt * 0.5 * k2),
+        t + dt * 0.5,
+        params,
+        inputs,
+        gravity,
+    );
+    let k4 =
+        compute_derivatives_vec_with_gravity(&(state + dt * k3), t + dt, params, inputs, gravity);
 
     state + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
 }
@@ -90,13 +105,15 @@ pub(crate) fn rk45_error_norm(
 }
 
 /// Adaptive RK45 integration step (Dormand-Prince method)
-fn rk45_step(
+#[allow(clippy::too_many_arguments)]
+fn rk45_step_with_gravity(
     state: &Vector6<f64>,
     t: f64,
     dt: f64,
     params: &TrajectoryParams,
     inputs: &BallisticInputs,
     tol: f64,
+    gravity: Gravity,
 ) -> (Vector6<f64>, f64, f64) {
     // Dormand-Prince coefficients (same as scipy.integrate.solve_ivp RK45)
     const A21: f64 = 1.0 / 5.0;
@@ -136,37 +153,48 @@ fn rk45_step(
     const B7_ERR: f64 = 1.0 / 40.0;
 
     // Compute stages
-    let k1 = compute_derivatives_vec(state, t, params, inputs);
-    let k2 = compute_derivatives_vec(&(state + dt * A21 * k1), t + dt * 0.2, params, inputs);
-    let k3 = compute_derivatives_vec(
+    let k1 = compute_derivatives_vec_with_gravity(state, t, params, inputs, gravity);
+    let k2 = compute_derivatives_vec_with_gravity(
+        &(state + dt * A21 * k1),
+        t + dt * 0.2,
+        params,
+        inputs,
+        gravity,
+    );
+    let k3 = compute_derivatives_vec_with_gravity(
         &(state + dt * (A31 * k1 + A32 * k2)),
         t + dt * 0.3,
         params,
         inputs,
+        gravity,
     );
-    let k4 = compute_derivatives_vec(
+    let k4 = compute_derivatives_vec_with_gravity(
         &(state + dt * (A41 * k1 + A42 * k2 + A43 * k3)),
         t + dt * 0.8,
         params,
         inputs,
+        gravity,
     );
-    let k5 = compute_derivatives_vec(
+    let k5 = compute_derivatives_vec_with_gravity(
         &(state + dt * (A51 * k1 + A52 * k2 + A53 * k3 + A54 * k4)),
         t + dt * 8.0 / 9.0,
         params,
         inputs,
+        gravity,
     );
-    let k6 = compute_derivatives_vec(
+    let k6 = compute_derivatives_vec_with_gravity(
         &(state + dt * (A61 * k1 + A62 * k2 + A63 * k3 + A64 * k4 + A65 * k5)),
         t + dt,
         params,
         inputs,
+        gravity,
     );
-    let k7 = compute_derivatives_vec(
+    let k7 = compute_derivatives_vec_with_gravity(
         &(state + dt * (A71 * k1 + A73 * k3 + A74 * k4 + A75 * k5 + A76 * k6)),
         t + dt,
         params,
         inputs,
+        gravity,
     );
 
     // 5th order solution
@@ -195,19 +223,28 @@ fn rk45_step(
 ///
 /// `Err(n)` means no finite acceptable candidate was found in `n` trials. Rejected candidates
 /// never escape this function, so callers cannot accidentally advance state or time with one.
-fn adaptive_rk45_step(
+#[allow(clippy::too_many_arguments)]
+fn adaptive_rk45_step_with_gravity(
     state: &Vector6<f64>,
     t: f64,
     initial_dt: f64,
     params: &TrajectoryParams,
     inputs: &BallisticInputs,
     control: Rk45Control,
+    gravity: Gravity,
 ) -> Result<Rk45AcceptedStep, usize> {
     let mut trial_dt = initial_dt;
 
     for trials in 1..=control.max_trials {
-        let (new_state, suggested_dt, error) =
-            rk45_step(state, t, trial_dt, params, inputs, control.tolerance);
+        let (new_state, suggested_dt, error) = rk45_step_with_gravity(
+            state,
+            t,
+            trial_dt,
+            params,
+            inputs,
+            control.tolerance,
+            gravity,
+        );
         let candidate_is_finite = error.is_finite()
             && suggested_dt.is_finite()
             && new_state.iter().all(|value| value.is_finite());
@@ -415,11 +452,12 @@ fn build_inputs(params: &TrajectoryParams, muzzle_velocity_mps: f64) -> Ballisti
 }
 
 /// Convert state to Vector6 and call compute_derivatives
-fn compute_derivatives_vec(
+fn compute_derivatives_vec_with_gravity(
     state: &Vector6<f64>,
     t: f64,
     params: &TrajectoryParams,
     inputs: &BallisticInputs,
+    gravity: Gravity,
 ) -> Vector6<f64> {
     let pos = Vector3::new(state[0], state[1], state[2]);
     let vel = Vector3::new(state[3], state[4], state[5]);
@@ -443,7 +481,7 @@ fn compute_derivatives_vec(
 
     // Call compute_derivatives - returns [f64; 6] directly. `inputs` is built once per
     // integration by build_inputs() and threaded in, instead of rebuilt every call.
-    let deriv_result = compute_derivatives(
+    let deriv_result = compute_derivatives_with_gravity(
         pos,
         vel,
         inputs,
@@ -453,6 +491,7 @@ fn compute_derivatives_vec(
         params.omega_vector,
         t,
         params.atmo_sock.as_ref(),
+        gravity,
     );
 
     Vector6::new(
@@ -520,10 +559,31 @@ pub fn try_integrate_trajectory(
 pub fn integrate_trajectory(
     initial_state: [f64; 6],
     t_span: (f64, f64),
+    params: TrajectoryParams,
+    method: &str,
+    tolerance: f64,
+    max_step: f64,
+) -> Vec<(f64, Vector6<f64>)> {
+    integrate_trajectory_with_gravity(
+        initial_state,
+        t_span,
+        params,
+        method,
+        tolerance,
+        max_step,
+        Gravity::EARTH,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn integrate_trajectory_with_gravity(
+    initial_state: [f64; 6],
+    t_span: (f64, f64),
     mut params: TrajectoryParams,
     method: &str,
     tolerance: f64,
     max_step: f64,
+    gravity: Gravity,
 ) -> Vec<(f64, Vector6<f64>)> {
     // Normalize once before build_inputs reads the first zone and before any RK stage performs a
     // first-match lookup. Callers may supply zones in any order.
@@ -564,7 +624,7 @@ pub fn integrate_trajectory(
                     dt = t_end - t;
                 }
 
-                let new_state = rk4_step(&state, t, dt, &params, &inputs);
+                let new_state = rk4_step_with_gravity(&state, t, dt, &params, &inputs, gravity);
 
                 // Check if we're about to pass the target (X is downrange, McCoy)
                 if state[0] < params.target_distance_m && new_state[0] >= params.target_distance_m {
@@ -645,7 +705,9 @@ pub fn integrate_trajectory(
                     max_step: effective_max_step,
                     max_trials: max_iterations - iteration_count,
                 };
-                let accepted = match adaptive_rk45_step(&state, t, dt, &params, &inputs, control) {
+                let accepted = match adaptive_rk45_step_with_gravity(
+                    &state, t, dt, &params, &inputs, control, gravity,
+                ) {
                     Ok(accepted) => accepted,
                     Err(trials) => {
                         iteration_count += trials;
@@ -841,6 +903,35 @@ pub fn solve_trajectory_rust(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uniform_gravity_integrators_match_a_ball_in_near_vacuum() {
+        let initial = [0.0, 10.0, 0.0, 10.0, 2.0, 0.0];
+        for method in ["RK4", "RK45"] {
+            for magnitude in [0.0, 1.62, 9.80665, 20.0] {
+                let mut params = create_test_params(10.0);
+                params.mass_kg = 0.0459;
+                params.bullet_diameter = 0.0427;
+                params.bullet_length = 0.0427;
+                params.atmos_params = (1e-12, 340.0, 0.0, 0.0);
+                let result = integrate_trajectory_with_gravity(
+                    initial,
+                    (0.0, 2.0),
+                    params,
+                    method,
+                    1e-8,
+                    0.001,
+                    Gravity::new(magnitude).unwrap(),
+                );
+                let (time, state) = result.last().unwrap();
+                assert!((time - 1.0).abs() < 1e-8);
+                assert!(
+                    (state[1] - (10.0 + 2.0 * time - 0.5 * magnitude * time * time)).abs() < 1e-5
+                );
+                assert!((state[4] - (2.0 - magnitude * time)).abs() < 1e-8);
+            }
+        }
+    }
 
     fn create_test_params(target_distance_m: f64) -> TrajectoryParams {
         TrajectoryParams {
@@ -1055,15 +1146,22 @@ mod tests {
         let inputs = build_inputs(&params, launch_speed);
         let initial_dt = 0.01;
         let tolerance = 1e-6;
-        let (rejected_state, suggested_dt, error) =
-            rk45_step(&state, 0.0, initial_dt, &params, &inputs, tolerance);
+        let (rejected_state, suggested_dt, error) = rk45_step_with_gravity(
+            &state,
+            0.0,
+            initial_dt,
+            &params,
+            &inputs,
+            tolerance,
+            Gravity::EARTH,
+        );
         assert!(
             error > tolerance,
             "wind-boundary trial must exceed tolerance, got {error}"
         );
         assert!(suggested_dt < initial_dt);
 
-        let accepted = adaptive_rk45_step(
+        let accepted = adaptive_rk45_step_with_gravity(
             &state,
             0.0,
             initial_dt,
@@ -1075,6 +1173,7 @@ mod tests {
                 max_step: initial_dt,
                 max_trials: 100,
             },
+            Gravity::EARTH,
         )
         .expect("a smaller finite trial should satisfy the tolerance");
 
@@ -1087,8 +1186,15 @@ mod tests {
             accepted.used_dt
         );
 
-        let (accepted_state, _, accepted_error) =
-            rk45_step(&state, 0.0, accepted.used_dt, &params, &inputs, tolerance);
+        let (accepted_state, _, accepted_error) = rk45_step_with_gravity(
+            &state,
+            0.0,
+            accepted.used_dt,
+            &params,
+            &inputs,
+            tolerance,
+            Gravity::EARTH,
+        );
         assert_eq!(accepted.state, accepted_state);
         assert_eq!(accepted.error, accepted_error);
         assert_ne!(accepted.state, rejected_state);
@@ -1152,12 +1258,13 @@ mod tests {
         let reference_params = create_test_params(target_distance_m);
         let inputs = build_inputs(&reference_params, Vector3::new(800.0, 5.0, 2.0).norm());
         let full_step_dt = 0.001;
-        let bracket_end = rk4_step(
+        let bracket_end = rk4_step_with_gravity(
             previous_state,
             *previous_t,
             full_step_dt,
             &reference_params,
             &inputs,
+            Gravity::EARTH,
         );
         assert!(previous_state[0] < target_distance_m);
         assert!(bracket_end[0] >= target_distance_m);
@@ -1185,7 +1292,7 @@ mod tests {
         let reference_params = create_test_params(target_distance_m);
         let inputs = build_inputs(&reference_params, Vector3::new(800.0, 5.0, 2.0).norm());
         let initial_dt = 0.001;
-        let accepted = adaptive_rk45_step(
+        let accepted = adaptive_rk45_step_with_gravity(
             &initial,
             0.0,
             initial_dt,
@@ -1197,6 +1304,7 @@ mod tests {
                 max_step: 0.01,
                 max_trials: 100_000,
             },
+            Gravity::EARTH,
         )
         .expect("first RK45 target bracket should be accepted");
         assert!(accepted.state[0] >= target_distance_m);

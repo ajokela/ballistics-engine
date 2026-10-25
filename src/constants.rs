@@ -1,6 +1,6 @@
 //! Physical constants used in ballistics calculations.
 
-/// Gravitational acceleration in m/s²
+/// Standard Earth gravitational acceleration in m/s² (public API default).
 pub const G_ACCEL_MPS2: f64 = 9.80665;
 
 /// Conversion factor: meters per second to feet per second

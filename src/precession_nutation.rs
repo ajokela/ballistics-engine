@@ -8,7 +8,7 @@
 
 // Precession and nutation modeling - now integrated!
 
-use crate::constants::G_ACCEL_MPS2;
+use crate::gravity::Gravity;
 use crate::pitch_damping::{calculate_pitch_damping_moment, PitchDampingCoefficients};
 
 /// Estimate the projectile's longitudinal and transverse moments of inertia from its geometry.
@@ -349,6 +349,24 @@ pub fn calculate_limit_cycle_yaw_with_inertias(
     spin_inertia: f64,
     transverse_inertia: f64,
 ) -> f64 {
+    calculate_limit_cycle_yaw_with_inertias_with_gravity(
+        velocity_mps,
+        spin_rate_rad_s,
+        stability_factor,
+        spin_inertia,
+        transverse_inertia,
+        Gravity::EARTH,
+    )
+}
+
+pub(crate) fn calculate_limit_cycle_yaw_with_inertias_with_gravity(
+    velocity_mps: f64,
+    spin_rate_rad_s: f64,
+    stability_factor: f64,
+    spin_inertia: f64,
+    transverse_inertia: f64,
+    gravity: Gravity,
+) -> f64 {
     if !velocity_mps.is_finite()
         || velocity_mps <= 0.0
         || !spin_rate_rad_s.is_finite()
@@ -363,7 +381,7 @@ pub fn calculate_limit_cycle_yaw_with_inertias(
         return 0.0;
     }
 
-    4.0 * transverse_inertia * stability_factor * G_ACCEL_MPS2
+    4.0 * transverse_inertia * stability_factor * gravity.magnitude()
         / (spin_inertia * spin_rate_rad_s.abs() * velocity_mps)
 }
 

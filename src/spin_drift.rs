@@ -1,5 +1,6 @@
+use crate::gravity::Gravity;
 use crate::pitch_damping::{
-    calculate_damped_yaw_of_repose, calculate_gravity_yaw_of_repose,
+    calculate_damped_yaw_of_repose_with_gravity, calculate_gravity_yaw_of_repose_with_gravity,
     calculate_pitch_damping_moment, PitchDampingCoefficients,
 };
 use crate::spin_decay::{update_spin_rate, SpinDecayParameters};
@@ -195,6 +196,39 @@ pub fn calculate_yaw_of_repose(
     bullet_type: &str,
     use_pitch_damping: bool,
 ) -> (f64, f64) {
+    calculate_yaw_of_repose_with_gravity(
+        stability_factor,
+        velocity_mps,
+        spin_rate_rad_s,
+        wind_velocity_mps,
+        pitch_rate_rad_s,
+        air_density_kg_m3,
+        caliber_inches,
+        length_inches,
+        mass_grains,
+        mach,
+        bullet_type,
+        use_pitch_damping,
+        Gravity::EARTH,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn calculate_yaw_of_repose_with_gravity(
+    stability_factor: f64,
+    velocity_mps: f64,
+    spin_rate_rad_s: f64,
+    wind_velocity_mps: f64,
+    pitch_rate_rad_s: f64,
+    air_density_kg_m3: f64,
+    caliber_inches: f64,
+    length_inches: f64,
+    mass_grains: f64,
+    mach: f64,
+    bullet_type: &str,
+    use_pitch_damping: bool,
+    gravity: Gravity,
+) -> (f64, f64) {
     if stability_factor <= 1.0 || spin_rate_rad_s == 0.0 {
         return (0.0, 0.0);
     }
@@ -210,7 +244,7 @@ pub fn calculate_yaw_of_repose(
             _ => "match_boat_tail",
         };
 
-        return calculate_damped_yaw_of_repose(
+        return calculate_damped_yaw_of_repose_with_gravity(
             stability_factor,
             velocity_mps,
             spin_rate_rad_s,
@@ -222,19 +256,21 @@ pub fn calculate_yaw_of_repose(
             mass_grains,
             mach,
             damping_type,
+            gravity,
         );
     }
 
     // Crosswind yaw is a muzzle transient, not a persistent equilibrium. The simple and damped
     // paths share the same gravity/gyroscopic repose angle; only the damped path reports a
     // convergence rate.
-    let yaw_rad = calculate_gravity_yaw_of_repose(
+    let yaw_rad = calculate_gravity_yaw_of_repose_with_gravity(
         stability_factor,
         velocity_mps,
         spin_rate_rad_s,
         mass_grains * crate::constants::GRAINS_TO_KG,
         caliber_inches * 0.0254,
         length_inches * 0.0254,
+        gravity,
     );
 
     (yaw_rad, 0.0)

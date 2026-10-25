@@ -1,5 +1,6 @@
 // CLI API module - provides simplified interfaces for command-line tool
 use crate::cluster_bc::ClusterBCDegradation;
+use crate::gravity::Gravity;
 use crate::mc_stats::{wilson_interval, BernoulliConfidenceSequence, ConfidenceLevel, Welford};
 use crate::pitch_damping::{calculate_pitch_damping_coefficient, PitchDampingCoefficients};
 use crate::precession_nutation::{
@@ -1043,6 +1044,7 @@ enum StationAtmosphereResolution {
 
 #[derive(Clone)]
 pub struct TrajectorySolver {
+    gravity: Gravity,
     inputs: BallisticInputs,
     wind: WindConditions,
     atmosphere: AtmosphericConditions,
@@ -1144,10 +1146,26 @@ impl TrajectorySolver {
     }
 
     fn new_with_station_atmosphere_resolution(
+        inputs: BallisticInputs,
+        wind: WindConditions,
+        atmosphere: AtmosphericConditions,
+        station_atmosphere_resolution: StationAtmosphereResolution,
+    ) -> Self {
+        Self::new_with_station_atmosphere_resolution_with_gravity(
+            inputs,
+            wind,
+            atmosphere,
+            station_atmosphere_resolution,
+            Gravity::EARTH,
+        )
+    }
+
+    fn new_with_station_atmosphere_resolution_with_gravity(
         mut inputs: BallisticInputs,
         wind: WindConditions,
         atmosphere: AtmosphericConditions,
         station_atmosphere_resolution: StationAtmosphereResolution,
+        gravity: Gravity,
     ) -> Self {
         // MBA-1415: every input-conditioning step lives in one shared, idempotent helper that
         // the fast_integrate* entry points call too. Keeping it out of this constructor is the
@@ -1168,6 +1186,7 @@ impl TrajectorySolver {
         );
 
         Self {
+            gravity,
             inputs,
             wind,
             atmosphere,
@@ -1992,8 +2011,7 @@ impl TrajectorySolver {
             Some(sock) => scalar_wind.max(sock.max_speed_mps()),
             None => scalar_wind,
         };
-        2.0 * (self.inputs.muzzle_velocity + wind_bound + 10.0)
-            + crate::constants::G_ACCEL_MPS2 * time
+        2.0 * (self.inputs.muzzle_velocity + wind_bound + 10.0) + self.gravity.magnitude() * time
     }
 
     /// Store one public trajectory point, collapsing a downrange stall, without exceeding the
@@ -2352,12 +2370,7 @@ impl TrajectorySolver {
     }
 
     fn gravity_acceleration(&self) -> Vector3<f64> {
-        let theta = self.inputs.shooting_angle;
-        Vector3::new(
-            -crate::constants::G_ACCEL_MPS2 * theta.sin(),
-            -crate::constants::G_ACCEL_MPS2 * theta.cos(),
-            0.0,
-        )
+        self.gravity.in_frame(self.inputs.shooting_angle)
     }
 
     fn get_wind_at_altitude(&self, altitude_m: f64) -> Vector3<f64> {
@@ -3576,14 +3589,16 @@ impl TrajectorySolver {
             position.y,
             self.inputs.shooting_angle,
         );
-        let (air_density, speed_of_sound) = crate::atmosphere::get_local_atmosphere_humid(
-            local_alt,
-            self.atmosphere.altitude,
-            drag_base_temp_c,
-            drag_base_press_hpa,
-            drag_base_ratio,
-            drag_humidity_percent,
-        );
+        let (air_density, speed_of_sound) =
+            crate::atmosphere::get_local_atmosphere_humid_with_gravity(
+                local_alt,
+                self.atmosphere.altitude,
+                drag_base_temp_c,
+                drag_base_press_hpa,
+                drag_base_ratio,
+                drag_humidity_percent,
+                self.gravity,
+            );
 
         // Resolve the Cd and the retardation denominator through the shared resolver. MBA-1423
         // reports a per-point Cd derived from these same two values, so the number a consumer
@@ -3693,7 +3708,7 @@ impl TrajectorySolver {
             );
 
             // Yaw of repose (radians); zero for unstable bullets (Sg <= 1).
-            let (yaw_rad, _) = crate::spin_drift::calculate_yaw_of_repose(
+            let (yaw_rad, _) = crate::spin_drift::calculate_yaw_of_repose_with_gravity(
                 sg,
                 velocity_magnitude,
                 spin_rad_s,
@@ -3706,6 +3721,7 @@ impl TrajectorySolver {
                 mach,
                 "match",
                 false,
+                self.gravity,
             );
 
             // Proper McCoy Magnus FORCE: F = q S C_Npa (pd/2V) sin(alpha_R).
@@ -5568,6 +5584,88 @@ mod mba1302_solver_seam_tests {
             (segmented_angle - calm_angle).abs() > 1e-5,
             "segmented vertical wind must participate in zero trials: segmented={segmented_angle}, calm={calm_angle}"
         );
+    }
+}
+
+#[cfg(test)]
+mod uniform_gravity_tests {
+    use super::*;
+
+    #[test]
+    fn uniform_gravity_is_per_solver_and_survives_cloning() {
+        for (use_rk4, use_adaptive_rk45) in [(false, false), (true, false), (true, true)] {
+            // A ball with negligible drag provides an independent constant-acceleration oracle.
+            let inputs = BallisticInputs {
+                bullet_mass: 0.0459,
+                bullet_diameter: 0.0427,
+                bullet_length: 0.0427,
+                muzzle_velocity: 10.0,
+                muzzle_height: 10.0,
+                muzzle_angle: 0.0,
+                bc_type: DragModel::GS,
+                custom_drag_table: Some(crate::drag::DragTable::new(
+                    vec![0.0, 5.0],
+                    vec![1e-20, 1e-20],
+                )),
+                use_rk4,
+                use_adaptive_rk45,
+                ..BallisticInputs::default()
+            };
+            let public = TrajectorySolver::new(
+                inputs.clone(),
+                WindConditions::default(),
+                AtmosphericConditions::default(),
+            );
+            for magnitude in [0.0, 1.62, 9.80665, 20.0] {
+                let mut solver =
+                    TrajectorySolver::new_with_station_atmosphere_resolution_with_gravity(
+                        inputs.clone(),
+                        WindConditions::default(),
+                        AtmosphericConditions::default(),
+                        StationAtmosphereResolution::LegacyDefaultSentinels,
+                        Gravity::new(magnitude).unwrap(),
+                    )
+                    .clone();
+                solver.set_max_range(10.0);
+                let result = solver.solve().unwrap();
+                let end = result.points.last().unwrap();
+                assert!((end.time - 1.0).abs() < 1e-8);
+                // The endpoint is linearly interpolated across the final step: a parabola's
+                // interpolation error is bounded by g*dt²/8. Euler also has O(dt) error.
+                let step = if use_adaptive_rk45 {
+                    RK45_MAX_DT
+                } else {
+                    solver.time_step
+                };
+                let tolerance = magnitude * step * step / 8.0
+                    + if use_rk4 { 0.0 } else { magnitude * step / 2.0 }
+                    + 1e-8;
+                assert!(
+                    (end.position.y - (10.0 - 0.5 * magnitude)).abs() < tolerance,
+                    "g={magnitude}, rk4={use_rk4}, adaptive={use_adaptive_rk45}, y={}, time={}",
+                    end.position.y,
+                    end.time
+                );
+                assert!(
+                    (solver.speed_budget(1.0) - solver.speed_budget(0.0) - magnitude).abs() < 1e-12
+                );
+                assert_eq!(public.gravity, Gravity::EARTH);
+                if magnitude == 9.80665 {
+                    let mut earth = public.clone();
+                    earth.set_max_range(10.0);
+                    let reference = earth.solve().unwrap();
+                    assert_eq!(result.points.len(), reference.points.len());
+                    for (actual, expected) in result.points.iter().zip(&reference.points) {
+                        assert_eq!(actual.time.to_bits(), expected.time.to_bits());
+                        assert_eq!(actual.position, expected.position);
+                        assert_eq!(
+                            actual.velocity_magnitude.to_bits(),
+                            expected.velocity_magnitude.to_bits()
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 

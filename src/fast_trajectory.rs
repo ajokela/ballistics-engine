@@ -3,10 +3,13 @@
 //! This is a Rust implementation of the fast fixed-step trajectory solver
 //! that provides significant performance improvements for long-range calculations.
 
+#[cfg(test)]
+use crate::constants::G_ACCEL_MPS2;
+use crate::gravity::Gravity;
 use crate::{
-    atmosphere::{calculate_air_density_cimp, get_local_atmosphere_humid, AtmoSock},
+    atmosphere::{calculate_air_density_cimp, get_local_atmosphere_humid_with_gravity, AtmoSock},
     bc_estimation::velocity_segment_bc,
-    constants::{G_ACCEL_MPS2, MPS_TO_FPS, STANDARD_AIR_DENSITY},
+    constants::{MPS_TO_FPS, STANDARD_AIR_DENSITY},
     drag::get_drag_coefficient,
     wind::WindSock,
     DragModel, InternalBallisticInputs as BallisticInputs,
@@ -283,6 +286,15 @@ pub fn fast_integrate(
     wind_sock: &WindSock,
     params: FastIntegrationParams,
 ) -> FastSolution {
+    fast_integrate_with_gravity(inputs, wind_sock, params, Gravity::EARTH)
+}
+
+pub(crate) fn fast_integrate_with_gravity(
+    inputs: &BallisticInputs,
+    wind_sock: &WindSock,
+    params: FastIntegrationParams,
+    gravity: Gravity,
+) -> FastSolution {
     // Malformed wind or a degenerate atmosphere would otherwise silently stub or poison the run.
     if wind_sock.validate_segments().is_err() || !atmo_is_physical(params.atmo_params) {
         return FastSolution::degenerate(&params.initial_state);
@@ -481,7 +493,7 @@ pub fn fast_integrate(
         }
 
         // RK4 step
-        let k1 = compute_derivatives(
+        let k1 = compute_derivatives_with_gravity(
             &state,
             inputs,
             wind_sock,
@@ -494,13 +506,14 @@ pub fn fast_integrate(
             omega_vector,
             wind_shear_model,
             atmo_sock,
+            gravity,
         );
 
         let mut state2 = state;
         for j in 0..6 {
             state2[j] = state[j] + 0.5 * dt * k1[j];
         }
-        let k2 = compute_derivatives(
+        let k2 = compute_derivatives_with_gravity(
             &state2,
             inputs,
             wind_sock,
@@ -513,13 +526,14 @@ pub fn fast_integrate(
             omega_vector,
             wind_shear_model,
             atmo_sock,
+            gravity,
         );
 
         let mut state3 = state;
         for j in 0..6 {
             state3[j] = state[j] + 0.5 * dt * k2[j];
         }
-        let k3 = compute_derivatives(
+        let k3 = compute_derivatives_with_gravity(
             &state3,
             inputs,
             wind_sock,
@@ -532,13 +546,14 @@ pub fn fast_integrate(
             omega_vector,
             wind_shear_model,
             atmo_sock,
+            gravity,
         );
 
         let mut state4 = state;
         for j in 0..6 {
             state4[j] = state[j] + dt * k3[j];
         }
-        let k4 = compute_derivatives(
+        let k4 = compute_derivatives_with_gravity(
             &state4,
             inputs,
             wind_sock,
@@ -551,6 +566,7 @@ pub fn fast_integrate(
             omega_vector,
             wind_shear_model,
             atmo_sock,
+            gravity,
         );
 
         // Update state
@@ -631,6 +647,7 @@ fn fast_magnus_acceleration(
     air_density: f64,
     mach: f64,
     gravity_acceleration: Vector3<f64>,
+    gravity: Gravity,
 ) -> Vector3<f64> {
     if !inputs.enable_magnus
         || inputs.use_enhanced_spin_drift
@@ -677,7 +694,7 @@ fn fast_magnus_acceleration(
         l_in,
         air_density,
     );
-    let (yaw_rad, _) = crate::spin_drift::calculate_yaw_of_repose(
+    let (yaw_rad, _) = crate::spin_drift::calculate_yaw_of_repose_with_gravity(
         sg,
         speed_air,
         spin_rate_rad_s,
@@ -690,6 +707,7 @@ fn fast_magnus_acceleration(
         mach,
         "match",
         false,
+        gravity,
     );
     let area = std::f64::consts::PI * (diameter_m / 2.0).powi(2);
     let c_np = crate::derivatives::calculate_magnus_moment_coefficient(mach);
@@ -766,7 +784,7 @@ fn interpolated_vertical_apex(
 
 /// Compute derivatives for the state vector
 #[allow(clippy::too_many_arguments)]
-fn compute_derivatives(
+fn compute_derivatives_with_gravity(
     state: &[f64; 6],
     inputs: &BallisticInputs,
     wind_sock: &WindSock,
@@ -780,6 +798,7 @@ fn compute_derivatives(
     wind_shear_model: Option<crate::wind_shear::WindShearModel>,
     // MBA-1137: optional downrange-segmented atmosphere (zone base swapped by pos.x before lapse).
     atmo_sock: Option<&AtmoSock>,
+    gravity: Gravity,
 ) -> [f64; 6] {
     let pos = Vector3::new(state[0], state[1], state[2]);
     let vel = Vector3::new(state[3], state[4], state[5]);
@@ -804,11 +823,7 @@ fn compute_derivatives(
     // Gravity acceleration vector, rotated into the shot-aligned frame by shooting_angle
     // (uphill/downhill inclined fire), matching cli_api::TrajectorySolver::gravity_acceleration.
     let theta = inputs.shooting_angle;
-    let accel_gravity = Vector3::new(
-        -G_ACCEL_MPS2 * theta.sin(),
-        -G_ACCEL_MPS2 * theta.cos(),
-        0.0,
-    );
+    let accel_gravity = gravity.in_frame(theta);
 
     // Calculate acceleration
     let mut accel = if v_mag < 1e-6 {
@@ -857,13 +872,14 @@ fn compute_derivatives(
                     }
                     None => (inputs.temperature, inputs.pressure, base_density / 1.225),
                 };
-                get_local_atmosphere_humid(
+                get_local_atmosphere_humid_with_gravity(
                     altitude,
                     inputs.altitude, // base_alt approximation
                     base_temp_c,
                     base_press_hpa,
                     base_ratio,
                     0.0, // humidity not available here (see note above)
+                    gravity,
                 )
             }
         };
@@ -930,8 +946,14 @@ fn compute_derivatives(
 
         // The Litz post-process owns the gyroscopic effect whenever it is enabled. Otherwise,
         // honor the explicit Magnus flag with the same dynamic-Sg/yaw model as sibling solvers.
-        let accel_magnus =
-            fast_magnus_acceleration(inputs, vel_adjusted, local_density, mach, accel_gravity);
+        let accel_magnus = fast_magnus_acceleration(
+            inputs,
+            vel_adjusted,
+            local_density,
+            mach,
+            accel_gravity,
+            gravity,
+        );
 
         // Total acceleration
         accel_drag + accel_gravity + accel_magnus
@@ -960,8 +982,17 @@ pub fn fast_integrate_with_segments(
     wind_segments: Vec<crate::wind::WindSegment>,
     params: FastIntegrationParams,
 ) -> FastSolution {
+    fast_integrate_with_segments_with_gravity(inputs, wind_segments, params, Gravity::EARTH)
+}
+
+pub(crate) fn fast_integrate_with_segments_with_gravity(
+    inputs: &BallisticInputs,
+    wind_segments: Vec<crate::wind::WindSegment>,
+    params: FastIntegrationParams,
+    gravity: Gravity,
+) -> FastSolution {
     // Use the RK45 implementation from trajectory_integration module
-    use crate::trajectory_integration::{integrate_trajectory, TrajectoryParams};
+    use crate::trajectory_integration::{integrate_trajectory_with_gravity, TrajectoryParams};
 
     // Malformed wind or a degenerate atmosphere would otherwise silently stub or poison the run.
     if crate::wind::validate_wind_segments(&wind_segments).is_err()
@@ -1057,13 +1088,14 @@ pub fn fast_integrate_with_segments(
     };
 
     // Use RK45 adaptive integration
-    let trajectory = integrate_trajectory(
+    let trajectory = integrate_trajectory_with_gravity(
         initial_state,
         params.t_span,
         traj_params,
         "RK45", // Use RK45 implementation
         1e-6,   // tolerance
         0.01,   // max_step
+        gravity,
     );
 
     // Convert trajectory to FastSolution format
@@ -1173,6 +1205,57 @@ pub fn fast_integrate_with_segments(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uniform_gravity_reaches_both_fast_integration_paths() {
+        let inputs = BallisticInputs {
+            bullet_mass: 0.0459,
+            bullet_diameter: 0.0427,
+            bullet_length: 0.0427,
+            muzzle_velocity: 10.0,
+            ..BallisticInputs::default()
+        };
+        let params = || FastIntegrationParams {
+            horiz: 10.0,
+            vert: 0.0,
+            initial_state: [0.0, 10.0, 0.0, 10.0, 2.0, 0.0],
+            t_span: (0.0, 2.0),
+            atmo_params: (1e-12, 340.0, 0.0, 0.0),
+            atmo_sock: None,
+        };
+        for magnitude in [0.0, 1.62, 9.80665, 20.0] {
+            let gravity = Gravity::new(magnitude).unwrap();
+            for segmented in [false, true] {
+                let result = if segmented {
+                    fast_integrate_with_segments_with_gravity(&inputs, vec![], params(), gravity)
+                } else {
+                    fast_integrate_with_gravity(&inputs, &WindSock::new(vec![]), params(), gravity)
+                };
+                assert!(result.success);
+                let time = *result.t.last().unwrap();
+                assert!((time - 1.0).abs() < 1e-8);
+                // Terminal linear interpolation of the parabola contributes at most g*dt²/8.
+                let step: f64 = if segmented { 0.01 } else { 0.0001 };
+                let tolerance = magnitude * step * step / 8.0 + 1e-8;
+                assert!(
+                    (result.y[1].last().unwrap() - (12.0 - 0.5 * magnitude)).abs() < tolerance,
+                    "g={magnitude}, segmented={segmented}, y={:?}, time={time}",
+                    result.y[1].last()
+                );
+                assert!((result.y[4].last().unwrap() - (2.0 - magnitude)).abs() < 1e-8);
+                if magnitude == 9.80665 {
+                    let public = if segmented {
+                        fast_integrate_with_segments(&inputs, vec![], params())
+                    } else {
+                        fast_integrate(&inputs, &WindSock::new(vec![]), params())
+                    };
+                    assert_eq!(public.t, result.t);
+                    assert_eq!(public.y, result.y);
+                    assert_eq!(public.t_events, result.t_events);
+                }
+            }
+        }
+    }
     use crate::BCSegmentData;
 
     fn expected_shot_frame_vector(level: Vector3<f64>, angle: f64) -> Vector3<f64> {
@@ -1197,7 +1280,7 @@ mod tests {
                 ..BallisticInputs::default()
             };
 
-            compute_derivatives(
+            compute_derivatives_with_gravity(
                 &[0.0, 0.0, 0.0, 600.0, 0.0, 0.0],
                 &inputs,
                 &WindSock::new(vec![]),
@@ -1212,6 +1295,7 @@ mod tests {
                 None,
                 None,
                 None,
+                Gravity::EARTH,
             )
         };
 
@@ -1240,7 +1324,7 @@ mod tests {
                 .bc_segments_data
                 .as_ref()
                 .is_some_and(|segments| !segments.is_empty());
-            compute_derivatives(
+            compute_derivatives_with_gravity(
                 &[0.0, 0.0, 0.0, 600.0, 0.0, 0.0],
                 inputs,
                 &WindSock::new(vec![]),
@@ -1255,6 +1339,7 @@ mod tests {
                 None,
                 None,
                 None,
+                Gravity::EARTH,
             )
         };
 
@@ -1320,7 +1405,7 @@ mod tests {
         let state_along_slant = [1_000.0, 0.0, 0.0, 600.0, 0.0, 0.0];
         let state_across_slant = [0.0, 500.0 / angle.cos(), 0.0, 600.0, 0.0, 0.0];
 
-        let a = compute_derivatives(
+        let a = compute_derivatives_with_gravity(
             &state_along_slant,
             &inputs,
             &wind_sock,
@@ -1333,8 +1418,9 @@ mod tests {
             None,
             None,
             None,
+            Gravity::EARTH,
         );
-        let b = compute_derivatives(
+        let b = compute_derivatives_with_gravity(
             &state_across_slant,
             &inputs,
             &wind_sock,
@@ -1347,6 +1433,7 @@ mod tests {
             None,
             None,
             None,
+            Gravity::EARTH,
         );
 
         for component in 3..6 {
@@ -1370,7 +1457,7 @@ mod tests {
         let level_headwind = Vector3::new(-speed_mps, 0.0, 0.0);
         let velocity = expected_shot_frame_vector(level_headwind, angle);
         let state = [0.0, 0.0, 0.0, velocity.x, velocity.y, velocity.z];
-        let actual = compute_derivatives(
+        let actual = compute_derivatives_with_gravity(
             &state,
             &inputs,
             &WindSock::new(vec![crate::wind::WindSegment::new(360.0, 0.0, 1000.0)]),
@@ -1386,6 +1473,7 @@ mod tests {
             None,
             None,
             None,
+            Gravity::EARTH,
         );
         let expected = Vector3::new(
             -G_ACCEL_MPS2 * angle.sin(),
@@ -1413,7 +1501,7 @@ mod tests {
             let wind_shear_model = enable_wind_shear
                 .then(|| crate::wind_shear::boundary_layer_model_from_name(model))
                 .filter(|model| *model != crate::wind_shear::WindShearModel::None);
-            compute_derivatives(
+            compute_derivatives_with_gravity(
                 &state,
                 &inputs,
                 &WindSock::new(vec![crate::wind::WindSegment::new(
@@ -1433,6 +1521,7 @@ mod tests {
                 None,
                 wind_shear_model,
                 None,
+                Gravity::EARTH,
             )
         };
 
@@ -1523,7 +1612,7 @@ mod tests {
         let state = [0.0, 0.0, 0.0, velocity.x, velocity.y, velocity.z];
         let level_omega = Vector3::new(3.0e-5, 6.0e-5, -2.0e-5);
         let run = |omega| {
-            compute_derivatives(
+            compute_derivatives_with_gravity(
                 &state,
                 &inputs,
                 &WindSock::new(vec![]),
@@ -1539,6 +1628,7 @@ mod tests {
                 omega,
                 None,
                 None,
+                Gravity::EARTH,
             )
         };
         let baseline = run(None);
@@ -2319,7 +2409,7 @@ mod tests {
 
     fn deck_accel_x(cd_scale: f64) -> f64 {
         let inputs = deck_test_inputs(cd_scale);
-        compute_derivatives(
+        compute_derivatives_with_gravity(
             &[0.0, 0.0, 0.0, 700.0, 0.0, 0.0],
             &inputs,
             &WindSock::new(vec![]),
@@ -2334,6 +2424,7 @@ mod tests {
             None,
             None,
             None,
+            Gravity::EARTH,
         )[3]
     }
 
@@ -2355,7 +2446,7 @@ mod tests {
         };
         assert_eq!(omitted_inputs.cd_scale, 1.0);
 
-        let a_omitted = compute_derivatives(
+        let a_omitted = compute_derivatives_with_gravity(
             &[0.0, 0.0, 0.0, 700.0, 0.0, 0.0],
             &omitted_inputs,
             &WindSock::new(vec![]),
@@ -2370,6 +2461,7 @@ mod tests {
             None,
             None,
             None,
+            Gravity::EARTH,
         )[3];
         let a_explicit = deck_accel_x(1.0);
         assert_eq!(
@@ -2412,7 +2504,7 @@ mod tests {
         };
         let accel = |cd_scale: f64| {
             let inputs = make(cd_scale);
-            compute_derivatives(
+            compute_derivatives_with_gravity(
                 &[0.0, 0.0, 0.0, 700.0, 0.0, 0.0],
                 &inputs,
                 &WindSock::new(vec![]),
@@ -2427,6 +2519,7 @@ mod tests {
                 None,
                 None,
                 None,
+                Gravity::EARTH,
             )[3]
         };
         assert_eq!(

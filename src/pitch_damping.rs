@@ -6,7 +6,7 @@
 //! - Yaw of repose convergence
 //! - Transonic stability transitions
 
-use crate::constants::G_ACCEL_MPS2;
+use crate::gravity::Gravity;
 use crate::spin_decay::calculate_moment_of_inertia;
 use std::f64::consts::PI;
 
@@ -179,13 +179,14 @@ pub fn calculate_angular_acceleration(moment: f64, moment_of_inertia: f64) -> f6
 /// `yaw = Ix * p * g / (M * V)` eliminate the unavailable static-moment slope `M`, leaving
 /// `yaw = 4 * Iy * Sg * g / (Ix * |p| * V)`. The API has no flight-path angle, so this uses
 /// the flat-fire approximation `cos(theta) = 1`. Twist direction is applied downstream.
-pub(crate) fn calculate_gravity_yaw_of_repose(
+pub(crate) fn calculate_gravity_yaw_of_repose_with_gravity(
     stability_factor: f64,
     velocity_mps: f64,
     spin_rate_rad_s: f64,
     mass_kg: f64,
     caliber_m: f64,
     length_m: f64,
+    gravity: Gravity,
 ) -> f64 {
     if !stability_factor.is_finite()
         || stability_factor <= 1.0
@@ -210,7 +211,7 @@ pub(crate) fn calculate_gravity_yaw_of_repose(
         return 0.0;
     }
 
-    4.0 * transverse_inertia * stability_factor * G_ACCEL_MPS2
+    4.0 * transverse_inertia * stability_factor * gravity.magnitude()
         / (axial_inertia * spin_rate_rad_s.abs() * velocity_mps)
 }
 
@@ -232,6 +233,37 @@ pub fn calculate_damped_yaw_of_repose(
     mach: f64,
     bullet_type: &str,
 ) -> (f64, f64) {
+    calculate_damped_yaw_of_repose_with_gravity(
+        stability_factor,
+        velocity_mps,
+        spin_rate_rad_s,
+        _wind_velocity_mps,
+        pitch_rate_rad_s,
+        air_density_kg_m3,
+        caliber_inches,
+        length_inches,
+        mass_grains,
+        mach,
+        bullet_type,
+        Gravity::EARTH,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn calculate_damped_yaw_of_repose_with_gravity(
+    stability_factor: f64,
+    velocity_mps: f64,
+    spin_rate_rad_s: f64,
+    _wind_velocity_mps: f64,
+    pitch_rate_rad_s: f64,
+    air_density_kg_m3: f64,
+    caliber_inches: f64,
+    length_inches: f64,
+    mass_grains: f64,
+    mach: f64,
+    bullet_type: &str,
+    gravity: Gravity,
+) -> (f64, f64) {
     if stability_factor <= 1.0 || spin_rate_rad_s == 0.0 {
         return (0.0, 0.0);
     }
@@ -243,13 +275,14 @@ pub fn calculate_damped_yaw_of_repose(
 
     // Crosswind creates an initial transient handled by aerodynamic-jump physics; it is not part
     // of the persistent equilibrium yaw. Use the gravity/gyroscopic balance for repose instead.
-    let equilibrium_yaw_rad = calculate_gravity_yaw_of_repose(
+    let equilibrium_yaw_rad = calculate_gravity_yaw_of_repose_with_gravity(
         stability_factor,
         velocity_mps,
         spin_rate_rad_s,
         mass_kg,
         caliber_m,
         length_m,
+        gravity,
     );
 
     // Get damping coefficients
@@ -556,13 +589,14 @@ mod tests {
         let caliber_m = 0.308 * 0.0254;
         let length_m = 1.3 * 0.0254;
 
-        let actual = calculate_gravity_yaw_of_repose(
+        let actual = calculate_gravity_yaw_of_repose_with_gravity(
             stability_factor,
             velocity_mps,
             spin_rate_rad_s,
             mass_kg,
             caliber_m,
             length_m,
+            Gravity::EARTH,
         );
 
         // Independent expansion of the inertia approximations and the classical flat-fire

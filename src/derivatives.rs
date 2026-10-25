@@ -1,9 +1,11 @@
 use crate::atmosphere::{
-    calculate_air_density_cimp, get_direct_atmosphere, get_local_atmosphere_humid, AtmoSock,
+    calculate_air_density_cimp, get_direct_atmosphere, get_local_atmosphere_humid_with_gravity,
+    AtmoSock,
 };
 use crate::bc_estimation::{velocity_segment_bc, BCSegmentEstimator};
 use crate::constants::*;
 use crate::drag::get_drag_coefficient_full;
+use crate::gravity::Gravity;
 use crate::InternalBallisticInputs as BallisticInputs;
 use nalgebra::Vector3;
 
@@ -160,14 +162,43 @@ pub fn compute_derivatives(
     // (every existing caller) is byte-identical to the pre-feature behavior.
     atmo_sock: Option<&AtmoSock>,
 ) -> [f64; 6] {
+    compute_derivatives_with_gravity(
+        pos,
+        vel,
+        inputs,
+        wind_vector,
+        atmos_params,
+        bc_used,
+        omega_vector,
+        _time,
+        atmo_sock,
+        Gravity::EARTH,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compute_derivatives_with_gravity(
+    pos: Vector3<f64>,
+    vel: Vector3<f64>,
+    inputs: &BallisticInputs,
+    wind_vector: Vector3<f64>,
+    atmos_params: (f64, f64, f64, f64),
+    bc_used: f64,
+    omega_vector: Option<Vector3<f64>>,
+    // MBA-1134: the in-integration spin-drift term that consumed `time` is deprecated (spin drift
+    // is now a Litz post-process), so this is currently unused; kept in the signature for callers.
+    _time: f64,
+    // MBA-1137: optional downrange-segmented atmosphere. When `Some`, the STANDARD-mode base
+    // (station-referenced) T/P/H is swapped for the zone selected by downrange distance (pos.x)
+    // before the altitude lapse; the direct-atmosphere sentinel path is left untouched. `None`
+    // (every existing caller) is byte-identical to the pre-feature behavior.
+    atmo_sock: Option<&AtmoSock>,
+    gravity: Gravity,
+) -> [f64; 6] {
     // Gravity acceleration vector, rotated into the shot-aligned frame by shooting_angle
     // (uphill/downhill inclined fire), matching cli_api::TrajectorySolver::gravity_acceleration.
     let theta = inputs.shooting_angle;
-    let accel_gravity = Vector3::new(
-        -G_ACCEL_MPS2 * theta.sin(),
-        -G_ACCEL_MPS2 * theta.cos(),
-        0.0,
-    );
+    let accel_gravity = gravity.in_frame(theta);
 
     // Wind-adjusted velocity. Wind sources are defined in the level frame; rotate the selected
     // vector into the same inclined shot frame used by velocity and gravity.
@@ -239,13 +270,14 @@ pub fn compute_derivatives(
                     (atmos_params.1, atmos_params.2, base_ratio)
                 }
             };
-            let (rho, sound) = get_local_atmosphere_humid(
+            let (rho, sound) = get_local_atmosphere_humid_with_gravity(
                 altitude_at_pos,
                 atmos_params.0, // base_alt
                 base_temp_c,    // base_temp_c (zone-swapped when AtmoSock present)
                 base_press_hpa, // base_press_hpa (zone-swapped when AtmoSock present)
                 base_ratio,     // base_ratio (zone-swapped when AtmoSock present)
                 0.0,            // humidity not available here (see note above)
+                gravity,
             );
             // LOCAL temperature at the projectile altitude, back-computed from the LOCAL speed of
             // sound (get_local_atmosphere returns density/sound at altitude_at_pos but not temp;
@@ -480,7 +512,7 @@ pub fn compute_derivatives(
                 l_in,
                 air_density,
             );
-            let (yaw_rad, _) = crate::spin_drift::calculate_yaw_of_repose(
+            let (yaw_rad, _) = crate::spin_drift::calculate_yaw_of_repose_with_gravity(
                 sg,
                 speed_air,
                 spin_rate_rad_s,
@@ -493,6 +525,7 @@ pub fn compute_derivatives(
                 mach,
                 "match",
                 false,
+                gravity,
             );
 
             // Proper McCoy Magnus FORCE: F = q S C_Npa (pd/2V) sin(alpha_R).

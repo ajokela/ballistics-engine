@@ -1,3 +1,4 @@
+use crate::gravity::Gravity;
 use crate::InternalBallisticInputs;
 
 // Constants for unit conversions
@@ -339,6 +340,22 @@ pub fn quick_drop_estimate(
     _bullet_mass_grains: f64,
     bc: f64,
 ) -> f64 {
+    quick_drop_estimate_with_gravity(
+        muzzle_velocity_fps,
+        distance_yards,
+        _bullet_mass_grains,
+        bc,
+        Gravity::EARTH,
+    )
+}
+
+pub(crate) fn quick_drop_estimate_with_gravity(
+    muzzle_velocity_fps: f64,
+    distance_yards: f64,
+    _bullet_mass_grains: f64,
+    bc: f64,
+    gravity: Gravity,
+) -> f64 {
     if muzzle_velocity_fps <= 0.0 || distance_yards <= 0.0 {
         return 0.0; // No drop if no velocity or distance
     }
@@ -347,7 +364,7 @@ pub fn quick_drop_estimate(
     let distance_ft = distance_yards * 3.0;
     let step_count = ((distance_yards / 5.0).ceil() as usize).clamp(32, 4096);
     let step_ft = distance_ft / step_count as f64;
-    let gravity_ft_s2 = crate::constants::G_ACCEL_MPS2 / FEET_TO_METERS;
+    let gravity_ft_s2 = gravity.magnitude() / FEET_TO_METERS;
     let speed_of_sound_fps = crate::constants::SPEED_OF_SOUND_MPS / FPS_TO_MPS;
 
     // State is vertical position, downrange velocity, and vertical velocity, all in imperial

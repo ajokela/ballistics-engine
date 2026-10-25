@@ -3,6 +3,7 @@
 //! This module provides Rust-accelerated implementations of atmospheric calculations
 //! with full ICAO Standard Atmosphere support for improved accuracy at all altitudes.
 
+use crate::gravity::Gravity;
 use std::cmp::Ordering;
 
 /// ICAO Standard Atmosphere layer definitions
@@ -19,7 +20,9 @@ struct AtmosphereLayer {
 }
 
 /// ICAO Standard Atmosphere constants
-const G_ACCEL_MPS2: f64 = 9.80665;
+// ICAO reference quantities are defined using standard Earth gravity, independently of the
+// acceleration chosen for an internal simulation.
+const G_ACCEL_MPS2: f64 = crate::constants::G_ACCEL_MPS2;
 const R_AIR: f64 = 287.0531; // Specific gas constant for dry air (J/(kg·K))
 const GAMMA: f64 = 1.4; // Heat capacity ratio for air
 const GEOPOTENTIAL_EARTH_RADIUS_M: f64 = 6_356_766.0;
@@ -871,12 +874,34 @@ pub fn get_local_atmosphere_humid(
     base_ratio: f64,
     humidity_percent: f64,
 ) -> (f64, f64) {
-    let (temp_k, pressure_pa, density) = local_temp_pressure_density(
+    get_local_atmosphere_humid_with_gravity(
         altitude_m,
         base_alt,
         base_temp_c,
         base_press_hpa,
         base_ratio,
+        humidity_percent,
+        Gravity::EARTH,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn get_local_atmosphere_humid_with_gravity(
+    altitude_m: f64,
+    base_alt: f64,
+    base_temp_c: f64,
+    base_press_hpa: f64,
+    base_ratio: f64,
+    humidity_percent: f64,
+    gravity: Gravity,
+) -> (f64, f64) {
+    let (temp_k, pressure_pa, density) = local_temp_pressure_density_with_gravity(
+        altitude_m,
+        base_alt,
+        base_temp_c,
+        base_press_hpa,
+        base_ratio,
+        gravity,
     );
     (
         density,
@@ -894,6 +919,24 @@ fn local_temp_pressure_density(
     base_press_hpa: f64,
     base_ratio: f64,
 ) -> (f64, f64, f64) {
+    local_temp_pressure_density_with_gravity(
+        altitude_m,
+        base_alt,
+        base_temp_c,
+        base_press_hpa,
+        base_ratio,
+        Gravity::EARTH,
+    )
+}
+
+fn local_temp_pressure_density_with_gravity(
+    altitude_m: f64,
+    base_alt: f64,
+    base_temp_c: f64,
+    base_press_hpa: f64,
+    base_ratio: f64,
+    gravity: Gravity,
+) -> (f64, f64, f64) {
     let base_temp_k = base_temp_c + 273.15;
 
     // A non-finite endpoint would make the boundary walk fail to advance. The
@@ -909,6 +952,7 @@ fn local_temp_pressure_density(
         target_geopotential_m,
         base_temp_k,
         base_press_hpa,
+        gravity,
     );
 
     // Enhanced density calculation
@@ -926,6 +970,7 @@ fn integrate_local_atmosphere_layers(
     target_geopotential_m: f64,
     mut temp_k: f64,
     mut pressure_hpa: f64,
+    gravity: Gravity,
 ) -> (f64, f64) {
     let mut current_alt = base_geopotential_m;
 
@@ -946,6 +991,7 @@ fn integrate_local_atmosphere_layers(
                 pressure_hpa,
                 segment_end - current_alt,
                 ICAO_LAYERS[layer_index].lapse_rate,
+                gravity,
             );
             current_alt = segment_end;
         }
@@ -967,6 +1013,7 @@ fn integrate_local_atmosphere_layers(
                 pressure_hpa,
                 segment_end - current_alt,
                 ICAO_LAYERS[layer_index].lapse_rate,
+                gravity,
             );
             current_alt = segment_end;
         }
@@ -981,16 +1028,51 @@ fn integrate_local_atmosphere_segment(
     base_pressure_hpa: f64,
     height_diff: f64,
     lapse_rate: f64,
+    gravity: Gravity,
 ) -> (f64, f64) {
     let temp_k = base_temp_k + lapse_rate * height_diff;
     let pressure_hpa = if lapse_rate.abs() < 1e-10 {
-        base_pressure_hpa * (-G_ACCEL_MPS2 * height_diff / (R_AIR * base_temp_k)).exp()
+        base_pressure_hpa * (-gravity.magnitude() * height_diff / (R_AIR * base_temp_k)).exp()
     } else {
         let temp_ratio = temp_k / base_temp_k;
-        base_pressure_hpa * temp_ratio.powf(-G_ACCEL_MPS2 / (lapse_rate * R_AIR))
+        base_pressure_hpa * temp_ratio.powf(-gravity.magnitude() / (lapse_rate * R_AIR))
     };
 
     (temp_k, pressure_hpa)
+}
+
+#[cfg(test)]
+mod uniform_gravity_tests {
+    use super::*;
+
+    #[test]
+    fn uniform_gravity_controls_hydrostatic_pressure_without_moving_the_station_anchor() {
+        for magnitude in [0.0, 1.62, 9.80665, 20.0] {
+            let gravity = Gravity::new(magnitude).unwrap();
+            let (temperature, pressure) =
+                integrate_local_atmosphere_segment(280.0, 900.0, 100.0, 0.0, gravity);
+            assert_eq!(temperature, 280.0);
+            assert!(
+                (pressure / 900.0 - (-magnitude * 100.0 / (R_AIR * 280.0)).exp()).abs() < 1e-14
+            );
+            let station =
+                local_temp_pressure_density_with_gravity(300.0, 300.0, 20.0, 900.0, 0.9, gravity);
+            assert_eq!(
+                station,
+                local_temp_pressure_density(300.0, 300.0, 20.0, 900.0, 0.9)
+            );
+        }
+        // Exercise both the lapse and isothermal branches while crossing layer boundaries.
+        let (_, pressure, _) = local_temp_pressure_density_with_gravity(
+            25_000.0,
+            0.0,
+            20.0,
+            900.0,
+            0.9,
+            Gravity::new(0.0).unwrap(),
+        );
+        assert_eq!(pressure, 90_000.0);
+    }
 }
 
 /// Determine local lapse rate based on altitude and atmospheric layer.

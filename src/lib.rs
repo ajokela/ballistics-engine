@@ -15,6 +15,8 @@
 //! - FFI bindings for iOS and Android development
 
 // Re-export the main types and functions
+mod gravity;
+
 pub use atmosphere::{AtmoSegment, AtmoSock};
 pub use cli_api::{
     calculate_zero_angle, calculate_zero_angle_with_conditions,
