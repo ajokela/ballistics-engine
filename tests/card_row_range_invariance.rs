@@ -27,6 +27,7 @@
 
 use std::process::Command;
 
+#[cfg(feature = "pdf")]
 #[path = "support/pdf_text.rs"]
 mod pdf_text;
 

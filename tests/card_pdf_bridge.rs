@@ -24,6 +24,7 @@
 
 use serde_json::{json, Value};
 
+#[cfg(feature = "pdf")]
 #[path = "support/pdf_text.rs"]
 mod pdf_text;
 
@@ -176,7 +177,7 @@ mod pdf_present {
     // same reading in the truncation tests. One reader, so two test files cannot come to
     // disagree about what a card says.
 
-    use crate::pdf_text::{glyph_scan, pdftotext, tokens};
+    use crate::pdf_text::{native_text, pdftotext, tokens};
 
     fn assert_run_present(tokens: &[String], run: &[String], label: &str) {
         assert!(
@@ -454,11 +455,11 @@ mod pdf_present {
     }
 
     /// The fallback extractor must agree with poppler where poppler is available, so the
-    /// glyph scan is trustworthy on machines (CI included) that lack `pdftotext`.
+    /// native parser is trustworthy on machines (CI included) that lack `pdftotext`.
     ///
     /// Compared as a token MULTISET plus the data rows, not as an ordered sequence: the two
     /// disagree on the column-header block alone, and legitimately. `pdftotext -layout`
-    /// reads it visually (eight headings, then eight unit sub-headings), while the glyph scan
+    /// reads it visually (eight headings, then eight unit sub-headings), while the native parser
     /// reads draw order (heading then sub-heading, per column). Every data row, and every
     /// header/footer string, is identical under both.
     #[test]
@@ -466,12 +467,12 @@ mod pdf_present {
         let (bytes, _pages) = generate(fixture_request());
         let Some(real) = pdftotext(&bytes) else {
             eprintln!(
-                "pdftotext not installed; the glyph-scan fallback is what ran everywhere else"
+                "pdftotext not installed; the native-parser fallback is what ran everywhere else"
             );
             return;
         };
         let mut real: Vec<String> = real.split_whitespace().map(str::to_string).collect();
-        let mut scanned: Vec<String> = glyph_scan(&bytes, "bridge card")
+        let mut scanned: Vec<String> = native_text(&bytes, "bridge card")
             .split_whitespace()
             .map(str::to_string)
             .collect();
@@ -479,7 +480,7 @@ mod pdf_present {
         let table = call("card.range_table", fixture_request());
         for run in expected_runs(&table["result"]) {
             assert_run_present(&real, &run, "pdftotext");
-            assert_run_present(&scanned, &run, "glyph scan");
+            assert_run_present(&scanned, &run, "native parser");
         }
 
         real.sort();
@@ -569,17 +570,28 @@ mod pdf_present {
         assert_is_a_pdf(&bytes, "no-pdf-block card");
     }
 
-    /// (d) The output cap, end to end. The `pdf` block's labels are drawn verbatim, so a
-    /// several-hundred-KiB label is the cheapest way to push a document past
-    /// `MAX_PDF_BYTES` — and it must come back as a typed `resource_limit` refusal rather
-    /// than a multi-megabyte payload. (The boundary itself, at exactly the cap and one byte
-    /// over, is unit-tested in `bridge::tests::pdf_output_cap_refuses_only_over_the_limit`.)
+    /// The output cap still applies when the PDF writer compresses content streams.
+    /// Repeated characters compress almost entirely, so use a deterministic varied
+    /// label repeated across six pages. The request remains below the input cap.
     #[test]
     fn an_oversize_card_is_refused_rather_than_returned() {
-        let mut request = fixture_request();
-        // Each character costs 4 bytes of hex-encoded glyph ids in the content stream, on
-        // top of the ~815 KiB of embedded fonts every card carries.
-        request["pdf"] = json!({"powder": "P".repeat(900_000)});
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut state = 0x1234_5678u32;
+        let label: String = (0..900_000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                ALPHABET[state as usize & 63] as char
+            })
+            .collect();
+        let rows: Vec<Value> = (0..600)
+            .map(|i| json!({"range": 100.0 + i as f64, "drop_adj": 1.0, "wind_adj": 0.1, "time": 0.5}))
+            .collect();
+        let mut request = stored_request();
+        request["end"] = json!(699.0);
+        request["stored_card"]["card"]["rows"] = json!(rows);
+        request["pdf"] = json!({"powder": label, "font_preset": "small"});
         let out = call("card.pdf", request);
         assert_eq!(
             out["ok"], false,
@@ -589,10 +601,10 @@ mod pdf_present {
         assert_eq!(out["error"]["code"], "resource_limit", "{}", out["error"]);
         let message = out["error"]["message"].as_str().unwrap();
         assert!(message.contains("the limit is"), "{message}");
-        // The refusal describes the document — six rows on one page, made huge by a label —
+        // The refusal describes the document — 600 rows on six pages, with a large label —
         // and names no control a saved card does not have.
         assert!(
-            message.contains("6 rows") && message.contains("1 pages"),
+            message.contains("600 rows") && message.contains("6 pages"),
             "{message}"
         );
         for absent in ["coarsen", "shorten"] {
