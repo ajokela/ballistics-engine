@@ -1,108 +1,27 @@
-//! Reading text back out of a rendered dope card, shared by every test that asserts on what
-//! a PDF actually says (`card_pdf_bridge`, `card_row_range_invariance`, `bc5d_bridge`).
+//! Read text from generated PDFs for presentation assertions.
 //!
-//! Not a test target of its own — it lives under `tests/support/` (cargo builds only the
-//! top-level `tests/*.rs` as test binaries) and is pulled in with
-//! `#[path = "support/pdf_text.rs"] mod pdf_text;`.
-//!
-//! `printpdf` 0.12 writes uncompressed content streams whose text is hex-encoded GLYPH IDS
-//! of the embedded Liberation Sans subset, not ASCII — so a naive `grep` for "4.8" finds
-//! nothing (an older comment in `tests/dope_card_units.rs` blames compression; the real
-//! reason is the glyph encoding). Two extractors are used:
-//!
-//! * `pdftotext` (poppler) when it is on PATH — the real thing, via the font's ToUnicode map;
-//! * otherwise a glyph scan: pull every `<hex> Tj` operand and map glyph id -> character.
-//!   Liberation Sans lays its ASCII glyphs out contiguously, so ONE constant offset decodes
-//!   the whole card, and the offset is calibrated from the card's own "Range" column header
-//!   rather than hard-coded.
-//!
-//! `card_pdf_bridge::both_extractors_agree_on_the_same_card` cross-checks the two whenever
-//! pdftotext is available, so the fallback is not an untested path on machines that have the
-//! tool.
-//!
-//! This module was a private block inside `card_pdf_bridge.rs` until MBA-1477 needed the same
-//! reading in the truncation tests. A printed card's contents are asserted from ONE reader,
-//! not from a second copy of it that could drift into agreeing with a different document.
+//! Prefer poppler when installed; otherwise use printpdf's parser, which decodes
+//! compressed content streams and embedded font mappings. The integration suite
+//! compares both extractors on the same document when poppler is available.
 
-// Each including test file uses the part of this it needs.
 #![allow(dead_code)]
 
-/// Every `<hex> Tj` operand in the document, as glyph-id runs, in draw order.
-pub fn glyph_runs(pdf: &[u8]) -> Vec<Vec<u32>> {
-    fn hex_value(c: u8) -> Option<u32> {
-        match c {
-            b'0'..=b'9' => Some(u32::from(c - b'0')),
-            b'a'..=b'f' => Some(u32::from(c - b'a') + 10),
-            b'A'..=b'F' => Some(u32::from(c - b'A') + 10),
-            _ => None,
-        }
-    }
-    let mut runs = Vec::new();
-    let mut i = 0;
-    while i < pdf.len() {
-        if pdf[i] != b'<' {
-            i += 1;
-            continue;
-        }
-        let mut digits = Vec::new();
-        let mut j = i + 1;
-        while j < pdf.len() {
-            match hex_value(pdf[j]) {
-                Some(v) => {
-                    digits.push(v);
-                    j += 1;
-                }
-                None => break,
-            }
-        }
-        // Only a well-formed `<....> Tj` show-text operand counts; PDF dictionaries
-        // (`<<`) and hex strings used for anything else are skipped.
-        let closed = j < pdf.len() && pdf[j] == b'>' && !digits.is_empty() && digits.len() % 4 == 0;
-        let mut k = j + 1;
-        while k < pdf.len() && pdf[k].is_ascii_whitespace() {
-            k += 1;
-        }
-        if closed && pdf[k..].starts_with(b"Tj") {
-            runs.push(
-                digits
-                    .chunks(4)
-                    .map(|q| q.iter().fold(0, |acc, d| acc * 16 + d))
-                    .collect(),
-            );
-            i = k + 2;
-        } else {
-            i += 1;
-        }
-    }
-    runs
-}
-
-pub fn decode_runs(runs: &[Vec<u32>], offset: u32) -> Vec<String> {
-    runs.iter()
-        .map(|run| {
-            run.iter()
-                .filter_map(|&g| char::from_u32(g + offset))
-                .collect()
-        })
-        .collect()
-}
-
-/// Fallback extraction: decode the glyph ids with the one constant offset that makes the
-/// card's own "Range" column header appear. Self-calibrating, so a different font subset
-/// ordering fails loudly here instead of silently producing garbage that no assertion
-/// happens to notice.
-pub fn glyph_scan(pdf: &[u8], label: &str) -> String {
-    let runs = glyph_runs(pdf);
+/// Decode the document without requiring an external PDF utility.
+pub fn native_text(pdf: &[u8], label: &str) -> String {
+    let document =
+        printpdf::PdfDocument::parse(pdf, &printpdf::PdfParseOptions::default(), &mut Vec::new())
+            .unwrap_or_else(|error| panic!("{label}: could not parse PDF: {error}"));
+    let text = document
+        .extract_text()
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        !runs.is_empty(),
-        "{label}: no show-text operands found in the PDF"
+        !text.trim().is_empty(),
+        "{label}: PDF contains no readable text"
     );
-    let offset = (0u32..=0x2000)
-        .find(|&offset| decode_runs(&runs, offset).iter().any(|s| s == "Range"))
-        .unwrap_or_else(|| {
-            panic!("{label}: could not calibrate the glyph offset against the \"Range\" header")
-        });
-    decode_runs(&runs, offset).join("\n")
+    text
 }
 
 /// Real extraction via poppler, or `None` when `pdftotext` is not installed. Feeds the
@@ -127,11 +46,11 @@ pub fn pdftotext(pdf: &[u8]) -> Option<String> {
 }
 
 /// The card's drawn text as whitespace-separated tokens. Both the two-column table's
-/// visual line order (`pdftotext -layout`) and the generator's draw order (glyph scan)
+/// visual line order (`pdftotext -layout`) and the generator's draw order (native parser)
 /// emit a row as `range drop wind lead`, so a row's cells are a contiguous token run
 /// under either extractor.
 pub fn tokens(pdf: &[u8], label: &str) -> Vec<String> {
-    let text = pdftotext(pdf).unwrap_or_else(|| glyph_scan(pdf, label));
+    let text = pdftotext(pdf).unwrap_or_else(|| native_text(pdf, label));
     text.split_whitespace().map(str::to_string).collect()
 }
 
@@ -139,7 +58,7 @@ pub fn tokens(pdf: &[u8], label: &str) -> Vec<String> {
 ///
 /// Asserted on TOKENS rather than the raw string because the two extractors disagree about
 /// runs of spaces — `pdftotext -layout` reconstructs inter-word gaps from glyph positions,
-/// while the glyph scan emits exactly what was drawn — and a footer line is one drawn string
+/// while the native parser emits exactly what was drawn — and a footer line is one drawn string
 /// under both.
 pub fn contains_phrase(pdf: &[u8], label: &str, phrase: &str) -> bool {
     let want: Vec<String> = phrase.split_whitespace().map(str::to_string).collect();
