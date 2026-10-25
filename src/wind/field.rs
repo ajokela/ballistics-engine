@@ -71,7 +71,9 @@ pub struct ProfileLevel {
 /// altitude, direction along the shortest circular arc; nearest level holds
 /// outside the range.
 ///
-/// The field reads only the height (`position_m.y`). Vertical wind is zero.
+/// The field reads only the height (`position_m.y`), on the same datum as the levels'
+/// `altitude_m`. A query exactly at a level gives that level's own vector, and exactly opposite
+/// neighbouring directions turn clockwise (increasing FROM angle). Vertical wind is zero.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProfileField {
     /// Levels sorted by strictly ascending altitude.
@@ -142,16 +144,28 @@ impl ProfileField {
         }
         for pair in levels.windows(2) {
             let (lo, hi) = (pair[0], pair[1]);
-            if altitude_m <= hi.altitude_m {
-                let f = (altitude_m - lo.altitude_m) / (hi.altitude_m - lo.altitude_m);
+            // Strictly below the upper level: a query exactly at a level is answered by that
+            // level itself (the next segment's lower end, or the top level below), so every
+            // level reproduces its own speed and direction exactly.
+            if altitude_m < hi.altitude_m {
+                if altitude_m == lo.altitude_m {
+                    return horizontal(lo.speed_mps, lo.direction_from_deg);
+                }
+                // Halving keeps the span finite for levels near ±f64::MAX and is exact otherwise.
+                let f = (altitude_m / 2.0 - lo.altitude_m / 2.0)
+                    / (hi.altitude_m / 2.0 - lo.altitude_m / 2.0);
                 let speed = lo.speed_mps + f * (hi.speed_mps - lo.speed_mps);
-                let mut delta = (hi.direction_from_deg - lo.direction_from_deg) % 360.0;
+                // Interpolate between directions reduced to [0, 360), so a huge angle cannot
+                // absorb the turn. Exactly opposite directions turn clockwise (the FROM angle
+                // increases), however the angles are written.
+                let lo_dir = lo.direction_from_deg.rem_euclid(360.0);
+                let mut delta = hi.direction_from_deg.rem_euclid(360.0) - lo_dir;
                 if delta > 180.0 {
                     delta -= 360.0;
-                } else if delta < -180.0 {
+                } else if delta <= -180.0 {
                     delta += 360.0;
                 }
-                return horizontal(speed, lo.direction_from_deg + f * delta);
+                return horizontal(speed, lo_dir + f * delta);
             }
         }
         let last = levels[levels.len() - 1];
@@ -168,7 +182,9 @@ impl WindField for ProfileField {
 /// Log-law boundary layer: u(z) = u_ref · ln(z/z0) / ln(z_ref/z0), z > z0;
 /// zero below z0. Constant direction with height.
 ///
-/// The field reads only the height (`position_m.y`). Vertical wind is zero.
+/// The field reads only the height (`position_m.y`), which must be the height above the ground.
+/// This crate's trajectory frame puts y = 0 at the muzzle, so a caller passing trajectory
+/// positions must add the muzzle's height above the ground. Vertical wind is zero.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LogProfile {
     reference_speed_mps: f64,
@@ -202,7 +218,14 @@ impl LogProfile {
                 WindFieldRule::FiniteAndPositive,
             );
         }
-        if !roughness_m.is_finite() || roughness_m <= 0.0 || roughness_m >= reference_height_m {
+        // The log difference is the profile's denominator; it must be a usable positive number,
+        // which also rejects a roughness indistinguishable from the reference height.
+        let log_span = reference_height_m.ln() - roughness_m.ln();
+        if !roughness_m.is_finite()
+            || roughness_m <= 0.0
+            || roughness_m >= reference_height_m
+            || !(log_span.is_finite() && log_span > 0.0)
+        {
             return invalid(
                 WindFieldParam::RoughnessM,
                 WindFieldRule::FiniteAndPositiveBelowReferenceHeight,
@@ -239,14 +262,16 @@ impl LogProfile {
         self.direction_from_deg
     }
 
-    /// Wind speed (m/s) at an altitude: zero at or below the roughness length, and for a NaN
-    /// altitude.
+    /// Wind speed (m/s) at an altitude: zero at or below the roughness length, and for a NaN or
+    /// infinite altitude (the log law has no finite value there).
     pub fn speed_at(&self, altitude_m: f64) -> f64 {
-        if altitude_m.is_nan() || altitude_m <= self.roughness_m {
+        if !altitude_m.is_finite() || altitude_m <= self.roughness_m {
             return 0.0;
         }
-        let z0 = self.roughness_m;
-        self.reference_speed_mps * (altitude_m / z0).ln() / (self.reference_height_m / z0).ln()
+        // Differences of logs rather than logs of ratios: z / z0 overflows for a tiny z0.
+        let z0_ln = self.roughness_m.ln();
+        self.reference_speed_mps * (altitude_m.ln() - z0_ln)
+            / (self.reference_height_m.ln() - z0_ln)
     }
 
     /// Wind (m/s) at an altitude.
@@ -268,8 +293,13 @@ impl WindField for LogProfile {
 ///
 /// `u` runs along the geostrophic flow and `v` to its left, so in the northern hemisphere the
 /// wind near the surface is backed up to 45° from the geostrophic direction and veers with
-/// height; the southern hemisphere mirrors this. The field reads only the height
-/// (`position_m.y`). Vertical wind is zero.
+/// height; the southern hemisphere mirrors this. This constant-K solution is linear near the
+/// ground, not logarithmic; [`LogProfile`] is the surface-layer model.
+///
+/// The field reads only the height (`position_m.y`), which must be the height above the ground.
+/// This crate's trajectory frame puts y = 0 at the muzzle, so a caller passing trajectory
+/// positions must add the muzzle's height above the ground. An infinite height is the
+/// geostrophic limit. Vertical wind is zero.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EkmanProfile {
     geostrophic_mps: f64,
@@ -284,7 +314,9 @@ impl EkmanProfile {
     /// `geostrophic_mps` must be finite and `>= 0`, `latitude_deg` finite, nonzero and strictly
     /// between -90 and 90 (the solution has no boundary layer at the equator), and
     /// `eddy_viscosity_m2s` finite and `> 0`. `direction_from_deg`, the wind-FROM direction of
-    /// the geostrophic wind aloft, must be finite.
+    /// the geostrophic wind aloft, must be finite. A latitude so close to zero that the Coriolis
+    /// parameter underflows counts as the equator, and a viscosity so small that the decay rate
+    /// overflows is rejected.
     pub fn new(
         geostrophic_mps: f64,
         latitude_deg: f64,
@@ -304,7 +336,16 @@ impl EkmanProfile {
                 WindFieldRule::FiniteNonzeroAndOffThePoles,
             );
         }
-        if !eddy_viscosity_m2s.is_finite() || eddy_viscosity_m2s <= 0.0 {
+        if coriolis_parameter(latitude_deg) == 0.0 {
+            return invalid(
+                WindFieldParam::LatitudeDeg,
+                WindFieldRule::FiniteNonzeroAndOffThePoles,
+            );
+        }
+        if !eddy_viscosity_m2s.is_finite()
+            || eddy_viscosity_m2s <= 0.0
+            || !decay_rate(latitude_deg, eddy_viscosity_m2s).is_finite()
+        {
             return invalid(
                 WindFieldParam::EddyViscosityM2s,
                 WindFieldRule::FiniteAndPositive,
@@ -346,17 +387,29 @@ impl EkmanProfile {
         if altitude_m.is_nan() || altitude_m <= 0.0 {
             return (0.0, 0.0);
         }
-        let f = 2.0 * EARTH_ROTATION_RAD_PER_S * self.latitude_deg.to_radians().sin();
-        let gamma = (f.abs() / (2.0 * self.eddy_viscosity_m2s)).sqrt();
-        let decay = (-gamma * altitude_m).exp();
         let g = self.geostrophic_mps;
-        (
-            g * (1.0 - decay * (gamma * altitude_m).cos()),
-            f.signum() * g * decay * (gamma * altitude_m).sin(),
-        )
+        let x = decay_rate(self.latitude_deg, self.eddy_viscosity_m2s) * altitude_m;
+        // Past this, e^-x is exactly zero: the geostrophic limit, also for an infinite height
+        // (where cos(x) would be NaN).
+        if x > 746.0 {
+            return (g, 0.0);
+        }
+        let decay = (-x).exp();
+        let (sin_x, cos_x) = x.sin_cos();
+        // 1 - e^-x cos x. Near the surface write it as 2 sin^2(x/2) - cos x * expm1(-x), which
+        // has no cancellation, so the 45° surface turn survives at sub-millimetre heights.
+        let along = if x < 1.0 {
+            let half = (0.5 * x).sin();
+            2.0 * half * half - cos_x * (-x).exp_m1()
+        } else {
+            1.0 - decay * cos_x
+        };
+        let sign = coriolis_parameter(self.latitude_deg).signum();
+        (g * along, sign * g * decay * sin_x)
     }
 
-    /// Wind (m/s) at an altitude: zero at or below the surface, and for a NaN altitude.
+    /// Wind (m/s) at an altitude: zero at or below the surface and for a NaN altitude, and the
+    /// geostrophic wind for an infinite one.
     pub fn wind_at(&self, altitude_m: f64) -> Vector3<f64> {
         let (u, v) = self.components_at(altitude_m);
         let from_rad = direction_to_rad(self.direction_from_deg);
@@ -480,6 +533,16 @@ pub enum WindFieldError {
         param: WindFieldParam,
         rule: WindFieldRule,
     },
+}
+
+/// The Coriolis parameter f = 2Ω·sin(latitude), 1/s.
+fn coriolis_parameter(latitude_deg: f64) -> f64 {
+    2.0 * EARTH_ROTATION_RAD_PER_S * latitude_deg.to_radians().sin()
+}
+
+/// The Ekman decay rate γ = sqrt(|f| / 2K), 1/m.
+fn decay_rate(latitude_deg: f64, eddy_viscosity_m2s: f64) -> f64 {
+    (coriolis_parameter(latitude_deg).abs() / (2.0 * eddy_viscosity_m2s)).sqrt()
 }
 
 /// Degrees to radians with the same arithmetic as [`WindSegment`](super::WindSegment)'s
@@ -947,6 +1010,161 @@ mod tests {
         let w = profile.wind_at(150.0);
         for y in [-1e3, 0.0, 149.0, 151.0, 1e5] {
             assert_eq!(profile.wind_at(y), w);
+        }
+    }
+
+    // ---- Review fixes: exact levels, extremes, numerics ----
+
+    #[test]
+    fn every_level_reproduces_its_own_vector_exactly() {
+        // Bottom, interior (after a 350 -> 10 wrap) and top levels, plus a raw angle >= 360.
+        let levels = vec![
+            level(0.0, 3.0, 350.0),
+            level(100.0, 5.0, 10.0),
+            level(250.0, 8.0, 100.0),
+            level(330.0, 6.5, 370.0),
+            level(400.0, 2.0, 359.0),
+        ];
+        let profile = ProfileField::new(levels.clone()).unwrap();
+        for l in levels {
+            assert_eq!(
+                profile.wind_at(l.altitude_m),
+                wind_vector(l.speed_mps, direction_to_rad(l.direction_from_deg), 0.0),
+                "level at {} m",
+                l.altitude_m
+            );
+        }
+    }
+
+    #[test]
+    fn opposite_directions_turn_clockwise_however_written() {
+        // Exactly opposite neighbours: the FROM angle increases by 90° at the midpoint.
+        for (lo, hi) in [
+            (0.0, 180.0),
+            (0.0, -180.0),
+            (180.0, 0.0),
+            (180.0, 360.0),
+            (-180.0, 0.0),
+            (190.0, 10.0),
+            (190.0, 370.0),
+        ] {
+            let profile =
+                ProfileField::new(vec![level(0.0, 5.0, lo), level(100.0, 5.0, hi)]).unwrap();
+            let expected = (lo + 90.0_f64).rem_euclid(360.0);
+            let mid = direction_from(profile.wind_at(50.0));
+            assert!(
+                angle_diff(mid, expected).abs() < 1e-9,
+                "{lo} -> {hi}: {mid}"
+            );
+        }
+    }
+
+    #[test]
+    fn huge_level_angles_still_interpolate() {
+        let lo_dir = 1e300_f64;
+        let profile =
+            ProfileField::new(vec![level(0.0, 5.0, lo_dir), level(100.0, 5.0, 10.0)]).unwrap();
+        let lo_n = lo_dir.rem_euclid(360.0);
+        let mut delta = 10.0 - lo_n;
+        if delta > 180.0 {
+            delta -= 360.0;
+        } else if delta <= -180.0 {
+            delta += 360.0;
+        }
+        for frac in [0.25, 0.5, 0.75] {
+            let want = (lo_n + frac * delta).rem_euclid(360.0);
+            let got = direction_from(profile.wind_at(100.0 * frac));
+            assert!(
+                angle_diff(got, want).abs() < 1e-6,
+                "frac {frac}: {got} vs {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn extreme_altitude_spans_stay_finite() {
+        let profile =
+            ProfileField::new(vec![level(-1e308, 2.0, 0.0), level(1e308, 6.0, 0.0)]).unwrap();
+        assert!((speed(profile.wind_at(0.0)) - 4.0).abs() < 1e-12);
+        assert_eq!(profile.wind_at(1e308), horizontal(6.0, 0.0));
+        assert_eq!(profile.wind_at(f64::INFINITY), horizontal(6.0, 0.0));
+        assert_eq!(profile.wind_at(f64::NEG_INFINITY), horizontal(2.0, 0.0));
+    }
+
+    #[test]
+    fn log_profile_is_finite_for_every_accepted_roughness() {
+        for z0 in [1e-310, 1e-300, 1e-12, 0.03, 9.999] {
+            let log = LogProfile::new(8.0, 10.0, z0, 30.0).unwrap();
+            assert!((log.speed_at(10.0) - 8.0).abs() < 1e-12, "z0 {z0}");
+            for z in [z0 * 2.0, 1.0, 1e9, f64::MAX] {
+                let w = log.wind_at(z);
+                assert!(w.iter().all(|c| c.is_finite()), "z0 {z0} z {z}: {w:?}");
+            }
+        }
+        // A roughness indistinguishable from the reference height on a log scale is refused;
+        // anything accepted must still hit its reference speed.
+        let z0 = f64::from_bits(10.0_f64.to_bits() - 1);
+        match LogProfile::new(8.0, 10.0, z0, 0.0) {
+            Err(e) => assert_eq!(
+                e,
+                WindFieldError::InvalidParameter {
+                    param: WindFieldParam::RoughnessM,
+                    rule: WindFieldRule::FiniteAndPositiveBelowReferenceHeight
+                }
+            ),
+            Ok(log) => assert!((log.speed_at(10.0) - 8.0).abs() < 1e-9),
+        }
+        // No finite value at an infinite height: calm, like NaN.
+        let log = LogProfile::new(8.0, 10.0, 0.03, 30.0).unwrap();
+        assert_eq!(log.wind_at(f64::INFINITY), Vector3::zeros());
+        assert_eq!(log.wind_at(f64::NEG_INFINITY), Vector3::zeros());
+    }
+
+    #[test]
+    fn ekman_rejects_underflowing_latitude_and_overflowing_decay() {
+        let invalid = |param, rule| WindFieldError::InvalidParameter { param, rule };
+        assert_eq!(
+            EkmanProfile::new(12.0, 1e-322, 5.0, 0.0).unwrap_err(),
+            invalid(
+                WindFieldParam::LatitudeDeg,
+                WindFieldRule::FiniteNonzeroAndOffThePoles
+            )
+        );
+        assert_eq!(
+            EkmanProfile::new(12.0, 45.0, 1e-320, 0.0).unwrap_err(),
+            invalid(
+                WindFieldParam::EddyViscosityM2s,
+                WindFieldRule::FiniteAndPositive
+            )
+        );
+        // Small but representable values are still accepted.
+        assert!(EkmanProfile::new(12.0, 1e-6, 5.0, 0.0).is_ok());
+        assert!(EkmanProfile::new(12.0, 45.0, 1e-300, 0.0).is_ok());
+    }
+
+    #[test]
+    fn ekman_is_finite_at_every_height_and_geostrophic_at_infinity() {
+        for k in [1e-300, 5.0, 1e6] {
+            let ekman = EkmanProfile::new(12.0, -30.0, k, 75.0).unwrap();
+            for z in [1e-300, 1e-15, 1.0, 1e4, 1e200, f64::MAX, f64::INFINITY] {
+                let w = ekman.wind_at(z);
+                assert!(w.iter().all(|c| c.is_finite()), "k {k} z {z}: {w:?}");
+            }
+            let top = ekman.wind_at(f64::INFINITY);
+            assert!((speed(top) - 12.0).abs() < 1e-12);
+            assert!(angle_diff(direction_from(top), 75.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn ekman_surface_turn_holds_at_tiny_heights() {
+        let north = EkmanProfile::new(10.0, 45.0, 5.0, 0.0).unwrap();
+        let south = EkmanProfile::new(10.0, -45.0, 5.0, 0.0).unwrap();
+        for z in [1e-15, 1e-13, 1e-9, 1e-5] {
+            let n = angle_diff(direction_from(north.wind_at(z)), 0.0);
+            let s = angle_diff(direction_from(south.wind_at(z)), 0.0);
+            assert!((n + 45.0).abs() < 1e-3, "north z {z}: {n}");
+            assert!((s - 45.0).abs() < 1e-3, "south z {z}: {s}");
         }
     }
 

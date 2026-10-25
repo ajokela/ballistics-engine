@@ -1,6 +1,7 @@
 # Wind field modeling in the `wind` module (planned, additive)
 
-Status: planned, decided 2026-10-24. Not implemented.
+Status: decided 2026-10-24; implemented 2026-10-25 per
+[WIND_FIELD_IMPLEMENTATION.md](WIND_FIELD_IMPLEMENTATION.md), unreleased. See "As built" below.
 Companion: [winds-engine plan](https://github.com/ajokela/winds-engine/blob/main/docs/winds-engine-plan.md)
 (GRIB acquisition and radiosonde validation live there; this note covers only
 what lands in this crate).
@@ -49,8 +50,9 @@ everything reproducible from inputs.
 ## Validation
 
 - Unit tests: profile interpolation, analytic-profile sanity (log law
-  reproduces its reference point; Ekman reduces to the log layer near the
-  ground), adapter equivalence with `WindSock` on the segment ladders.
+  reproduces its reference point; Ekman endpoints and turning sense; see "As
+  built" on the log-layer limit), adapter equivalence with `WindSock` on the
+  segment ladders.
 - Cross-check: winds-engine's radiosonde datasets compare `ProfileField`
   providers against sounding archives on a handful of station-days.
 
@@ -58,3 +60,20 @@ everything reproducible from inputs.
 
 Kernel `WindField` minor release, then rockets-engine
 `with_wind_field`/`--wind-profile` end to end against two sounding days.
+
+## As built
+
+- `EkmanProfile` follows the implementation brief: geostrophic speed, latitude,
+  a constant eddy viscosity K (not a roughness length) and the geostrophic
+  direction. The constant-K solution is linear near the ground, not
+  logarithmic, so it does not reduce to the log layer; `LogProfile` is the
+  surface-layer model.
+- Its turning sense is Holton's: in the northern hemisphere the surface wind
+  is backed about 45 degrees from the geostrophic wind and veers with height.
+  The staged winds-engine version rotated the other way; a test pins both
+  hemispheres here.
+- `LogProfile` and `EkmanProfile` take y as height above the ground.
+  `ProfileField` uses its levels' datum, so a sounding in metres above sea
+  level needs the site elevation added to (or subtracted from) heights
+  wherever the data enters.
+

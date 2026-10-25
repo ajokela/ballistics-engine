@@ -15,8 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `EkmanProfile` (the constant-eddy-viscosity Ekman spiral, backed near the surface in the
   northern hemisphere and veered in the southern). `WindSock` implements the trait as exactly
   `vector_for_range_stateless(position.x)`. Directions use the module's wind-FROM convention
-  (0° headwind, 90° from the right), and a profile level gives the same vector as
-  `wind_vector` for its speed and direction. Constructors return a typed `WindFieldError`.
+  (0° headwind, 90° from the right), and every profile level gives exactly the vector
+  `wind_vector` gives for its speed and direction. `LogProfile` and `EkmanProfile` take the
+  height above the ground; `ProfileField` uses its levels' datum. Constructors return a typed
+  `WindFieldError`.
   Purely additive: `WindSegment`, `WindSock`, `wind_vector` and every other existing API are
   unchanged. Design record: [docs/WIND_FIELD_MODELING.md](docs/WIND_FIELD_MODELING.md).
 

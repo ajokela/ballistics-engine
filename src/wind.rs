@@ -24,7 +24,10 @@
 //!   [`WindSock::vector_for_range_stateless`].
 //!
 //! The profile fields read only the height (`position_m.y`) and have no vertical wind.
-//! Constructors validate their inputs and return a typed [`WindFieldError`].
+//! [`ProfileField`] uses whatever datum its levels' altitudes use. [`LogProfile`] and
+//! [`EkmanProfile`] need the height above the ground; this crate's trajectory frame puts y = 0
+//! at the muzzle, so a caller passing trajectory positions adds the muzzle's height above the
+//! ground. Constructors validate their inputs and return a typed [`WindFieldError`].
 //!
 //! ```
 //! use ballistics_engine::wind::{ProfileField, ProfileLevel, WindField};
