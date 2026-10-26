@@ -151,6 +151,16 @@ fn trajectory_zero_day_warns_for_a_qnh_typed_as_zero_pressure() {
         "{line}"
     );
     assert!(line.contains("add --zero-pressure-type qnh"), "{line}");
+    // No --zero-altitude was given, so the zero day flies at --altitude and the text says so
+    // rather than pointing at a flag the user never typed.
+    assert!(
+        line.contains("The zero day uses --altitude because --zero-altitude was not given."),
+        "{line}"
+    );
+    assert!(
+        line.contains("check that --altitude is the station elevation"),
+        "{line}"
+    );
 }
 
 // ---- Must not warn --------------------------------------------------------------------------

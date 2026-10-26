@@ -6194,8 +6194,13 @@ enum PressureDay {
     Shot,
     /// `trajectory`'s `--zero-pressure` / `--zero-pressure-type` / `--zero-altitude`.
     /// `inherited_pressure`: no `--zero-pressure` was given, so the zero day flies the
-    /// shot-day pressure at its own altitude.
-    Zero { inherited_pressure: bool },
+    /// shot-day pressure at its own altitude. `inherited_altitude`: no `--zero-altitude` was
+    /// given, so the zero day flies its own pressure at `--altitude`, and the text names
+    /// that flag instead.
+    Zero {
+        inherited_pressure: bool,
+        inherited_altitude: bool,
+    },
 }
 
 /// Warning for an absolute station pressure that cannot be a reading at the station's altitude,
@@ -6232,23 +6237,36 @@ fn station_pressure_warning(
     let shown = UnitConverter::pressure_from_metric(station_hpa, units);
     let standard = UnitConverter::pressure_from_metric(check.icao_standard_pa / 100.0, units);
     let altitude = UnitConverter::altitude_from_metric(altitude_m, units);
-    let (label, qnh_flag, altitude_flag) = match day {
-        PressureDay::Shot => ("station pressure", "--pressure-type qnh", "--altitude"),
-        PressureDay::Zero { .. } => (
+    let (label, qnh_flag, altitude_flag, pressure_note, altitude_note) = match day {
+        PressureDay::Shot => (
+            "station pressure",
+            "--pressure-type qnh",
+            "--altitude",
+            "",
+            "",
+        ),
+        PressureDay::Zero {
+            inherited_pressure,
+            inherited_altitude,
+        } => (
             "zero-day station pressure",
             "--zero-pressure-type qnh",
-            "--zero-altitude",
+            if inherited_altitude {
+                "--altitude"
+            } else {
+                "--zero-altitude"
+            },
+            if inherited_pressure {
+                " The zero day uses the shot-day pressure because --zero-pressure was not given."
+            } else {
+                ""
+            },
+            if inherited_altitude {
+                " The zero day uses --altitude because --zero-altitude was not given."
+            } else {
+                ""
+            },
         ),
-    };
-    let inherited = if matches!(
-        day,
-        PressureDay::Zero {
-            inherited_pressure: true
-        }
-    ) {
-        " The zero day uses the shot-day pressure because --zero-pressure was not given."
-    } else {
-        ""
     };
     let min = ballistics_engine::atmosphere::STATION_PRESSURE_MIN_PLAUSIBLE_RATIO;
     let max = ballistics_engine::atmosphere::STATION_PRESSURE_MAX_PLAUSIBLE_RATIO;
@@ -6266,7 +6284,8 @@ fn station_pressure_warning(
     Some(format!(
         "warning: {label} {shown:.decimals$} {pressure_unit} is {:.3} times the ICAO standard \
          pressure at {altitude:.0} {altitude_unit} ({standard:.decimals$} {pressure_unit}), \
-         outside the {min} to {max} band that recorded weather stays within.{inherited} \
+         outside the {min} to {max} band that recorded weather stays within.\
+         {pressure_note}{altitude_note} \
          {advice} The pressure is used as given.",
         check.ratio
     ))
@@ -8299,6 +8318,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     if let Some(w) = station_pressure_warning(
                         PressureDay::Zero {
                             inherited_pressure: zero_pressure.is_none(),
+                            inherited_altitude: zero_altitude.is_none(),
                         },
                         zero_pressure_metric,
                         zero_altitude_metric,
@@ -22764,6 +22784,7 @@ mod station_pressure_warning_tests {
         let zero = station_pressure_warning(
             PressureDay::Zero {
                 inherited_pressure: false,
+                inherited_altitude: false,
             },
             hpa,
             CUSCO_M,
@@ -22772,14 +22793,54 @@ mod station_pressure_warning_tests {
         .expect("the zero day warns the same way");
         assert!(zero.contains("zero-day station pressure"), "{zero}");
         assert!(zero.contains("--zero-pressure-type qnh"), "{zero}");
-        assert!(zero.contains("--zero-altitude"), "{zero}");
+        assert!(
+            zero.contains("check that --zero-altitude is the station elevation"),
+            "{zero}"
+        );
         assert!(!zero.contains("shot-day pressure"), "{zero}");
+        assert!(
+            !zero.contains("because --zero-altitude was not given"),
+            "{zero}"
+        );
+
+        // The same --zero-pressure with no --zero-altitude: the zero day flies it at
+        // --altitude, so the advice names that flag, not one the user never gave.
+        let inherited_altitude = station_pressure_warning(
+            PressureDay::Zero {
+                inherited_pressure: false,
+                inherited_altitude: true,
+            },
+            hpa,
+            CUSCO_M,
+            UnitSystem::Imperial,
+        )
+        .expect("a QNH at the inherited Cusco altitude must warn");
+        for expected in [
+            "warning: zero-day station pressure 30.50 inHg",
+            "The zero day uses --altitude because --zero-altitude was not given.",
+            "add --zero-pressure-type qnh",
+            "otherwise check that --altitude is the station elevation, in ft",
+        ] {
+            assert!(
+                inherited_altitude.contains(expected),
+                "{expected:?} missing: {inherited_altitude}"
+            );
+        }
+        assert!(
+            !inherited_altitude.contains("--zero-altitude is"),
+            "{inherited_altitude}"
+        );
+        assert!(
+            !inherited_altitude.contains("shot-day pressure"),
+            "{inherited_altitude}"
+        );
 
         // A Cusco reading carried to a 500 ft zero range because --zero-pressure was left out.
         let station_hpa = UnitConverter::pressure_to_metric(20.33, UnitSystem::Imperial);
         let inherited = station_pressure_warning(
             PressureDay::Zero {
                 inherited_pressure: true,
+                inherited_altitude: false,
             },
             station_hpa,
             UnitConverter::altitude_to_metric(500.0, UnitSystem::Imperial),
@@ -22788,6 +22849,14 @@ mod station_pressure_warning_tests {
         .expect("a mountain reading at a valley zero range must warn");
         assert!(
             inherited.contains("uses the shot-day pressure because --zero-pressure was not given"),
+            "{inherited}"
+        );
+        assert!(
+            inherited.contains("Check that --zero-altitude is the station elevation"),
+            "{inherited}"
+        );
+        assert!(
+            !inherited.contains("because --zero-altitude was not given"),
             "{inherited}"
         );
     }
