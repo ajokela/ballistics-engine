@@ -1411,4 +1411,133 @@ mod pdf_present {
             "DA:-336 ft Pressure:30.25/1024 Temp:60",
         );
     }
+
+    // -- station presence (0.49.0) ---------------------------------------------------------
+
+    /// The station-sentinel spec's metric card at a 150 m site, 20 °C, with `air` merged in.
+    fn site_150m_request(air: Value) -> Value {
+        let mut request = json!({
+            "units": "metric",
+            "muzzle_velocity": 823.0,
+            "ballistic_coefficient": 0.475,
+            "mass": 10.9,
+            "diameter": 7.82,
+            "drag_model": "g1",
+            "sight_height": 38.1,
+            "zero_distance": 100.0,
+            "start": 100.0,
+            "end": 800.0,
+            "step": 100.0,
+            "adjustment_unit": "mil",
+            "temperature": 20.0,
+            "altitude": 150.0
+        });
+        for (key, value) in air.as_object().expect("air is an object") {
+            request[key] = value.clone();
+        }
+        request
+    }
+
+    /// (0.49.0) A typed pressure inside the old sentinel band at a real altitude is a reading:
+    /// `card.come_ups`, `card.range_table` and `card.wind` fly it as typed. The 600 m row's
+    /// velocity (a wind card's crosswind hold) lies strictly between its out-of-band
+    /// neighbours' and differs from the omitted-pressure card, which still flies ICAO air.
+    #[test]
+    fn card_rows_fly_a_typed_in_band_pressure() {
+        for (command, extra) in [
+            ("card.come_ups", json!({})),
+            ("card.range_table", json!({})),
+            (
+                "card.wind",
+                json!({"wind_speeds": [5.0], "wind_angles_deg": [90.0]}),
+            ),
+        ] {
+            let velocity_600 = |air: Value| {
+                let mut request = site_150m_request(air);
+                for (key, value) in extra.as_object().unwrap() {
+                    request[key] = value.clone();
+                }
+                let out = call(command, request);
+                assert_eq!(out["ok"], true, "{command}: {out}");
+                let row = out["result"]["rows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|row| row["range"] == json!(600.0))
+                    .unwrap_or_else(|| panic!("{command}: no 600 m row: {out}"))
+                    .clone();
+                // A wind card states holds, not velocities: its 5 m/s crosswind column is the
+                // figure the air moves (denser air, more drift).
+                if command == "card.wind" {
+                    -row["wind_columns"][0].as_f64().unwrap()
+                } else {
+                    row["velocity"].as_f64().unwrap()
+                }
+            };
+            let low = velocity_600(json!({"pressure": 1014.0}));
+            let typed = velocity_600(json!({"pressure": 1013.0}));
+            let high = velocity_600(json!({"pressure": 1012.0}));
+            let omitted = velocity_600(json!({}));
+            assert!(
+                low.min(high) < typed && typed < low.max(high),
+                "{command}: {typed} is not strictly between {low} and {high}"
+            );
+            assert_ne!(typed.to_bits(), omitted.to_bits(), "{command}");
+        }
+    }
+
+    /// (0.49.0) The solve path's header states the air the rows flew, now including a typed
+    /// in-band pressure. The spec's engine run: before, `DA:1209 ft Pressure:29.39/995 Temp:68`.
+    #[test]
+    fn the_header_states_a_typed_in_band_pressure() {
+        let (bytes, _pages) = generate(site_150m_request(json!({"pressure": 1012.8562053925472})));
+        assert_header_says(
+            &bytes,
+            "reduced QNH 1031 at 150 m",
+            "DA:613 ft Pressure:29.91/1013 Temp:68",
+        );
+    }
+
+    /// (0.49.0) A reprint prints stored rows, so its header follows the engine that solved
+    /// them: presence-aware only when the stored card's `engine_version` is 0.49.0 or later.
+    /// A pre-0.49 card with a typed 59 °F at 1500 m carries rows flown in the ICAO 41 °F air,
+    /// and its header must keep saying so; an absent, empty or unreadable version is treated
+    /// the same way.
+    #[test]
+    fn a_reprint_header_follows_the_stored_engine_version() {
+        let request = altitude_request(json!({
+            "temperature": 59.0,
+            "temperature_unit": "fahrenheit"
+        }));
+        let stored = call("card.range_table", request.clone())["result"].clone();
+        let reprint = |engine_version: Option<&str>| {
+            let mut reprint = request.clone();
+            reprint["stored_card"] = json!({"card": stored.clone()});
+            if let Some(version) = engine_version {
+                reprint["stored_card"]["engine_version"] = json!(version);
+            }
+            let out = call("card.pdf", reprint);
+            assert_eq!(out["ok"], true, "{engine_version:?}: {out}");
+            assert_eq!(out["result"]["source"], "stored_rows", "{out}");
+            pdf_bytes(&out["result"])
+        };
+        for version in [Some("0.48.0"), None, Some(""), Some("unknown")] {
+            let bytes = reprint(version);
+            let label = format!("legacy reprint {version:?}");
+            assert_header_says(&bytes, &label, "DA:4919 ft Pressure:24.97/846 Temp:41");
+            let printed = tokens(&bytes, &label);
+            for run in expected_runs(&stored) {
+                assert_run_present(&printed, &run, &label);
+            }
+        }
+        for version in ["0.49.0", "v0.49.1-rc1"] {
+            let bytes = reprint(Some(version));
+            let label = format!("presence-aware reprint {version}");
+            assert_header_says(&bytes, &label, "DA:6089 ft Pressure:24.97/846 Temp:59");
+            let printed = tokens(&bytes, &label);
+            for run in expected_runs(&stored) {
+                assert_run_present(&printed, &run, &label);
+            }
+        }
+    }
 }

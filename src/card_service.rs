@@ -93,9 +93,10 @@ use crate::adjustment::{
     adjustment_display, adjustment_unit_label, parse_click_value, windage_adjustment_display,
     AdjustmentUnit, ClickValue,
 };
+use crate::atmosphere::StationAtmospherePresence;
 use crate::hold_curve::{
-    card_sample_max_range_m, range_not_sampled_message, run_sampled_flight, sample_at_range,
-    CardTruncation, SampledFlight, CARD_SAMPLE_INTERVAL_M,
+    card_sample_max_range_m, range_not_sampled_message, run_sampled_flight_with_station_presence,
+    sample_at_range, CardTruncation, SampledFlight, CARD_SAMPLE_INTERVAL_M,
 };
 use crate::{AtmosphericConditions, BCSegmentData, BallisticInputs, DragModel, WindConditions};
 
@@ -1151,6 +1152,10 @@ struct Resolved {
     sight_offset_lateral_m: f64,
     temperature_c: f64,
     pressure_hpa: f64,
+    /// Which of `temperature` / `pressure` the request carried (0.49.0). A field the request
+    /// carried is a reading and flies as given; an absent one is the default above, resolved
+    /// by the legacy rule (ICAO standard air at a real altitude).
+    station_presence: StationAtmospherePresence,
     /// Site elevation in metres — which is what `altitude` already was for every request
     /// that states no `altitude_unit`, so this is a rename of an identity, not a conversion.
     altitude_m: f64,
@@ -1230,6 +1235,10 @@ fn resolve_inner(
     } else {
         req.sight_height
     };
+    // Presence is taken BEFORE the collapse below, which yields the legacy default for an
+    // absent field (and must keep doing so: at sea level that default is what flies).
+    let station_presence =
+        StationAtmospherePresence::new(req.temperature.is_some(), req.pressure.is_some());
     let temperature = req.temperature.unwrap_or_else(|| u.default_temperature());
     let pressure = req.pressure.unwrap_or_else(|| u.default_pressure());
 
@@ -1278,6 +1287,7 @@ fn resolve_inner(
         sight_offset_lateral_m: u.sight_height_to_metric(req.sight_offset_lateral),
         temperature_c: u.temperature_to_metric(temperature),
         pressure_hpa: u.pressure_to_metric(pressure),
+        station_presence,
         altitude_m: u.altitude_to_metric(req.altitude),
         end_m: u.distance_to_metric(req.end),
         elevation_click,
@@ -1483,12 +1493,13 @@ fn solve_zero(req: &CardRequestV1, r: &Resolved) -> Result<f64, CardServiceError
         humidity: req.humidity,
         altitude: r.altitude_m,
     };
-    crate::calculate_zero_angle_with_conditions(
+    crate::calculate_zero_angle_with_station_presence(
         zero_inputs,
         r.zero_distance_m,
         r.sight_height_m,
         WindConditions::default(),
         atmosphere,
+        r.station_presence,
     )
     .map_err(|e| CardServiceError::ZeroSolve(e.to_string()))
 }
@@ -1501,7 +1512,7 @@ fn sampled(
     wind_direction_deg: f64,
     zero_angle: f64,
 ) -> Result<SampledFlight, CardServiceError> {
-    run_sampled_flight(
+    run_sampled_flight_with_station_presence(
         r.velocity_m,
         r.bc_for_solve,
         r.mass_kg,
@@ -1529,6 +1540,7 @@ fn sampled(
         r.zero_poi_horizontal_m,
         r.sight_offset_lateral_m,
         Some(r.zero_distance_m),
+        r.station_presence,
     )
     .map_err(|e| CardServiceError::Trajectory(e.to_string()))
 }
@@ -1987,6 +1999,14 @@ pub struct StoredCardV1 {
     pub card: StoredCardResponseV1,
     /// Engine version that produced the rows (`engine_version` from the bridge envelope of
     /// the call that produced them). Absent/empty prints no engine line.
+    ///
+    /// Since 0.49.0 the reprint header's air depends on this version; send the
+    /// `engine_version` of the call that produced the rows. Rows from 0.49.0 or later flew a
+    /// typed temperature or pressure as typed, so the header states it that way. Rows from an
+    /// older engine, or from an absent, empty or unreadable version, flew the pre-0.49.0 rule
+    /// (a typed 15 °C / 59 °F or 1013.25 hPa / 29.92 inHg at a real altitude was replaced by
+    /// ICAO standard air), and the header states that air instead, so it never describes air
+    /// the printed rows did not fly.
     #[serde(default)]
     pub engine_version: Option<String>,
     /// Correction-table version the rows were solved against — the published BC5D table-set
@@ -1994,6 +2014,34 @@ pub struct StoredCardV1 {
     /// honest rendering of "this card used no correction table".
     #[serde(default)]
     pub bc5d_table_version: Option<String>,
+}
+
+/// Whether stored card rows were solved by an engine that flies a typed station reading as
+/// typed (0.49.0 or later), judged from [`StoredCardV1::engine_version`].
+///
+/// The version is read as `MAJOR.MINOR.PATCH`, ignoring a leading `v` and any `-pre` or
+/// `+build` suffix. An absent, empty or unparseable version is `false`: such rows are treated
+/// as pre-0.49.0 rows, which is what they are when an app recorded no version.
+#[cfg(feature = "pdf")]
+fn stored_rows_are_presence_aware(engine_version: &Option<String>) -> bool {
+    let Some(version) = engine_version.as_deref() else {
+        return false;
+    };
+    let version = version.trim();
+    let version = version.strip_prefix('v').unwrap_or(version);
+    let core = version.split(['-', '+']).next().unwrap_or("");
+    let parts: Vec<&str> = core.split('.').collect();
+    let [major, minor, patch] = parts.as_slice() else {
+        return false;
+    };
+    let (Ok(major), Ok(minor), Ok(_patch)) = (
+        major.parse::<u64>(),
+        minor.parse::<u64>(),
+        patch.parse::<u64>(),
+    ) else {
+        return false;
+    };
+    (major, minor) >= (0, 49)
 }
 
 /// A stored [`CardResponseV1`], as a deserializable mirror.
@@ -2468,7 +2516,7 @@ pub fn pdf_card_v1(
     req: &CardRequestV1,
     stored: Option<&StoredCardV1>,
 ) -> Result<PdfCardV1, CardServiceError> {
-    use crate::atmosphere::{resolve_station_conditions_with_pressure_mode, PressureReferenceMode};
+    use crate::atmosphere::{resolve_station_conditions_with_presence, PressureReferenceMode};
     use crate::pdf_dope_card::{
         dope_card_page_count, generate_dope_card_pdf, ladder_bc_label, DopeCardConfig,
         HeaderAtmosphere, RangeUnit,
@@ -2628,15 +2676,30 @@ pub fn pdf_card_v1(
     // used to print the pair as handed, so a 1500 m card with no pressure read DA:0 ft. The
     // stated figures use the CLI dope card's own 33.8639 inHg <-> hPa factor (main.rs uses it
     // on both PDF call sites), NOT pdf_dope_card::INHG_TO_HPA, matching the shipped header.
+    //
+    // 0.49.0: a field the request carried is a reading and the solve flies it as typed, so the
+    // solve path's header resolves with the request's presence, exactly as the rows were
+    // solved. A reprint's rows were solved by whichever engine produced them, so its header
+    // takes presence only when those rows are from 0.49.0 or later, and otherwise states the
+    // pre-0.49.0 air they flew (see `StoredCardV1::engine_version`).
     let supplied = (
         u.temperature_to_metric(temperature),
         u.pressure_to_metric(pressure),
     );
-    let flown = resolve_station_conditions_with_pressure_mode(
+    let request_presence =
+        StationAtmospherePresence::new(req.temperature.is_some(), req.pressure.is_some());
+    let header_presence = match stored {
+        Some(stored) if !stored_rows_are_presence_aware(&stored.engine_version) => {
+            StationAtmospherePresence::NEITHER
+        }
+        _ => request_presence,
+    };
+    let flown = resolve_station_conditions_with_presence(
         supplied.0,
         supplied.1,
         u.altitude_to_metric(req.altitude),
         PressureReferenceMode::Absolute,
+        header_presence,
     );
     let header_air = HeaderAtmosphere::new(
         u.temperature_to_fahrenheit(temperature),
@@ -2714,4 +2777,30 @@ pub fn pdf_card_v1(
         unprintable_title_chars,
         truncation: to_print.truncation,
     })
+}
+
+#[cfg(all(test, feature = "pdf"))]
+mod stored_engine_version_tests {
+    use super::stored_rows_are_presence_aware;
+
+    #[test]
+    fn only_a_readable_version_of_0_49_or_later_is_presence_aware() {
+        let aware = |v: Option<&str>| stored_rows_are_presence_aware(&v.map(str::to_string));
+        for version in [
+            "0.49.0",
+            "v0.49.1-rc1",
+            "0.49.0+build.7",
+            "0.50.0",
+            "0.100.3",
+            "1.0.0",
+        ] {
+            assert!(aware(Some(version)), "{version}");
+        }
+        for version in [
+            "0.48.0", "0.48.9", "0.9.99", "", "unknown", "0.49", "0.49.x", "x0.49.0",
+        ] {
+            assert!(!aware(Some(version)), "{version}");
+        }
+        assert!(!aware(None));
+    }
 }
