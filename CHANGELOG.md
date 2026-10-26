@@ -29,6 +29,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one. Constructors return a typed `WindFieldError`.
   Purely additive: `WindSegment`, `WindSock`, `wind_vector` and every other existing API are
   unchanged. Design record: [docs/WIND_FIELD_MODELING.md](docs/WIND_FIELD_MODELING.md).
+- **A warning for a station pressure that does not fit the altitude.** solve-json flies an
+  explicit absolute `pressure_pa` as the station reading whatever `altitude_m` says, so a bridge
+  app that always sent 101325 Pa beside Cusco's 3310.128 m flew sea-level air there, 1.503 times
+  the standard pressure, with nothing in the response to say so. A new warning code,
+  `station_pressure_implausible_for_altitude` at `$.atmosphere.pressure_pa`, is raised when an
+  absolute `pressure_pa` (sent, or by the default reference) is outside 0.85 to 1.08 times the
+  ICAO standard pressure at the resolved `altitude_m`. Its message gives the pressure, the
+  altitude and whether it was defaulted, the standard there, and the likely causes for its side:
+  a sea-level placeholder or an altimeter setting sent without `"pressure_reference": "qnh"`
+  above the band, an `altitude_m` that is not the station elevation or a unit error below it.
+  The WMO's sea-level pressure records, 870 hPa and 1089.1 hPa, are 0.859 and 1.075 times
+  standard, so weather does not raise it; a `"qnh"` or omitted pressure never does. Bridge and
+  mobile apps get it through `solve`, as do the C ABI's bridge call, the MCP tool and the CLI's
+  `solve-json`. The CLI's `trajectory` (shot day, and the zero day when `--zero-pressure` or
+  `--zero-altitude` is given) and `zero` print the same check as a `warning:` line on stderr,
+  and never for the default pressure, which the CLI already replaces with the ICAO pressure at
+  a real altitude. The test is the new `atmosphere::station_pressure_plausibility`, with its
+  band in `STATION_PRESSURE_MIN_PLAUSIBLE_RATIO` and `STATION_PRESSURE_MAX_PLAUSIBLE_RATIO`.
+  Additive: only requests outside the band see it, and no number changes. 15 solve-json
+  requests in and out of the band match the 0.48.0 code byte for byte apart from the new
+  `warnings` entry, and 14 CLI runs have identical stdout. `atmosphere.density_altitude` and the
+  `card.*` commands, which have no `warnings` array, the other CLI subcommands and the browser
+  terminal do not check. See [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#atmosphere) and
+  [CLI_USAGE.md](CLI_USAGE.md).
 
 ### Fixed
 - **Boundary-layer wind shear measures height from the ground in every kernel.** The shear
