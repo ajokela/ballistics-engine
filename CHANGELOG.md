@@ -108,6 +108,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and every other command carries none. A Kotlin `org.json` unwrap shows why the path is
   tested with `isNull`: `optString` returns `""` for a missing key and, on Android, the string
   `"null"` for a JSON `null`. Documentation only; the engine is unchanged.
+- **The Android guide's worked example now builds and loads the JNI glue.** Its Kotlin called
+  `System.loadLibrary("ballistics_engine")` and then a `Java_..._nativeCall` C function, which
+  cannot live in the prebuilt Rust library, so an app that loaded only the engine, as the
+  example did, failed on its first call with `UnsatisfiedLinkError`. [docs/ANDROID_JNI_BRIDGE.md](docs/ANDROID_JNI_BRIDGE.md)
+  now builds the C file as its own `libballistics_jni.so` in CMake, linked against the engine
+  with `-L`/`-l` so its `DT_NEEDED` is the bare `libballistics_engine.so` (MBA-1541) and with
+  the 16 KB page alignment the engine gets, and the Kotlin loads `ballistics_jni`, which brings
+  the engine in. A `RegisterNatives` from `JNI_OnLoad` variant replaces the mangled name for
+  those who prefer it. All of it was built with NDK 29.0 for `arm64-v8a` and `x86_64`, and the
+  Kotlin and C were run on a desktop JVM. Documentation only; the engine is unchanged.
 
 ## [0.48.0] - 2026-10-20
 

@@ -67,13 +67,19 @@ Return a `jbyteArray` and decode it on the Kotlin side with `Charsets.UTF_8`.
 
 ## Worked example
 
+The example is two pieces of app code: a Kotlin wrapper, and a C function that JNI calls. The C
+function cannot go in the prebuilt engine library, so the app compiles it into a small library
+of its own, `libballistics_jni.so`, which links against the engine. That is the library Kotlin
+loads; [Loading the library](#loading-the-library) has the CMake for it.
+
 Kotlin:
 
 ```kotlin
 package com.example.ballistics
 
 object BallisticsBridge {
-    init { System.loadLibrary("ballistics_engine") }
+    // The JNI glue below, not the engine: its DT_NEEDED entry brings libballistics_engine.so in.
+    init { System.loadLibrary("ballistics_jni") }
 
     /** Bytes in, bytes out. Neither side ever sees a jstring. */
     private external fun nativeCall(request: ByteArray): ByteArray
@@ -83,7 +89,7 @@ object BallisticsBridge {
 }
 ```
 
-C:
+C, in `ballistics_jni.c`:
 
 ```c
 #include <jni.h>
@@ -126,9 +132,35 @@ Java_com_example_ballistics_BallisticsBridge_nativeCall(JNIEnv *env,
 }
 ```
 
-In C++ the `JNIEnv` calls lose their first argument: `env->GetArrayLength(request)`. If you
-would rather not spell out the mangled name, register the method with `RegisterNatives` from
-`JNI_OnLoad` instead; nothing above changes.
+In C++ the `JNIEnv` calls lose their first argument: `env->GetArrayLength(request)`.
+
+If you would rather not spell out the mangled name, give the same function any name, make it
+`static`, and register it with `RegisterNatives` from `JNI_OnLoad` in the same file. It still
+lives in the glue library, and nothing else above changes:
+
+```c
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved)
+{
+    (void)reserved;
+
+    JNIEnv *env;
+    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+        return JNI_ERR;
+    }
+    jclass bridge = (*env)->FindClass(env, "com/example/ballistics/BallisticsBridge");
+    if (bridge == NULL) {
+        return JNI_ERR;
+    }
+    /* native_call is the function above, renamed and static. "([B)[B" is ByteArray -> ByteArray. */
+    static const JNINativeMethod methods[] = {
+        {"nativeCall", "([B)[B", (void *)native_call},
+    };
+    if ((*env)->RegisterNatives(env, bridge, methods, 1) != JNI_OK) {
+        return JNI_ERR;
+    }
+    return JNI_VERSION_1_6;
+}
+```
 
 ### Things the example is relying on
 
@@ -146,30 +178,69 @@ would rather not spell out the mangled name, register the method with `RegisterN
 
 ## Loading the library
 
-`scripts/build-mobile-android.sh` writes `target/mobile/jniLibs/<abi>/libballistics_engine.so`
-for `arm64-v8a` and `x86_64`. Copying those into the module's `jniLibs` source set is enough for
-`System.loadLibrary("ballistics_engine")`.
+The app ships two libraries for each ABI, and the worked example needs both.
+
+**The engine, prebuilt.** `scripts/build-mobile-android.sh` writes
+`target/mobile/jniLibs/<abi>/libballistics_engine.so` for `arm64-v8a` and `x86_64`. Copy each
+into the module's `jniLibs` source set, as `src/main/jniLibs/<abi>/libballistics_engine.so`.
 
 Copy the engine library by name rather than the whole directory: cargo-ndk also drops any
 `cdylib` a dependency happens to declare next to it (currently a `libprintpdf-<hash>.so`),
 which nothing here loads and which is only APK weight.
 
-If you link against the library from CMake instead, the ordinary imported-target pattern works:
+**The JNI glue, built by the app.** The engine exports the `ballistics_bridge_*` functions and
+no JNI symbols, so `Java_com_example_ballistics_BallisticsBridge_nativeCall` has to be compiled
+into a library of the app's own. With `ballistics_jni.c` and a copy of
+`include/ballistics_bridge.h` beside the module's `CMakeLists.txt` in `src/main/cpp`:
+
+```cmake
+cmake_minimum_required(VERSION 3.13)
+project(ballistics_jni C)
+
+# The prebuilt engine for the ABI being built, and the directory holding ballistics_bridge.h.
+set(ENGINE_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}")
+set(ENGINE_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+
+add_library(ballistics_jni SHARED ballistics_jni.c)
+target_include_directories(ballistics_jni PRIVATE "${ENGINE_INCLUDE_DIR}")
+# -L and -l, not a path: the linker records the engine's soname, libballistics_engine.so,
+# in this library's DT_NEEDED, never the directory it was found in.
+target_link_directories(ballistics_jni PRIVATE "${ENGINE_LIB_DIR}")
+target_link_libraries(ballistics_jni PRIVATE ballistics_engine)
+# The 16 KB page alignment scripts/build-mobile-android.sh gives the engine. The glue ships in
+# the same APK, and Play asks it of every .so there.
+target_link_options(ballistics_jni PRIVATE "-Wl,-z,max-page-size=16384")
+```
+
+`System.loadLibrary("ballistics_jni")` then loads both. The glue's `DT_NEEDED` names
+`libballistics_engine.so`, and the dynamic linker finds it among the app's native libraries.
+Loading `ballistics_engine` instead, as if the JNI function were in it, succeeds, and the first
+`nativeCall` then throws `UnsatisfiedLinkError`.
+
+`target_link_libraries` with the bare name `ballistics_engine`, beside
+`target_link_directories`, makes CMake pass `-L<dir> -lballistics_engine`. Linked that way, the
+glue records the engine's `DT_SONAME`, or the bare file name when a library has none, so the
+host path the linker searched never reaches the device. `llvm-readelf -d libballistics_jni.so |
+grep NEEDED` shows the entry. The alignment flag matters with older NDKs: NDK 27.0 links the
+glue at 4 KB pages without it, while NDK 29.0 already defaults to 16 KB.
+
+The imported-target pattern, in place of the `target_link_directories` and
+`target_link_libraries` lines above, works too, but only because the engine declares a
+`DT_SONAME`:
 
 ```cmake
 add_library(ballistics_engine SHARED IMPORTED)
 set_target_properties(ballistics_engine PROPERTIES
-    IMPORTED_LOCATION "${JNI_LIBS}/${ANDROID_ABI}/libballistics_engine.so"
+    IMPORTED_LOCATION "${ENGINE_LIB_DIR}/libballistics_engine.so"
     INTERFACE_INCLUDE_DIRECTORIES "${ENGINE_INCLUDE_DIR}")
-target_link_libraries(your_jni_lib PRIVATE ballistics_engine)
+target_link_libraries(ballistics_jni PRIVATE ballistics_engine)
 ```
 
-This depends on the library declaring a `DT_SONAME`; without one, the linker records the path
-you linked against — here an absolute host path — in your own `DT_NEEDED`, and the app fails to
-`dlopen` it on device. Libraries built by that script carry
-`DT_SONAME libballistics_engine.so`, and the script fails the build if they do not (MBA-1541).
-If you are linking a library from elsewhere, `llvm-readelf -d libballistics_engine.so | grep
-SONAME` says whether it has one.
+That passes the linker a path. Without a soname, the linker records that path, here an absolute
+host path, in your own `DT_NEEDED`, and the app fails to `dlopen` it on device. Libraries built
+by that script carry `DT_SONAME libballistics_engine.so`, and the script fails the build if they
+do not (MBA-1541). If you are linking a library from elsewhere, `llvm-readelf -d
+libballistics_engine.so | grep SONAME` says whether it has one.
 
 ## Reading a failure
 
