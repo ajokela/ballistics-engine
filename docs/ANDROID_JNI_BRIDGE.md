@@ -171,6 +171,105 @@ you linked against — here an absolute host path — in your own `DT_NEEDED`, a
 If you are linking a library from elsewhere, `llvm-readelf -d libballistics_engine.so | grep
 SONAME` says whether it has one.
 
+## Reading a failure
+
+A failed call is an `{"ok": false}` envelope. Its `error.code` is one of the bridge's own codes:
+`invalid_json`, `unsupported_api_version`, `unknown_command`, `invalid_request`,
+`resource_limit`, `command_failed` or `internal_error`. Only `command_failed` can carry
+`error.details`, which is where a command says what it refused, and its shape depends on the
+command:
+
+| Command | `error.details` on `command_failed` |
+| --- | --- |
+| `solve`, `atmosphere.density_altitude` | The command's whole solve-json error envelope (below). |
+| `reticle.describe`, `reticle.hold`, `reticle.holds`, `reticle.import` | A flat object: a `reason` (one per reticle error), the `command`, and the values at fault. |
+| `true.dsf`, `true.plan`, `true.dial_plan` | A flat object: a `reason` and the values at fault. |
+| `profile.export_a7p` | A flat object: a `reason` of `units`, `drag_model` or `field`, and the value at fault. |
+| Every other command | None. The reason is in `error.message` alone. |
+
+A payload that does not decode is `invalid_request`, with no `details`, for every command except
+`solve` and `atmosphere.density_altitude`. Those two decode their payload with the solve-json
+decoder, so a misspelt or out-of-range field there is a `command_failed` that names it. A
+missing `request` is `invalid_request` for them too.
+
+### The `solve` error envelope
+
+For `solve` and `atmosphere.density_altitude`, `error.details` is the complete envelope from
+[Error envelope](SOLVE_JSON_V1.md#error-envelope), not just its inner `error`, so the code to
+branch on is one level further down, at `error.details.error.code`. A `latitude_rad` of 2.0
+comes back as:
+
+```json
+{
+  "ok": false,
+  "api_version": 1,
+  "engine_version": "…",
+  "error": {
+    "code": "command_failed",
+    "message": "solve failed",
+    "details": {
+      "schema_version": 1,
+      "status": "error",
+      "error": {
+        "code": "invalid_value",
+        "message": "value must be finite and in the inclusive range [-1.5707963267948966, 1.5707963267948966]",
+        "path": "$.atmosphere.latitude_rad",
+        "line": null,
+        "column": null
+      }
+    }
+  }
+}
+```
+
+- **`error.code` is `command_failed`** for every refusal of the payload by these two commands.
+  The solve-json code inside (`unknown_field`, `missing_field`, `invalid_value`,
+  `conflicting_fields`, `resource_limit`, `solve_failed`, …) is the one to branch on.
+- **`error.message` is one of three fixed summaries.** `solve request rejected` means the
+  solve-json decoder refused the document: an unknown or missing field, a wrong type or enum
+  value, or one of the checks the decoder makes itself, such as the projectile bounds and the
+  `bc_segments` rules. `solve failed` means the solve service refused it or could not finish
+  it: the range and cross-field checks the service owns, such as `latitude_rad` above, and
+  engine failures. An `invalid_value` can therefore arrive under either.
+  `atmosphere.density_altitude` uses `atmosphere.density_altitude request rejected` for every
+  refusal.
+- **`path` is a string or JSON `null`.** It is `null` when no single field is at fault. A muzzle
+  velocity of 0.5 m/s with a 100 m zero comes back as `solve_failed`, with the message
+  `Cannot find zero angle: trajectory cannot reach target distance at any angle` and
+  `"path": null`.
+- **`line` and `column` are always present and always `null` here.** They locate malformed JSON
+  when a solve-json document is decoded from text, as the `solve-json` command does. The bridge
+  has already parsed the request as part of the envelope, so malformed JSON is the bridge's own
+  `invalid_json`, with no `details`.
+
+Unwrapping with `org.json`:
+
+```kotlin
+import org.json.JSONObject
+
+/** What an app acts on in a failed call. [path] is null when no single field is at fault. */
+data class BridgeFailure(val code: String, val message: String, val path: String?)
+
+fun failureOf(envelope: JSONObject): BridgeFailure {
+    val error = envelope.getJSONObject("error")
+    // solve and atmosphere.density_altitude: the solve-json envelope, one level down.
+    val inner = error.optJSONObject("details")?.optJSONObject("error")
+        ?: return BridgeFailure(error.getString("code"), error.getString("message"), null)
+    return BridgeFailure(
+        code = inner.getString("code"),
+        message = inner.getString("message"),
+        path = if (inner.isNull("path")) null else inner.getString("path"),
+    )
+}
+```
+
+`optString` is the wrong tool for these lookups. For a missing key it returns `""`, not `null`,
+so `optString("code") ?: outerCode` never falls back. For a JSON `null` Android's `org.json`
+returns the string `"null"`, from `optString` and `getString` alike, so a `solve_failed` would
+highlight a field named `null`. `isNull` is true for a missing key and for a JSON `null`, which
+is why the path is tested with it first. The same holds for the `reason` of the other families:
+`details.optString("reason")` is `""` when there is none.
+
 ## Sending a BC ladder with `solve`
 
 A `solve` request can carry a velocity-banded BC ladder as `projectile.bc_segments`. Speeds are
@@ -203,8 +302,8 @@ projectile.put("bc_segments", bcSegments(listOf(
 ```
 
 A ladder the contract refuses comes back as an ordinary `{"ok":false}` envelope, and
-`error.details.error.path` names the entry at fault, such as
-`$.projectile.bc_segments[1].velocity_max_mps`. The `card.*` commands take a ladder too, but with
+`error.details.error.path` ([Reading a failure](#reading-a-failure)) names the entry at fault,
+such as `$.projectile.bc_segments[1].velocity_max_mps`. The `card.*` commands take a ladder too, but with
 other member names, the request's `velocity_unit` and no order rule (they still refuse overlapping
 bands, more than 64 bands and band BCs outside 0.0001 to 100), so a stored ladder has to be
 written out for each command. The table at the end of that section lists the differences.

@@ -93,6 +93,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shows it reproduces the CLI's zero angle exactly.
   [docs/ANDROID_JNI_BRIDGE.md](docs/ANDROID_JNI_BRIDGE.md) carries the Kotlin version.
   Documentation only; the engine is unchanged.
+- **The bridge's `error.details` is documented per command.** `include/ballistics_bridge.h`
+  showed only `"details": { ... }`, and the one statement that `solve` nests its solve-json
+  error envelope there sat in the BC-ladder section of the Android guide, so a bridge
+  integrator could reasonably look for `code` and `path` directly under `details`. The header
+  and a new [Reading a failure](docs/ANDROID_JNI_BRIDGE.md#reading-a-failure) section now say
+  which commands carry `details` and in what shape. For `solve` and
+  `atmosphere.density_altitude` it is the whole envelope
+  `{schema_version, status, error: {code, message, path, line, column}}`, with `path` possibly
+  JSON `null` and `line`/`column` always `null` over the bridge, under the outer code
+  `command_failed` and a fixed message (`solve request rejected`, `solve failed`, or
+  `atmosphere.density_altitude request rejected`). The reticle commands, `true.dsf`,
+  `true.plan`, `true.dial_plan` and `profile.export_a7p` carry a flat object with a `reason`,
+  and every other command carries none. A Kotlin `org.json` unwrap shows why the path is
+  tested with `isNull`: `optString` returns `""` for a missing key and, on Android, the string
+  `"null"` for a JSON `null`. Documentation only; the engine is unchanged.
 
 ## [0.48.0] - 2026-10-20
 
