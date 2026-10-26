@@ -186,3 +186,360 @@ fn the_two_surfaces_agree_once_the_station_reading_escapes_the_sentinel_bands() 
         "an explicitly-stated station reading must be authoritative on BOTH surfaces"
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// 0.49.0: the presence-aware exports
+// ---------------------------------------------------------------------------------------
+//
+// `FFIAtmosphericConditions` still cannot say which of its doubles were supplied, so the
+// struct exports above keep the legacy rule. The `*_with_station_presence` exports take the
+// presence beside it as bits. Every expected number below is from the station-sentinel spec's
+// golden C ABI block (legacy values captured at ab4eb0c, new-export values from the oracle with
+// the sentinels off) or was captured at ab4eb0c.
+
+mod station_presence_exports {
+    use ballistics_engine::ffi::{
+        ballistics_calculate_trajectory, ballistics_calculate_trajectory_with_station_presence,
+        ballistics_calculate_zero_angle, ballistics_calculate_zero_angle_with_station_presence,
+        ballistics_density_altitude_altitude_m, ballistics_density_altitude_pressure_hpa,
+        ballistics_density_altitude_temperature_c, ballistics_free_monte_carlo_results,
+        ballistics_free_trajectory_result, ballistics_monte_carlo,
+        ballistics_monte_carlo_with_station_presence, ballistics_reduce_qnh_pressure,
+        FFIAtmosphericConditions, FFIBallisticInputs, FFIMonteCarloParams,
+        BALLISTICS_STATION_PRESSURE_SUPPLIED, BALLISTICS_STATION_TEMPERATURE_SUPPLIED,
+    };
+    use std::ptr;
+
+    const T: u32 = BALLISTICS_STATION_TEMPERATURE_SUPPLIED;
+    const P: u32 = BALLISTICS_STATION_PRESSURE_SUPPLIED;
+
+    /// The golden's C ABI rifle (`bridge_golden.py`'s FFI worker), with `temperature` echoed
+    /// into the inputs as that worker does.
+    fn inputs(altitude: f64, temperature: f64) -> FFIBallisticInputs {
+        FFIBallisticInputs {
+            muzzle_velocity: 823.0,
+            muzzle_angle: 0.0,
+            bc_value: 0.475,
+            bullet_mass: 0.0109,
+            bullet_diameter: 0.00782,
+            bc_type: 0,
+            sight_height: 0.0381,
+            target_distance: 600.0,
+            temperature,
+            twist_rate: 10.0,
+            is_twist_right: 1,
+            shooting_angle: 0.0,
+            altitude,
+            latitude: f64::NAN,
+            azimuth_angle: 0.0,
+            use_rk4: 1,
+            use_adaptive_rk45: 0,
+            enable_wind_shear: 0,
+            enable_trajectory_sampling: 0,
+            sample_interval: 10.0,
+            enable_pitch_damping: 0,
+            enable_precession_nutation: 0,
+            enable_spin_drift: 0,
+            enable_magnus: 0,
+            enable_coriolis: 0,
+            shot_azimuth: 0.0,
+            cant_angle: 0.0,
+            zero_poi_vertical: 0.0,
+            zero_poi_horizontal: 0.0,
+            sight_offset_lateral: 0.0,
+        }
+    }
+
+    fn air(t: f64, p: f64, alt: f64) -> FFIAtmosphericConditions {
+        FFIAtmosphericConditions {
+            temperature: t,
+            pressure: p,
+            humidity: 50.0,
+            altitude: alt,
+        }
+    }
+
+    fn legacy_zero(t: f64, p: f64, alt: f64) -> f64 {
+        unsafe {
+            ballistics_calculate_zero_angle(&inputs(alt, t), ptr::null(), &air(t, p, alt), 600.0)
+        }
+    }
+
+    fn presence_zero(t: f64, p: f64, alt: f64, flags: u32) -> f64 {
+        unsafe {
+            ballistics_calculate_zero_angle_with_station_presence(
+                &inputs(alt, t),
+                ptr::null(),
+                &air(t, p, alt),
+                600.0,
+                ptr::null(),
+                ptr::null(),
+                0,
+                1.0,
+                flags,
+            )
+        }
+    }
+
+    /// The golden block, row for row: (label, (t, p, alt), flags, legacy today, new export).
+    #[test]
+    fn zero_export_matches_the_golden_c_abi_block() {
+        let qnh = ballistics_reduce_qnh_pressure(1031.0, 150.0);
+        let da_t = ballistics_density_altitude_temperature_c(1000.0, 15.0);
+        let da_p = ballistics_density_altitude_pressure_hpa(1000.0, 15.0);
+        let da_a = ballistics_density_altitude_altitude_m(1000.0, 15.0);
+        let rows: [(&str, (f64, f64, f64), u32, f64, f64); 7] = [
+            (
+                "abs 1013.0 at 150 m",
+                (20.0, 1013.0, 150.0),
+                P,
+                0.0062198638916015625,
+                0.006264114379882812,
+            ),
+            (
+                "QNH helper 1031 at 150 m",
+                (20.0, qnh, 150.0),
+                P,
+                0.0062198638916015625,
+                0.00626373291015625,
+            ),
+            (
+                "15 C at 1000 m",
+                (15.0, 900.0, 1000.0),
+                T,
+                0.006062698364257813,
+                0.0060211181640625,
+            ),
+            (
+                "DA helper 1000 m, 15 C",
+                (da_t, da_p, da_a),
+                T,
+                0.006103515625,
+                0.006068801879882813,
+            ),
+            (
+                "omitted at 150 m",
+                (15.0, 1013.25, 150.0),
+                0,
+                0.00626373291015625,
+                0.00626373291015625,
+            ),
+            (
+                "omitted at 0.5 m",
+                (15.0, 1013.25, 0.5),
+                0,
+                0.006302261352539062,
+                0.006302261352539062,
+            ),
+            (
+                "abs 1012.0 at 150 m",
+                (20.0, 1012.0, 150.0),
+                P,
+                0.006261444091796875,
+                0.006261444091796875,
+            ),
+        ];
+        for (label, (t, p, alt), flags, legacy, new) in rows {
+            assert_eq!(
+                legacy_zero(t, p, alt).to_bits(),
+                legacy.to_bits(),
+                "{label}: legacy export"
+            );
+            assert_eq!(
+                presence_zero(t, p, alt, flags).to_bits(),
+                new.to_bits(),
+                "{label}: new export, flags {flags}"
+            );
+            // Flags 0 IS the legacy export, whatever the inputs: compared with the golden's
+            // legacy number, not just with the legacy export.
+            assert_eq!(
+                presence_zero(t, p, alt, 0).to_bits(),
+                legacy.to_bits(),
+                "{label}: new export, flags 0"
+            );
+        }
+        // Supplying the in-band pressure moves the answer off the legacy one.
+        assert_ne!(
+            presence_zero(20.0, 1013.0, 150.0, P).to_bits(),
+            legacy_zero(20.0, 1013.0, 150.0).to_bits()
+        );
+    }
+
+    #[test]
+    fn unknown_bits_and_a_scale_without_a_deck_are_refused() {
+        for flags in [4, 8, 1 << 31, T | P | 4] {
+            assert!(
+                presence_zero(20.0, 1013.0, 150.0, flags).is_nan(),
+                "flags {flags}"
+            );
+        }
+        assert!(presence_zero(20.0, 1013.0, 150.0, T | P).is_finite());
+        let scaled = unsafe {
+            ballistics_calculate_zero_angle_with_station_presence(
+                &inputs(150.0, 20.0),
+                ptr::null(),
+                &air(20.0, 1013.0, 150.0),
+                600.0,
+                ptr::null(),
+                ptr::null(),
+                0,
+                1.05,
+                P,
+            )
+        };
+        assert!(scaled.is_nan(), "cd_scale without a deck must be refused");
+        // A deck is validated as by the _scaled export.
+        let mach = [0.5, 1.0, 2.0];
+        let cd = [0.2, 0.4, 0.3];
+        let with_deck = unsafe {
+            ballistics_calculate_zero_angle_with_station_presence(
+                &inputs(150.0, 20.0),
+                ptr::null(),
+                &air(20.0, 1013.0, 150.0),
+                600.0,
+                mach.as_ptr(),
+                cd.as_ptr(),
+                3,
+                1.0,
+                P,
+            )
+        };
+        assert!(with_deck.is_finite());
+        let bad_deck = unsafe {
+            ballistics_calculate_zero_angle_with_station_presence(
+                &inputs(150.0, 20.0),
+                ptr::null(),
+                &air(20.0, 1013.0, 150.0),
+                600.0,
+                mach.as_ptr(),
+                cd.as_ptr(),
+                1,
+                1.0,
+                P,
+            )
+        };
+        assert!(bad_deck.is_nan());
+    }
+
+    /// The capture fixture: a 0.002 rad shot sampled every 50 m.
+    fn trajectory_inputs() -> FFIBallisticInputs {
+        FFIBallisticInputs {
+            muzzle_angle: 0.002,
+            temperature: 20.0,
+            altitude: 150.0,
+            enable_trajectory_sampling: 1,
+            sample_interval: 50.0,
+            ..inputs(150.0, 20.0)
+        }
+    }
+
+    /// (impact velocity, max height, sample 6 velocity, sample 6 Mach)
+    fn trajectory_headline(flags: Option<u32>) -> Option<[f64; 4]> {
+        let atmosphere = air(20.0, 1013.0, 150.0);
+        unsafe {
+            let result = match flags {
+                None => ballistics_calculate_trajectory(
+                    &trajectory_inputs(),
+                    ptr::null(),
+                    &atmosphere,
+                    600.0,
+                    1.0,
+                ),
+                Some(flags) => ballistics_calculate_trajectory_with_station_presence(
+                    &trajectory_inputs(),
+                    ptr::null(),
+                    &atmosphere,
+                    600.0,
+                    1.0,
+                    ptr::null(),
+                    ptr::null(),
+                    0,
+                    1.0,
+                    flags,
+                ),
+            };
+            if result.is_null() {
+                return None;
+            }
+            let r = &*result;
+            let samples =
+                std::slice::from_raw_parts(r.sampled_points, r.sampled_point_count as usize);
+            let headline = [
+                r.impact_velocity,
+                r.max_height,
+                samples[6].velocity_mps,
+                samples[6].mach,
+            ];
+            ballistics_free_trajectory_result(result);
+            Some(headline)
+        }
+    }
+
+    #[test]
+    fn trajectory_export_is_the_legacy_one_with_flags_0_and_flies_a_supplied_pressure() {
+        // captured at ab4eb0c (legacy export, in-band 1013.0 hPa at 150 m)
+        let pinned = [
+            0x407f0676b1cf0f7a,
+            0x3fc08c94333f41cc,
+            0x40843afdb0c2e019,
+            0x3ffe1f1ff823bb7a,
+        ];
+        let bits = |h: [f64; 4]| h.map(f64::to_bits);
+        assert_eq!(bits(trajectory_headline(None).unwrap()), pinned);
+        assert_eq!(bits(trajectory_headline(Some(0)).unwrap()), pinned);
+        let supplied = trajectory_headline(Some(P)).unwrap();
+        assert_ne!(bits(supplied), pinned);
+        // 1013 hPa is denser than the ICAO 995 hPa: slower at impact.
+        assert!(supplied[0] < f64::from_bits(pinned[0]));
+        assert!(trajectory_headline(Some(4)).is_none());
+    }
+
+    /// `ballistics_monte_carlo` is unseeded, so the parameters carry no dispersion at all:
+    /// every trial is then the baseline, and counts and means are exact.
+    fn zero_sigma_monte_carlo(flags: Option<u32>) -> Option<(i32, f64, f64)> {
+        let params = FFIMonteCarloParams {
+            num_simulations: 8,
+            velocity_std_dev: 0.0,
+            angle_std_dev: 0.0,
+            bc_std_dev: 0.0,
+            wind_speed_std_dev: 0.0,
+            target_distance: 500.0,
+            base_wind_speed: 0.0,
+            base_wind_direction: 0.0,
+            azimuth_std_dev: 0.0,
+        };
+        let atmosphere = air(20.0, 1013.0, 150.0);
+        unsafe {
+            let results = match flags {
+                None => ballistics_monte_carlo(&trajectory_inputs(), &atmosphere, &params),
+                Some(flags) => ballistics_monte_carlo_with_station_presence(
+                    &trajectory_inputs(),
+                    &atmosphere,
+                    &params,
+                    0.0,
+                    flags,
+                ),
+            };
+            if results.is_null() {
+                return None;
+            }
+            let r = &*results;
+            let out = (r.num_results, r.mean_range, r.mean_impact_velocity);
+            ballistics_free_monte_carlo_results(results);
+            Some(out)
+        }
+    }
+
+    #[test]
+    fn monte_carlo_export_is_the_legacy_one_with_flags_0_and_flies_a_supplied_pressure() {
+        // captured at ab4eb0c
+        let pinned = (8, 0x407fe680b099e436_u64, 0x4080d4ad5eca7c79_u64);
+        let bits = |(n, range, velocity): (i32, f64, f64)| (n, range.to_bits(), velocity.to_bits());
+        assert_eq!(bits(zero_sigma_monte_carlo(None).unwrap()), pinned);
+        assert_eq!(bits(zero_sigma_monte_carlo(Some(0)).unwrap()), pinned);
+        let supplied = zero_sigma_monte_carlo(Some(P)).unwrap();
+        assert_eq!(supplied.0, 8);
+        assert_ne!(supplied.2.to_bits(), pinned.2);
+        assert!(zero_sigma_monte_carlo(Some(4)).is_none());
+    }
+}

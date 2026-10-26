@@ -62,9 +62,11 @@ const FROZEN_EXPORTS: &[&str] = &[
     "ballistics_calculate_trajectory",
     "ballistics_calculate_trajectory_with_drag_table",
     "ballistics_calculate_trajectory_with_drag_table_scaled",
+    "ballistics_calculate_trajectory_with_station_presence",
     "ballistics_calculate_zero_angle",
     "ballistics_calculate_zero_angle_with_drag_table",
     "ballistics_calculate_zero_angle_with_drag_table_scaled",
+    "ballistics_calculate_zero_angle_with_station_presence",
     "ballistics_density_altitude_altitude_m",
     "ballistics_density_altitude_pressure_hpa",
     "ballistics_density_altitude_temperature_c",
@@ -74,6 +76,7 @@ const FROZEN_EXPORTS: &[&str] = &[
     "ballistics_hold_point_in_reticle",
     "ballistics_monte_carlo",
     "ballistics_monte_carlo_with_direction_std_dev",
+    "ballistics_monte_carlo_with_station_presence",
     "ballistics_quick_trajectory",
     "ballistics_reduce_qnh_pressure",
 ];
@@ -244,6 +247,22 @@ const FROZEN_CALCULATE_TRAJECTORY_WITH_DRAG_TABLE_SCALED:
     ) -> *mut FFITrajectoryResult =
     ballistics_engine::ffi::ballistics_calculate_trajectory_with_drag_table_scaled;
 
+#[allow(clippy::type_complexity)]
+const FROZEN_CALCULATE_TRAJECTORY_WITH_STATION_PRESENCE:
+    unsafe extern "C" fn(
+        *const FFIBallisticInputs,
+        *const FFIWindConditions,
+        *const FFIAtmosphericConditions,
+        c_double,
+        c_double,
+        *const c_double,
+        *const c_double,
+        c_int,
+        c_double,
+        u32,
+    ) -> *mut FFITrajectoryResult =
+    ballistics_engine::ffi::ballistics_calculate_trajectory_with_station_presence;
+
 const FROZEN_FREE_TRAJECTORY_RESULT: unsafe extern "C" fn(*mut FFITrajectoryResult) =
     ballistics_engine::ffi::ballistics_free_trajectory_result;
 
@@ -280,6 +299,19 @@ const FROZEN_CALCULATE_ZERO_ANGLE_WITH_DRAG_TABLE_SCALED: unsafe extern "C" fn(
 /// for Rust callers) is caught too. A safe `extern "C" fn` would coerce INTO an `unsafe`
 /// pointer type silently, which is why the safety is written out here rather than blanket
 /// `unsafe` everywhere.
+#[allow(clippy::type_complexity)]
+const FROZEN_CALCULATE_ZERO_ANGLE_WITH_STATION_PRESENCE: unsafe extern "C" fn(
+    *const FFIBallisticInputs,
+    *const FFIWindConditions,
+    *const FFIAtmosphericConditions,
+    c_double,
+    *const c_double,
+    *const c_double,
+    c_int,
+    c_double,
+    u32,
+) -> c_double = ballistics_engine::ffi::ballistics_calculate_zero_angle_with_station_presence;
+
 const FROZEN_QUICK_TRAJECTORY: extern "C" fn(
     c_double,
     c_double,
@@ -302,6 +334,15 @@ const FROZEN_MONTE_CARLO_WITH_DIRECTION_STD_DEV: unsafe extern "C" fn(
 )
     -> *mut FFIMonteCarloResults =
     ballistics_engine::ffi::ballistics_monte_carlo_with_direction_std_dev;
+
+const FROZEN_MONTE_CARLO_WITH_STATION_PRESENCE: unsafe extern "C" fn(
+    *const FFIBallisticInputs,
+    *const FFIAtmosphericConditions,
+    *const FFIMonteCarloParams,
+    c_double,
+    u32,
+) -> *mut FFIMonteCarloResults =
+    ballistics_engine::ffi::ballistics_monte_carlo_with_station_presence;
 
 const FROZEN_FREE_MONTE_CARLO_RESULTS: unsafe extern "C" fn(*mut FFIMonteCarloResults) =
     ballistics_engine::ffi::ballistics_free_monte_carlo_results;
@@ -360,13 +401,16 @@ fn every_frozen_export_has_a_frozen_signature() {
         FROZEN_CALCULATE_TRAJECTORY as *const (),
         FROZEN_CALCULATE_TRAJECTORY_WITH_DRAG_TABLE as *const (),
         FROZEN_CALCULATE_TRAJECTORY_WITH_DRAG_TABLE_SCALED as *const (),
+        FROZEN_CALCULATE_TRAJECTORY_WITH_STATION_PRESENCE as *const (),
         FROZEN_FREE_TRAJECTORY_RESULT as *const (),
         FROZEN_CALCULATE_ZERO_ANGLE as *const (),
         FROZEN_CALCULATE_ZERO_ANGLE_WITH_DRAG_TABLE as *const (),
         FROZEN_CALCULATE_ZERO_ANGLE_WITH_DRAG_TABLE_SCALED as *const (),
+        FROZEN_CALCULATE_ZERO_ANGLE_WITH_STATION_PRESENCE as *const (),
         FROZEN_QUICK_TRAJECTORY as *const (),
         FROZEN_MONTE_CARLO as *const (),
         FROZEN_MONTE_CARLO_WITH_DIRECTION_STD_DEV as *const (),
+        FROZEN_MONTE_CARLO_WITH_STATION_PRESENCE as *const (),
         FROZEN_FREE_MONTE_CARLO_RESULTS as *const (),
         FROZEN_BC_FOR_REFERENCE_STANDARD as *const (),
         FROZEN_REDUCE_QNH_PRESSURE as *const (),

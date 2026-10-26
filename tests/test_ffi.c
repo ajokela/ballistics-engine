@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <math.h>
 
 // FFI structure definitions (normally these would be in a header file)
@@ -107,6 +108,85 @@ extern FFITrajectoryResult* ballistics_calculate_trajectory(
 
 extern void ballistics_free_trajectory_result(FFITrajectoryResult* result);
 
+// 0.49.0 station-presence exports: the same structs, plus a bit set saying which of the
+// atmosphere's temperature / pressure the caller actually supplied.
+#define BALLISTICS_STATION_TEMPERATURE_SUPPLIED 1u
+#define BALLISTICS_STATION_PRESSURE_SUPPLIED 2u
+
+typedef struct {
+    int num_simulations;
+    double velocity_std_dev;
+    double angle_std_dev;
+    double bc_std_dev;
+    double wind_speed_std_dev;
+    double target_distance;
+    double base_wind_speed;
+    double base_wind_direction;
+    double azimuth_std_dev;
+} FFIMonteCarloParams;
+
+typedef struct {
+    double* ranges;
+    double* impact_velocities;
+    double* impact_positions_x;
+    double* impact_positions_y;
+    double* impact_positions_z;
+    int num_results;
+    double mean_range;
+    double std_dev_range;
+    double mean_impact_velocity;
+    double std_dev_impact_velocity;
+    double hit_probability;
+} FFIMonteCarloResults;
+
+extern double ballistics_calculate_zero_angle(
+    const FFIBallisticInputs* inputs,
+    const FFIWindConditions* wind,
+    const FFIAtmosphericConditions* atmosphere,
+    double zero_distance
+);
+
+extern FFITrajectoryResult* ballistics_calculate_trajectory_with_station_presence(
+    const FFIBallisticInputs* inputs,
+    const FFIWindConditions* wind,
+    const FFIAtmosphericConditions* atmosphere,
+    double max_range,
+    double step_size,
+    const double* drag_mach,
+    const double* drag_cd,
+    int drag_table_len,
+    double cd_scale,
+    uint32_t station_presence
+);
+
+extern double ballistics_calculate_zero_angle_with_station_presence(
+    const FFIBallisticInputs* inputs,
+    const FFIWindConditions* wind,
+    const FFIAtmosphericConditions* atmosphere,
+    double zero_distance,
+    const double* drag_mach,
+    const double* drag_cd,
+    int drag_table_len,
+    double cd_scale,
+    uint32_t station_presence
+);
+
+extern FFIMonteCarloResults* ballistics_monte_carlo(
+    const FFIBallisticInputs* inputs,
+    const FFIAtmosphericConditions* atmosphere,
+    const FFIMonteCarloParams* params
+);
+
+extern FFIMonteCarloResults* ballistics_monte_carlo_with_station_presence(
+    const FFIBallisticInputs* inputs,
+    const FFIAtmosphericConditions* atmosphere,
+    const FFIMonteCarloParams* params,
+    double wind_direction_std_dev,
+    uint32_t station_presence
+);
+
+extern void ballistics_free_monte_carlo_results(FFIMonteCarloResults* results);
+
 extern int ballistics_hold_point_in_reticle(
     double drop_mil,
     double wind_mil,
@@ -171,6 +251,96 @@ static int test_reticle_hold(void) {
         return 1;
     }
     printf("Bounds and magnification guards: OK\n\n");
+    return 0;
+}
+
+// 0.49.0: a pressure inside the old 1013.25 +/- 0.5 hPa band at 150 m. Flags 0 must equal the
+// struct export (the legacy rule replaces it with ICAO air); the pressure bit must fly it.
+static int test_station_presence(const FFIBallisticInputs* base) {
+    FFIBallisticInputs inputs = *base;
+    inputs.altitude = 150.0;
+    inputs.temperature = 20.0;
+    inputs.enable_wind_shear = 0;
+    FFIAtmosphericConditions atmosphere = {
+        .temperature = 20.0,
+        .pressure = 1013.0,
+        .humidity = 50.0,
+        .altitude = 150.0
+    };
+
+    printf("Station presence (0.49.0):\n");
+    printf("--------------------------\n");
+
+    double legacy = ballistics_calculate_zero_angle(&inputs, NULL, &atmosphere, 300.0);
+    double none = ballistics_calculate_zero_angle_with_station_presence(
+        &inputs, NULL, &atmosphere, 300.0, NULL, NULL, 0, 1.0, 0u);
+    double supplied = ballistics_calculate_zero_angle_with_station_presence(
+        &inputs, NULL, &atmosphere, 300.0, NULL, NULL, 0, 1.0,
+        BALLISTICS_STATION_PRESSURE_SUPPLIED);
+    double unknown = ballistics_calculate_zero_angle_with_station_presence(
+        &inputs, NULL, &atmosphere, 300.0, NULL, NULL, 0, 1.0, 4u);
+    if (!isfinite(legacy) || none != legacy || !isfinite(supplied) || supplied == legacy ||
+        !isnan(unknown)) {
+        printf("FATAL: zero angle presence mismatch (legacy %.17g, flags 0 %.17g, flags 2 %.17g)\n",
+               legacy, none, supplied);
+        return 1;
+    }
+    printf("Zero angle: legacy %.9f rad, flags 0 equal, pressure supplied %.9f rad\n",
+           legacy, supplied);
+
+    FFITrajectoryResult* old_result = ballistics_calculate_trajectory(
+        &inputs, NULL, &atmosphere, 600.0, 1.0);
+    FFITrajectoryResult* zero_bits = ballistics_calculate_trajectory_with_station_presence(
+        &inputs, NULL, &atmosphere, 600.0, 1.0, NULL, NULL, 0, 1.0, 0u);
+    FFITrajectoryResult* typed = ballistics_calculate_trajectory_with_station_presence(
+        &inputs, NULL, &atmosphere, 600.0, 1.0, NULL, NULL, 0, 1.0,
+        BALLISTICS_STATION_PRESSURE_SUPPLIED);
+    int bad = old_result == NULL || zero_bits == NULL || typed == NULL ||
+              zero_bits->impact_velocity != old_result->impact_velocity ||
+              typed->impact_velocity == old_result->impact_velocity;
+    if (!bad) {
+        printf("Trajectory: legacy %.6f m/s, flags 0 equal, pressure supplied %.6f m/s\n",
+               old_result->impact_velocity, typed->impact_velocity);
+    }
+    ballistics_free_trajectory_result(old_result);
+    ballistics_free_trajectory_result(zero_bits);
+    ballistics_free_trajectory_result(typed);
+    if (bad) {
+        printf("FATAL: trajectory presence mismatch\n");
+        return 1;
+    }
+
+    // No dispersion at all: every trial is the baseline, so the unseeded runs compare exactly.
+    FFIMonteCarloParams params = {
+        .num_simulations = 4,
+        .velocity_std_dev = 0.0,
+        .angle_std_dev = 0.0,
+        .bc_std_dev = 0.0,
+        .wind_speed_std_dev = 0.0,
+        .target_distance = 300.0,
+        .base_wind_speed = 0.0,
+        .base_wind_direction = 0.0,
+        .azimuth_std_dev = 0.0
+    };
+    FFIMonteCarloResults* mc_old = ballistics_monte_carlo(&inputs, &atmosphere, &params);
+    FFIMonteCarloResults* mc_zero = ballistics_monte_carlo_with_station_presence(
+        &inputs, &atmosphere, &params, 0.0, 0u);
+    FFIMonteCarloResults* mc_typed = ballistics_monte_carlo_with_station_presence(
+        &inputs, &atmosphere, &params, 0.0, BALLISTICS_STATION_PRESSURE_SUPPLIED);
+    bad = mc_old == NULL || mc_zero == NULL || mc_typed == NULL ||
+          mc_zero->mean_impact_velocity != mc_old->mean_impact_velocity ||
+          mc_typed->mean_impact_velocity == mc_old->mean_impact_velocity;
+    if (!bad) {
+        printf("Monte Carlo: legacy %.6f m/s, flags 0 equal, pressure supplied %.6f m/s\n\n",
+               mc_old->mean_impact_velocity, mc_typed->mean_impact_velocity);
+    }
+    ballistics_free_monte_carlo_results(mc_old);
+    ballistics_free_monte_carlo_results(mc_zero);
+    ballistics_free_monte_carlo_results(mc_typed);
+    if (bad) {
+        printf("FATAL: Monte Carlo presence mismatch\n");
+        return 1;
+    }
     return 0;
 }
 
@@ -319,6 +489,9 @@ int main() {
 
     printf("\n");
     if (test_reticle_hold() != 0) {
+        return 1;
+    }
+    if (test_station_presence(&inputs) != 0) {
         return 1;
     }
 
