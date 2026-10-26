@@ -15,7 +15,10 @@
 //! - FFI bindings for iOS and Android development
 
 // Re-export the main types and functions
-pub use atmosphere::{AtmoSegment, AtmoSock};
+pub use atmosphere::{
+    resolve_station_conditions_with_presence, AtmoSegment, AtmoSock, StationAtmospherePresence,
+    StationReading,
+};
 pub use cli_api::{
     calculate_zero_angle, calculate_zero_angle_with_conditions,
     calculate_zero_angle_with_resolved_conditions, calculate_zero_range_from_angle_with_conditions,
