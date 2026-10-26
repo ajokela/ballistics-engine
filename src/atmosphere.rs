@@ -353,9 +353,13 @@ pub struct StationPressurePlausibility {
 /// - 1089.1 hPa at Tosontsengel, Mongolia, 30 December 2004, the highest above 750 m.
 ///
 /// Against the 1013.25 hPa standard those are 0.859, 1.070 and 1.075. They are sea-level
-/// figures; at a station above sea level both extremes sit closer to standard still, because
-/// the record highs come from cold air, reduced to sea level through a column denser than the
-/// standard one, and the record lows from warm-cored storms.
+/// figures. At a station above sea level the high extreme moves toward standard, because the
+/// record highs come from cold air: reduced to sea level through a column denser than the
+/// standard one, a station pressure nearer standard becomes the record sea-level figure. Cold
+/// air moves the low side the other way. Under a cold column an ordinary sea-level pressure
+/// puts a high station further below standard than the sea-level figure is: a 3000 m station
+/// under a 243 K column reads 0.948 times the ICAO standard there with 1013.25 hPa at sea
+/// level, and 0.917 with 980 hPa. Both stay well above 0.85.
 ///
 /// The band catches gross mismatches, not every placeholder: 101325 Pa stays inside it up to
 /// about 645 m, where it is already 8% above standard.
