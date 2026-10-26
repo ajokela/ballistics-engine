@@ -77,7 +77,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicit absolute pressure as the real station reading, so the example described a day of
   unusually high pressure and modelled the placeholder habit that silently stops the altitude
   from mattering. It now sends 98500 Pa and 291.15 K, and the doc says to omit `pressure_pa` and
-  `temperature_k` when there is no reading. Documentation only; the engine is unchanged.
+  `temperature_k` when there is no reading. Bridge and mobile apps send this same document
+  through `solve`, so one that copied the old example's placeholders should omit them instead.
+  Documentation only; the engine is unchanged.
 - **Gravity is an internal per-simulation value.** The integration kernels take uniform
   gravity as an explicit, immutable per-simulation value instead of reading the 9.80665 m/s²
   constant, and the local atmosphere and the Magnus yaw of repose use that same value; zero
@@ -85,9 +87,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   public gravity option, signature or schema change, and Earth output is byte-identical: 114
   CLI and solve-json runs match the 0.48.0 code exactly. The ICAO tables, geopotential
   conversion, Earth rotation and the empirical aerodynamic calibrations remain Earth models.
-- **Sight-in (zero-day) conditions over the bridge are documented.** solve-json has one
-  atmosphere per request, and the CLI's `--zero-*` flags have no counterpart in it. A new section
-  of [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#sight-in-zero-day-conditions) gives the
+- **Sight-in (zero-day) conditions over the bridge are documented.** solve-json, which bridge
+  and mobile apps send through `solve`, has one atmosphere per request, and the CLI's `--zero-*`
+  flags have no counterpart in it, so this recipe is how such an app honours a zero made in
+  other air. A new section of
+  [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#sight-in-zero-day-conditions) gives the
   two-request recipe: solve the zero in the sight-in air, in still air and level, then fly
   `resolved_request.shot.muzzle_angle_rad` in the shot-day air. Engine output in that section
   shows it reproduces the CLI's zero angle exactly.
@@ -111,8 +115,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The Android guide's worked example now builds and loads the JNI glue.** Its Kotlin called
   `System.loadLibrary("ballistics_engine")` and then a `Java_..._nativeCall` C function, which
   cannot live in the prebuilt Rust library, so an app that loaded only the engine, as the
-  example did, failed on its first call with `UnsatisfiedLinkError`. [docs/ANDROID_JNI_BRIDGE.md](docs/ANDROID_JNI_BRIDGE.md)
-  now builds the C file as its own `libballistics_jni.so` in CMake, linked against the engine
+  example did, failed on its first call with `UnsatisfiedLinkError`.
+  [docs/ANDROID_JNI_BRIDGE.md](docs/ANDROID_JNI_BRIDGE.md) now builds the C file as its own
+  `libballistics_jni.so` in CMake, linked against the engine
   with `-L`/`-l` so its `DT_NEEDED` is the bare `libballistics_engine.so` (MBA-1541) and with
   the 16 KB page alignment the engine gets, and the Kotlin loads `ballistics_jni`, which brings
   the engine in. A `RegisterNatives` from `JNI_OnLoad` variant replaces the mangled name for
