@@ -41,7 +41,8 @@
  *     refusal of that command.
  *   - "reticle.describe", "reticle.hold", "reticle.holds", "reticle.import",
  *     "true.dsf", "true.plan", "true.dial_plan" and "profile.export_a7p": a
- *     flat object with a machine-readable "reason" and the offending values.
+ *     flat object with a machine-readable "reason", plus the offending values
+ *     when the error has any.
  *   - Every other command: no "details"; the reason is in "message" alone.
  *
  * Messages are text for a person; branch on codes. Per command, with a Kotlin

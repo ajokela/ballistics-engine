@@ -255,9 +255,9 @@ command:
 | Command | `error.details` on `command_failed` |
 | --- | --- |
 | `solve`, `atmosphere.density_altitude` | The command's whole solve-json error envelope (below). |
-| `reticle.describe`, `reticle.hold`, `reticle.holds`, `reticle.import` | A flat object: a `reason` (one per reticle error), the `command`, and the values at fault. |
-| `true.dsf`, `true.plan`, `true.dial_plan` | A flat object: a `reason` and the values at fault. |
-| `profile.export_a7p` | A flat object: a `reason` of `units`, `drag_model` or `field`, and the value at fault. |
+| `reticle.describe`, `reticle.hold`, `reticle.holds`, `reticle.import` | A flat object: a `reason` (one per reticle error) and the `command`, plus the offending values when the error has any. |
+| `true.dsf`, `true.plan`, `true.dial_plan` | A flat object: a `reason`, plus the error's own numbers when it has any (`true.plan` always adds `rejected_candidates`). |
+| `profile.export_a7p` | A flat object: a `reason` of `units`, `drag_model` (with the `drag_model`) or `field` (with the `field`). |
 | Every other command | None. The reason is in `error.message` alone. |
 
 A payload that does not decode is `invalid_request`, with no `details`, for every command except
