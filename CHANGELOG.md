@@ -194,11 +194,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   temperature (or with either left at the sea-level default) now prints the corrected header
   too, while its rows are the stored ones, unchanged: the 1500 m card above reprints as
   `DA:4919 ft Pressure:24.97/846 Temp:41` where it read `DA:0 ft Pressure:29.92/1013 Temp:59`.
-  Sea level, fully stated station air, a QNH at sea
-  level and `--density-altitude` runs print the same header text as before: 108 CLI runs
-  (`trajectory` and `adaptive-card`, imperial and metric) and 49 `card.pdf` cards. WASM,
-  solve-json, the typed FFI calls and the Python and Ruby bindings print no card and are
-  unaffected. `calculate_density_altitude` and its unused altitude argument are unchanged.
+  Sea level, fully stated station air, a QNH at sea level and `--density-altitude` runs print
+  the same header text as before: 108 CLI runs (`trajectory` and `adaptive-card`, imperial and
+  metric) and 49 `card.pdf` cards. WASM, solve-json, the typed FFI calls and the Python and Ruby
+  bindings print no card and are unaffected. `calculate_density_altitude` and its unused
+  altitude argument are unchanged.
 
 ### Notes
 - **The solve-json example request now sends a realistic station reading.** The representative
