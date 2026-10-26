@@ -334,6 +334,60 @@ warning: --bc-reference army-standard-metro has no effect together with a custom
 
 **FFI:** `FFIBallisticInputs` is an ABI-frozen `repr(C)` struct for iOS/Android consumers and gains no new field. Instead, call the standalone `ballistics_bc_for_reference_standard(bc, reference_standard)` (`reference_standard`: `0` = ICAO, `1` = Army Standard Metro) once on a raw BC value and write the result into `FFIBallisticInputs.bc_value` before calling any existing `ballistics_calculate_trajectory*`/`ballistics_calculate_zero_angle*`/`ballistics_monte_carlo*` export unchanged. This is a pure addition to the C ABI — existing callers that never call the new function are unaffected and need no recompile.
 
+#### Typed and omitted atmosphere
+
+A temperature or pressure you give is a reading, and every subcommand flies it as given,
+whatever its value: 15 °C, 59 °F, 1013.25 hPa and 29.92 inHg included. A temperature or
+pressure you leave out flies the ICAO standard atmosphere at `--altitude` (59 °F / 15 °C and
+29.92 inHg / 1013.25 hPa at sea level).
+
+Before 0.49.0 the engine could not tell the two apart once it held the number: at an altitude
+above 1 m, a pressure within 0.5 hPa of 1013.25 hPa or a temperature within 0.1 °C of 15 °C
+was read as "not given" and replaced with ICAO air there. A real reading was replaced. A QNH of
+1031 hPa at 150 m reduces to 1012.86 hPa, and `come-ups` flew it as 995.36 hPa; 29.92 inHg typed
+at 5000 ft flew as 24.90 inHg. Engine output for that last case now (before 0.49.0 there was no
+warning, and the bullet reached 529.25 yd at 1934.97 fps in the ICAO air):
+
+```
+$ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 600 --auto-zero 100 \
+    --altitude 5000 --temperature 70 --pressure 29.92
+warning: station pressure 29.92 inHg is 1.202 times the ICAO standard pressure at 5000 ft (24.90 inHg), outside the 0.85 to 1.08 band that recorded weather stays within. If it is a sea-level altimeter setting (QNH) from a weather report, add --pressure-type qnh; otherwise check that --altitude is the station elevation, in ft. The pressure is used as given.
+...
+║ Max Range:           516.33 yd        ║
+...
+║ Impact Velocity:    1817.37 fps       ║
+```
+
+- **Where a reading comes from.** A flag, a `--location` CSV cell or a `--profile` CSV
+  `ZERO_TEMP` cell is a reading. An empty cell is omitted.
+- **QNH.** `--pressure-type qnh` declares a sea-level altimeter setting. It is reduced to
+  station pressure at `--altitude`, and that station pressure flies as a reading even when it
+  lands near 1013.25 hPa. An omitted pressure keeps each command's existing treatment under
+  `--pressure-type qnh` (most reduce the default, `estimate-bc` never does).
+- **Saved profiles.** `profile save` records which of the two you typed
+  (`temperature_supplied` / `pressure_supplied` in the file, written only when true), and
+  `.a7p` import marks both. A profile saved before 0.49.0 carries neither, so its stored
+  59 °F / 29.92 inHg keeps the old meaning, standard air at a real altitude; re-save it with
+  `--temperature` / `--pressure` to mark a real reading.
+- **Density altitude.** The pressure is derived from the density altitude, never a reading,
+  and an explicit temperature wins over the ISA one. Explicit means any supplied source: the
+  flag, a `--location` CSV cell, a `--profile` CSV `ZERO_TEMP` cell or a marked saved profile.
+  An unmarked (pre-0.49.0) profile's temperature is not explicit.
+- **A stored density altitude** is honoured by `plan-truing --profile` and
+  `dsf --saved-profile`, as `trajectory --saved-profile` already did, when the run supplies no
+  pressure or altitude of its own.
+- **The zero day.** A `--zero-*` value you give is a reading; a value the zero day inherits
+  from the shot day keeps the shot day's status.
+- **Typed defaults.** On `trajectory`, a typed `--altitude 0` or `--humidity 50` beats a
+  `--location` CSV or saved-profile value.
+- **`--online`.** A typed value is sent with `temperature_supplied` / `pressure_supplied` set
+  to `true`, and a declared QNH is sent as its station pressure. The online service flies a
+  marked value as typed once it supports those fields; until then it still replaces an
+  in-band value, including a QNH that reduces to about 1013 hPa. An omitted value's request is
+  unchanged.
+- **`stability`** keeps its own rule: an omitted pressure there is the sea-level value itself,
+  as before.
+
 #### Pressure Reference: Absolute vs. QNH (`--pressure-type`)
 
 A barometric pressure reading can mean two different physical quantities, and mixing them up is a classic source of vertical error: **station pressure** (the actual air pressure at the shooter's altitude) versus **QNH** (a sea-level-corrected altimeter setting — the kind of "barometer" value read off a weather report or METAR, which has been artificially inflated to what the pressure WOULD be at sea level). Kestrel, AB Mobile, Shooter, JBM, and Hornady 4DOF all let the user declare which one they are entering; this engine's `--pressure` previously only supported station pressure, so a QNH value entered at a real altitude silently over-stated air density and under-stated drop.
@@ -360,9 +414,9 @@ engine's number exactly.
   --altitude 5000 --pressure 30.31 --pressure-type qnh
 ```
 
-An omitted `--pressure` is unaffected by `--pressure-type` in metric units: the sea-level standard default (1013.25 hPa) reduces to precisely the same ICAO-standard station pressure at any altitude under either mode, so there is nothing to reduce. The imperial default, 29.92 inHg, is 1013.21 hPa, so under `qnh` it is reduced as a reading and lands 0.036 hPa below the ICAO-standard station pressure at 5,000 ft; leave `--pressure-type` off when no pressure was read.
+An omitted `--pressure` is all but unaffected by `--pressure-type` in metric units: the sea-level standard default (1013.25 hPa) reduces to the ICAO-standard station pressure at any altitude to within rounding, though not bit for bit (1012.0492647136854 against 1012.0492647136847 hPa at 10 m). The imperial default, 29.92 inHg, is 1013.21 hPa, so under `qnh` it is reduced as a reading and lands 0.036 hPa below the ICAO-standard station pressure at 5,000 ft; leave `--pressure-type` off when no pressure was read.
 
-**A pressure that does not fit the altitude is warned.** `trajectory` and `zero` print a `warning:` line on stderr when the absolute station pressure they fly is outside 0.85 to 1.08 times the ICAO standard pressure at `--altitude`. Recorded weather stays inside that band: the sea-level records, 870 hPa and 1089.1 hPa, are 0.859 and 1.075 times standard. Above the band the warning suggests `--pressure-type qnh` or a check of `--altitude`; below it, a check of `--altitude` and of the pressure's unit. The pressure is still used as given, and stdout does not change. It covers a pressure from `--pressure`, a `--location` CSV or a saved profile, and on `trajectory` the zero-day pair too, when `--zero-pressure` or `--zero-altitude` is given. The default pressure is never warned, because at a real altitude it is replaced by the ICAO pressure there. Neither is a `qnh` pressure or a `--density-altitude` run. The other subcommands and the browser terminal do not check yet. Engine output for a weather report's QNH typed as station pressure at Cusco:
+**A pressure that does not fit the altitude is warned.** `trajectory` and `zero` print a `warning:` line on stderr when the absolute station pressure they fly is outside 0.85 to 1.08 times the ICAO standard pressure at `--altitude`. Recorded weather stays inside that band: the sea-level records, 870 hPa and 1089.1 hPa, are 0.859 and 1.075 times standard. Above the band the warning suggests `--pressure-type qnh` or a check of `--altitude`; below it, a check of `--altitude` and of the pressure's unit. The pressure is still used as given, and stdout does not change. It covers a pressure from `--pressure`, a `--location` CSV or a saved profile, and on `trajectory` the zero-day pair too, when `--zero-pressure` or `--zero-altitude` is given. An omitted pressure is never warned, because it flies the ICAO pressure at the altitude. A typed one is always checked, so 29.92 inHg typed at 5000 ft, 1.20 times standard there, is warned (since 0.49.0; before, it was read as omitted and silently replaced). Neither is a `qnh` pressure or a `--density-altitude` run. The other subcommands and the browser terminal do not check yet. Engine output for a weather report's QNH typed as station pressure at Cusco:
 
 ```
 $ ballistics trajectory -v 2600 -b 0.243 --drag-model g7 -m 175 -d 0.308 --max-range 1000 \
@@ -397,7 +451,7 @@ silently — tracked as MBA-1425.
 
 **Not yet available** on `estimate-bc`, `true-velocity`, `plan-truing`, `mpbr`, `come-ups`, `lead`, `wind-card`, `stability`, `range-table`, or `compare` — these subcommands still treat `--pressure` as absolute station pressure only. This is a tracked follow-up, not an oversight.
 
-**WASM:** pass `--pressure-type <absolute|qnh>` (and `--zero-pressure-type` for the auto-zero override) as a terminal argument to `trajectory`; behavior matches native exactly (same reduction formula, same Authoritative-constructor bypass of the legacy default-sentinel heuristic).
+**WASM:** pass `--pressure-type <absolute|qnh>` (and `--zero-pressure-type` for the auto-zero override) as a terminal argument to `trajectory`; behavior matches native exactly (same reduction formula, and the same presence rule: a typed `--temperature` / `--pressure` flies as typed, an omitted one flies ICAO air at `--altitude`). Since 0.49.0 the same rule holds on the terminal's `zero`, `lead`, `true-velocity`, `true-wind` and `estimate-bc`, and for the `Calculator` API, which sends a temperature or pressure only when its setter was called.
 
 **Monte Carlo / FFI:** the engine's `BallisticInputs.pressure` and `FFIAtmosphericConditions.pressure` fields have always meant absolute station pressure and continue to. `FFIAtmosphericConditions` is an ABI-frozen `repr(C)` struct with no new field. A QNH-aware FFI caller should call the standalone `ballistics_reduce_qnh_pressure(qnh_hpa, altitude_m)` once and write the result into `FFIAtmosphericConditions.pressure` before calling any existing `ballistics_calculate_trajectory*`/`ballistics_calculate_zero_angle*`/`ballistics_monte_carlo*` export unchanged — a pure addition to the C ABI requiring no recompile for existing callers. Pass the QNH in hPa: since 0.49.0 the reduction is the altimeter-setting relation, not a plain ratio, so convert an inHg reading (× 33.8639) before the call, not after. A QNH with no station pressure at that altitude returns NaN, which the trajectory exports refuse.
 
@@ -436,9 +490,9 @@ solved for `station_hpa` given a target density altitude and a station temperatu
 
 **BC reference standard (MBA-1365) interaction:** independent. `--bc-reference` converts the BC value itself (`inputs.bc_value`); `--density-altitude` resolves the atmosphere (`AtmosphericConditions`/`BallisticInputs.altitude`/`.temperature`/`.pressure`). Neither reads the other's fields, so any combination of the two flags composes exactly as if applied separately.
 
-Available on `trajectory` (CLI flag + `--location`/CSV `DA`/`DENSITY_ALTITUDE` columns) and `profile save --density-altitude` (stored for round-trip parity, alongside the pre-existing `temperature`/`pressure`/`altitude`/`humidity` profile fields — like those, `trajectory --saved-profile` does not read any of them back today; only `--location`/CSV feeds shot-day atmosphere there). **Not yet available** on `zero` or any of the subcommands `--pressure-type` also excludes (`estimate-bc`, `true-velocity`, `plan-truing`, `mpbr`, `come-ups`, `lead`, `wind-card`, `stability`, `range-table`, `compare`) — tracked alongside that same follow-up.
+Available on `trajectory` (CLI flag + `--location`/CSV `DA`/`DENSITY_ALTITUDE` columns) and `profile save --density-altitude`, stored alongside the profile's `temperature`/`pressure`/`altitude`/`humidity`. `trajectory --saved-profile` reads the stored atmosphere as a set (MBA-1417), and since 0.49.0 `plan-truing --profile` and `dsf --saved-profile` honour a stored density altitude too, whenever the run supplies no pressure or altitude of its own. **Not yet available** on `zero` or any of the subcommands `--pressure-type` also excludes (`estimate-bc`, `true-velocity`, `plan-truing`, `mpbr`, `come-ups`, `lead`, `wind-card`, `stability`, `range-table`, `compare`) — tracked alongside that same follow-up.
 
-**WASM:** pass `--density-altitude <value>` as a terminal argument to `trajectory`; behavior matches native exactly (same back-solve, same Authoritative-constructor bypass of the legacy default-sentinel heuristic — including when `--density-altitude` is combined with `--pressure-type`).
+**WASM:** pass `--density-altitude <value>` as a terminal argument to `trajectory`; behavior matches native exactly (same back-solve, flown authoritatively — including when `--density-altitude` is combined with `--pressure-type`). A typed `--temperature` is the explicit temperature, whatever its value; the zero day that inherits the density-altitude air keeps that temperature as a reading and the derived pressure as derived.
 
 **FFI:** `FFIAtmosphericConditions` is the same ABI-frozen `repr(C)` struct as above, with no new field. A density-altitude-aware FFI caller calls three standalone conversions once — `ballistics_density_altitude_altitude_m`, `ballistics_density_altitude_temperature_c`, `ballistics_density_altitude_pressure_hpa` (all `(density_altitude_m, explicit_temperature_c)`, where `explicit_temperature_c = NAN` means the ISA-at-DA default) — and writes the three results into `FFIAtmosphericConditions.altitude`/`.temperature`/`.pressure` before calling any existing `ballistics_calculate_trajectory*`/`ballistics_calculate_zero_angle*`/`ballistics_monte_carlo*` export unchanged. A pure addition to the C ABI; no recompile is required for existing callers (only for a caller that wants to opt into density-altitude support).
 
@@ -2754,7 +2808,7 @@ error rather than a silent blend of weighting schemes.
 | `--called-wind` | The wind you called (mph/m·s⁻¹) — adds the wind-call correction factor | None |
 | `--zero-distance` | Zero distance | 100 yd/m |
 | `--sight-height` | Sight height above bore | 2 in / 50 mm |
-| `--temperature`, `--pressure`, `--pressure-type`, `--humidity`, `--altitude` | Atmosphere (same meanings as elsewhere) | 59 °F / 29.92 inHg / 50% / 0 |
+| `--temperature`, `--pressure`, `--pressure-type`, `--humidity`, `--altitude` | Atmosphere (same meanings as elsewhere) | omitted: ICAO standard at `--altitude` (59 °F / 29.92 inHg at sea level) / absolute / 50% / 0 |
 | `--units` | Unit system | imperial |
 | `-o`, `--output` | `table`, `json`, or `csv` | table |
 
@@ -3145,7 +3199,10 @@ them, keyed by Mach, on a saved profile; `trajectory --saved-profile` and
 Unlike every other command, `dsf` takes **no ballistic parameters of its own** — it
 solves the named saved profile's own trajectory (same physics `trajectory
 --saved-profile NAME` would fly with no other flags) and derives everything else from
-`--range` and `--observed-drop`.
+`--range` and `--observed-drop`. Since 0.49.0 that includes the profile's air as a set: a
+stored `qnh` pressure mode is reduced at the profile's altitude, a stored density altitude
+flies its derived station air, and a temperature or pressure the profile marks as typed flies
+as typed (see [Typed and omitted atmosphere](#typed-and-omitted-atmosphere)).
 
 ```bash
 # Record an observed 5.1 mil drop at 900 yards on a profile already MV-trued.
@@ -3414,7 +3471,11 @@ window) — JSON/CSV never get the note text above, only these numbers.
 target distances actually available at this facility best separate muzzle
 velocity from a scalar BC? It uses the same trajectory solver and central
 finite-difference perturbations as `true-velocity`, and it never fabricates an
-observation or changes a saved profile.
+observation or changes a saved profile. With `--profile`, the profile's air applies as on
+`trajectory --saved-profile`: its stored `qnh` mode is used, reduced at the altitude in use,
+when its pressure is the one in use and no `--pressure-type` is given; its stored density
+altitude flies when the run supplies no `--pressure` or `--altitude`; and a temperature or
+pressure it marks as typed flies as typed (0.49.0).
 
 ```bash
 # Explicit discrete target stations
@@ -4340,7 +4401,7 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 - Alternating row stripes for easy tracking in field conditions
 - Header with rifle, location, density altitude, atmospheric data. The pressure, temperature
   and density altitude are the station air the rows were solved in: ICAO air at `--altitude`
-  for an omitted (or sea-level default) pressure or temperature, and the station pressure for
+  for an omitted pressure or temperature, a typed one as typed, and the station pressure for
   `--pressure-type qnh` (MBA-1593)
 - Footer with timestamp, load data, BC, and velocity
 

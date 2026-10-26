@@ -433,6 +433,18 @@ fun call(request: JSONObject): JSONObject {
 Keep `zero_distance_m` in the second request only when it uses `rifle.sight_offset_lateral_m` or
 `shot.zero_poi_right_m`, which need it.
 
+## Station readings on `card.*` and `true.*`
+
+Send a temperature or pressure only when you have a reading, and leave the field out when you
+do not. Since 0.49.0 a field that is present is a reading and flies as sent, even 59 °F, 15 °C,
+29.92 inHg or 1013.25 hPa at altitude; a field that is absent flies the ICAO standard atmosphere
+at the request's altitude. That holds for `card.*`'s `temperature` / `pressure` and for the
+truing commands' `temperature_f` / `pressure_inhg` (`true.fit`, `true.plan`, `true.dsf`,
+`true.wind`), which became optional. An app that sends 59 / 29.92 as a "no reading" placeholder
+must omit the field instead: before 0.49.0 the placeholder flew standard air at altitude, and
+now it flies sea-level air there. A `card.pdf` reprint states the air its stored rows flew, so
+send the stored card's `engine_version`.
+
 ## Turning samples into holds
 
 A `solve` result's `samples` give drop and windage in metres, not holds.

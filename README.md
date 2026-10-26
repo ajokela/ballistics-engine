@@ -1087,6 +1087,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### A station reading at altitude
+
+`AtmosphericConditions` is a plain struct of numbers, so `TrajectorySolver::new` cannot tell a
+reading from a default: at an altitude above 1 m it reads 15 °C (±0.1) or 1013.25 hPa (±0.5) as
+"not given" and flies the ICAO standard air there instead, which is what the sea-level example
+above wants. When the values are readings, say so with `new_with_station_presence` (0.49.0); a
+supplied value then flies as given, whatever it is, and an omitted one still flies ICAO air:
+
+```rust
+use ballistics_engine::{StationAtmospherePresence, TrajectorySolver};
+
+// A barometer reading 1013.0 hPa at a 150 m range, and no thermometer.
+let atmosphere = AtmosphericConditions { temperature: 15.0, pressure: 1013.0, humidity: 50.0, altitude: 150.0 };
+let presence = StationAtmospherePresence::new(false, true); // (temperature, pressure) supplied
+let solver = TrajectorySolver::new_with_station_presence(inputs, wind, atmosphere, presence);
+```
+
+The zero, Monte Carlo, BC-fit, lead, hold-curve and truing entry points have the same
+`*_with_station_presence` twins, and `atmosphere::resolve_station_conditions_with_presence`
+returns the pair a solve will fly.
+
 ## Performance
 
 Optimized Rust implementation provides:

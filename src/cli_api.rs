@@ -1153,11 +1153,11 @@ impl TrajectorySolver {
     /// authoritative at nonzero altitude rather than acting as legacy omission sentinels.
     ///
     /// `pub` (MBA-1397; was `pub(crate)`): a QNH-aware caller (native CLI, WASM) that has
-    /// already reduced a declared altimeter setting to station pressure via
-    /// [`crate::atmosphere::resolve_station_conditions_with_pressure_mode`] needs this
-    /// constructor too, and those callers live in a different crate (`src/main.rs` is a
-    /// separate binary crate over the library). Widening visibility only, no signature
-    /// change: every existing `pub(crate)` caller is unaffected.
+    /// already resolved the station air, for example with
+    /// [`crate::atmosphere::resolve_station_conditions_with_presence`] (which reduces a declared
+    /// altimeter setting to station pressure), needs this constructor too, and those callers
+    /// live in a different crate (`src/main.rs` is a separate binary crate over the library).
+    /// It is [`Self::new_with_station_presence`] with [`StationAtmospherePresence::BOTH`].
     pub fn new_with_resolved_station_atmosphere(
         inputs: BallisticInputs,
         wind: WindConditions,
@@ -5035,7 +5035,7 @@ pub fn calculate_zero_angle_with_station_presence(
 
 /// [`calculate_zero_angle_with_conditions`] for a presence-aware caller that has already
 /// resolved station temperature/pressure (MBA-1397; e.g. reduced a declared QNH via
-/// [`crate::atmosphere::resolve_station_conditions_with_pressure_mode`]). Unlike the base
+/// [`crate::atmosphere::resolve_station_conditions_with_presence`]). Unlike the base
 /// function, `atmosphere`'s temperature/pressure are trusted as-is and never re-interpreted
 /// through the legacy default-sentinel heuristic.
 pub fn calculate_zero_angle_with_resolved_conditions(

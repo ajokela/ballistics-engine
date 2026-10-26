@@ -680,10 +680,12 @@ density of the air it resolves to — see [ATMOSPHERE_DENSITY_ALTITUDE.md](ATMOS
 error rather than a silently chosen latitude.
 
 Explicit temperature and pressure values are authoritative station conditions, including values
-equal to `288.15 K` and `101325 Pa` at nonzero altitude. The solve service must preserve that
-explicit intent and must not apply the legacy CLI rule that treats those exact values as omitted
-standard-atmosphere sentinels. MBA-1302 must bypass that CLI sentinel inference: omitted fields
-select ICAO-at-altitude resolution, while present fields are passed as authoritative values. The
+equal to `288.15 K` and `101325 Pa` at nonzero altitude. The solve service preserves that
+explicit intent and never applied the rule the CLI used before 0.49.0, which treated those exact
+values as omitted standard-atmosphere sentinels (since 0.49.0 the CLI, too, takes presence from
+what was typed, not from the value). MBA-1302 bypassed that sentinel inference from the start:
+omitted fields select ICAO-at-altitude resolution, while present fields are passed as
+authoritative values. The
 resolved values are recorded as explicit numbers in a successful response's
 `resolved_request`; the resolved altitude and relative humidity are concrete there as well.
 

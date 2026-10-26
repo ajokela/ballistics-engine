@@ -137,21 +137,22 @@ fn geometric_to_geopotential_height_m(geometric_altitude_m: f64) -> f64 {
         / (GEOPOTENTIAL_EARTH_RADIUS_M + geometric_altitude_m)
 }
 
-/// Resolve the station-pressure override for an air-density calculation.
+/// Resolve the station-pressure override for an air-density calculation, by the legacy
+/// default-sentinel convention.
 ///
-/// Altitude and pressure are redundant inputs for density. The rule:
-/// * An explicitly-supplied pressure is the authoritative STATION pressure (already
-///   altitude-reduced); it is returned as `Some` and used directly, so altitude is NOT
-///   double-counted.
-/// * When pressure is left at the sea-level standard default (≈1013.25 hPa) while a real
-///   altitude is given, the caller meant "standard atmosphere at this altitude": return
-///   `None` so [`calculate_atmosphere`] derives the station pressure from altitude (ICAO
-///   standard) instead of silently using sea-level density.
+/// Presence-blind legacy convention: a bare `f64` cannot say whether it was supplied, so a
+/// sea-level default at a real altitude is read as omitted. The rule:
+/// * A pressure within 0.5 hPa of the 1013.25 hPa sea-level standard at an altitude above 1 m
+///   is read as "omitted, standard atmosphere at this altitude": `None`, so
+///   [`calculate_atmosphere`] derives the station pressure from altitude (ICAO standard)
+///   instead of flying sea-level density there.
+/// * Any other value is returned as `Some` and used as the STATION pressure, so altitude is
+///   not double-counted.
 ///
-/// Without this, `--altitude` with the default pressure produced sea-level density (altitude
-/// had no effect on drag). The ±0.5 hPa tolerance covers the `29.92 inHg ≈ 1013.21 hPa`
-/// conversion, and `>1 m` avoids triggering at sea level. (Mirrors the existing
-/// `pressure != 29.92` "user override" sentinel used elsewhere in the CLI.)
+/// The ±0.5 hPa tolerance covers the `29.92 inHg ≈ 1013.21 hPa` conversion, and `>1 m` avoids
+/// triggering at sea level. A real reading inside that band (QNH 1031 hPa at 150 m reduces to
+/// 1012.86 hPa) is indistinguishable from the default here. A caller that knows presence uses
+/// [`resolve_station_conditions_with_presence`], which flies a supplied value as given.
 pub fn resolve_station_pressure(pressure_hpa: f64, altitude_m: f64) -> Option<f64> {
     const SEA_LEVEL_HPA: f64 = 1013.25;
     if (pressure_hpa - SEA_LEVEL_HPA).abs() < 0.5 && altitude_m.abs() > 1.0 {
@@ -161,21 +162,23 @@ pub fn resolve_station_pressure(pressure_hpa: f64, altitude_m: f64) -> Option<f6
     }
 }
 
-/// Resolve the temperature override for an air-density calculation, mirroring
-/// [`resolve_station_pressure`].
+/// Resolve the temperature override for an air-density calculation, by the legacy
+/// default-sentinel convention, mirroring [`resolve_station_pressure`].
 ///
-/// * An explicitly-supplied temperature is authoritative (returned as `Some`).
-/// * When temperature is left at the sea-level standard default (15 °C) while a real altitude
-///   is given, the caller meant "standard atmosphere at this altitude": return `None` so
+/// Presence-blind legacy convention: a bare `f64` cannot say whether it was supplied, so a
+/// sea-level default at a real altitude is read as omitted.
+/// * A temperature within 0.1 °C of the 15 °C sea-level standard at an altitude above 1 m is
+///   read as "omitted, standard atmosphere at this altitude": `None`, so
 ///   [`calculate_atmosphere`] applies the ICAO lapse-rate temperature for that altitude
 ///   (≈ −6.5 °C/km).
+/// * Any other value is returned as `Some` and used as given.
 ///
-/// Without this, `--altitude` with the default temperature held the air at 15 °C, which
-/// under-estimates density (warm air is thinner) by ~2.4% at 1 km up to ~7% at 3 km versus the
-/// standard atmosphere — validated against py_ballisticcalc, which derives both temperature and
-/// pressure from altitude. The 0.1 °C tolerance matches the `59 °F = 15.0 °C` default exactly,
-/// and `>1 m` avoids triggering at sea level. A shooter at a genuinely non-standard temperature
-/// at altitude should pass an explicit temperature (same contract as station pressure).
+/// Without the omitted case, `--altitude` with the default temperature held the air at 15 °C,
+/// which under-estimates density by ~2.4% at 1 km up to ~7% at 3 km versus the standard
+/// atmosphere (validated against py_ballisticcalc). The 0.1 °C tolerance matches the
+/// `59 °F = 15.0 °C` default exactly, and `>1 m` avoids triggering at sea level. A real 15 °C
+/// reading at altitude is indistinguishable from the default here; a caller that knows presence
+/// uses [`resolve_station_conditions_with_presence`].
 pub fn resolve_station_temperature(temperature_c: f64, altitude_m: f64) -> Option<f64> {
     const SEA_LEVEL_TEMP_C: f64 = 15.0;
     if (temperature_c - SEA_LEVEL_TEMP_C).abs() < 0.1 && altitude_m.abs() > 1.0 {
@@ -191,6 +194,10 @@ pub fn resolve_station_temperature(temperature_c: f64, altitude_m: f64) -> Optio
 /// A thin, byte-identical delegate to
 /// [`resolve_station_conditions_with_pressure_mode`] at [`PressureReferenceMode::Absolute`]
 /// (MBA-1397) — kept as a separate name/signature so no existing caller needs to change.
+///
+/// Presence-blind: both values go through the legacy default sentinels
+/// ([`resolve_station_temperature`], [`resolve_station_pressure`]). See
+/// [`resolve_station_conditions_with_presence`].
 pub fn resolve_station_conditions(
     temperature_c: f64,
     pressure_hpa: f64,
@@ -261,9 +268,11 @@ pub enum PressureReferenceMode {
 /// uses for its own non-isothermal-layer pressure formula, rather than re-hardcoding the
 /// lapse rate / sea-level temperature / exponent a second time. `altitude_m` is clamped and
 /// converted to geopotential height exactly like `calculate_icao_standard_atmosphere`, and
-/// `(P0/QNH)^n` is exactly 1 at QNH = 1013.25 hPa, so a QNH of exactly 1013.25 hPa reduces to
-/// precisely the ICAO standard station pressure at every altitude (this is what makes the
-/// omitted-pressure default byte-identical under either [`PressureReferenceMode`]).
+/// `(P0/QNH)^n` is exactly 1 at QNH = 1013.25 hPa. At QNH = 1013.25 hPa the reduction therefore
+/// equals the ICAO standard station pressure to rounding, but not bit for bit at every altitude
+/// (for example 1012.0492647136854 against 1012.0492647136847 at 10 m; the two agree exactly at
+/// 150 m). Callers that must stay bit-identical for an omitted pressure keep the mode they
+/// already used for it.
 ///
 /// The reduction is only physically meaningful within the troposphere (the altitude range
 /// real shooting takes place in); it is not re-derived per-layer for higher altitudes. No
@@ -315,6 +324,12 @@ pub fn resolve_station_pressure_with_mode(
 /// [`resolve_station_pressure_with_mode`] for [`PressureReferenceMode::Qnh`] before applying
 /// the same standard-atmosphere fallback used when either input is left at its sea-level
 /// default.
+///
+/// Presence-blind: this is [`resolve_station_conditions_with_presence`] with
+/// [`StationAtmospherePresence::NEITHER`], bit for bit. The temperature sentinel runs in BOTH
+/// arms, so a typed 15 °C at altitude flies the ICAO lapse temperature here even with a
+/// declared QNH; only the pressure sentinel is bypassed in the `Qnh` arm. A caller that knows
+/// which values were supplied uses [`resolve_station_conditions_with_presence`].
 pub fn resolve_station_conditions_with_pressure_mode(
     temperature_c: f64,
     pressure_hpa: f64,
