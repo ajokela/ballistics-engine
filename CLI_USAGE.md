@@ -4327,8 +4327,8 @@ Generate a printable dope card with two-column layout, color-coded values, and a
 | --powder-temp-curve | Measured `TEMP:VEL,...` powder-temp→velocity table (interpolated at the powder temp, clamped; overrides --powder-temp-sensitivity) | none | °F & fps | °C & m/s |
 | --powder-temp | With a curve: powder temp the curve is looked up at (default --temperature). With the linear model: reference temp (default 70/21) | --temperature (curve) / 70°F (linear) | °F | °C |
 | --sight-height | Sight height above bore | 0.05 | yards | meters |
-| --bore-height | Bore height above ground | 5 | feet | meters |
-| --ignore-ground-impact | Disable ground impact detection | false | - | - |
+| --bore-height | Bore height above ground (also `--muzzle-height`); must be above 0 unless `--ignore-ground-impact` is set | 60 / 1500 | inches | mm |
+| --ignore-ground-impact | Disable ground impact detection, for the flight and the `--auto-zero` solve; allows a `--bore-height` of 0 or less | false | - | - |
 | --max-range | Maximum range | 1000 | yards | meters |
 | --time-step | Integration time step — RK4/Euler only (the adaptive RK45 default steps adaptively and ignores this) | 0.001 | seconds | seconds |
 | --wind-speed | Wind speed | 0 | mph | m/s |
@@ -4809,6 +4809,7 @@ available whenever the `online` feature is enabled (on by default).
 - All internal calculations use SI units for precision
 - BC values are dimensionless (same for G1 and G7)
 - Wind direction: 0° = headwind, 90° = from right, 180° = tailwind, 270° = from left
-- Trajectory stops at ground impact or max range
+- Trajectory stops at ground impact or max range (so a `--bore-height` of 0 or less needs
+  `--ignore-ground-impact`)
 - Sight height default is 1.8 inches (0.05 yards) above bore
 - Bore height default is 5 feet (1.5 meters) above ground - adjust for shooting position (e.g., 2ft prone, 4ft sitting, 5ft standing)

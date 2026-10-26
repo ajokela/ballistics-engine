@@ -250,7 +250,7 @@ Control bore height above ground and ground impact detection:
 ./ballistics trajectory \
   -v 2700 -b 0.475 -m 168 -d 0.308 \
   --auto-zero 100 \
-  --bore-height 2  # 2 feet (imperial) or meters (metric)
+  --bore-height 24  # inches (imperial) or mm (metric)
 
 # Disable ground impact detection for full trajectory to max range
 ./ballistics trajectory \
@@ -260,7 +260,10 @@ Control bore height above ground and ground impact detection:
   --ignore-ground-impact
 ```
 
-Bore height defaults: 5 feet (imperial) / 1.5 meters (metric) - standing position.
+Bore height defaults: 60 in (imperial) / 1500 mm (metric), i.e. 5 ft / 1.5 m - standing position.
+The ground plane is at height 0 and ends the flight, so a `--bore-height` of 0 or less is
+rejected unless `--ignore-ground-impact` is set; with it, both the flight and the `--auto-zero`
+solve start from that height.
 
 #### Advanced BC Modeling
 

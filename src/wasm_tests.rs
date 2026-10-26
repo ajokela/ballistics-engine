@@ -1109,6 +1109,36 @@ mod tests {
         assert!(!unwarned.contains("WARNING"));
     }
 
+    /// Parity with the native CLI's --bore-height check: a muzzle on or below the ground
+    /// plane is rejected with an actionable error (it used to surface only as "No trajectory
+    /// points", or a zero failure suggesting a shorter distance) unless
+    /// --ignore-ground-impact removes the ground, and then the auto-zero solves.
+    #[wasm_bindgen_test]
+    fn muzzle_height_on_or_below_ground_needs_ignore_ground_impact() {
+        let wasm = WasmBallistics::new();
+        for cmd in [
+            "trajectory -v 2600 -b 0.505 -m 175 -d 0.308 --muzzle-height 0",
+            "trajectory -v 2600 -b 0.505 -m 175 -d 0.308 --muzzle-height -1 --use-euler",
+            "trajectory -v 2600 -b 0.505 -m 175 -d 0.308 --bore-height 0 --auto-zero 1500",
+        ] {
+            let err = wasm.run_command(cmd).expect_err(cmd);
+            let msg = format!("{err:?}");
+            assert!(
+                msg.contains("--muzzle-height must be above 0")
+                    && msg.contains("--ignore-ground-impact"),
+                "{cmd}: unexpected error {msg}"
+            );
+        }
+        let output = wasm
+            .run_command(
+                "trajectory -v 2600 -b 0.505 -m 175 -d 0.308 --muzzle-height 0 \
+                 --auto-zero 1500 --ignore-ground-impact --max-range 1500 -o json",
+            )
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert!(json["zero_angle_degrees"].as_f64().unwrap().is_finite());
+    }
+
     #[wasm_bindgen_test]
     fn lead_output_json_parses_with_sane_intercept_range() {
         let wasm = WasmBallistics::new();

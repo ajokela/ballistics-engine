@@ -104,6 +104,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reduces the CLI's 29.92 inHg default (1013.21 hPa, not 1013.25) as a reading, now 0.0012 hPa
   lower at 5000 ft. No API, schema or ABI change, and the `qnh_reduced_to_station_pressure`
   message wording is unchanged.
+- **`trajectory --auto-zero` solves from a bore at ground level under
+  `--ignore-ground-impact`.** The ground plane is height 0 and ends the flight, so a bore height
+  of 0 or less stops before its first point. `--ignore-ground-impact` removes the ground for the
+  flight, but the `--auto-zero` solve hardcoded a ground at 0 and ignored the flag, so
+  `--bore-height 0 --auto-zero 1500 --ignore-ground-impact` exited with "No trajectory points
+  calculated". The zero solve now uses the flight's ground: that command solves a
+  1.510919806676861° zero for a .308 (175 gr, 2600 fps, G1 0.505), and its metric twin (792 m/s,
+  11.34 g, zero at 1372 m) 1.5137119880095622°. Without `--ignore-ground-impact`, a bore height
+  of 0 or less is now refused up front ("--bore-height must be above 0 (the ground plane) ...
+  Pass --ignore-ground-impact to fly from ground level."), where it used to surface only as the
+  solver's "No trajectory points calculated" ("...generated" under `--use-euler`); solve-json
+  already refuses the same input ("ground threshold must be below the resolved muzzle height").
+  The WASM terminal's zero already used the flight's ground, and its `--muzzle-height` (alias
+  `--bore-height`) gets the same check, replacing "Error: No trajectory points calculated" and,
+  with `--auto-zero`, a zero failure that suggested a shorter zero distance. solve-json, the
+  bridge, the FFI and the bindings are unchanged.
+  Every run with a bore above 0 that solved before is byte-identical: 114 native CLI runs (all
+  three integrators, imperial and metric, auto-zero and plain, with and without
+  `--ignore-ground-impact`, table and `-o json --full`) and 84 WASM terminal runs. One class of
+  run changes from an error to a solution: with `--ignore-ground-impact`, a zero too far for the
+  zero search's first bracket (0.2 rad, 11.46°) to reach before falling to ground level, which
+  failed with "trajectory cannot reach target distance at any angle", now widens the bracket
+  and solves, as the WASM terminal already did. For the .308 above, a 4000 yd zero solves at
+  11.732877099642561°. Without the flag such zeros still fail as before.
 
 ### Notes
 - **The solve-json example request now sends a realistic station reading.** The representative

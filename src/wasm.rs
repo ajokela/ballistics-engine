@@ -1937,6 +1937,16 @@ impl WasmBallistics {
         } else {
             0.0
         };
+        // Parity with the native CLI's --bore-height check: a bore on or below the ground
+        // plane ends the flight before its first point, which surfaced only as the solver's
+        // "No trajectory points" (or a zero failure suggesting a shorter distance).
+        if inputs.muzzle_height <= 0.0 && !ignore_ground_impact {
+            return Err(JsValue::from_str(
+                "--muzzle-height must be above 0 (the ground plane): a flight that starts on \
+                 or below the ground ends before its first point. Pass --ignore-ground-impact \
+                 to fly from ground level.",
+            ));
+        }
 
         // Bero-feedback (0.23.0): trajectory altitude feeds air density (thinning it over a
         // long flight), so a tester using --muzzle-height to defeat ground truncation instead
@@ -8337,7 +8347,8 @@ Trajectory Command:
                                  shooter, moving point of impact right and low
     --sight-height <HEIGHT>      Sight height above bore (inches/mm)
     --muzzle-height <HEIGHT>     Shooter height above ground (inches/mm; also accepts
-                                 --bore-height, matching the native CLI). A value above
+                                 --bore-height, matching the native CLI). Must be above 0
+                                 unless --ignore-ground-impact is set. A value above
                                  ~39,370in/1,000,000mm (1000m) triggers a warning: it feeds
                                  air density, thinning it over the whole flight — use
                                  --altitude for site elevation, --ignore-ground-impact to

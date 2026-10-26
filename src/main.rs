@@ -834,7 +834,8 @@ enum Commands {
 
         /// Bore height above ground (inches for imperial, mm for metric; MBA-1339 unified
         /// this with --sight-height and the WASM --muzzle-height flag). Default: 60in/1500mm
-        /// (= 5ft/1.5m). Also accepts --muzzle-height.
+        /// (= 5ft/1.5m). Must be above 0 unless --ignore-ground-impact is set. Also accepts
+        /// --muzzle-height.
         #[arg(long, visible_alias = "muzzle-height")]
         bore_height: Option<f64>,
 
@@ -7914,6 +7915,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                      ground-impact truncation use --ignore-ground-impact."
                 );
             }
+            // The ground plane is height 0 and ends the flight, so a bore on or below it
+            // stops before the first point and the solver can only report "No trajectory
+            // points". Name the cause up front instead; with --ignore-ground-impact there is
+            // no ground and the run is valid (solve-json's rule: ground below the muzzle).
+            if bore_height_metric <= 0.0 && !ignore_ground_impact {
+                return Err(
+                    "--bore-height must be above 0 (the ground plane): a flight that starts on \
+                     or below the ground ends before its first point. Pass \
+                     --ignore-ground-impact to fly from ground level."
+                        .into(),
+                );
+            }
 
             // Construct PDF metadata if PDF output is requested
             let pdf_metadata = if matches!(output, OutputFormat::Pdf) {
@@ -8222,7 +8235,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                         .unwrap_or_else(|| fallback_bullet_length_m(diameter_metric, mass_metric)),
                     sight_height: sight_height_metric,
                     muzzle_height: bore_height_metric,
-                    ground_threshold: 0.0,
+                    // Same ground as the flight (run_trajectory): with a bore at ground level
+                    // a fixed 0.0 here ended every zero trial at the muzzle, so --auto-zero
+                    // failed even under --ignore-ground-impact.
+                    ground_threshold: if ignore_ground_impact {
+                        f64::NEG_INFINITY
+                    } else {
+                        0.0
+                    },
                     altitude: zero_altitude_metric,
                     temperature: zero_temperature_metric,
                     pressure: zero_pressure_metric,
