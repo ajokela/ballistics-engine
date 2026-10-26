@@ -39,6 +39,7 @@ fn load() -> CorridorLoad {
         pressure_hpa: 1013.25,
         humidity_pct: 50.0,
         altitude_m: 0.0,
+        station_presence: ballistics_engine::StationAtmospherePresence::NEITHER,
     }
 }
 

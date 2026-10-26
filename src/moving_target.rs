@@ -195,6 +195,9 @@ fn tof_at(points: &[TrajectoryPoint], x_m: f64) -> Option<f64> {
 /// Runs ONE wind-aware solve past the range (with outbound headroom), interpolates
 /// time of flight from its points, and fixed-point iterates the intercept range for
 /// radial motion. Errors are typed (`LeadError`).
+///
+/// Presence-blind: `atmo` goes through the legacy default-sentinel rule (see
+/// [`TrajectorySolver::new`]). See [`calculate_lead_with_station_presence`].
 pub fn calculate_lead(
     inputs: BallisticInputs,
     wind: WindConditions,
@@ -202,6 +205,30 @@ pub fn calculate_lead(
     speed_mps: f64,
     angle_deg: f64,
     range_m: f64,
+) -> Result<LeadSolution, LeadError> {
+    calculate_lead_with_station_presence(
+        inputs,
+        wind,
+        atmo,
+        speed_mps,
+        angle_deg,
+        range_m,
+        crate::atmosphere::StationAtmospherePresence::NEITHER,
+    )
+}
+
+/// [`calculate_lead`] knowing which of `atmo`'s temperature and pressure the caller supplied
+/// (0.49.0): a supplied value flies as given, an omitted one keeps the legacy default-sentinel
+/// rule (see [`TrajectorySolver::new_with_station_presence`]). `NEITHER` is bit-identical to
+/// [`calculate_lead`].
+pub fn calculate_lead_with_station_presence(
+    inputs: BallisticInputs,
+    wind: WindConditions,
+    atmo: AtmosphericConditions,
+    speed_mps: f64,
+    angle_deg: f64,
+    range_m: f64,
+    station_presence: crate::atmosphere::StationAtmospherePresence,
 ) -> Result<LeadSolution, LeadError> {
     if !speed_mps.is_finite() || speed_mps < 0.0 {
         return Err(LeadError::InvalidInput(format!(
@@ -224,7 +251,8 @@ pub fn calculate_lead(
     // One solve with headroom for outbound intercepts: 6 s of target motion covers
     // any realistic small-arms TOF at leadable ranges.
     let max_range = range_m + (v_radial.max(0.0) * 6.0).max(20.0);
-    let mut solver = TrajectorySolver::new(inputs, wind, atmo);
+    let mut solver =
+        TrajectorySolver::new_with_station_presence(inputs, wind, atmo, station_presence);
     solver.set_max_range(max_range);
     let result = solver.solve()?;
     let points = &result.points;

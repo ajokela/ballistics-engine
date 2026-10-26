@@ -709,6 +709,7 @@ mod adaptive_card_tests {
             altitude_m: 0.0,
             wind_speed_mps: 3.0,
             wind_direction_deg: 90.0,
+            station_presence: crate::atmosphere::StationAtmospherePresence::NEITHER,
         }
     }
 

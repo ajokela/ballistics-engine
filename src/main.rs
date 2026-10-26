@@ -96,7 +96,7 @@ use ballistics_engine::truing_service::{
 use ballistics_engine::wez::{compute_wez, parse_target_size, TargetSizeMetric, WezResult, WezRow};
 // MBA-1372: SAAMI free-recoil and power-factor calculators.
 use ballistics_engine::atmosphere::{
-    resolve_station_conditions_with_pressure_mode, PressureReferenceMode,
+    resolve_station_conditions_with_pressure_mode, PressureReferenceMode, StationAtmospherePresence,
 };
 use ballistics_engine::power_factor::{evaluate_all as pf_evaluate_all, scored_power_factor};
 use ballistics_engine::recoil::{
@@ -4085,6 +4085,7 @@ impl InverseSolverLoadArgs {
                 altitude_m: UnitConverter::altitude_to_metric(self.altitude, units),
                 wind_speed_mps: UnitConverter::wind_to_metric(self.wind_speed, units),
                 wind_direction_deg: self.wind_direction.degrees,
+                station_presence: StationAtmospherePresence::NEITHER,
             },
             profile,
         ))
@@ -23874,6 +23875,7 @@ fn handle_hold_corridor(
             pressure_hpa: UnitConverter::pressure_to_metric(pressure, units),
             humidity_pct: humidity,
             altitude_m: UnitConverter::altitude_to_metric(altitude, units),
+            station_presence: StationAtmospherePresence::NEITHER,
         },
     };
 
@@ -24943,6 +24945,7 @@ fn handle_reticle(action: ReticleAction, units: UnitSystem) -> Result<(), Box<dy
                         altitude_m: UnitConverter::altitude_to_metric(altitude, units),
                         wind_speed_mps: UnitConverter::wind_to_metric(wind_speed, units),
                         wind_direction_deg: wind_direction.degrees,
+                        station_presence: StationAtmospherePresence::NEITHER,
                     };
                     let range_m = UnitConverter::distance_to_metric(range, units);
                     let curve = HoldCurve::solve(&load, range_m * 1.05)?;

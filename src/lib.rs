@@ -41,7 +41,8 @@ pub use cli_api::{
 pub use drag_model::DragModel;
 pub use mc_stats::{wilson_interval, ConfidenceLevel};
 pub use moving_target::{
-    calculate_lead, lead_from_tof, mover_ring, LeadComponents, LeadError, LeadSolution,
+    calculate_lead, calculate_lead_with_station_presence, lead_from_tof, mover_ring,
+    LeadComponents, LeadError, LeadSolution,
 };
 pub use solve_json::{
     decode_solve_request_v1, ResolvedSolveRequestV1, SolveErrorCodeV1, SolveErrorEnvelopeV1,
