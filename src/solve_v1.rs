@@ -163,6 +163,26 @@ pub const WARNING_SPIN_EFFECT_ASSUMED_TWIST_RATE: &str = "spin_effect_assumed_tw
 /// reported number now depends on it.
 pub const WARNING_STABILITY_FACTOR_ASSUMED_TWIST_RATE: &str = "stability_factor_assumed_twist_rate";
 
+/// An explicit absolute `atmosphere.pressure_pa` is outside the band of ratios to the ICAO
+/// standard pressure at `altitude_m` that weather produces (0.85 to 1.08; see
+/// [`crate::atmosphere::station_pressure_plausibility`] for where the band comes from).
+///
+/// The pressure is authoritative, so the solve flies it as sent, and the response would
+/// otherwise give no sign that it belongs to another altitude. Two habits produce it. A client
+/// sends a sea-level figure at a real elevation: a 101325 Pa placeholder, or a weather report's
+/// altimeter setting (QNH) without `pressure_reference: "qnh"`. At Cusco's 3310.128 m the
+/// placeholder is 1.503 times the standard pressure there and the solve flies sea-level air
+/// through it. Or the pressure is a true station reading and `altitude_m` is wrong: omitted, so
+/// 0 m, or in feet. The message names the likely causes for the side of the band the pressure
+/// is on.
+///
+/// Emitted at `$.atmosphere.pressure_pa` only when `pressure_pa` is present and the reference
+/// is absolute, sent or by default. An omitted pressure resolves to the standard itself, and a
+/// `"qnh"` pressure is a sea-level figure by declaration, so neither is checked. Purely a
+/// notice: no resolved value or sample changes.
+pub const WARNING_STATION_PRESSURE_IMPLAUSIBLE_FOR_ALTITUDE: &str =
+    "station_pressure_implausible_for_altitude";
+
 /// Whether the raw request supplied the geometry fields the twist-reading effects need, as
 /// opposed to letting `resolve_rifle`/`resolve_projectile` substitute a default.
 ///
@@ -458,6 +478,9 @@ pub(crate) fn prepare_request(
     let rifle = resolve_rifle(&request.rifle, &mut assumptions)?;
     let shot = resolve_shot(&request.shot, &rifle, &mut assumptions, &mut warnings)?;
     let atmosphere = resolve_atmosphere(&request.atmosphere, &mut assumptions)?;
+    // Here rather than in `resolve_atmosphere`, which `atmosphere.density_altitude` shares and
+    // whose response has no `warnings` array.
+    warnings.extend(station_pressure_warning(&request.atmosphere, &atmosphere));
     let wind_coverage_distance_m = shot.zero_distance_m.unwrap_or(0.0).max(shot.max_range_m);
     let (resolved_wind, wind, wind_segments) = resolve_wind(
         &request.wind,
@@ -1443,6 +1466,61 @@ pub(crate) fn resolve_atmosphere(
         // above is (see the QNH-reduction branch).
         pressure_reference: atmosphere.pressure_reference,
     })
+}
+
+/// The [`WARNING_STATION_PRESSURE_IMPLAUSIBLE_FOR_ALTITUDE`] notice for a sent absolute
+/// pressure that cannot be a station reading at the resolved altitude, or `None`.
+///
+/// `sent` is the raw request atmosphere, which says whether `pressure_pa` and `altitude_m` were
+/// present; `resolved` carries the altitude actually used, which is 0 m when it was omitted.
+fn station_pressure_warning(
+    sent: &AtmosphereV1,
+    resolved: &ResolvedAtmosphereV1,
+) -> Option<SolveNoticeV1> {
+    let pressure_pa = sent.pressure_pa?;
+    if sent.pressure_reference == Some(PressureReferenceV1::Qnh) {
+        return None;
+    }
+    let altitude_m = resolved.altitude_m;
+    let check = crate::atmosphere::station_pressure_plausibility(pressure_pa, altitude_m);
+    if !check.implausible {
+        return None;
+    }
+    let ratio = check.ratio;
+    let icao_pa = check.icao_standard_pa;
+    let defaulted = if sent.altitude_m.is_none() {
+        "; altitude_m was omitted and defaulted to 0 m"
+    } else {
+        ""
+    };
+    let min = crate::atmosphere::STATION_PRESSURE_MIN_PLAUSIBLE_RATIO;
+    let max = crate::atmosphere::STATION_PRESSURE_MAX_PLAUSIBLE_RATIO;
+    let measured = format!(
+        "pressure_pa {pressure_pa} Pa, sent as absolute station pressure, is {ratio:.3} times \
+         the ICAO standard pressure at altitude_m {altitude_m} m ({icao_pa:.2} Pa{defaulted})"
+    );
+    // A sea-level figure sent at a real elevation can only read high, so the low side names
+    // the altitude and the unit alone.
+    let causes = if ratio > max {
+        format!(
+            "above the {min} to {max} band that recorded weather stays within. Likely causes: \
+             a sea-level placeholder such as 101325 Pa, or a weather-report altimeter setting \
+             (QNH) sent as station pressure, which belongs in the request with \
+             \"pressure_reference\": \"qnh\" and the real altitude_m; or altitude_m is not the \
+             station elevation, or is not in meters."
+        )
+    } else {
+        format!(
+            "below the {min} to {max} band that recorded weather stays within. Likely causes: \
+             altitude_m is not the station elevation (send the real one, in meters), or \
+             pressure_pa is not in pascals."
+        )
+    };
+    Some(notice(
+        WARNING_STATION_PRESSURE_IMPLAUSIBLE_FOR_ALTITUDE,
+        format!("{measured}, {causes} The solve used pressure_pa as sent."),
+        "$.atmosphere.pressure_pa",
+    ))
 }
 
 fn resolve_wind(

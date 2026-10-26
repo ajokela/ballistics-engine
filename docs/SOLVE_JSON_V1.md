@@ -200,10 +200,12 @@ When you do not, omit them: the engine resolves the ICAO standard at `altitude_m
 `assumptions` (`icao_standard_pressure`, `icao_standard_temperature`). Do not send the sea-level
 standards `101325 Pa` and `288.15 K` as placeholders. A present value is authoritative, so
 `101325 Pa` at 250 m describes a day of unusually high pressure (about 1044 hPa at sea level), and
-with a temperature also present `altitude_m` no longer sets the air density. An altimeter setting
-(QNH), such as a METAR figure or a weather meter's baro reading, goes in with
-`"pressure_reference": "qnh"`; see [`pressure_reference`](#pressure_reference-mba-1397), and
-[ATMOSPHERE_DENSITY_ALTITUDE.md](ATMOSPHERE_DENSITY_ALTITUDE.md#request) for other pressure
+with a temperature also present `altitude_m` no longer sets the air density. Higher up, above
+about 645 m, the placeholder also draws a `station_pressure_implausible_for_altitude` warning
+(see [`atmosphere`](#atmosphere)); at 250 m it does not, because 101325 Pa is a possible reading
+there. An altimeter setting (QNH), such as a METAR figure or a weather meter's baro reading, goes
+in with `"pressure_reference": "qnh"`; see [`pressure_reference`](#pressure_reference-mba-1397),
+and [ATMOSPHERE_DENSITY_ALTITUDE.md](ATMOSPHERE_DENSITY_ALTITUDE.md#request) for other pressure
 sources.
 
 ### `projectile`
@@ -685,6 +687,24 @@ select ICAO-at-altitude resolution, while present fields are passed as authorita
 resolved values are recorded as explicit numbers in a successful response's
 `resolved_request`; the resolved altitude and relative humidity are concrete there as well.
 
+An absolute `pressure_pa` that cannot be a station reading at `altitude_m` is still flown as
+sent, and the response carries a `station_pressure_implausible_for_altitude` warning at
+`$.atmosphere.pressure_pa`. It is raised when `pressure_pa` is outside 0.85 to 1.08 times the
+ICAO standard pressure at the resolved `altitude_m` (0 m when omitted). The recorded sea-level
+pressure extremes, 870 hPa and 1089.1 hPa, are 0.859 and 1.075 times standard, so weather does
+not raise it. Above the band the likely cause is a sea-level placeholder, or an altimeter setting
+sent without `"pressure_reference": "qnh"`; below it, an `altitude_m` that is not the station
+elevation, or a pressure that is not in pascals. The message names the causes for its side. In
+engine output, 101325 Pa at Cusco's 3310.128 m is 1.503 times the standard there (67402.29 Pa)
+and is warned. For a .308 (11.34 g, G7 0.243, 792.48 m/s, zeroed at 91.44 m, 16 °C, 52% RH) it
+gives 10.811 m of drop at 914.4 m, against 8.368 m from a real reading of 68830 Pa, which is not
+warned. The same 68830 Pa with `altitude_m` omitted is 0.679 times the 101325 Pa standard at
+0 m and is warned, though with a temperature present the altitude only sets how the air changes
+along the bullet's path, and the drop at 914.4 m differs from the 3310.128 m request by 0.3 µm.
+The band catches gross mismatches only: 101325 Pa stays inside it up to about 645 m. The warning
+is never raised for a `"qnh"` pressure or an omitted one, and it changes no number in the
+response.
+
 #### `pressure_reference` (MBA-1397)
 
 `pressure_pa` can mean two different physical quantities, and the caller must say which:
@@ -947,13 +967,17 @@ the optional `corrections` block above), `wind_shear_model_not_modeled` (an acce
 `effects.wind_shear_model` this solve path has no profile for, so the wind is left unchanged — see
 `effects.wind_shear_model` above), `aerodynamic_jump_assumed_geometry` (`effects.aerodynamic_jump`
 enabled without `rifle.twist_rate_m_per_turn` or `projectile.length_m`, so the jump was computed
-from an assumed barrel rather than disabled — see `effects.aerodynamic_jump` above), and
+from an assumed barrel rather than disabled — see `effects.aerodynamic_jump` above),
 `spin_effect_assumed_twist_rate` (`effects.magnus` or `effects.enhanced_spin_drift` enabled without
 `rifle.twist_rate_m_per_turn`, so the spin-driven model was computed from the assumed 1:12 twist
-rather than disabled), and `stability_factor_assumed_twist_rate` (`rifle.twist_rate_m_per_turn`
+rather than disabled), `stability_factor_assumed_twist_rate` (`rifle.twist_rate_m_per_turn`
 omitted on a solve that reported `summary.stability_factor`, so the Sg published is the Sg of the
 assumed 1:12 barrel — this one is not gated on any flag, because Sg is computed on every solve; see
-[Omitting the twist rate](#omitting-the-twist-rate) above for both). More than one of these can be
+[Omitting the twist rate](#omitting-the-twist-rate) above for both), and
+`station_pressure_implausible_for_altitude` (an absolute `atmosphere.pressure_pa` outside 0.85 to
+1.08 times the ICAO standard pressure at `altitude_m`, flown as sent — a sea-level placeholder,
+an altimeter setting sent as station pressure, or a wrong `altitude_m`; see
+[`atmosphere`](#atmosphere) above). More than one of these can be
 present at once: they are keyed to the consumer, not to the missing field. Messages are descriptive
 text rather than a compatibility surface.
 
