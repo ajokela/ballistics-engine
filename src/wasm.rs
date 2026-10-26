@@ -6981,7 +6981,7 @@ impl WasmBallistics {
             }
         };
 
-        // MBA-1575: THE SAME KEYS NATIVE EMITS, MEANING THE SAME THING.
+        // MBA-1575: NATIVE'S SCALAR KEYS, MEANING THE SAME THING.
         //
         // `summary` above is this surface's own shape and stays exactly as it was --
         // unit-suffixed, which is the better-documented form and what existing
@@ -6993,12 +6993,18 @@ impl WasmBallistics {
         // omitted `impact_energy` altogether.
         //
         // So the flat keys are added ALONGSIDE, never replacing: nothing that reads
-        // `summary` breaks, and anything written against the native CLI now reads this
-        // document correctly. Converters are the same inlined native ones the CSV
-        // branch below already uses -- native converts the HEIGHT with its distance
-        // converter, so `max_height` is in the range unit here too, however odd that
-        // looks beside `max_height_inches`. Matching native is the entire point; the
-        // two disagreeing is the bug.
+        // `summary` breaks, and a consumer reading native's six scalar keys (`units`,
+        // `max_range`, `max_height`, `time_of_flight`, `impact_velocity`,
+        // `impact_energy`) finds them here with native's meaning. The parity stops
+        // there. Native's `stability_coefficient` and `spin_drift` are not emitted (this
+        // surface computes neither; see `format_trajectory_csv_summary`), `trajectory[]`
+        // and `legend` keep this surface's own shape, and imperial values can differ
+        // from native's from about the seventh significant digit, because this surface
+        // converts inHg with 33.863886666667 where native uses 33.8639. Converters are
+        // the same inlined native ones the CSV branch below already uses -- native
+        // converts the HEIGHT with its distance converter, so `max_height` is in the
+        // range unit here too, however odd that looks beside `max_height_inches`.
+        // Matching native is the entire point; the two disagreeing is the bug.
         let flat_distance = |v: f64| match units {
             UnitSystem::Metric => v,
             UnitSystem::Imperial => v / 0.9144,

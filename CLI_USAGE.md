@@ -4208,8 +4208,8 @@ field names:
 
 ```json
 {
-  "trajectory": [ { "range_yards": 0.0, "drop_inches": 0.0, "drift_inches": 0.0, "velocity_fps": 2700.0, "energy_ftlb": 2718.96, "time_seconds": 0.0 } ],
-  "summary": { "max_range_yards": 25.0, "max_height_inches": 60.0, "time_of_flight_seconds": 0.028, "impact_velocity_fps": 2651.8 },
+  "trajectory": [ { "range_yards": 0.0, "drop_inches": 2.0000010799999983, "drift_inches": 0.0, "velocity_fps": 2700.0000864000003, "energy_ftlb": 2718.9615199865875, "time_seconds": 0.0 } ],
+  "summary": { "max_range_yards": 24.9999246, "max_height_inches": 60.0000324, "time_of_flight_seconds": 0.028036753986387143, "impact_velocity_fps": 2651.8044442619002 },
   "legend": {
     "units": { "range": "yd", "drop": "in", "drift": "in", "velocity": "fps", "energy": "ft-lb" },
     "axes": {
@@ -4217,7 +4217,13 @@ field names:
       "drop": "vertical miss from the line of sight; positive means the bullet is below the line of sight (has fallen below the aim point). Not the same reference as the native CLI legacy JSON's world-frame `y`.",
       "drift": "lateral miss from the line of sight; positive means to the shooter's right (e.g. a crosswind FROM the left, --wind-direction 270, drifts it positive; FROM the right, --wind-direction 90, drifts it negative). Same sign and source as the native CLI legacy JSON's `x`."
     }
-  }
+  },
+  "units": "imperial",
+  "max_range": 25.0,
+  "max_height": 1.6666666666666667,
+  "time_of_flight": 0.028036753986387143,
+  "impact_velocity": 2651.8043594041606,
+  "impact_energy": 2622.7591190390795
 }
 ```
 
@@ -4225,6 +4231,28 @@ field names:
 in the engine's internal frame), so the two agree in sign; `drop` is LOS-relative (subtracts
 the line-of-sight height) where the native CLI's `y` is an absolute world-frame height, so the
 two do **not** share a reference despite both being "vertical".
+
+**Native's scalar keys (MBA-1575).** Since 0.49.0 the WASM document also carries the six
+top-level scalars of native's `-o json`, under native's names and in native's units: `units`
+(`"imperial"` or `"metric"`), `max_range` and `max_height` (both in the range unit, yd or m),
+`time_of_flight` (seconds), `impact_velocity` (fps or m/s) and `impact_energy` (ft-lb or J).
+They sit beside the existing keys, which are unchanged: `summary`, `legend`, `trajectory[]` and
+`zero_angle_degrees` have the same keys and values as before. Note that `max_height` is in the
+range unit like native's, so the example above says 1.6666666666666667 (yd) where
+`summary.max_height_inches` says 60.0000324, and that `impact_energy` has no counterpart in
+`summary`. The new keys use native's conversion factors, so in metric they are bit-identical to
+native's `-o json` for the same command. In imperial they can differ from native's from about
+the seventh significant digit: the terminal converts `--pressure` from inHg with
+33.863886666667 hPa/inHg and native with 33.8639, so for the command above native answers
+`impact_velocity` 2651.8043404763275 where the terminal answers 2651.8043594041606. `summary`
+keeps the terminal's own factors, so in imperial it also differs slightly from the flat keys
+(`summary.max_range_yards` 24.9999246 beside `max_range` 25.0). The keys report the terminal's
+own solve, as `summary` always has, so where the two surfaces solve differently the numbers
+differ too: under `--use-euler` or `--use-rk4-fixed` the terminal's `--auto-zero` angle can
+differ from native's. The parity covers these six keys only. The terminal emits no
+`stability_coefficient` or `spin_drift` (it computes neither; see the CSV note below),
+`trajectory[]` keeps the line-of-sight points above (always present, where native's need
+`--full`), and `legend` keeps the shape shown above.
 
 ### CSV Format
 ```bash

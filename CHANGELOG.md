@@ -29,6 +29,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one. Constructors return a typed `WindFieldError`.
   Purely additive: `WindSegment`, `WindSock`, `wind_vector` and every other existing API are
   unchanged. Design record: [docs/WIND_FIELD_MODELING.md](docs/WIND_FIELD_MODELING.md).
+- **The WASM terminal's `trajectory -o json` also carries the native CLI's six scalar keys.**
+  The browser terminal (ballistics.sh, ballistics.rs) and npm's `WasmBallistics.runCommand` put
+  the trajectory's scalars under `summary` with unit-suffixed names, while the native CLI's are
+  top-level and bare, and the two documents did not hold the same quantities. For a .308 (168
+  gr, 2700 fps, G1 0.475) to 500 yd, native's `max_height` is 1.6666666666666667, in yards like
+  `max_range`, where the terminal's `summary.max_height_inches` is 60.0000324, and the terminal
+  had no `impact_energy` at all. Its document now also carries `units`, `max_range`,
+  `max_height` (yd or m, like native's), `time_of_flight`, `impact_velocity` and
+  `impact_energy` at the top level, converted with native's factors (MBA-1575). Additive and
+  WASM/npm only: `summary`, `legend`, `trajectory[]` and `zero_angle_degrees` are byte-identical
+  on 33 terminal commands compared before and after, and the native CLI, solve-json, the bridge,
+  the FFI, the Python and Ruby bindings, the WASM `Calculator` API and the terminal's table and
+  CSV output are unchanged. A consumer that rejects unknown keys will see six new ones.
+  In metric the new keys are bit-identical to native's `-o json` for the same command (14 of 16
+  commands; the other two are the fixed-step zeros below). In imperial they differ from native's
+  from about the seventh significant digit, because the terminal converts `--pressure` from inHg
+  with 33.863886666667 hPa/inHg and native with 33.8639: `impact_velocity` is 1828.3912814919443
+  fps for the shot above, native's 1828.3909765751007. Given the equivalent pressure,
+  29.92001178049429 inHg, the terminal matches native bit for bit (6 of 7 imperial commands).
+  Gaps that remain: the terminal emits no `stability_coefficient` or `spin_drift` (it computes
+  neither on any output); its `trajectory[]` points and `legend` keep their line-of-sight,
+  unit-suffixed shape, where native's points are world-frame `x`/`y`/`z` and appear only with
+  `--full`; the inHg constant above; and under `--use-euler` or `--use-rk4-fixed` the terminal
+  can solve a different `--auto-zero` angle from native's (0.07273878258496781° against
+  0.07247650332083931° under `--use-euler` for a 10.9 g, 823 m/s, G1 0.475 load zeroed at
+  100 m), which these keys carry, as `summary` and `zero_angle_degrees` already did.
 
 ### Fixed
 - **Boundary-layer wind shear measures height from the ground in every kernel.** The shear

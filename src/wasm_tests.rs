@@ -3884,8 +3884,9 @@ Impact Velocity: 2510 fps\n";
 
     /// A scalar from the trajectory JSON's `summary` envelope.
     ///
-    /// The browser terminal answers `trajectory -o json` with
-    /// `{legend, summary, trajectory}` -- the scalars are NOT at the top level. Panicking
+    /// The browser terminal's own unit-suffixed scalars live in `summary`, not at the top
+    /// level; the top-level `max_range`, `max_height`, ... beside it are native's keys
+    /// (MBA-1575), with different names and, for `max_height`, a different unit. Panicking
     /// with the key and the available keys turns "unwrap on None" into a sentence, which
     /// is the difference between a five-minute fix and the state MBA-1535 found these in.
     fn summary_f64(v: &serde_json::Value, key: &str) -> f64 {
@@ -3954,6 +3955,60 @@ Impact Velocity: 2510 fps\n";
 
         assert!((v["max_range"].as_f64().unwrap() - 500.0).abs() < 0.01);
         assert!((v["time_of_flight"].as_f64().unwrap() - 0.6757329).abs() < 1e-5);
+    }
+
+    /// The metric half of MBA-1575. Native's metric converters are the identity, so the
+    /// flat keys are the solve's own numbers: the same f64s `summary` reports for range,
+    /// time of flight and velocity, under native's names, with `max_height` in meters
+    /// beside `summary.max_height_cm` and `impact_energy` in joules. Checked against the
+    /// summary and the bullet's mass rather than against pinned solver output, so a physics
+    /// change does not break it but a converter or unit mix-up does.
+    #[wasm_bindgen_test]
+    fn the_metric_trajectory_json_answers_the_native_key_names_in_si() {
+        let wasm = WasmBallistics::new();
+        let out = wasm
+            .run_command(
+                "trajectory -v 823 -b 0.475 -m 10.9 -d 7.82 --units metric \
+                 --max-range 500 -o json",
+            )
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let flat = |key: &str| {
+            v[key].as_f64().unwrap_or_else(|| {
+                panic!(
+                    "`{key}` is missing or not a number; top-level keys: {:?}",
+                    v.as_object().map(|o| o.keys().collect::<Vec<_>>())
+                )
+            })
+        };
+
+        assert_eq!(v["units"].as_str(), Some("metric"));
+        assert_eq!(flat("max_range"), summary_f64(&v, "max_range_meters"));
+        assert_eq!(
+            flat("time_of_flight"),
+            summary_f64(&v, "time_of_flight_seconds")
+        );
+        assert_eq!(
+            flat("impact_velocity"),
+            summary_f64(&v, "impact_velocity_mps")
+        );
+
+        // Meters, in the range unit as native reports it, not the summary's centimeters.
+        let height = flat("max_height");
+        let height_cm = summary_f64(&v, "max_height_cm");
+        assert!(
+            (height * 100.0 - height_cm).abs() < 1e-9,
+            "max_height must be meters like native's, got {height} beside {height_cm} cm"
+        );
+
+        // Joules for the 10.9 g bullet at the impact velocity.
+        let velocity = flat("impact_velocity");
+        let expected_joules = 0.5 * 0.0109 * velocity * velocity;
+        let energy = flat("impact_energy");
+        assert!(
+            (energy - expected_joules).abs() < 1e-9 * expected_joules,
+            "impact_energy must be joules, got {energy}, expected {expected_joules}"
+        );
     }
 
     const QNH_TRAJECTORY_BASE: &str = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
