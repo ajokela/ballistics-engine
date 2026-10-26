@@ -114,16 +114,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   station/QNH ratio that gives, so imperial and metric input reach the same air and a sea-level
   QNH comes back exactly as typed. A QNH with no station pressure at the altitude (its pressure
   altitude plus the station height at or past 44,331 m, such as 500 hPa at 40 km) is now
-  refused instead of being flown as near-vacuum air: solve-json answers `invalid_value` at
-  `$.atmosphere.pressure_pa`, the CLI "atmosphere.pressure must be finite", and `stability`,
-  which runs no solve, refuses it itself.
+  refused instead of being flown as near-vacuum air. solve-json answers `invalid_value` at
+  `$.atmosphere.pressure_pa`. The CLI's solving commands exit with an error, most of them
+  "atmosphere.pressure must be finite": `adaptive-card`, `true-velocity` and `compare` put
+  their own context in front of it, `true-wind`, `plan-truing` and `hold-corridor` word it as a
+  non-finite pressure, and `optimal-zero` says no trajectory could be solved at its fitted
+  zero. `lead` instead reports the failure on each row (exit 0), `estimate-bc` reports a failed
+  estimate, and `stability`, which runs no solve, refuses it itself.
   Output moves only for a QNH away from 1013.25 hPa at a nonzero altitude. Station pressure is
   860.0681 hPa for 1030 hPa at 1500 m (was 859.5753, +0.49), 688.2405 hPa for Cusco's 1033 hPa
   at 3310 m (+1.07), 628.1893 hPa for La Paz's 1038 hPa at 4061 m (+1.52) and 784.1298 hPa for
   1000 hPa at 2000 m (−0.49). For a .308 (G1 0.505, 792.5 m/s, 100 yd zero) the 1000 yd drop
   grows 7.98 mm (0.030 MOA) at La Paz, 5.97 mm at Cusco and 3.28 mm at 1030 hPa and 1500 m, and
-  shrinks 3.00 mm at 1000 hPa and 2000 m. The bridge's 102641 Pa QNH at 1524 m now reduces to
-  85445.27 Pa with a `faa_rule` density altitude of 7210.2 ft (was 85406.08 Pa and 7225.4 ft).
+  shrinks 3.00 mm at 1000 hPa and 2000 m. The bridge's 102641 Pa QNH at 1524 m and 300.3722 K
+  (81 °F) now reduces to 85445.27 Pa with a `faa_rule` density altitude of 7210.2 ft (was
+  85406.08 Pa and 7225.4 ft).
   Absolute pressure (the default), an omitted mode and an omitted pressure are byte-identical:
   all 104 such CLI runs (twelve subcommands, both unit systems) and the solve-json absolute
   envelopes match the engine before the fix, as do a QNH of exactly 1013.25 hPa and any QNH at
@@ -184,7 +189,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ICAO value the rows flew; the reported QNH case (`--temperature 15 --pressure 1013.25
   --pressure-type qnh` at 1500 m) reads `DA:4919 ft Temp:41`, not the 6088.6 ft that 15 °C
   would give. On 34 cards compared before and after (20 CLI, 14 `card.pdf`), every token outside
-  the header line is identical, rows included. Sea level, fully stated station air, a QNH at sea
+  the header line is identical, rows included. A `card.pdf` reprint of a saved `stored_card`
+  takes its header from the stored request, so one made at altitude without a pressure or
+  temperature (or with either left at the sea-level default) now prints the corrected header
+  too, while its rows are the stored ones, unchanged: the 1500 m card above reprints as
+  `DA:4919 ft Pressure:24.97/846 Temp:41` where it read `DA:0 ft Pressure:29.92/1013 Temp:59`.
+  Sea level, fully stated station air, a QNH at sea
   level and `--density-altitude` runs print the same header text as before: 108 CLI runs
   (`trajectory` and `adaptive-card`, imperial and metric) and 49 `card.pdf` cards. WASM,
   solve-json, the typed FFI calls and the Python and Ruby bindings print no card and are

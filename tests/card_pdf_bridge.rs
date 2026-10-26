@@ -1327,6 +1327,36 @@ mod pdf_present {
         assert_header_says(&bytes, "omitted air at 1500 m", &want);
     }
 
+    /// (MBA-1593) A reprint takes its header from the stored REQUEST, so a card saved at
+    /// altitude with no pressure or temperature reprints with the air its rows flew (before
+    /// 0.49.0 it read `DA:0 ft Pressure:29.92/1013 Temp:59`), while the rows on the paper are
+    /// still the stored ones. Across an engine bump only the header of such a reprint moves.
+    #[test]
+    fn a_reprint_at_altitude_prints_the_corrected_header_over_its_stored_rows() {
+        let request = altitude_request(json!({}));
+        let stored = call("card.range_table", request.clone())["result"].clone();
+        let mut reprint = request;
+        reprint["stored_card"] = json!({
+            "card": stored.clone(),
+            "engine_version": "0.48.0",
+            "bc5d_table_version": "2.5.0"
+        });
+        let out = call("card.pdf", reprint);
+        assert_eq!(out["ok"], true, "{out}");
+        assert_eq!(out["result"]["source"], "stored_rows", "{out}");
+
+        let bytes = pdf_bytes(&out["result"]);
+        assert_header_says(
+            &bytes,
+            "reprint at 1500 m",
+            "DA:4919 ft Pressure:24.97/846 Temp:41",
+        );
+        let printed = tokens(&bytes, "reprint at 1500 m");
+        for run in expected_runs(&stored) {
+            assert_run_present(&printed, &run, "reprint at 1500 m");
+        }
+    }
+
     /// (MBA-1593) An explicit station pressure with the temperature left out flies the ICAO
     /// temperature at the site, and the header must say so. Until 0.49.0 it printed the 59 °F
     /// default and a density altitude about 1170 ft too high (`DA:6088 ft`).
