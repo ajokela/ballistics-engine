@@ -254,8 +254,12 @@ fun densityAltitude(
         val error = response.getJSONObject("error")
         val cause = error.optJSONObject("details")?.optJSONObject("error")
         throw IllegalArgumentException(
-            if (cause != null) "${cause.optString("path")}: ${cause.optString("message")}"
-            else error.getString("message")
+            when {
+                cause == null -> error.getString("message")
+                // A JSON null path: no single field is at fault. optString would read "null".
+                cause.isNull("path") -> cause.getString("message")
+                else -> "${cause.getString("path")}: ${cause.getString("message")}"
+            }
         )
     }
     return response.getJSONObject("result")
