@@ -11890,6 +11890,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     turret_wind,
                     clear_turret,
                 } => {
+                    // 0.49.0: whether each value was typed, recorded on the profile so a later
+                    // run can fly a typed 59 F / 29.92 inHg as a reading. Taken before the
+                    // defaults below collapse an omitted flag into the same number.
+                    let temperature_supplied = temperature.is_some();
+                    let pressure_supplied = pressure.is_some();
                     let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
                     let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
                     let units_str = match cli.units {
@@ -12137,6 +12142,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         units: units_str.to_string(),
                         temperature,
                         pressure,
+                        temperature_supplied,
+                        pressure_supplied,
                         humidity,
                         altitude,
                         bullet_name,
@@ -21125,6 +21132,8 @@ mod profile_unit_tests {
             units: "metric".to_string(),
             temperature: 15.0,
             pressure: 1_013.207_888,
+            temperature_supplied: false,
+            pressure_supplied: false,
             humidity: 55.0,
             altitude: 304.8,
             bullet_name: Some("175gr SMK".to_string()),
@@ -22642,6 +22651,8 @@ mod adjustment_unit_tests {
                 units: "metric".to_string(),
                 temperature: 15.0,
                 pressure: 1_013.207_888,
+                temperature_supplied: false,
+                pressure_supplied: false,
                 humidity: 55.0,
                 altitude: 0.0,
                 bullet_name: None,

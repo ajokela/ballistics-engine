@@ -44,6 +44,16 @@ pub struct ProfileData {
     pub temperature: f64,
     #[serde(default = "default_pressure")]
     pub pressure: f64,
+    /// True when the stored temperature was a supplied reading (0.49.0+). Absent/false = unknown:
+    /// files written before 0.49.0 cannot tell a typed 59 °F from the default, so they keep the
+    /// legacy rule (59 °F / 15 °C at a real altitude flies the ICAO standard temperature).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub temperature_supplied: bool,
+    /// True when the stored pressure was a supplied reading (0.49.0+). Absent/false = unknown:
+    /// files written before 0.49.0 cannot tell a typed 29.92 inHg from the default, so they keep
+    /// the legacy rule (29.92 inHg / 1013.25 hPa at a real altitude flies ICAO standard pressure).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pressure_supplied: bool,
     #[serde(default = "default_humidity")]
     pub humidity: f64,
     #[serde(default)]

@@ -116,6 +116,31 @@ fn import_then_show_roundtrip() {
     assert!(shown.contains("G7"), "{shown}");
 }
 
+/// 0.49.0: an `.a7p` carries real zero-condition readings and has no concept of omission, so
+/// the imported profile marks both its temperature and its pressure as supplied.
+#[test]
+fn imported_profiles_mark_their_air_as_supplied() {
+    let home = tempfile_dir();
+    let a7p_path = home.join("test.a7p");
+    std::fs::write(&a7p_path, synthetic_a7p()).unwrap();
+    let output = cli()
+        .env("HOME", &home)
+        .args(["profile", "import"])
+        .arg(&a7p_path)
+        .args(["--name", "imported-air"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let saved = std::fs::read_to_string(
+        home.join(".ballistics")
+            .join("profiles")
+            .join("imported-air.json"),
+    )
+    .unwrap();
+    assert!(saved.contains("\"temperature_supplied\": true"), "{saved}");
+    assert!(saved.contains("\"pressure_supplied\": true"), "{saved}");
+}
+
 #[test]
 fn corrupted_checksum_warns_by_default_and_fails_with_strict() {
     let home = tempfile_dir();

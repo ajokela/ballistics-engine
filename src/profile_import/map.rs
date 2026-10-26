@@ -486,6 +486,10 @@ pub fn map_a7p_to_profile(
         units: "metric".to_string(),
         temperature: src.air_temperature_c,
         pressure: src.air_pressure_hpa,
+        // 0.49.0: the file carries real zero-condition readings and has no concept of an
+        // omitted one, so both are readings and fly as stored, even 15 C / 1013.25 hPa.
+        temperature_supplied: true,
+        pressure_supplied: true,
         humidity: src.air_humidity_pct,
         altitude: 0.0,
         bullet_name: if src.bullet_name.is_empty() {
