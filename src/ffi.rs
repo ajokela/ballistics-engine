@@ -1291,7 +1291,11 @@ pub extern "C" fn ballistics_bc_for_reference_standard(
 ///
 /// A non-finite `qnh_hpa` or `altitude_m` is returned unchanged (this function performs no
 /// validation; the existing per-export input checks still apply to whatever ends up in
-/// `FFIAtmosphericConditions.pressure`).
+/// `FFIAtmosphericConditions.pressure`). `qnh_hpa` must be in hPa: since MBA-1605 the
+/// reduction is the altimeter-setting relation, which is not a plain ratio, so convert an inHg
+/// reading (× 33.8639) before calling, not after. A finite pair for which no station pressure
+/// exists (a QNH whose pressure altitude plus `altitude_m` reaches 44,331 m, or a non-positive
+/// QNH) returns NaN, which the trajectory exports refuse as a non-finite pressure.
 #[no_mangle]
 pub extern "C" fn ballistics_reduce_qnh_pressure(
     qnh_hpa: c_double,

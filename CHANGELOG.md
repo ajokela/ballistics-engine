@@ -69,6 +69,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at the default `"none"` and so now gets no shear from `TrajectorySolver` either; name the
   model. The C ABI already names `power_law`, and an unrecognized name still falls back to the
   power law in `TrajectorySolver` (and to no shear in the fast kernels), unchanged.
+- **A QNH is reduced to station pressure with the altimeter-setting relation.**
+  `reduce_qnh_to_station_pressure`, behind every QNH input, scaled the standard pressure ratio
+  by the QNH, `QNH·(1 − 0.0065·h/288.15)^5.2559`, and its doc comment called that the ICAO/NOAA
+  altimeter-setting reduction. It is not. An altimeter set to QNH reads field elevation on the
+  ground, so the station pressure's pressure altitude is the QNH's own plus the station height,
+  a relation that is additive in P^0.190263. The two agree only at a QNH of exactly 1013.25 hPa
+  or at sea level; elsewhere the ratio form read low for a high QNH at elevation and high for a
+  low one. The function now evaluates `QNH·(1 + (L·h/T0)·(P0/QNH)^n)^(1/n)` (n = 0.190263, the
+  same geopotential h and clamps), which returns the QNH bit-exactly at sea level and the old
+  value bit-exactly at 1013.25 hPa (MBA-1605). Every QNH surface shares the function: the CLI's
+  `--pressure-type qnh` and `--zero-pressure-type qnh` on every subcommand (with a profile's
+  stored `qnh` mode and a `--location` CSV pressure), solve-json `pressure_reference: "qnh"`,
+  the bridge's `solve` and `atmosphere.density_altitude`, the FFI
+  `ballistics_reduce_qnh_pressure` and the WASM terminal. The calculator subcommands (and the
+  WASM `true-velocity` and `true-wind`) fed an inHg reading to the reduction directly, which
+  only the ratio form tolerated; they now convert it to hPa and back, so imperial and metric
+  input reach the same air. A QNH with no station pressure at the altitude (its pressure
+  altitude plus the station height at or past 44,331 m, such as 500 hPa at 40 km) is now
+  refused instead of being flown as near-vacuum air: solve-json answers `invalid_value` at
+  `$.atmosphere.pressure_pa`, the CLI "atmosphere.pressure must be finite", and `stability`,
+  which runs no solve, refuses it itself.
+  Output moves only for a QNH away from 1013.25 hPa at a nonzero altitude. Station pressure is
+  860.0681 hPa for 1030 hPa at 1500 m (was 859.5753, +0.49), 688.2405 hPa for Cusco's 1033 hPa
+  at 3310 m (+1.07), 628.1893 hPa for La Paz's 1038 hPa at 4061 m (+1.52) and 784.1298 hPa for
+  1000 hPa at 2000 m (−0.49). For a .308 (G1 0.505, 792.5 m/s, 100 yd zero) the 1000 yd drop
+  grows 7.98 mm (0.030 MOA) at La Paz, 5.97 mm at Cusco and 3.28 mm at 1030 hPa and 1500 m, and
+  shrinks 3.00 mm at 1000 hPa and 2000 m. The bridge's 102641 Pa QNH at 1524 m now reduces to
+  85445.27 Pa with a `faa_rule` density altitude of 7210.2 ft (was 85406.08 Pa and 7225.4 ft).
+  Absolute pressure (the default), an omitted mode and an omitted pressure are byte-identical:
+  all 104 such CLI runs (twelve subcommands, both unit systems) and the solve-json absolute
+  envelopes match the engine before the fix, as do a QNH of exactly 1013.25 hPa and any QNH at
+  sea level. One case moves slightly: an imperial run that declares `qnh` with no `--pressure`
+  reduces the CLI's 29.92 inHg default (1013.21 hPa, not 1013.25) as a reading, now 0.0012 hPa
+  lower at 5000 ft. No API, schema or ABI change, and the `qnh_reduced_to_station_pressure`
+  message wording is unchanged.
 
 ### Notes
 - **The solve-json example request now sends a realistic station reading.** The representative

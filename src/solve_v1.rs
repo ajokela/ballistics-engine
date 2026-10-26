@@ -2349,6 +2349,21 @@ mod tests {
             .any(|notice| notice.code == ASSUMPTION_ICAO_STANDARD_PRESSURE));
     }
 
+    /// MBA-1605: a QNH with no station pressure at the requested altitude (the altimeter-setting
+    /// relation goes NaN once the setting's pressure altitude plus the station height reaches
+    /// 44,331 m) is refused as an invalid pressure, never flown as near-vacuum air.
+    #[test]
+    fn qnh_with_no_station_pressure_at_altitude_is_refused() {
+        let mut request = minimal_request();
+        request.atmosphere.altitude_m = Some(40_000.0);
+        request.atmosphere.pressure_pa = Some(50_000.0); // 500 hPa QNH
+        request.atmosphere.pressure_reference = Some(PressureReferenceV1::Qnh);
+
+        let error = prepare_request(&request).expect_err("no station pressure exists");
+        assert_eq!(error.error.code, SolveErrorCodeV1::InvalidValue);
+        assert_eq!(error.error.path(), Some("$.atmosphere.pressure_pa"));
+    }
+
     /// `pressure_reference: "qnh"` with `pressure_pa` OMITTED must be byte-identical to the
     /// absolute default: an omitted pressure always resolves to the ICAO standard station
     /// pressure regardless of the declared reference (mathematically the same result as

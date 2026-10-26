@@ -338,11 +338,13 @@ warning: --bc-reference army-standard-metro has no effect together with a custom
 
 A barometric pressure reading can mean two different physical quantities, and mixing them up is a classic source of vertical error: **station pressure** (the actual air pressure at the shooter's altitude) versus **QNH** (a sea-level-corrected altimeter setting — the kind of "barometer" value read off a weather report or METAR, which has been artificially inflated to what the pressure WOULD be at sea level). Kestrel, AB Mobile, Shooter, JBM, and Hornady 4DOF all let the user declare which one they are entering; this engine's `--pressure` previously only supported station pressure, so a QNH value entered at a real altitude silently over-stated air density and under-stated drop.
 
-`--pressure-type <absolute|qnh>` declares which one `--pressure` is. `absolute` is the default and is a complete no-op — omitting the flag, or passing `--pressure-type absolute` explicitly, is byte-identical to every run before this flag existed. `qnh` reduces the declared pressure to station pressure at `--altitude` via the ICAO inverse-barometric formula, the exact inverse of the standard-atmosphere formula this engine already uses for altitude-derived pressure:
+`--pressure-type <absolute|qnh>` declares which one `--pressure` is. `absolute` is the default and is a complete no-op — omitting the flag, or passing `--pressure-type absolute` explicitly, is byte-identical to every run before this flag existed. `qnh` reduces the declared pressure to station pressure at `--altitude` with the altimeter-setting relation, on the same ICAO standard atmosphere this engine already uses for altitude-derived pressure. An altimeter set to the QNH reads the field's elevation on the ground, so the station pressure is the one whose standard-atmosphere pressure altitude is the QNH's own pressure altitude plus the station's height:
 
 ```
-station = QNH * (1 - 0.0065 * h_geopotential_m / 288.15) ^ 5.25588
+station = QNH * (1 - (0.0065 * h_geopotential_m / 288.15) * (1013.25 / QNH) ^ 0.190263) ^ (1 / 0.190263)
 ```
+
+with both pressures in hPa (an inHg reading is converted first). This is the NWS/ASOS altimeter-setting relation without its 0.3 hPa sensor offset. Before 0.49.0 the engine scaled the standard pressure ratio by the QNH instead, `station = QNH * (1 - 0.0065 * h / 288.15) ^ 5.25588`. That agrees only at a QNH of exactly 1013.25 hPa or at sea level, and read low at high-elevation airports: 1.52 hPa low at La Paz (QNH 1038 hPa, 4061 m), 1.07 hPa at Cusco (1033 hPa, 3310 m) (MBA-1605).
 
 `h_geopotential_m` is the geopotential height ISA is defined against, not the geometric
 altitude you type in; the engine converts before applying the formula. The difference is
@@ -351,14 +353,14 @@ substituting your `--altitude` straight into the expression above will not repro
 engine's number exactly.
 
 ```bash
-# A weather report gives 30.31 inHg (1026.5 hPa) QNH at a 5,000 ft (1524 m) firing position.
+# A weather report gives 30.31 inHg (1026.4 hPa) QNH at a 5,000 ft (1524 m) firing position.
 # Entered as absolute (the historical default) this over-states density; entered as qnh it is
-# correctly reduced to ~25.22 inHg (~854.1 hPa) station pressure before the solve runs.
+# correctly reduced to ~25.23 inHg (~854.5 hPa) station pressure before the solve runs.
 ./ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 \
   --altitude 5000 --pressure 30.31 --pressure-type qnh
 ```
 
-An omitted `--pressure` is unaffected by `--pressure-type`: the sea-level standard default (29.92 inHg / 1013.25 hPa) reduces to precisely the same ICAO-standard station pressure at any altitude under either mode, so there is nothing to reduce.
+An omitted `--pressure` is unaffected by `--pressure-type` in metric units: the sea-level standard default (1013.25 hPa) reduces to precisely the same ICAO-standard station pressure at any altitude under either mode, so there is nothing to reduce. The imperial default, 29.92 inHg, is 1013.21 hPa, so under `qnh` it is reduced as a reading and lands 0.036 hPa below the ICAO-standard station pressure at 5,000 ft; leave `--pressure-type` off when no pressure was read.
 
 Available on **every subcommand that accepts `--pressure`** (MBA-1416): `trajectory` (`--pressure-type`, plus an independent `--zero-pressure-type` for the `--auto-zero` zero-day override — it defaults to the shot-day `--pressure-type` when not given, matching the existing "omitting all `--zero-*` flags reuses the shot-day values" contract), `zero`, `estimate-bc`, `true-velocity`, `plan-truing`, `mpbr`, `come-ups`, `lead`, `wind-card`, `stability`, `range-table`, `compare`, and `profile save`. On the calculator subcommands the mode reduces `--pressure` against that command's own `--altitude`, so `qnh` means the same thing everywhere; omitting it is exactly `absolute`, leaving every existing invocation byte-identical. **`profile save` records the mode, and since MBA-1417 `--saved-profile` applies it — but only to the pressure it describes.** The profile's atmosphere (temperature, pressure, humidity, altitude, pressure mode, density altitude) now loads as a SET. Precedence per value is: an explicit CLI flag beats the profile, which beats the built-in standard. The stored MODE, however, is honored only when the profile's stored pressure VALUE is the one in use — supply `--pressure` yourself, or a `--location` CSV pressure, and the stored mode is ignored because it describes a different reading. That pairing is the point: applying a mode saved on another day to a pressure you just typed was a measured 77 fps error at 300 yd. A stored `density_altitude` is stricter still, since it supersedes altitude and pressure outright: it applies only when the run supplies no pressure or altitude of its own. Profiles saved before these flags existed omit the keys and load as `absolute` with no density altitude, unchanged.
 
@@ -387,7 +389,7 @@ silently — tracked as MBA-1425.
 
 **WASM:** pass `--pressure-type <absolute|qnh>` (and `--zero-pressure-type` for the auto-zero override) as a terminal argument to `trajectory`; behavior matches native exactly (same reduction formula, same Authoritative-constructor bypass of the legacy default-sentinel heuristic).
 
-**Monte Carlo / FFI:** the engine's `BallisticInputs.pressure` and `FFIAtmosphericConditions.pressure` fields have always meant absolute station pressure and continue to. `FFIAtmosphericConditions` is an ABI-frozen `repr(C)` struct with no new field. A QNH-aware FFI caller should call the standalone `ballistics_reduce_qnh_pressure(qnh_hpa, altitude_m)` once and write the result into `FFIAtmosphericConditions.pressure` before calling any existing `ballistics_calculate_trajectory*`/`ballistics_calculate_zero_angle*`/`ballistics_monte_carlo*` export unchanged — a pure addition to the C ABI requiring no recompile for existing callers.
+**Monte Carlo / FFI:** the engine's `BallisticInputs.pressure` and `FFIAtmosphericConditions.pressure` fields have always meant absolute station pressure and continue to. `FFIAtmosphericConditions` is an ABI-frozen `repr(C)` struct with no new field. A QNH-aware FFI caller should call the standalone `ballistics_reduce_qnh_pressure(qnh_hpa, altitude_m)` once and write the result into `FFIAtmosphericConditions.pressure` before calling any existing `ballistics_calculate_trajectory*`/`ballistics_calculate_zero_angle*`/`ballistics_monte_carlo*` export unchanged — a pure addition to the C ABI requiring no recompile for existing callers. Pass the QNH in hPa: since 0.49.0 the reduction is the altimeter-setting relation, not a plain ratio, so convert an inHg reading (× 33.8639) before the call, not after. A QNH with no station pressure at that altitude returns NaN, which the trajectory exports refuse.
 
 **solve-json v1:** `atmosphere.pressure_reference` (`"absolute"` or `"qnh"`) mirrors `--pressure-type`; see [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#pressure_reference-mba-1397). A QNH reduction is recorded in the response's `assumptions` with code `qnh_reduced_to_station_pressure`.
 

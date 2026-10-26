@@ -9231,10 +9231,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // so reducing it against altitude would corrupt the documented default.
                 pressure: pressure
                     .map(|p| {
-                        apply_pressure_mode(
-                            UnitConverter::pressure_to_metric(p, cli.units),
-                            altitude,
-                            pressure_type,
+                        UnitConverter::pressure_to_metric(
+                            apply_pressure_mode(p, altitude, pressure_type, cli.units),
                             cli.units,
                         )
                     })
@@ -11300,12 +11298,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
             // MBA-1416: honor --pressure-type here too, so a QNH altimeter setting means
             // the same thing on this command as it does on `trajectory`.
-            let pressure = apply_pressure_mode(
-                UnitConverter::resolve_pressure(pressure, cli.units)?,
-                altitude,
-                pressure_type,
-                cli.units,
-            );
+            let entered_pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
+            let pressure =
+                apply_pressure_mode(entered_pressure, altitude, pressure_type, cli.units);
+            // MBA-1605: a QNH with no station pressure at this altitude reduces to NaN. Every
+            // command that runs a solve refuses that in the solver's input check; this one never
+            // solves, so it refuses here rather than print a NaN stability factor.
+            if !pressure.is_finite() {
+                return Err(format!(
+                    "--pressure {entered_pressure} as a QNH has no station pressure at --altitude \
+                     {altitude}: the altimeter-setting reduction has no solution that high"
+                )
+                .into());
+            }
             let profile_data = profile.as_ref().map(|name| {
                 load_profile_for_units(name, cli.units).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
@@ -24783,20 +24788,27 @@ fn bc_convert_speed_of_sound_fps(value: Option<f64>, units: UnitSystem) -> f64 {
 /// the same thing everywhere it is accepted. `Absolute` (and an omitted flag) returns the
 /// pressure untouched, which keeps every existing invocation byte-identical.
 ///
-/// `pressure_hpa` is already unit-resolved; `altitude_display` is still in the command's display
-/// units (feet imperial / meters metric) and is converted here, because feeding feet to a
-/// reduction expecting meters would be a large and completely silent error.
+/// `pressure_display` and the returned pressure are in the command's display units (inHg
+/// imperial / hPa metric), the units `UnitConverter::resolve_pressure` returns. The reduction
+/// itself takes hPa: since MBA-1605 it is the altimeter-setting relation, which is not a plain
+/// ratio, so an inHg value fed to it directly would come out badly wrong. The pressure is
+/// converted to hPa for the reduction and back afterwards. `altitude_display` is likewise in
+/// display units (feet imperial / meters metric) and is converted here, because feeding feet to
+/// a reduction expecting meters would be a large and completely silent error.
 fn apply_pressure_mode(
-    pressure_hpa: f64,
+    pressure_display: f64,
     altitude_display: f64,
     mode: Option<PressureReferenceMode>,
     units: UnitSystem,
 ) -> f64 {
     match mode.unwrap_or(PressureReferenceMode::Absolute) {
-        PressureReferenceMode::Absolute => pressure_hpa,
+        PressureReferenceMode::Absolute => pressure_display,
         PressureReferenceMode::Qnh => {
             let altitude_m = UnitConverter::altitude_to_metric(altitude_display, units);
-            ballistics_engine::atmosphere::reduce_qnh_to_station_pressure(pressure_hpa, altitude_m)
+            let qnh_hpa = UnitConverter::pressure_to_metric(pressure_display, units);
+            let station_hpa =
+                ballistics_engine::atmosphere::reduce_qnh_to_station_pressure(qnh_hpa, altitude_m);
+            UnitConverter::pressure_from_metric(station_hpa, units)
         }
     }
 }

@@ -171,7 +171,7 @@ fn trajectory_auto_zero_omitted_zero_pressure_type_is_byte_identical_to_explicit
 
 /// Hand-computed pin (see also src/atmosphere.rs's
 /// `qnh_reduction_matches_hand_computed_value_at_nonzero_altitude`): reducing a QNH of
-/// 1030.0 hPa at 1500 m gives 859.575312392644... hPa station pressure -- strictly, and
+/// 1030.0 hPa at 1500 m gives 860.068111433278... hPa station pressure -- strictly, and
 /// substantially, lower than the raw 1030.0 hPa. Lower pressure means less dense air, less
 /// drag, and a HIGHER retained impact velocity at a fixed range.
 #[test]
@@ -284,6 +284,73 @@ fn qnh_pressure_at_sea_level_matches_absolute_exactly() {
     assert_eq!(
         absolute.stdout, qnh.stdout,
         "at sea level, QNH and absolute must be byte-identical (QNH reduces to itself)"
+    );
+}
+
+/// MBA-1605: a QNH with no station pressure at the altitude (500 hPa at 40 km, past where the
+/// altimeter-setting relation has a solution) is refused, never flown as near-vacuum air. The
+/// solving commands refuse it in the solver's input check; `stability` never solves, so it
+/// refuses on its own rather than print a NaN stability factor.
+#[test]
+fn a_qnh_with_no_station_pressure_at_the_altitude_is_refused() {
+    let out_of_domain = [
+        "--altitude",
+        "40000",
+        "--pressure",
+        "500",
+        "--pressure-type",
+        "qnh",
+    ];
+    let trajectory = run(&with_extra(
+        &[
+            "trajectory",
+            "-v",
+            "2700",
+            "-b",
+            "0.475",
+            "-m",
+            "168",
+            "-d",
+            "0.308",
+            "--units",
+            "metric",
+            "--max-range",
+            "300",
+            "-o",
+            "json",
+        ],
+        &out_of_domain,
+    ));
+    assert!(!trajectory.status.success(), "trajectory flew it");
+    assert!(
+        String::from_utf8_lossy(&trajectory.stderr).contains("atmosphere.pressure must be finite"),
+        "{}",
+        String::from_utf8_lossy(&trajectory.stderr)
+    );
+
+    let stability = run(&with_extra(
+        &[
+            "stability",
+            "--units",
+            "metric",
+            "--mass",
+            "11.3",
+            "--diameter",
+            "7.82",
+            "--length",
+            "31.5",
+            "--twist-rate",
+            "254",
+            "--velocity",
+            "823",
+        ],
+        &out_of_domain,
+    ));
+    assert!(!stability.status.success(), "stability printed a result");
+    assert!(
+        String::from_utf8_lossy(&stability.stderr).contains("has no station pressure"),
+        "{}",
+        String::from_utf8_lossy(&stability.stderr)
     );
 }
 
@@ -630,6 +697,45 @@ mod pressure_mode_on_calculator_subcommands {
                 stdout_of(&qnh),
                 "`{name} --pressure-type qnh` produced identical output to `absolute`; the flag \
                  parses but is not reaching the atmosphere"
+            );
+        }
+    }
+
+    /// MBA-1605: the declared mode must give exactly the answer of the station pressure the
+    /// library reduction yields. The two tests around this one cannot catch a unit slip,
+    /// because a wrong reduction still changes the output. Since the reduction stopped being a
+    /// plain ratio, this 24.90 inHg reading fed to it as if it were hPa comes out at 17.05 inHg
+    /// instead of 20.58. The
+    /// station pressure is built with the CLI's own factors (33.8639 hPa/inHg, 0.3048 m/ft) and
+    /// printed at full precision, so both runs reach the solver with the same air.
+    #[test]
+    fn qnh_matches_absolute_at_the_reduced_station_pressure_on_every_subcommand() {
+        let station_inhg = ballistics_engine::atmosphere::reduce_qnh_to_station_pressure(
+            24.90 * 33.8639,
+            5000.0 * 0.3048,
+        ) / 33.8639;
+        let station = station_inhg.to_string();
+        for (name, args) in cases() {
+            let mut qnh = args.clone();
+            qnh.extend_from_slice(&["--pressure-type", "qnh"]);
+            let mut absolute: Vec<&str> = args
+                .iter()
+                .map(|arg| {
+                    if *arg == "24.90" {
+                        station.as_str()
+                    } else {
+                        arg
+                    }
+                })
+                .collect();
+            absolute.extend_from_slice(&["--pressure-type", "absolute"]);
+
+            assert_eq!(
+                stdout_of(&qnh),
+                stdout_of(&absolute),
+                "`{name} --pressure 24.90 --pressure-type qnh` at 5000 ft differs from \
+                 `--pressure {station} --pressure-type absolute`, the station pressure the \
+                 reduction gives"
             );
         }
     }

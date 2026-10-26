@@ -692,11 +692,17 @@ resolved values are recorded as explicit numbers in a successful response's
 - `"absolute"` (the default, and the only meaning before this field existed): `pressure_pa` is
   already the absolute station pressure at `altitude_m`. Used as-is.
 - `"qnh"`: `pressure_pa` is a sea-level-corrected altimeter setting (a weather-report barometer
-  / METAR-style QNH reading). It is reduced to station pressure at `altitude_m` via the ICAO
-  inverse-barometric formula (`station = QNH * (1 - 0.0065*h/288.15)^5.25588`) before use, and
-  the resolved `pressure_pa` in a successful response's `resolved_request` is the REDUCED
-  station pressure, not the raw QNH the caller sent. The reduction is recorded as an
-  `assumptions` entry with code `qnh_reduced_to_station_pressure`.
+  / METAR-style QNH reading). It is reduced to station pressure at `altitude_m` before use with
+  the altimeter-setting relation on the ICAO standard atmosphere: the station pressure's
+  pressure altitude is the QNH's own plus `h`, the geopotential height of `altitude_m`, so
+  `station = QNH * (1 - (0.0065*h/288.15) * (101325/QNH)^0.190263)^(1/0.190263)`. Before
+  0.49.0 this was the ratio `QNH * (1 - 0.0065*h/288.15)^5.25588`, which read low at
+  high-elevation airports, 1.52 hPa at La Paz (QNH 1038 hPa, 4061 m) (MBA-1605). The resolved
+  `pressure_pa` in a successful response's `resolved_request` is the REDUCED station pressure,
+  not the raw QNH the caller sent. The reduction is recorded as an `assumptions` entry with
+  code `qnh_reduced_to_station_pressure`. A QNH with no station pressure at `altitude_m` (its
+  pressure altitude plus `h` at or past 44,331 m, where the standard troposphere would reach
+  absolute zero) is refused with `invalid_value` at `$.atmosphere.pressure_pa`.
 
 The mode itself is separately echoed in `resolved_request.atmosphere.pressure_reference`
 whenever the request supplies one, including an explicit `"absolute"` — which therefore solves

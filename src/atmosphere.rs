@@ -225,40 +225,55 @@ pub enum PressureReferenceMode {
 }
 
 /// Reduce a sea-level-corrected altimeter setting (QNH) to the station pressure at
-/// `altitude_m` (MBA-1397), using the inverse of the ICAO troposphere barometric formula:
+/// `altitude_m` (MBA-1397), using the altimeter-setting relation (MBA-1605):
 ///
-/// `station = QNH * (1 + L*h/T0)^(-g/(L*R))`
+/// `station = QNH * (1 + (L*h/T0) * (P0/QNH)^n)^(1/n)`, with `n = -L*R/g`
 ///
-/// which, for the troposphere's published lapse rate `L` and sea-level temperature `T0`, is
-/// exactly the standard ICAO Doc 7488 / NOAA altimeter-setting reduction
-/// `station = QNH * (1 - 0.0065*h/288.15)^5.25588`, where `h` is GEOPOTENTIAL height, not
-/// the geometric altitude the caller supplies — this function converts the one to the other
-/// first (`geometric_to_geopotential_height_m`), as ISA requires. Substituting geometric
-/// altitude directly into that expression reproduces the reduction only to about 0.04 hPa
-/// at 1500 m, which is why the worked values below are not what the bare formula gives.
+/// for the ICAO troposphere's lapse rate `L` (-0.0065 K/m), sea-level temperature `T0`
+/// (288.15 K) and sea-level pressure `P0` (1013.25 hPa), so `n` = 0.190263. This is what an
+/// altimeter setting means: an altimeter set to QNH reads field elevation on the ground, so the
+/// station pressure's ISA pressure altitude is the QNH's own pressure altitude plus `h`. Written
+/// that way it is the additive form `station = P0 * ((QNH/P0)^n + L*h/T0)^(1/n)` (the NWS/ASOS
+/// altimeter-setting algorithm, less its 0.3 hPa sensor offset); the algebraically equal form
+/// above is the one evaluated, because it returns QNH bit-exactly at `h = 0`.
+///
+/// Before 0.49.0 this function scaled the standard pressure ratio by QNH,
+/// `station = QNH * (1 + L*h/T0)^(1/n)`, and called that the altimeter-setting reduction. It is
+/// not: the two agree only at QNH = 1013.25 hPa or at `h = 0`, and the ratio form ran 0.49 hPa
+/// low for a QNH of 1030 hPa at 1500 m.
+///
+/// `h` is GEOPOTENTIAL height, not the geometric altitude the caller supplies — this function
+/// converts the one to the other first (`geometric_to_geopotential_height_m`), as ISA requires.
+/// Substituting geometric altitude directly into that expression reproduces the reduction only
+/// to about 0.04 hPa at 1500 m, which is why the worked values below are not what the bare
+/// formula gives.
 ///
 /// Reuses the SAME troposphere layer (`ICAO_LAYERS[0]`) and physical constants
 /// (`G_ACCEL_MPS2`, `R_AIR`) that `calculate_icao_standard_atmosphere` (private to this crate)
 /// uses for its own non-isothermal-layer pressure formula, rather than re-hardcoding the
-/// lapse rate / sea-level temperature / exponent a second time — this is that same formula,
-/// solved for a caller-given sea-level pressure instead of the fixed 1013.25 hPa standard.
-/// `altitude_m` is clamped and converted to geopotential height exactly like
-/// `calculate_icao_standard_atmosphere`, so a QNH of exactly 1013.25 hPa reduces to precisely
-/// the ICAO standard station pressure at every altitude (this is what makes the
+/// lapse rate / sea-level temperature / exponent a second time. `altitude_m` is clamped and
+/// converted to geopotential height exactly like `calculate_icao_standard_atmosphere`, and
+/// `(P0/QNH)^n` is exactly 1 at QNH = 1013.25 hPa, so a QNH of exactly 1013.25 hPa reduces to
+/// precisely the ICAO standard station pressure at every altitude (this is what makes the
 /// omitted-pressure default byte-identical under either [`PressureReferenceMode`]).
 ///
 /// The reduction is only physically meaningful within the troposphere (the altitude range
-/// real shooting takes place in); it is not re-derived per-layer for higher altitudes.
+/// real shooting takes place in); it is not re-derived per-layer for higher altitudes. No
+/// station pressure exists once the QNH's pressure altitude plus `h` reaches `T0/-L`
+/// (44,331 m, where the troposphere's lapse rate reaches absolute zero), nor for a non-positive
+/// QNH; there this returns NaN, which callers refuse as a non-finite pressure.
 pub fn reduce_qnh_to_station_pressure(qnh_hpa: f64, altitude_m: f64) -> f64 {
     let geometric_altitude = altitude_m.clamp(MIN_GEOMETRIC_ALTITUDE_M, MAX_GEOMETRIC_ALTITUDE_M);
     let geopotential_height = geometric_to_geopotential_height_m(geometric_altitude).clamp(
         MIN_STANDARD_GEOPOTENTIAL_HEIGHT_M,
         MAX_STANDARD_GEOPOTENTIAL_HEIGHT_M,
     );
-    let layer = &ICAO_LAYERS[0]; // troposphere: the only layer the altimeter-setting reduction covers
-    let temp_ratio = 1.0 + layer.lapse_rate * geopotential_height / layer.base_temperature;
-    let exponent = -G_ACCEL_MPS2 / (layer.lapse_rate * R_AIR);
-    qnh_hpa * temp_ratio.powf(exponent)
+    let layer = &ICAO_LAYERS[0]; // troposphere: the only layer the altimeter-setting relation covers
+    let height_term = layer.lapse_rate * geopotential_height / layer.base_temperature;
+    let exponent = -G_ACCEL_MPS2 / (layer.lapse_rate * R_AIR); // 1/n
+    let sea_level_hpa = layer.base_pressure / 100.0;
+    let setting_term = (sea_level_hpa / qnh_hpa).powf(exponent.recip()); // (P0/QNH)^n
+    qnh_hpa * (1.0 + height_term * setting_term).powf(exponent)
 }
 
 /// Mode-aware counterpart of [`resolve_station_pressure`] (MBA-1397). Does NOT change that
@@ -1503,17 +1518,19 @@ mod tests {
 
     #[test]
     fn qnh_reduction_matches_hand_computed_value_at_nonzero_altitude() {
-        // Hand-computed (Python, double precision) from the ICAO inverse-barometric formula.
+        // Hand-computed (Python, double precision) from the altimeter-setting relation.
         // NOTE the geopotential step — 1500 m geometric is 1499.646 m geopotential, and it is
-        // the geopotential height that enters the exponent:
+        // the geopotential height that enters the formula:
         //   h_geo   = 6356766*1500/(6356766+1500)                    = 1499.6461... m
-        //   station = 1030.0 * (1 - 0.0065*h_geo/288.15)^5.255875601466713
-        //           = 859.5753123926447 hPa
-        // Feeding the raw 1500 m in instead yields 859.5378567 hPa, so a reader checking this
-        // pin against the bare formula would wrongly conclude the implementation is off.
+        //   n       = 1/5.255875601466713                            = 0.19026325503612...
+        //   station = 1030.0 * (1 - (0.0065*h_geo/288.15)*(1013.25/1030.0)^n)^(1/n)
+        //           = 860.0681114332783 hPa
+        // The ratio form this replaced, 1030.0 * (1 - 0.0065*h_geo/288.15)^5.2558756, gave
+        // 859.5753123926447 hPa: 0.49 hPa low, because it scales the standard pressure ratio
+        // by QNH instead of adding the station height to the QNH's pressure altitude.
         let reduced = reduce_qnh_to_station_pressure(1030.0, 1500.0);
         assert!(
-            (reduced - 859.575_312_392_644_7).abs() < 1e-9,
+            (reduced - 860.068_111_433_278_3).abs() < 1e-9,
             "reduced={reduced}"
         );
         // The reduction must strictly lower the pressure versus the raw QNH input.
@@ -1541,6 +1558,69 @@ mod tests {
                 "altitude={altitude_m} reduced={reduced} std={}",
                 std_pressure_pa / 100.0
             );
+        }
+    }
+
+    #[test]
+    fn qnh_reduction_adds_the_station_height_to_the_qnhs_pressure_altitude() {
+        // What an altimeter setting means: an altimeter set to QNH reads field elevation on
+        // the ground, so the station pressure's ISA pressure altitude is the QNH's own pressure
+        // altitude plus the station's (geopotential) height. The troposphere's pressure
+        // altitude is H(p) = (T0/-L) * (1 - (p/P0)^n), n = -L*R/g.
+        let layer = &ICAO_LAYERS[0];
+        let n = -layer.lapse_rate * R_AIR / G_ACCEL_MPS2;
+        let p0_hpa = layer.base_pressure / 100.0;
+        let pressure_altitude_m = |pressure_hpa: f64| {
+            layer.base_temperature / -layer.lapse_rate * (1.0 - (pressure_hpa / p0_hpa).powf(n))
+        };
+        // The unit-test pin, Cusco (SPZO), La Paz (SLLP), low and high settings, a standard
+        // setting, and a station below sea level.
+        for (qnh_hpa, altitude_m) in [
+            (1030.0, 1500.0),
+            (1033.0, 3310.0),
+            (1038.0, 4061.0),
+            (1000.0, 2000.0),
+            (980.0, 1500.0),
+            (1040.0, 4500.0),
+            (1013.25, 3000.0),
+            (1030.0, -400.0),
+        ] {
+            let station_hpa = reduce_qnh_to_station_pressure(qnh_hpa, altitude_m);
+            let added_m = pressure_altitude_m(station_hpa) - pressure_altitude_m(qnh_hpa);
+            let height_m = geometric_to_geopotential_height_m(altitude_m);
+            assert!(
+                (added_m - height_m).abs() < 1e-6,
+                "QNH {qnh_hpa} hPa at {altitude_m} m: station {station_hpa} hPa adds \
+                 {added_m} m of pressure altitude, expected {height_m} m"
+            );
+        }
+    }
+
+    #[test]
+    fn qnh_reduction_is_nan_where_no_station_pressure_exists() {
+        // A station pressure exists only while the QNH's pressure altitude plus the station
+        // height stays below T0/-L (44,331 m, where the troposphere's lapse rate reaches
+        // absolute zero). Past that the result is NaN, which every caller's finite-pressure
+        // check refuses, rather than a near-vacuum number that would be flown as real air.
+        assert!(reduce_qnh_to_station_pressure(500.0, 40_000.0).is_nan());
+        assert!(reduce_qnh_to_station_pressure(-1030.0, 1500.0).is_nan());
+        // Everywhere real shooting happens the reduction is finite and positive, lowers the
+        // pressure above sea level and raises it below.
+        for qnh_step in 0..=24 {
+            let qnh_hpa = 850.0 + 10.0 * f64::from(qnh_step);
+            for altitude_step in 0..=20 {
+                let altitude_m = -1000.0 + 500.0 * f64::from(altitude_step);
+                let station_hpa = reduce_qnh_to_station_pressure(qnh_hpa, altitude_m);
+                assert!(
+                    station_hpa.is_finite() && station_hpa > 0.0,
+                    "QNH {qnh_hpa} hPa at {altitude_m} m gave {station_hpa} hPa"
+                );
+                assert_eq!(
+                    station_hpa.partial_cmp(&qnh_hpa),
+                    0.0.partial_cmp(&altitude_m),
+                    "QNH {qnh_hpa} hPa at {altitude_m} m gave {station_hpa} hPa"
+                );
+            }
         }
     }
 
@@ -1630,7 +1710,7 @@ mod tests {
         // Temperature resolution is untouched by pressure mode: an explicit, non-default
         // temperature stays authoritative exactly as resolve_station_conditions would give.
         assert_eq!(temp_c, -5.0);
-        assert!((pressure_hpa - 859.575_312_392_644_7).abs() < 1e-9);
+        assert!((pressure_hpa - 860.068_111_433_278_3).abs() < 1e-9);
     }
 
     #[test]
