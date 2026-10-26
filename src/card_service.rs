@@ -2442,8 +2442,11 @@ fn validate_stored_card(
 /// * `Some(card)` — REPRINT. The rows are the caller's: the stored `card.range_table`
 ///   response for this same request. Nothing is solved, `bc5d_table_path` is never opened,
 ///   and the footer's BC, engine version and table version are the stored card's. A saved
-///   card therefore reprints identically after an engine bump, after the correction table at
-///   the stored path is overwritten in place, and even after that file is deleted.
+///   card's ROWS therefore reprint identically after an engine bump, after the correction
+///   table at the stored path is overwritten in place, and even after that file is deleted.
+///   The header is not stored: it states the air the stored request resolves to on this
+///   engine (MBA-1593), so a card saved before 0.49.0 at altitude without a pressure or
+///   temperature reprints with the corrected header over its unchanged rows.
 /// * `None` — SOLVE. `range_table_rows` runs, i.e. literally the rows [`range_table_v1`]
 ///   would return for this request, and the footer states THIS build's version. Unchanged
 ///   behaviour for a caller that has no stored rows.
