@@ -4504,3 +4504,454 @@ mod minimal_surface_tests {
         );
     }
 }
+
+/// 0.49.0: a station temperature or pressure typed into the browser terminal is never read as
+/// omitted. Each end-to-end check puts a supplied in-band value strictly between out-of-band
+/// neighbours and away from the omitted run (which still flies ICAO air). Commands that print
+/// rounded text use neighbours 10 hPa / 2 °C away so the rounding cannot hide the order. The
+/// helper checks pin, bit for bit, the mode an OMITTED pressure is resolved in: those three
+/// commands never reduced an omitted pressure, and their text output cannot show a last-bit
+/// difference.
+#[cfg(test)]
+#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm-terminal")]
+mod station_presence_tests {
+    use crate::atmosphere::{
+        calculate_icao_standard_atmosphere, reduce_qnh_to_station_pressure,
+        resolve_station_conditions_with_presence, PressureReferenceMode, StationAtmospherePresence,
+    };
+    use crate::cli_api::AtmosphericConditions;
+    use crate::wasm::*;
+    use wasm_bindgen_test::*;
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    const LOAD: &str = "--units metric -v 823 -b 0.475 -m 10.9 -d 7.82";
+
+    fn run(cmd: &str) -> String {
+        WasmBallistics::new()
+            .run_command(cmd)
+            .unwrap_or_else(|e| panic!("{cmd}: {e:?}"))
+    }
+
+    fn json(cmd: &str) -> serde_json::Value {
+        let out = run(cmd);
+        let start = out
+            .find('{')
+            .unwrap_or_else(|| panic!("{cmd}: no JSON in {out}"));
+        serde_json::from_str(&out[start..]).unwrap_or_else(|e| panic!("{cmd}: {e}: {out}"))
+    }
+
+    /// The first number printed after `label` in a text report.
+    fn number_after(out: &str, label: &str) -> f64 {
+        let rest = &out[out
+            .find(label)
+            .unwrap_or_else(|| panic!("no {label:?} in {out}"))
+            + label.len()..];
+        let token: String = rest
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
+            .collect();
+        token
+            .parse()
+            .unwrap_or_else(|_| panic!("no number after {label:?} in {out}"))
+    }
+
+    fn strictly_between(low: f64, value: f64, high: f64, what: &str) {
+        assert!(
+            low.min(high) < value && value < low.max(high),
+            "{what}: {value} is not strictly between {low} and {high}"
+        );
+    }
+
+    /// `f(extra)` for the supplied in-band value, its two neighbours and the omitted run.
+    fn check(
+        what: &str,
+        f: impl Fn(&str) -> f64,
+        low: &str,
+        supplied: &str,
+        high: &str,
+        omitted: &str,
+    ) {
+        let s = f(supplied);
+        strictly_between(f(low), s, f(high), what);
+        assert_ne!(
+            s.to_bits(),
+            f(omitted).to_bits(),
+            "{what}: supplied equals omitted"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn trajectory_shot_day_flies_a_typed_reading() {
+        let impact = |x: &str| {
+            json(&format!("trajectory {LOAD} --max-range 600 -o json {x}"))["impact_velocity"]
+                .as_f64()
+                .unwrap()
+        };
+        check(
+            "pressure",
+            impact,
+            "--temperature 20 --altitude 150 --pressure 1012",
+            "--temperature 20 --altitude 150 --pressure 1013",
+            "--temperature 20 --altitude 150 --pressure 1014",
+            "--temperature 20 --altitude 150",
+        );
+        check(
+            "temperature",
+            impact,
+            "--pressure 850 --altitude 1500 --temperature 14.8",
+            "--pressure 850 --altitude 1500 --temperature 15",
+            "--pressure 850 --altitude 1500 --temperature 15.2",
+            "--pressure 850 --altitude 1500",
+        );
+        // A QNH that reduces into the band flies its reduced value.
+        assert_eq!(
+            impact("--temperature 20 --altitude 150 --pressure 1031 --pressure-type qnh").to_bits(),
+            impact("--temperature 20 --altitude 150 --pressure 1012.8562053925472").to_bits()
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn trajectory_zero_day_flies_a_typed_reading() {
+        let zero = |x: &str| {
+            json(&format!(
+                "trajectory {LOAD} --max-range 600 --auto-zero 500 -o json --temperature 20 {x}"
+            ))["zero_angle_degrees"]
+                .as_f64()
+                .unwrap()
+        };
+        check(
+            "zero-day pressure",
+            zero,
+            "--zero-altitude 150 --zero-pressure 1008",
+            "--zero-altitude 150 --zero-pressure 1013",
+            "--zero-altitude 150 --zero-pressure 1018",
+            "--zero-altitude 150",
+        );
+        // The zero day inherits a typed shot-day pressure WITH its presence.
+        assert_ne!(
+            zero("--pressure 1013.25 --zero-altitude 150").to_bits(),
+            zero("--zero-altitude 150").to_bits()
+        );
+        check(
+            "zero-day temperature",
+            zero,
+            "--zero-altitude 1500 --zero-pressure 850 --zero-temperature 13",
+            "--zero-altitude 1500 --zero-pressure 850 --zero-temperature 15",
+            "--zero-altitude 1500 --zero-pressure 850 --zero-temperature 17",
+            "--zero-altitude 1500 --zero-pressure 850",
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn zero_command_flies_a_typed_reading() {
+        let moa = |x: &str| {
+            number_after(
+                &run(&format!("zero {LOAD} --target-distance 600 {x}")),
+                "MOA Adjustment:",
+            )
+        };
+        check(
+            "zero pressure",
+            moa,
+            "--temperature 20 --altitude 150 --pressure 1003",
+            "--temperature 20 --altitude 150 --pressure 1013",
+            "--temperature 20 --altitude 150 --pressure 1023",
+            "--temperature 20 --altitude 150",
+        );
+        check(
+            "zero temperature",
+            moa,
+            "--pressure 850 --altitude 1500 --temperature 13",
+            "--pressure 850 --altitude 1500 --temperature 15",
+            "--pressure 850 --altitude 1500 --temperature 17",
+            "--pressure 850 --altitude 1500",
+        );
+        let far = |x: &str| {
+            number_after(
+                &run(&format!("zero {LOAD} --from-angle 0.1 {x}")),
+                "Far Zero (descending):",
+            )
+        };
+        check(
+            "zero --from-angle pressure",
+            far,
+            "--temperature 20 --altitude 150 --pressure 1003",
+            "--temperature 20 --altitude 150 --pressure 1013",
+            "--temperature 20 --altitude 150 --pressure 1023",
+            "--temperature 20 --altitude 150",
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn lead_flies_a_typed_reading() {
+        let lead_moa = |x: &str| {
+            let out = run(&format!("lead {LOAD} --target-speed 4 --range 500 {x}"));
+            number_after(&out, "MIL /")
+        };
+        check(
+            "lead pressure",
+            lead_moa,
+            "--temperature 20 --altitude 150 --pressure 1003",
+            "--temperature 20 --altitude 150 --pressure 1013",
+            "--temperature 20 --altitude 150 --pressure 1023",
+            "--temperature 20 --altitude 150",
+        );
+        // The spec's QNH 1031 at 150 m run: 3.01 m (was 2.99 m, the ICAO air).
+        let out = run(&format!(
+            "lead {LOAD} --target-speed 4 --range 500 --temperature 20 --altitude 150 \
+             --pressure 1031 --pressure-type qnh"
+        ));
+        assert!(out.contains("Lead: 3.01 m"), "{out}");
+        assert!(out.contains("Time of Flight: 0.751 s"), "{out}");
+    }
+
+    #[wasm_bindgen_test]
+    fn true_velocity_flies_a_typed_reading() {
+        let effective = |x: &str| {
+            json(&format!(
+                "true-velocity --units metric --measured-drop 8 --range 500 -b 0.475 -m 10.9 \
+                 -d 7.82 --offline -o json {x}"
+            ))["effective_velocity"]
+                .as_f64()
+                .unwrap()
+        };
+        // The spec's engine run: 586.68046875 m/s (was 585.7875, the ICAO air).
+        assert_eq!(
+            effective("--temperature 20 --altitude 150 --pressure 1031 --pressure-type qnh")
+                .to_bits(),
+            586.68046875_f64.to_bits()
+        );
+        check(
+            "true-velocity pressure",
+            effective,
+            "--temperature 20 --altitude 150 --pressure 1003",
+            "--temperature 20 --altitude 150 --pressure 1013",
+            "--temperature 20 --altitude 150 --pressure 1023",
+            "--temperature 20 --altitude 150",
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn true_wind_flies_a_typed_reading() {
+        let crosswind = |x: &str| {
+            json(&format!(
+                "true-wind --units metric --miss 500:15 --twist-rate 254 {LOAD} -o json {x}"
+            ))["effective_crosswind"]
+                .as_f64()
+                .unwrap()
+        };
+        check(
+            "true-wind pressure",
+            crosswind,
+            "--temperature 20 --altitude 150 --pressure 1012",
+            "--temperature 20 --altitude 150 --pressure 1013",
+            "--temperature 20 --altitude 150 --pressure 1014",
+            "--temperature 20 --altitude 150",
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn estimate_bc_flies_a_typed_reading() {
+        let g1 = |x: &str| {
+            let out = run(&format!(
+                "estimate-bc --units metric --velocity 823 --mass 10.9 --diameter 7.82 \
+                 --velocity-data 300,650;500,560 {x}"
+            ));
+            number_after(&out, "G1     velocity (2 pts)")
+        };
+        check(
+            "estimate-bc pressure",
+            g1,
+            "--temperature 20 --altitude 150 --pressure 1003",
+            "--temperature 20 --altitude 150 --pressure 1013",
+            "--temperature 20 --altitude 150 --pressure 1023",
+            "--temperature 20 --altitude 150",
+        );
+    }
+
+    fn icao_pressure_hpa(altitude_m: f64) -> f64 {
+        calculate_icao_standard_atmosphere(altitude_m).1 / 100.0
+    }
+
+    #[wasm_bindgen_test]
+    fn zero_resolves_an_omitted_pressure_in_absolute_mode_even_under_qnh() {
+        for altitude_m in [1524.0, 10.0] {
+            let air = AtmosphericConditions {
+                altitude: altitude_m,
+                ..AtmosphericConditions::default()
+            };
+            let (_, p) =
+                zero_station_air(&air, false, false, false, Some(PressureReferenceMode::Qnh));
+            assert_eq!(
+                p.to_bits(),
+                icao_pressure_hpa(altitude_m).to_bits(),
+                "{altitude_m} m"
+            );
+            assert_ne!(
+                p.to_bits(),
+                reduce_qnh_to_station_pressure(1013.25, altitude_m).to_bits(),
+                "{altitude_m} m: an omitted pressure must not be reduced"
+            );
+        }
+        // A typed 29.92 inHg declared as QNH is reduced, through the command's own factor.
+        let typed = AtmosphericConditions {
+            pressure: 29.92 * 33.863886666667,
+            altitude: 1524.0,
+            ..AtmosphericConditions::default()
+        };
+        let (_, p) = zero_station_air(&typed, false, true, false, Some(PressureReferenceMode::Qnh));
+        assert_eq!(
+            p.to_bits(),
+            reduce_qnh_to_station_pressure(29.92 * 33.863886666667, 1524.0).to_bits()
+        );
+        // A typed absolute 1013.25 at altitude flies as typed; a density-altitude pressure is
+        // derived, never "typed", while the explicit DA temperature is.
+        let (t, p) = zero_station_air(
+            &AtmosphericConditions {
+                altitude: 1524.0,
+                ..AtmosphericConditions::default()
+            },
+            true,
+            true,
+            false,
+            None,
+        );
+        assert_eq!(
+            (t.to_bits(), p.to_bits()),
+            (15.0_f64.to_bits(), 1013.25_f64.to_bits())
+        );
+        let (t, p) = zero_station_air(
+            &AtmosphericConditions {
+                altitude: 1524.0,
+                ..AtmosphericConditions::default()
+            },
+            true,
+            true,
+            true,
+            None,
+        );
+        assert_eq!(t.to_bits(), 15.0_f64.to_bits());
+        assert_eq!(p.to_bits(), icao_pressure_hpa(1524.0).to_bits());
+    }
+
+    #[wasm_bindgen_test]
+    fn lead_never_reduces_an_omitted_pressure() {
+        let (air, presence) = lead_station_air(
+            None,
+            None,
+            None,
+            Some(5000.0),
+            Some(PressureReferenceMode::Qnh),
+            true,
+        );
+        assert_eq!(air.pressure.to_bits(), 1013.25_f64.to_bits());
+        assert_eq!(presence, StationAtmospherePresence::NEITHER);
+        let (_, flown) = resolve_station_conditions_with_presence(
+            air.temperature,
+            air.pressure,
+            air.altitude,
+            PressureReferenceMode::Absolute,
+            presence,
+        );
+        assert_eq!(flown.to_bits(), icao_pressure_hpa(1524.0).to_bits());
+        let (air, presence) = lead_station_air(
+            None,
+            Some(29.92),
+            None,
+            Some(5000.0),
+            Some(PressureReferenceMode::Qnh),
+            true,
+        );
+        assert_eq!(
+            air.pressure.to_bits(),
+            reduce_qnh_to_station_pressure(29.92 * 33.863886666667, 1524.0).to_bits()
+        );
+        assert_eq!(presence, StationAtmospherePresence::new(false, true));
+        let (air, presence) = lead_station_air(
+            None,
+            None,
+            None,
+            Some(10.0),
+            Some(PressureReferenceMode::Qnh),
+            false,
+        );
+        assert_eq!(air.pressure.to_bits(), 1013.25_f64.to_bits());
+        assert_eq!(presence, StationAtmospherePresence::NEITHER);
+    }
+
+    #[wasm_bindgen_test]
+    fn estimate_bc_never_reduces_an_omitted_pressure() {
+        for (altitude, imperial) in [(5000.0, true), (10.0, false)] {
+            let (air, presence) = estimate_bc_station_air(
+                None,
+                None,
+                50.0,
+                altitude,
+                Some(PressureReferenceMode::Qnh),
+                imperial,
+            );
+            assert_eq!(air.pressure.to_bits(), 1013.25_f64.to_bits(), "{altitude}");
+            assert_eq!(presence, StationAtmospherePresence::NEITHER);
+        }
+        let (air, presence) = estimate_bc_station_air(
+            Some(59.0),
+            Some(29.92),
+            50.0,
+            5000.0,
+            Some(PressureReferenceMode::Qnh),
+            true,
+        );
+        assert_eq!(
+            air.pressure.to_bits(),
+            reduce_qnh_to_station_pressure(29.92 * 33.8639, 1524.0).to_bits()
+        );
+        assert_eq!(air.temperature.to_bits(), 15.0_f64.to_bits());
+        assert_eq!(presence, StationAtmospherePresence::BOTH);
+    }
+
+    fn field(v: &wasm_bindgen::JsValue, key: &str) -> f64 {
+        js_sys::Reflect::get(v, &key.into())
+            .unwrap()
+            .as_f64()
+            .unwrap()
+    }
+
+    #[wasm_bindgen_test]
+    fn calculator_sends_temperature_and_pressure_only_when_set() {
+        let never_set = Calculator::new()
+            .set_altitude(500.0)
+            .set_zero_range(100.0)
+            .calculate_trajectory(600.0)
+            .unwrap();
+        // The terminal with both flags omitted, read at the same point the Calculator reads.
+        let doc = json(
+            "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --drag-model G1 --max-range 600 \
+             --humidity 50 --altitude 500 --sight-height 2 --auto-zero 100 -o json",
+        );
+        let point = doc["trajectory"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .min_by_key(|p| ((p["range_yards"].as_f64().unwrap() - 600.0).abs() * 100.0) as i64)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            field(&never_set, "velocity_fps").to_bits(),
+            point["velocity_fps"].as_f64().unwrap().to_bits()
+        );
+        let typed = Calculator::new()
+            .set_altitude(500.0)
+            .set_zero_range(100.0)
+            .set_pressure(29.92)
+            .calculate_trajectory(600.0)
+            .unwrap();
+        assert_ne!(
+            field(&typed, "velocity_fps").to_bits(),
+            field(&never_set, "velocity_fps").to_bits(),
+            "a set pressure is a reading"
+        );
+    }
+}
