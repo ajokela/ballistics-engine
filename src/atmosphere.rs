@@ -308,6 +308,77 @@ pub fn resolve_station_conditions_with_pressure_mode(
 }
 
 // ---------------------------------------------------------------------------------------
+// Station-pressure plausibility
+// ---------------------------------------------------------------------------------------
+
+/// The lowest ratio of station pressure to the ICAO standard pressure at the station's
+/// altitude that [`station_pressure_plausibility`] treats as weather. See that function for
+/// where the band comes from.
+pub const STATION_PRESSURE_MIN_PLAUSIBLE_RATIO: f64 = 0.85;
+/// The highest ratio of station pressure to the ICAO standard pressure at the station's
+/// altitude that [`station_pressure_plausibility`] treats as weather.
+pub const STATION_PRESSURE_MAX_PLAUSIBLE_RATIO: f64 = 1.08;
+
+/// How an explicit absolute station pressure compares with the ICAO standard pressure at the
+/// altitude it was sent with. Returned by [`station_pressure_plausibility`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StationPressurePlausibility {
+    /// The ICAO standard pressure at the altitude, in pascals.
+    pub icao_standard_pa: f64,
+    /// The station pressure divided by `icao_standard_pa`.
+    pub ratio: f64,
+    /// Whether `ratio` lies outside [`STATION_PRESSURE_MIN_PLAUSIBLE_RATIO`] to
+    /// [`STATION_PRESSURE_MAX_PLAUSIBLE_RATIO`] (both edges inside), or is not finite.
+    pub implausible: bool,
+}
+
+/// Compare an explicit absolute station pressure, in pascals, with the ICAO standard pressure
+/// at `altitude_m`, and say whether the two can describe the same station.
+///
+/// An explicit absolute pressure is authoritative wherever the engine takes one, so a pressure
+/// that belongs to some other altitude is flown as it was sent. The two common cases are a
+/// sea-level figure sent at a real elevation: a 101325 Pa placeholder, or a weather report's
+/// altimeter setting (QNH) sent as station pressure instead of as a QNH. At Cusco's 3310.128 m
+/// a 101325 Pa placeholder is 1.503 times the standard pressure there. The reverse, a true
+/// station reading sent with the wrong altitude (omitted, or in the wrong unit), shows up as a
+/// ratio far from 1 too. Callers use this to warn; nothing here changes a pressure.
+///
+/// The band, [`STATION_PRESSURE_MIN_PLAUSIBLE_RATIO`] to
+/// [`STATION_PRESSURE_MAX_PLAUSIBLE_RATIO`], is wide enough that recorded weather never leaves
+/// it. The WMO's table of weather and climate extremes (as of 31 July 2025) lists these
+/// sea-level pressure records:
+///
+/// - 870 hPa in the eye of Typhoon Tip, 12 October 1979, the lowest (tornadoes excluded);
+/// - 1083.8 hPa at Agata, Russia, 31 December 1968, the highest at a station below 750 m;
+/// - 1089.1 hPa at Tosontsengel, Mongolia, 30 December 2004, the highest above 750 m.
+///
+/// Against the 1013.25 hPa standard those are 0.859, 1.070 and 1.075. They are sea-level
+/// figures; at a station above sea level both extremes sit closer to standard still, because
+/// the record highs come from cold air, reduced to sea level through a column denser than the
+/// standard one, and the record lows from warm-cored storms.
+///
+/// The band catches gross mismatches, not every placeholder: 101325 Pa stays inside it up to
+/// about 645 m, where it is already 8% above standard.
+///
+/// This is for absolute station pressure only. A QNH is a sea-level figure by declaration, so
+/// comparing it with the standard at the station's altitude would say nothing about it.
+pub fn station_pressure_plausibility(
+    station_pressure_pa: f64,
+    altitude_m: f64,
+) -> StationPressurePlausibility {
+    let (_, icao_standard_pa) = calculate_icao_standard_atmosphere(altitude_m);
+    let ratio = station_pressure_pa / icao_standard_pa;
+    let implausible = !(STATION_PRESSURE_MIN_PLAUSIBLE_RATIO
+        ..=STATION_PRESSURE_MAX_PLAUSIBLE_RATIO)
+        .contains(&ratio);
+    StationPressurePlausibility {
+        icao_standard_pa,
+        ratio,
+        implausible,
+    }
+}
+
+// ---------------------------------------------------------------------------------------
 // MBA-1366: density altitude as a direct atmosphere input
 // ---------------------------------------------------------------------------------------
 
@@ -1487,6 +1558,66 @@ mod tests {
         let (density, speed) = calculate_atmosphere(0.0, None, None, 0.0);
         assert!((density - 1.225).abs() < 0.01);
         assert!((speed - 340.0).abs() < 1.0);
+    }
+
+    /// The band's edges are inside it, in both directions. At sea level the ICAO standard is
+    /// exactly 101325 Pa, and 1.08 and 0.85 times it are exact in binary, so the division
+    /// lands on the constants themselves rather than next to them.
+    #[test]
+    fn station_pressure_plausibility_band_edges_are_inside_the_band() {
+        let at_sea_level = |pa| station_pressure_plausibility(pa, 0.0);
+        assert_eq!(at_sea_level(101_325.0).icao_standard_pa, 101_325.0);
+
+        let high_edge = at_sea_level(109_431.0);
+        assert_eq!(high_edge.ratio, STATION_PRESSURE_MAX_PLAUSIBLE_RATIO);
+        assert!(!high_edge.implausible, "{high_edge:?}");
+        assert!(at_sea_level(109_432.0).implausible);
+
+        let low_edge = at_sea_level(86_126.25);
+        assert_eq!(low_edge.ratio, STATION_PRESSURE_MIN_PLAUSIBLE_RATIO);
+        assert!(!low_edge.implausible, "{low_edge:?}");
+        assert!(at_sea_level(86_126.0).implausible);
+
+        // Away from sea level the edges hold to a part in a billion either side.
+        for altitude_m in [-400.0, 1500.0, 3310.128] {
+            let (_, icao_pa) = calculate_icao_standard_atmosphere(altitude_m);
+            for (ratio, implausible) in [
+                (STATION_PRESSURE_MAX_PLAUSIBLE_RATIO * (1.0 - 1e-9), false),
+                (STATION_PRESSURE_MAX_PLAUSIBLE_RATIO * (1.0 + 1e-9), true),
+                (STATION_PRESSURE_MIN_PLAUSIBLE_RATIO * (1.0 + 1e-9), false),
+                (STATION_PRESSURE_MIN_PLAUSIBLE_RATIO * (1.0 - 1e-9), true),
+            ] {
+                let p = station_pressure_plausibility(ratio * icao_pa, altitude_m);
+                assert_eq!(p.icao_standard_pa, icao_pa);
+                assert_eq!(
+                    p.implausible, implausible,
+                    "{altitude_m} m, ratio {ratio}: {p:?}"
+                );
+            }
+        }
+
+        assert!(station_pressure_plausibility(f64::NAN, 0.0).implausible);
+    }
+
+    /// The record sea-level pressures the band is justified by stay inside it, and the reported
+    /// placeholder at Cusco does not.
+    #[test]
+    fn station_pressure_plausibility_passes_record_weather_and_flags_a_placeholder() {
+        for record_hpa in [870.0, 1083.8, 1089.1] {
+            let p = station_pressure_plausibility(record_hpa * 100.0, 0.0);
+            assert!(!p.implausible, "{record_hpa} hPa: {p:?}");
+        }
+
+        let placeholder = station_pressure_plausibility(101_325.0, 3310.128);
+        assert!(placeholder.implausible, "{placeholder:?}");
+        assert!((placeholder.ratio - 1.503).abs() < 5e-4, "{placeholder:?}");
+        // A real Cusco station reading is close to standard.
+        assert!(!station_pressure_plausibility(68_830.0, 3310.128).implausible);
+        // The same reading at an omitted (0 m) altitude is far below standard.
+        assert!(station_pressure_plausibility(68_830.0, 0.0).implausible);
+        // 101325 Pa leaves the band between 640 m and 650 m.
+        assert!(!station_pressure_plausibility(101_325.0, 640.0).implausible);
+        assert!(station_pressure_plausibility(101_325.0, 650.0).implausible);
     }
 
     #[test]
