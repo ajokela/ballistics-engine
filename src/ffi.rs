@@ -459,6 +459,10 @@ unsafe fn drag_table_from_raw(
 /// density — see `BallisticInputs::custom_drag_denominator`). `cd_scale` multiplies the
 /// deck's interpolated Cd (MBA-1356); callers that don't expose a scale pass `1.0`
 /// (neutral, byte-identical to no scale). It is inert when `custom_drag_table` is `None`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the shared body of the flat C trajectory exports, plus the station presence"
+)]
 unsafe fn calculate_trajectory_impl(
     inputs: *const FFIBallisticInputs,
     wind: *const FFIWindConditions,

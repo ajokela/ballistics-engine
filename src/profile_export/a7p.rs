@@ -1247,10 +1247,6 @@ mod tests {
         );
     }
 
-    /// `CARRIED_FIELDS` and the not-carried list partition `ProfileData`. A field
-    /// added to the struct later belongs to one side or the other, and until
-    /// somebody says which, this fails — which is the whole guarantee behind
-    /// "names every field it cannot carry".
     /// 0.49.0: an import marks the file's temperature and pressure as typed readings, so a
     /// profile whose stored values were NOT typed loses that fact on the way out. It matters
     /// only at a real altitude (where the unmarked default flew ICAO air), so only then is it
@@ -1300,6 +1296,10 @@ mod tests {
         );
     }
 
+    /// `CARRIED_FIELDS` and the not-carried list partition `ProfileData`. A field
+    /// added to the struct later belongs to one side or the other, and until
+    /// somebody says which, this fails — which is the whole guarantee behind
+    /// "names every field it cannot carry".
     #[test]
     fn not_carried_and_carried_cover_every_profile_field() {
         let profile = full_profile();

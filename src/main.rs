@@ -16315,12 +16315,6 @@ fn parse_drag_models(s: &str) -> Result<Vec<DragModel>, Box<dyn Error>> {
     }
 }
 
-/// Estimate BC for every (drag model × available data basis) combination and print the
-/// results. `drop_points` are `(m, m)`, `vel_points` are `(m, m/s)`.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "flat arguments preserve the existing BC-estimation compatibility helper"
-)]
 /// The atmosphere `estimate-bc`'s data was measured in, and which of it was typed (0.49.0).
 ///
 /// Built exactly as the command always built it: an omitted temperature is 15 °C and an
@@ -16359,6 +16353,12 @@ fn estimate_bc_station_air(
     (atmosphere, presence)
 }
 
+/// Estimate BC for every (drag model × available data basis) combination and print the
+/// results. `drop_points` are `(m, m)`, `vel_points` are `(m, m/s)`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments preserve the existing BC-estimation compatibility helper"
+)]
 fn run_bc_estimation_multi(
     velocity: f64,
     mass: f64,

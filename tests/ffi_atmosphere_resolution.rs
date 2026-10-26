@@ -281,14 +281,17 @@ mod station_presence_exports {
         }
     }
 
-    /// The golden block, row for row: (label, (t, p, alt), flags, legacy today, new export).
+    /// One golden row: (label, (t, p, alt), flags, legacy today, new export).
+    type GoldenRow = (&'static str, (f64, f64, f64), u32, f64, f64);
+
+    /// The golden block, row for row.
     #[test]
     fn zero_export_matches_the_golden_c_abi_block() {
         let qnh = ballistics_reduce_qnh_pressure(1031.0, 150.0);
         let da_t = ballistics_density_altitude_temperature_c(1000.0, 15.0);
         let da_p = ballistics_density_altitude_pressure_hpa(1000.0, 15.0);
         let da_a = ballistics_density_altitude_altitude_m(1000.0, 15.0);
-        let rows: [(&str, (f64, f64, f64), u32, f64, f64); 7] = [
+        let rows: [GoldenRow; 7] = [
             (
                 "abs 1013.0 at 150 m",
                 (20.0, 1013.0, 150.0),

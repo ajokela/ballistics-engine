@@ -295,10 +295,6 @@ const FROZEN_CALCULATE_ZERO_ANGLE_WITH_DRAG_TABLE_SCALED: unsafe extern "C" fn(
     c_double,
 ) -> c_double = ballistics_engine::ffi::ballistics_calculate_zero_angle_with_drag_table_scaled;
 
-/// Safe, not `unsafe` -- pinned as declared, so adding `unsafe` (a source-compatibility break
-/// for Rust callers) is caught too. A safe `extern "C" fn` would coerce INTO an `unsafe`
-/// pointer type silently, which is why the safety is written out here rather than blanket
-/// `unsafe` everywhere.
 #[allow(clippy::type_complexity)]
 const FROZEN_CALCULATE_ZERO_ANGLE_WITH_STATION_PRESENCE: unsafe extern "C" fn(
     *const FFIBallisticInputs,
@@ -312,6 +308,10 @@ const FROZEN_CALCULATE_ZERO_ANGLE_WITH_STATION_PRESENCE: unsafe extern "C" fn(
     u32,
 ) -> c_double = ballistics_engine::ffi::ballistics_calculate_zero_angle_with_station_presence;
 
+/// Safe, not `unsafe` -- pinned as declared, so adding `unsafe` (a source-compatibility break
+/// for Rust callers) is caught too. A safe `extern "C" fn` would coerce INTO an `unsafe`
+/// pointer type silently, which is why the safety is written out here rather than blanket
+/// `unsafe` everywhere.
 const FROZEN_QUICK_TRAJECTORY: extern "C" fn(
     c_double,
     c_double,
