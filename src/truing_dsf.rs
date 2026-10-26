@@ -41,8 +41,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::atmosphere::{StationAtmospherePresence, StationReading};
 use crate::cli_api::{
-    calculate_zero_angle_with_conditions, AtmosphericConditions, BallisticInputs,
+    calculate_zero_angle_with_station_presence, AtmosphericConditions, BallisticInputs,
     BcReferenceStandard, DropsReference, TrajectoryPoint, TrajectoryResult, TrajectorySolver,
     WindConditions,
 };
@@ -456,10 +457,12 @@ pub struct DsfSolveInputs {
     pub diameter_in: f64,
     /// Sight height over bore, inches.
     pub sight_height_in: f64,
-    /// Ambient temperature, degrees Fahrenheit.
-    pub temperature_f: f64,
-    /// Station pressure, inches of mercury.
-    pub pressure_inhg: f64,
+    /// Ambient temperature, degrees Fahrenheit, and whether it was a supplied reading
+    /// (0.49.0). An omitted reading keeps the legacy default-sentinel rule.
+    pub temperature_f: StationReading,
+    /// Station pressure, inches of mercury, and whether it was a supplied reading (0.49.0).
+    /// An omitted reading keeps the legacy default-sentinel rule.
+    pub pressure_inhg: StationReading,
     /// Relative humidity, percent (0 through 100).
     pub humidity_pct: f64,
     /// Altitude, feet.
@@ -617,9 +620,13 @@ pub fn solve_for_dsf(
     // itself.
     let bore_height_m = inputs.bore_height_m;
 
-    let temperature_c = (inputs.temperature_f - 32.0) * 5.0 / 9.0;
-    let pressure_hpa = inputs.pressure_inhg * 33.8639;
+    let temperature_c = (inputs.temperature_f.value - 32.0) * 5.0 / 9.0;
+    let pressure_hpa = inputs.pressure_inhg.value * 33.8639;
     let altitude_m = inputs.altitude_ft * 0.3048;
+    // Resolved from the converted metric pair inside the presence twins below, never
+    // pre-resolved and converted back (that round trip is not bit-exact).
+    let station_presence =
+        StationAtmospherePresence::from_readings(inputs.temperature_f, inputs.pressure_inhg);
 
     // `inputs.drag_model` is already the full `DragModel` family (MBA-1357 Task 8 review
     // round 3, Critical #1) — no G1/G7 coercion here.
@@ -754,12 +761,13 @@ pub fn solve_for_dsf(
     // function dropped).
     if let Some(zero_distance_yd) = inputs.zero_distance_yd {
         let zero_distance_m = zero_distance_yd * 0.9144;
-        ballistic_inputs.muzzle_angle = calculate_zero_angle_with_conditions(
+        ballistic_inputs.muzzle_angle = calculate_zero_angle_with_station_presence(
             ballistic_inputs.clone(),
             zero_distance_m,
             bore_height_m + sight_height_m,
             wind.clone(),
             atmosphere.clone(),
+            station_presence,
         )
         .map_err(|e| e.to_string())?;
         // MBA-1359: the returned angle carries the vertical POI bias; the horizontal bias
@@ -767,7 +775,12 @@ pub fn solve_for_dsf(
         ballistic_inputs.azimuth_angle += ballistic_inputs.windage_zero_bias_rad(zero_distance_m);
     }
 
-    let mut solver = TrajectorySolver::new(ballistic_inputs, wind, atmosphere);
+    let mut solver = TrajectorySolver::new_with_station_presence(
+        ballistic_inputs,
+        wind,
+        atmosphere,
+        station_presence,
+    );
     solver.set_max_range(max_range_m);
     solver.set_time_step(0.001);
     solver.solve().map_err(|e| e.to_string())

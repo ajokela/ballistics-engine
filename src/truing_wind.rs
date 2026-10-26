@@ -42,6 +42,7 @@ use std::error::Error;
 
 use serde::{Deserialize, Serialize};
 
+use crate::atmosphere::{StationAtmospherePresence, StationReading};
 use crate::cli_api::UnitSystem;
 use crate::truing::{
     DragModelArg, TruingEarthFrame, TruingEnvironment, TruingTwist, TRUING_BC_MAX, TRUING_BC_MIN,
@@ -172,10 +173,26 @@ pub struct WindTruingRequest {
     pub zero_distance_yd: f64,
     /// Sight height over bore in inches.
     pub sight_height_in: f64,
-    /// Ambient temperature in degrees Fahrenheit.
-    pub temperature_f: f64,
-    /// Station pressure in inches of mercury.
-    pub pressure_inhg: f64,
+    /// Ambient temperature in degrees Fahrenheit, as a [`StationReading`] (0.49.0).
+    ///
+    /// Optional on the wire; omit it when there is no reading, and the engine flies the ICAO
+    /// standard temperature at `altitude_ft` (what sending 59 °F produced before 0.49.0). A
+    /// value that is sent is a reading and flies as sent, 59 °F included.
+    #[serde(
+        default = "crate::truing::default_truing_temperature_f",
+        skip_serializing_if = "StationReading::is_omitted"
+    )]
+    pub temperature_f: StationReading,
+    /// Station pressure in inches of mercury, as a [`StationReading`] (0.49.0).
+    ///
+    /// Optional on the wire; omit it when there is no reading, and the engine flies the ICAO
+    /// standard pressure at `altitude_ft` (what sending 29.92 inHg produced before 0.49.0). A
+    /// value that is sent is a reading and flies as sent, 29.92 inHg included.
+    #[serde(
+        default = "crate::truing::default_truing_pressure_inhg",
+        skip_serializing_if = "StationReading::is_omitted"
+    )]
+    pub pressure_inhg: StationReading,
     /// Relative humidity in percent (0 through 100).
     pub humidity_pct: f64,
     /// Altitude in feet.
@@ -220,14 +237,14 @@ impl WindTruingRequest {
             ("bullet diameter", self.diameter_in),
             ("zero distance", self.zero_distance_yd),
             ("sight height", self.sight_height_in),
-            ("pressure", self.pressure_inhg),
+            ("pressure", self.pressure_inhg.value),
             ("twist rate", self.twist.rate_in),
         ] {
             if !value.is_finite() || value <= 0.0 {
                 return Err(format!("{name} must be positive and finite"));
             }
         }
-        if !self.temperature_f.is_finite() {
+        if !self.temperature_f.value.is_finite() {
             return Err("temperature must be finite".to_string());
         }
         if !self.humidity_pct.is_finite() || !(0.0..=100.0).contains(&self.humidity_pct) {
@@ -612,13 +629,14 @@ pub fn modeled_miss_right_m(
         request.zero_distance_yd,
         range_m / 0.9144,
         request.sight_height_in,
-        request.temperature_f,
-        request.pressure_inhg,
+        request.temperature_f.value,
+        request.pressure_inhg.value,
         request.humidity_pct,
         request.altitude_ft,
         &no_bc_segments,
         &env,
         true, // interpolate: land exactly on the requested range
+        StationAtmospherePresence::from_readings(request.temperature_f, request.pressure_inhg),
     )?;
     Ok(sample.lateral_m)
 }
@@ -660,13 +678,14 @@ pub fn solve_wind_truing(request: &WindTruingRequest) -> Result<WindTruingReport
             request.zero_distance_yd,
             range_yd,
             request.sight_height_in,
-            request.temperature_f,
-            request.pressure_inhg,
+            request.temperature_f.value,
+            request.pressure_inhg.value,
             request.humidity_pct,
             request.altitude_ft,
             &no_bc_segments,
             &environment(crosswind_mph),
             true, // interpolate: land exactly on the observation range
+            StationAtmospherePresence::from_readings(request.temperature_f, request.pressure_inhg),
         )?;
         Ok(sample.lateral_m)
     };
@@ -1175,8 +1194,8 @@ mod tests {
             diameter_in: 0.308,
             zero_distance_yd: 100.0,
             sight_height_in: 2.0,
-            temperature_f: 59.0,
-            pressure_inhg: 29.92,
+            temperature_f: StationReading::omitted(59.0),
+            pressure_inhg: StationReading::omitted(29.92),
             humidity_pct: 50.0,
             altitude_ft: 0.0,
             twist: TruingTwist {

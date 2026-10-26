@@ -5630,8 +5630,8 @@ impl WasmBallistics {
             diameter_in: caliber_in,
             zero_distance_yd: zero_yd,
             sight_height_in: sight_in,
-            temperature_f: temp_f,
-            pressure_inhg: press_inhg,
+            temperature_f: crate::atmosphere::StationReading::omitted(temp_f),
+            pressure_inhg: crate::atmosphere::StationReading::omitted(press_inhg),
             humidity_pct: humidity,
             altitude_ft: alt_ft,
             twist: TruingTwist {

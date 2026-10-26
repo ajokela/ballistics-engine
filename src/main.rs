@@ -96,7 +96,8 @@ use ballistics_engine::truing_service::{
 use ballistics_engine::wez::{compute_wez, parse_target_size, TargetSizeMetric, WezResult, WezRow};
 // MBA-1372: SAAMI free-recoil and power-factor calculators.
 use ballistics_engine::atmosphere::{
-    resolve_station_conditions_with_pressure_mode, PressureReferenceMode, StationAtmospherePresence,
+    resolve_station_conditions_with_pressure_mode, PressureReferenceMode,
+    StationAtmospherePresence, StationReading,
 };
 use ballistics_engine::power_factor::{evaluate_all as pf_evaluate_all, scored_power_factor};
 use ballistics_engine::recoil::{
@@ -6771,8 +6772,8 @@ fn solve_profile_for_dsf(
         mass_gr: mass_kg / GRAINS_TO_KG,
         diameter_in: diameter_m / 0.0254,
         sight_height_in: sight_height_m / 0.0254,
-        temperature_f: temperature_c * 9.0 / 5.0 + 32.0,
-        pressure_inhg: pressure_hpa / 33.8639,
+        temperature_f: StationReading::omitted(temperature_c * 9.0 / 5.0 + 32.0),
+        pressure_inhg: StationReading::omitted(pressure_hpa / 33.8639),
         // profile.humidity is already 0-100 regardless of `units` (humidity has no
         // imperial/metric distinction), matching DsfSolveInputs::humidity_pct.
         humidity_pct: profile.humidity,
@@ -9942,8 +9943,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     diameter_in: caliber_in,
                     zero_distance_yd: zero_yd,
                     sight_height_in: sight_in,
-                    temperature_f: temp_f,
-                    pressure_inhg: press_inhg,
+                    temperature_f: StationReading::omitted(temp_f),
+                    pressure_inhg: StationReading::omitted(press_inhg),
                     humidity_pct: humidity,
                     altitude_ft: alt_ft,
                 };
@@ -10341,8 +10342,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 diameter_in: caliber_in,
                 zero_distance_yd: zero_yd,
                 sight_height_in: sight_in,
-                temperature_f: temp_f,
-                pressure_inhg: press_inhg,
+                temperature_f: StationReading::omitted(temp_f),
+                pressure_inhg: StationReading::omitted(press_inhg),
                 humidity_pct: humidity,
                 altitude_ft: alt_ft,
                 twist: TruingTwist {
@@ -10526,14 +10527,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                     UnitSystem::Imperial => sight_height,
                     UnitSystem::Metric => sight_height / 25.4,
                 },
-                temperature_f: match cli.units {
+                temperature_f: StationReading::omitted(match cli.units {
                     UnitSystem::Imperial => temperature,
                     UnitSystem::Metric => temperature * 9.0 / 5.0 + 32.0,
-                },
-                pressure_inhg: match cli.units {
+                }),
+                pressure_inhg: StationReading::omitted(match cli.units {
                     UnitSystem::Imperial => pressure,
                     UnitSystem::Metric => pressure / 33.8639,
-                },
+                }),
                 humidity_pct: humidity,
                 altitude_ft: match cli.units {
                     UnitSystem::Imperial => altitude,

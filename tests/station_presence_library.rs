@@ -319,3 +319,384 @@ fn corridor_presence_field() {
         "temperature",
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// truing: correct_chrono_velocity_fps, calculate_true_velocity_local,
+// run_multi_observation_truing_core, solve_for_dsf, solve_wind_truing
+// ---------------------------------------------------------------------------------------
+
+use ballistics_engine::truing::{
+    calculate_true_velocity_local, calculate_true_velocity_local_with_station_presence,
+    correct_chrono_velocity_fps, correct_chrono_velocity_fps_with_station_presence,
+    run_multi_observation_truing_core, run_multi_observation_truing_core_with_station_presence,
+    DragModelArg, DropUnit, TruingModelInputsV1, TruingObservation, TruingTwist,
+};
+use ballistics_engine::truing_dsf::{solve_for_dsf, DsfSolveInputs};
+use ballistics_engine::truing_wind::{
+    modeled_miss_right_m, solve_wind_truing, WindObservation, WindTruingRequest,
+};
+use ballistics_engine::StationReading;
+
+/// 150 m and 1500 m in the truing core's feet.
+const ALT150_FT: f64 = 150.0 / 0.3048;
+const ALT1500_FT: f64 = 1500.0 / 0.3048;
+const HPA_PER_INHG: f64 = 33.8639;
+/// 15.0 °C and its out-of-band neighbours 14.8 / 15.2 °C, in °F.
+const F15: f64 = 59.0;
+const F14_8: f64 = 14.8 * 9.0 / 5.0 + 32.0;
+const F15_2: f64 = 15.2 * 9.0 / 5.0 + 32.0;
+
+fn inhg(hpa: f64) -> f64 {
+    hpa / HPA_PER_INHG
+}
+
+fn chrono(t: f64, p_inhg: f64, alt_ft: f64, presence: StationAtmospherePresence) -> f64 {
+    correct_chrono_velocity_fps_with_station_presence(
+        2650.0,
+        3.0,
+        0.475,
+        DragModelArg::G1,
+        168.0,
+        0.308,
+        t,
+        p_inhg,
+        50.0,
+        alt_ft,
+        &None,
+        presence,
+    )
+    .unwrap()
+    .muzzle_velocity_fps
+}
+
+#[test]
+fn chrono_correction_twin() {
+    let legacy = correct_chrono_velocity_fps(
+        2650.0,
+        3.0,
+        0.475,
+        DragModelArg::G1,
+        168.0,
+        0.308,
+        68.0,
+        inhg(1013.0),
+        50.0,
+        ALT150_FT,
+        &None,
+    )
+    .unwrap();
+    // captured at ab4eb0c
+    assert_eq!(legacy.muzzle_velocity_fps.to_bits(), 0x40a4c02ed353e514);
+    assert_eq!(
+        chrono(68.0, inhg(1013.0), ALT150_FT, NEITHER).to_bits(),
+        0x40a4c02ed353e514
+    );
+    assert_strictly_between(
+        chrono(68.0, inhg(1012.0), ALT150_FT, NEITHER),
+        chrono(68.0, inhg(1013.0), ALT150_FT, BOTH),
+        chrono(68.0, inhg(1014.0), ALT150_FT, NEITHER),
+        "pressure",
+    );
+    assert_strictly_between(
+        chrono(F14_8, inhg(850.0), ALT1500_FT, NEITHER),
+        chrono(F15, inhg(850.0), ALT1500_FT, BOTH),
+        chrono(F15_2, inhg(850.0), ALT1500_FT, NEITHER),
+        "temperature",
+    );
+}
+
+fn true_velocity(
+    t: f64,
+    p_inhg: f64,
+    alt_ft: f64,
+    presence: StationAtmospherePresence,
+) -> ballistics_engine::truing::TrueVelocityLocalResult {
+    calculate_true_velocity_local_with_station_presence(
+        3.6,
+        500.0,
+        0.475,
+        DragModelArg::G1,
+        168.0,
+        0.308,
+        100.0,
+        1.5,
+        t,
+        p_inhg,
+        50.0,
+        alt_ft,
+        &None,
+        presence,
+    )
+    .unwrap()
+}
+
+#[test]
+fn true_velocity_twin() {
+    let legacy = calculate_true_velocity_local(
+        3.6,
+        500.0,
+        0.475,
+        DragModelArg::G1,
+        168.0,
+        0.308,
+        100.0,
+        1.5,
+        68.0,
+        inhg(1013.0),
+        50.0,
+        ALT150_FT,
+        &None,
+    )
+    .unwrap();
+    let neither = true_velocity(68.0, inhg(1013.0), ALT150_FT, NEITHER);
+    for r in [&legacy, &neither] {
+        // captured at ab4eb0c
+        assert_eq!(r.effective_velocity_fps.to_bits(), 0x40a43efbc0000000);
+        assert_eq!(r.calculated_drop_mil.to_bits(), 0x400ca2bc89427843);
+    }
+    // The bisection stops at the first midpoint within 0.01 mil, so the fitted velocity is
+    // quantized; the supplied air must still move it off the ICAO-air answer.
+    let both = true_velocity(68.0, inhg(1013.0), ALT150_FT, BOTH);
+    assert_ne!(
+        both.effective_velocity_fps.to_bits(),
+        neither.effective_velocity_fps.to_bits()
+    );
+    // 1013 hPa is denser than the ICAO 995 hPa it used to be swapped for: the same measured
+    // drop needs a faster bullet.
+    assert!(both.effective_velocity_fps > neither.effective_velocity_fps);
+}
+
+fn multi(t: f64, p_inhg: f64, alt_ft: f64, presence: StationAtmospherePresence) -> f64 {
+    let observations = [
+        TruingObservation {
+            range_yd: 500.0,
+            drop: 3.6,
+        },
+        TruingObservation {
+            range_yd: 700.0,
+            drop: 6.6,
+        },
+    ];
+    run_multi_observation_truing_core_with_station_presence(
+        &observations,
+        DropUnit::Mil,
+        0.475,
+        DragModelArg::G1,
+        168.0,
+        0.308,
+        100.0,
+        1.5,
+        t,
+        p_inhg,
+        50.0,
+        alt_ft,
+        &None,
+        presence,
+    )
+    .unwrap()
+    .fitted_mv_fps
+}
+
+#[test]
+fn multi_observation_truing_twin() {
+    let observations = [
+        TruingObservation {
+            range_yd: 500.0,
+            drop: 3.6,
+        },
+        TruingObservation {
+            range_yd: 700.0,
+            drop: 6.6,
+        },
+    ];
+    let legacy = run_multi_observation_truing_core(
+        &observations,
+        DropUnit::Mil,
+        0.475,
+        DragModelArg::G1,
+        168.0,
+        0.308,
+        100.0,
+        1.5,
+        68.0,
+        inhg(1013.0),
+        50.0,
+        ALT150_FT,
+        &None,
+    )
+    .unwrap();
+    // captured at ab4eb0c
+    assert_eq!(legacy.fitted_mv_fps.to_bits(), 0x40a5268cde4e141c);
+    assert_eq!(legacy.rms.to_bits(), 0x3f1d732fcd3ff3eb);
+    assert_eq!(
+        multi(68.0, inhg(1013.0), ALT150_FT, NEITHER).to_bits(),
+        0x40a5268cde4e141c
+    );
+    assert_strictly_between(
+        multi(68.0, inhg(1012.0), ALT150_FT, NEITHER),
+        multi(68.0, inhg(1013.0), ALT150_FT, BOTH),
+        multi(68.0, inhg(1014.0), ALT150_FT, NEITHER),
+        "pressure",
+    );
+    assert_strictly_between(
+        multi(F14_8, inhg(850.0), ALT1500_FT, NEITHER),
+        multi(F15, inhg(850.0), ALT1500_FT, BOTH),
+        multi(F15_2, inhg(850.0), ALT1500_FT, NEITHER),
+        "temperature",
+    );
+}
+
+fn truing_model(
+    temperature_f: StationReading,
+    pressure_inhg: StationReading,
+    altitude_ft: f64,
+) -> TruingModelInputsV1 {
+    TruingModelInputsV1 {
+        muzzle_velocity_fps: 2700.0,
+        ballistic_coefficient: 0.243,
+        drag_model: DragModelArg::G7,
+        mass_gr: 168.0,
+        diameter_in: 0.308,
+        zero_distance_yd: 100.0,
+        sight_height_in: 1.5,
+        temperature_f,
+        pressure_inhg,
+        humidity_pct: 50.0,
+        altitude_ft,
+    }
+}
+
+fn dsf_impact(t: StationReading, p: StationReading, alt_ft: f64) -> f64 {
+    solve_for_dsf(&DsfSolveInputs::from(&truing_model(t, p, alt_ft)), 800.0)
+        .unwrap()
+        .impact_velocity
+}
+
+#[test]
+fn dsf_solve_reads_presence_from_the_readings() {
+    use StationReading as R;
+    // captured at ab4eb0c, when these were bare f64s (the legacy rule)
+    assert_eq!(
+        dsf_impact(R::omitted(68.0), R::omitted(inhg(1013.0)), ALT150_FT).to_bits(),
+        0x40819eba8b0a92de
+    );
+    assert_strictly_between(
+        dsf_impact(R::supplied(68.0), R::supplied(inhg(1012.0)), ALT150_FT),
+        dsf_impact(R::supplied(68.0), R::supplied(inhg(1013.0)), ALT150_FT),
+        dsf_impact(R::supplied(68.0), R::supplied(inhg(1014.0)), ALT150_FT),
+        "pressure",
+    );
+    assert_strictly_between(
+        dsf_impact(R::supplied(F14_8), R::supplied(inhg(850.0)), ALT1500_FT),
+        dsf_impact(R::supplied(F15), R::supplied(inhg(850.0)), ALT1500_FT),
+        dsf_impact(R::supplied(F15_2), R::supplied(inhg(850.0)), ALT1500_FT),
+        "temperature",
+    );
+}
+
+fn wind_request(t: StationReading, p: StationReading, alt_ft: f64) -> WindTruingRequest {
+    WindTruingRequest {
+        observations: vec![WindObservation {
+            range_m: 457.2,
+            miss_right_m: 0.15,
+            sigma_m: None,
+        }],
+        muzzle_velocity_fps: 2700.0,
+        bc: 0.475,
+        drag_model: DragModelArg::G7,
+        mass_gr: 168.0,
+        diameter_in: 0.308,
+        zero_distance_yd: 100.0,
+        sight_height_in: 2.0,
+        temperature_f: t,
+        pressure_inhg: p,
+        humidity_pct: 50.0,
+        altitude_ft: alt_ft,
+        twist: TruingTwist {
+            rate_in: 11.0,
+            right_hand: true,
+        },
+        earth: None,
+        called_crosswind_mph: None,
+    }
+}
+
+#[test]
+fn wind_truing_reads_presence_from_the_readings() {
+    use StationReading as R;
+    let mean = |t, p, alt| {
+        solve_wind_truing(&wind_request(t, p, alt))
+            .unwrap()
+            .mean_crosswind_mph
+    };
+    let miss = |t, p, alt| modeled_miss_right_m(&wind_request(t, p, alt), 10.0, 457.2).unwrap();
+    // captured at ab4eb0c, when these were bare f64s (the legacy rule)
+    assert_eq!(
+        mean(R::omitted(68.0), R::omitted(inhg(1013.0)), ALT150_FT).to_bits(),
+        0x4011af8332a75fb5
+    );
+    assert_eq!(
+        miss(R::omitted(68.0), R::omitted(inhg(1013.0)), ALT150_FT).to_bits(),
+        0x3fd20d53e5fa7542
+    );
+    assert_strictly_between(
+        miss(R::supplied(68.0), R::supplied(inhg(1012.0)), ALT150_FT),
+        miss(R::supplied(68.0), R::supplied(inhg(1013.0)), ALT150_FT),
+        miss(R::supplied(68.0), R::supplied(inhg(1014.0)), ALT150_FT),
+        "pressure",
+    );
+    assert_strictly_between(
+        miss(R::supplied(F14_8), R::supplied(inhg(850.0)), ALT1500_FT),
+        miss(R::supplied(F15), R::supplied(inhg(850.0)), ALT1500_FT),
+        miss(R::supplied(F15_2), R::supplied(inhg(850.0)), ALT1500_FT),
+        "temperature",
+    );
+    assert_ne!(
+        mean(R::supplied(68.0), R::supplied(inhg(1013.0)), ALT150_FT).to_bits(),
+        0x4011af8332a75fb5
+    );
+}
+
+#[test]
+fn truing_dtos_accept_omitted_readings_on_the_wire() {
+    let mut json = serde_json::to_value(truing_model(
+        StationReading::supplied(59.0),
+        StationReading::supplied(29.92),
+        5000.0,
+    ))
+    .unwrap();
+    assert_eq!(json["temperature_f"], serde_json::json!(59.0));
+    assert_eq!(json["pressure_inhg"], serde_json::json!(29.92));
+    let map = json.as_object_mut().unwrap();
+    map.remove("temperature_f");
+    map.remove("pressure_inhg");
+    let omitted: TruingModelInputsV1 = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(omitted.temperature_f, StationReading::omitted(59.0));
+    assert_eq!(omitted.pressure_inhg, StationReading::omitted(29.92));
+    // An omitted reading is not written back out.
+    let round_trip = serde_json::to_value(omitted).unwrap();
+    assert!(round_trip.get("temperature_f").is_none());
+    assert!(round_trip.get("pressure_inhg").is_none());
+    // deny_unknown_fields still holds, and null is not "omitted".
+    let mut unknown = json.clone();
+    unknown["pressure_hpa"] = serde_json::json!(1013.25);
+    assert!(serde_json::from_value::<TruingModelInputsV1>(unknown).is_err());
+    let mut null = json;
+    null["pressure_inhg"] = serde_json::Value::Null;
+    assert!(serde_json::from_value::<TruingModelInputsV1>(null).is_err());
+
+    let mut wind = serde_json::to_value(wind_request(
+        StationReading::supplied(59.0),
+        StationReading::supplied(29.92),
+        5000.0,
+    ))
+    .unwrap();
+    let map = wind.as_object_mut().unwrap();
+    map.remove("temperature_f");
+    map.remove("pressure_inhg");
+    let omitted: WindTruingRequest = serde_json::from_value(wind.clone()).unwrap();
+    assert_eq!(omitted.temperature_f, StationReading::omitted(59.0));
+    assert_eq!(omitted.pressure_inhg, StationReading::omitted(29.92));
+    wind["bogus"] = serde_json::json!(1);
+    assert!(serde_json::from_value::<WindTruingRequest>(wind).is_err());
+}

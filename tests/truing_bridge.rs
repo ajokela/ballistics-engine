@@ -1009,3 +1009,72 @@ fn true_dial_plan_matches_cli() {
         v["result"]
     );
 }
+
+/// 0.49.0: `temperature_f` / `pressure_inhg` are optional on `true.*`. A field that is present
+/// is a reading and flies as sent, even 29.92 inHg at 5000 ft; a field that is absent flies
+/// ICAO standard air at `altitude_ft`, which is what sending the 29.92 placeholder produced
+/// before. Both numbers are the station-sentinel spec's engine runs.
+#[test]
+fn true_wind_flies_a_sent_pressure_and_omits_an_absent_one() {
+    let request = |pressure: Option<f64>| {
+        let mut r = json!({
+            "observations": [{"range_m": 457.2, "miss_right_m": 0.315, "sigma_m": null}],
+            "muzzle_velocity_fps": 2700.0, "bc": 0.243, "drag_model": "g7",
+            "mass_gr": 168.0, "diameter_in": 0.308, "zero_distance_yd": 100.0,
+            "sight_height_in": 2.0, "temperature_f": 68.0,
+            "humidity_pct": 50.0, "altitude_ft": 5000.0,
+            "twist": {"rate_in": 11.0, "right_hand": true},
+            "earth": null, "called_crosswind_mph": null
+        });
+        if let Some(p) = pressure {
+            r["pressure_inhg"] = json!(p);
+        }
+        r
+    };
+    let mean = |r| {
+        let v = call("true.wind", r);
+        assert_eq!(v["ok"], json!(true), "{v}");
+        v["result"]["mean_crosswind_mph"].as_f64().unwrap()
+    };
+    assert_eq!(
+        mean(request(Some(29.92))).to_bits(),
+        5.053688506163011_f64.to_bits()
+    );
+    assert_eq!(
+        mean(request(None)).to_bits(),
+        6.197365422146237_f64.to_bits()
+    );
+}
+
+/// An omitted `true.fit` model reading equals what the 59 °F / 29.92 inHg placeholder gave
+/// before 0.49.0 at altitude; a sent one now differs from it.
+#[test]
+fn true_fit_omitted_readings_fly_icao_air_and_sent_ones_fly_as_sent() {
+    let request = |with_readings: bool| {
+        let mut m = model();
+        m["altitude_ft"] = json!(5000.0);
+        if !with_readings {
+            let obj = m.as_object_mut().unwrap();
+            obj.remove("temperature_f");
+            obj.remove("pressure_inhg");
+        }
+        json!({
+            "model": m, "drop_unit": "mil",
+            "observations": [
+                {"range_yd": 400.0, "drop": 2.6882, "sigma": 0.1},
+                {"range_yd": 600.0, "drop": 4.8626, "sigma": 0.1},
+                {"range_yd": 800.0, "drop": 7.6598, "sigma": 0.1}
+            ],
+            "priors": {
+                "muzzle_velocity_fps": {"mean": 2700.0, "sigma": 20.0},
+                "ballistic_coefficient": {"mean": 0.243, "sigma": 0.01}
+            },
+            "predictions": []
+        })
+    };
+    let omitted = call("true.fit", request(false));
+    let sent = call("true.fit", request(true));
+    assert_eq!(omitted["ok"], json!(true), "{omitted}");
+    assert_eq!(sent["ok"], json!(true), "{sent}");
+    assert_ne!(omitted["result"], sent["result"]);
+}
