@@ -110,8 +110,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the bridge's `solve` and `atmosphere.density_altitude`, the FFI
   `ballistics_reduce_qnh_pressure` and the WASM terminal. The calculator subcommands (and the
   WASM `true-velocity` and `true-wind`) fed an inHg reading to the reduction directly, which
-  only the ratio form tolerated; they now convert it to hPa and back, so imperial and metric
-  input reach the same air. A QNH with no station pressure at the altitude (its pressure
+  only the ratio form tolerated; they now reduce it in hPa and scale the reading by the
+  station/QNH ratio that gives, so imperial and metric input reach the same air and a sea-level
+  QNH comes back exactly as typed. A QNH with no station pressure at the altitude (its pressure
   altitude plus the station height at or past 44,331 m, such as 500 hPa at 40 km) is now
   refused instead of being flown as near-vacuum air: solve-json answers `invalid_value` at
   `$.atmosphere.pressure_pa`, the CLI "atmosphere.pressure must be finite", and `stability`,

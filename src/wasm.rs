@@ -59,6 +59,22 @@ fn parse_pressure_type_arg(s: &str) -> Result<PressureReferenceMode, JsValue> {
     }
 }
 
+/// Reduce a display-unit QNH (inHg imperial / hPa metric) to display-unit station pressure at a
+/// display-unit altitude (feet / meters), with native `apply_pressure_mode`'s factors and
+/// arithmetic so the two terminals fly the same air (MBA-1605). The reduction runs in hPa (the
+/// altimeter-setting relation is not a plain ratio); the reading is then scaled by the
+/// station/QNH ratio instead of converted back from hPa, so a sea-level QNH comes back
+/// bit-exact.
+#[cfg(feature = "wasm-truing")]
+fn qnh_display_to_station_display(pressure: f64, altitude: f64, units: UnitSystem) -> f64 {
+    let (altitude_m, qnh_hpa) = match units {
+        UnitSystem::Imperial => (altitude * 0.3048, pressure * 33.8639),
+        UnitSystem::Metric => (altitude, pressure),
+    };
+    let station_hpa = crate::atmosphere::reduce_qnh_to_station_pressure(qnh_hpa, altitude_m);
+    pressure * (station_hpa / qnh_hpa)
+}
+
 #[wasm_bindgen]
 pub struct WasmBallistics {
     /// Optional BC5D correction table loaded from an in-memory `.bin`. When
@@ -5018,20 +5034,12 @@ impl WasmBallistics {
         };
         // MBA-1426 item 3: a declared QNH reduces against this command's own --altitude,
         // matching native true-velocity since MBA-1416. The reduction takes hPa (the
-        // altimeter-setting relation is not a plain ratio, MBA-1605), so a display-unit inHg
-        // value goes in and comes back out through native apply_pressure_mode's own factor.
+        // altimeter-setting relation is not a plain ratio, MBA-1605), so an inHg value goes in
+        // through native apply_pressure_mode's own factor, and the display value is scaled by
+        // the station/QNH ratio exactly as native does (bit-exact at sea level).
         let pressure = match pressure_type.unwrap_or(PressureReferenceMode::Absolute) {
             PressureReferenceMode::Absolute => pressure,
-            PressureReferenceMode::Qnh => {
-                let (altitude_m, hpa_per_unit) = match units {
-                    UnitSystem::Imperial => (altitude * 0.3048, 33.8639),
-                    UnitSystem::Metric => (altitude, 1.0),
-                };
-                crate::atmosphere::reduce_qnh_to_station_pressure(
-                    pressure * hpa_per_unit,
-                    altitude_m,
-                ) / hpa_per_unit
-            }
+            PressureReferenceMode::Qnh => qnh_display_to_station_display(pressure, altitude, units),
         };
 
         // Convert to the truing core's internal imperial units — factor-for-factor the
@@ -5529,20 +5537,11 @@ impl WasmBallistics {
                 v
             }
         };
-        // A declared QNH reduces against this command's own --altitude (MBA-1416). The
-        // reduction takes hPa (MBA-1605), so an inHg value is converted in and back out.
+        // A declared QNH reduces against this command's own --altitude (MBA-1416), the same
+        // way native apply_pressure_mode does (MBA-1605).
         let pressure = match pressure_type.unwrap_or(PressureReferenceMode::Absolute) {
             PressureReferenceMode::Absolute => pressure,
-            PressureReferenceMode::Qnh => {
-                let (altitude_m, hpa_per_unit) = match units {
-                    UnitSystem::Imperial => (altitude * 0.3048, 33.8639),
-                    UnitSystem::Metric => (altitude, 1.0),
-                };
-                crate::atmosphere::reduce_qnh_to_station_pressure(
-                    pressure * hpa_per_unit,
-                    altitude_m,
-                ) / hpa_per_unit
-            }
+            PressureReferenceMode::Qnh => qnh_display_to_station_display(pressure, altitude, units),
         };
 
         // Convert to the truing core's internal imperial units — factor-for-factor the

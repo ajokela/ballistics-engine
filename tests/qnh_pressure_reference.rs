@@ -727,15 +727,15 @@ mod pressure_mode_on_calculator_subcommands {
     /// library reduction yields. The two tests around this one cannot catch a unit slip,
     /// because a wrong reduction still changes the output. Since the reduction stopped being a
     /// plain ratio, this 24.90 inHg reading fed to it as if it were hPa comes out at 17.05 inHg
-    /// instead of 20.58. The
-    /// station pressure is built with the CLI's own factors (33.8639 hPa/inHg, 0.3048 m/ft) and
+    /// instead of 20.58. The station pressure is built with the CLI's own factors (33.8639
+    /// hPa/inHg, 0.3048 m/ft) and arithmetic (the reading scaled by the station/QNH ratio) and
     /// printed at full precision, so both runs reach the solver with the same air.
     #[test]
     fn qnh_matches_absolute_at_the_reduced_station_pressure_on_every_subcommand() {
-        let station_inhg = ballistics_engine::atmosphere::reduce_qnh_to_station_pressure(
-            24.90 * 33.8639,
-            5000.0 * 0.3048,
-        ) / 33.8639;
+        let qnh_hpa = 24.90 * 33.8639;
+        let station_hpa =
+            ballistics_engine::atmosphere::reduce_qnh_to_station_pressure(qnh_hpa, 5000.0 * 0.3048);
+        let station_inhg = 24.90 * (station_hpa / qnh_hpa);
         let station = station_inhg.to_string();
         for (name, args) in cases() {
             let mut qnh = args.clone();
@@ -758,6 +758,36 @@ mod pressure_mode_on_calculator_subcommands {
                 "`{name} --pressure 24.90 --pressure-type qnh` at 5000 ft differs from \
                  `--pressure {station} --pressure-type absolute`, the station pressure the \
                  reduction gives"
+            );
+        }
+    }
+
+    /// At sea level a QNH IS the station pressure, so `qnh` must be byte-identical to
+    /// `absolute` at the same reading. 30.31 inHg converted to hPa and back is
+    /// 30.309999999999995, which `compare -o json` echoed and every subcommand flew. JSON,
+    /// because its full-precision numbers show a last-bit difference a table rounds away.
+    #[test]
+    fn a_sea_level_qnh_is_byte_identical_to_absolute_on_every_subcommand() {
+        for (name, args) in cases() {
+            let mut sea_level: Vec<&str> = args.clone();
+            sea_level.extend_from_slice(&["-o", "json"]);
+            for index in 0..sea_level.len() {
+                match sea_level[index] {
+                    "24.90" => sea_level[index] = "30.31",
+                    "--altitude" => sea_level[index + 1] = "0",
+                    _ => {}
+                }
+            }
+            let mut qnh = sea_level.clone();
+            qnh.extend_from_slice(&["--pressure-type", "qnh"]);
+            let mut absolute = sea_level;
+            absolute.extend_from_slice(&["--pressure-type", "absolute"]);
+
+            assert_eq!(
+                stdout_of(&qnh),
+                stdout_of(&absolute),
+                "`{name} --pressure 30.31 --altitude 0 --pressure-type qnh` differs from \
+                 `absolute` at the same reading"
             );
         }
     }

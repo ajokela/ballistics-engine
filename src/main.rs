@@ -24819,10 +24819,13 @@ fn bc_convert_speed_of_sound_fps(value: Option<f64>, units: UnitSystem) -> f64 {
 /// `pressure_display` and the returned pressure are in the command's display units (inHg
 /// imperial / hPa metric), the units `UnitConverter::resolve_pressure` returns. The reduction
 /// itself takes hPa: since MBA-1605 it is the altimeter-setting relation, which is not a plain
-/// ratio, so an inHg value fed to it directly would come out badly wrong. The pressure is
-/// converted to hPa for the reduction and back afterwards. `altitude_display` is likewise in
-/// display units (feet imperial / meters metric) and is converted here, because feeding feet to
-/// a reduction expecting meters would be a large and completely silent error.
+/// ratio, so an inHg value fed to it directly would come out badly wrong. The reduction runs on
+/// the hPa value, and the display value is then scaled by the station/QNH ratio it found rather
+/// than converted back from hPa: at sea level that ratio is exactly 1, so the reading comes back
+/// bit-exact (an inHg value converted to hPa and back is not; 30.31 became 30.309999999999995),
+/// and in metric the result is exactly the library's station pressure. `altitude_display` is
+/// likewise in display units (feet imperial / meters metric) and is converted here, because
+/// feeding feet to a reduction expecting meters would be a large and completely silent error.
 fn apply_pressure_mode(
     pressure_display: f64,
     altitude_display: f64,
@@ -24836,7 +24839,71 @@ fn apply_pressure_mode(
             let qnh_hpa = UnitConverter::pressure_to_metric(pressure_display, units);
             let station_hpa =
                 ballistics_engine::atmosphere::reduce_qnh_to_station_pressure(qnh_hpa, altitude_m);
-            UnitConverter::pressure_from_metric(station_hpa, units)
+            pressure_display * (station_hpa / qnh_hpa)
+        }
+    }
+}
+
+#[cfg(test)]
+mod pressure_mode_tests {
+    use super::*;
+    use ballistics_engine::atmosphere::reduce_qnh_to_station_pressure;
+
+    /// At sea level the reduction is the identity, so a QNH reading must come back exactly as
+    /// typed in either unit system. An inHg reading converted to hPa and back is not exact
+    /// (30.31 came back as 30.309999999999995 and `compare -o json` echoed it).
+    #[test]
+    fn a_sea_level_qnh_comes_back_bit_exact_in_both_unit_systems() {
+        for hundredths in 800..=3300 {
+            let inhg = f64::from(hundredths) / 100.0;
+            let reduced = apply_pressure_mode(
+                inhg,
+                0.0,
+                Some(PressureReferenceMode::Qnh),
+                UnitSystem::Imperial,
+            );
+            assert_eq!(
+                reduced.to_bits(),
+                inhg.to_bits(),
+                "{inhg} inHg came back as {reduced}"
+            );
+        }
+        for tenths in 2500..=11000 {
+            let hpa = f64::from(tenths) / 10.0;
+            let reduced = apply_pressure_mode(
+                hpa,
+                0.0,
+                Some(PressureReferenceMode::Qnh),
+                UnitSystem::Metric,
+            );
+            assert_eq!(
+                reduced.to_bits(),
+                hpa.to_bits(),
+                "{hpa} hPa came back as {reduced}"
+            );
+        }
+    }
+
+    /// A metric QNH must fly exactly the station pressure the library gives (the one
+    /// solve-json and `trajectory` fly), at every altitude, not merely close to it.
+    #[test]
+    fn a_metric_qnh_is_exactly_the_library_station_pressure() {
+        for altitude_m in [-430.0, 1.5, 150.0, 1524.0, 3310.0, 4061.0, 5000.0] {
+            for twentieths in 5000..=22000 {
+                let qnh_hpa = f64::from(twentieths) / 20.0;
+                let reduced = apply_pressure_mode(
+                    qnh_hpa,
+                    altitude_m,
+                    Some(PressureReferenceMode::Qnh),
+                    UnitSystem::Metric,
+                );
+                let library = reduce_qnh_to_station_pressure(qnh_hpa, altitude_m);
+                assert_eq!(
+                    reduced.to_bits(),
+                    library.to_bits(),
+                    "{qnh_hpa} hPa at {altitude_m} m: {reduced} vs the library's {library}"
+                );
+            }
         }
     }
 }
