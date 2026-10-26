@@ -117,7 +117,7 @@ fn bore_on_or_below_ground_without_ignore_is_rejected_with_actionable_error() {
     ];
     for base in [IMPERIAL, METRIC] {
         // `=` form: clap would read a separate "-1" as a flag.
-        for bore in ["--bore-height=0", "--bore-height=-1"] {
+        for bore in ["--bore-height=0", "--bore-height=-1", "--muzzle-height=0"] {
             for extra in extras {
                 let mut args = base.to_vec();
                 args.push(bore);
@@ -126,7 +126,7 @@ fn bore_on_or_below_ground_without_ignore_is_rejected_with_actionable_error() {
                 let stderr = String::from_utf8_lossy(&o.stderr);
                 assert!(!o.status.success(), "{args:?} should be rejected");
                 assert!(
-                    stderr.contains("--bore-height must be above 0")
+                    stderr.contains("--bore-height/--muzzle-height must be above 0")
                         && stderr.contains("--ignore-ground-impact"),
                     "{args:?}: unexpected error: {stderr}"
                 );

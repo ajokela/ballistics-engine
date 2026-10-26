@@ -141,14 +141,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   calculated". The zero solve now uses the flight's ground: that command solves a
   1.510919806676861° zero for a .308 (175 gr, 2600 fps, G1 0.505), and its metric twin (792 m/s,
   11.34 g, zero at 1372 m) 1.5137119880095622°. Without `--ignore-ground-impact`, a bore height
-  of 0 or less is now refused up front ("--bore-height must be above 0 (the ground plane) ...
-  Pass --ignore-ground-impact to fly from ground level."), where it used to surface only as the
+  of 0 or less is now refused up front ("--bore-height/--muzzle-height must be above 0 (the
+  ground plane) ... Pass --ignore-ground-impact to fly from ground level.", naming both
+  spellings since either one may have been typed), where it used to surface only as the
   solver's "No trajectory points calculated" ("...generated" under `--use-euler`); solve-json
   already refuses the same input ("ground threshold must be below the resolved muzzle height").
   The WASM terminal's zero already used the flight's ground, and its `--muzzle-height` (alias
-  `--bore-height`) gets the same check, replacing "Error: No trajectory points calculated" and,
-  with `--auto-zero`, a zero failure that suggested a shorter zero distance. solve-json, the
-  bridge, the FFI and the bindings are unchanged.
+  `--bore-height`) gets the same check and message, replacing "Error: No trajectory points
+  calculated" and, with `--auto-zero`, a zero failure that suggested a shorter zero distance.
+  solve-json, the bridge, the FFI and the bindings are unchanged.
   Every run with a bore above 0 that solved before is byte-identical: 114 native CLI runs (all
   three integrators, imperial and metric, auto-zero and plain, with and without
   `--ignore-ground-impact`, table and `-o json --full`) and 84 WASM terminal runs. One class of

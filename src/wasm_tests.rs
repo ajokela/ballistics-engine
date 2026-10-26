@@ -1168,7 +1168,7 @@ mod tests {
             let err = wasm.run_command(cmd).expect_err(cmd);
             let msg = format!("{err:?}");
             assert!(
-                msg.contains("--muzzle-height must be above 0")
+                msg.contains("--bore-height/--muzzle-height must be above 0")
                     && msg.contains("--ignore-ground-impact"),
                 "{cmd}: unexpected error {msg}"
             );

@@ -7922,8 +7922,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             // no ground and the run is valid (solve-json's rule: ground below the muzzle).
             if bore_height_metric <= 0.0 && !ignore_ground_impact {
                 return Err(
-                    "--bore-height must be above 0 (the ground plane): a flight that starts on \
-                     or below the ground ends before its first point. Pass \
+                    "--bore-height/--muzzle-height must be above 0 (the ground plane): a flight \
+                     that starts on or below the ground ends before its first point. Pass \
                      --ignore-ground-impact to fly from ground level."
                         .into(),
                 );

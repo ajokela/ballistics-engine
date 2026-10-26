@@ -1958,9 +1958,9 @@ impl WasmBallistics {
         // "No trajectory points" (or a zero failure suggesting a shorter distance).
         if inputs.muzzle_height <= 0.0 && !ignore_ground_impact {
             return Err(JsValue::from_str(
-                "--muzzle-height must be above 0 (the ground plane): a flight that starts on \
-                 or below the ground ends before its first point. Pass --ignore-ground-impact \
-                 to fly from ground level.",
+                "--bore-height/--muzzle-height must be above 0 (the ground plane): a flight \
+                 that starts on or below the ground ends before its first point. Pass \
+                 --ignore-ground-impact to fly from ground level.",
             ));
         }
 
