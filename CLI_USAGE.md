@@ -344,7 +344,7 @@ A barometric pressure reading can mean two different physical quantities, and mi
 station = QNH * (1 - (0.0065 * h_geopotential_m / 288.15) * (1013.25 / QNH) ^ 0.190263) ^ (1 / 0.190263)
 ```
 
-with both pressures in hPa (an inHg reading is converted first). This is the NWS/ASOS altimeter-setting relation without its 0.3 hPa sensor offset. Before 0.49.0 the engine scaled the standard pressure ratio by the QNH instead, `station = QNH * (1 - 0.0065 * h / 288.15) ^ 5.25588`. That agrees only at a QNH of exactly 1013.25 hPa or at sea level, and read low at high-elevation airports: 1.52 hPa low at La Paz (QNH 1038 hPa, 4061 m), 1.07 hPa at Cusco (1033 hPa, 3310 m) (MBA-1605).
+with both pressures in hPa (an inHg reading is converted first). This is the altimeter-setting relation on ICAO constants with geopotential height. It has the shape of the NWS/ASOS altimeter-setting algorithm but is not that algorithm, which uses its own rounded constants (n = 0.190284, k = 8.4228807e-5), adds the field elevation as entered, and subtracts a 0.3 hPa sensor offset. Even without that offset, NWS/ASOS gives a station pressure about 0.1 hPa lower than this engine at 1500 m and 0.3 to 0.45 hPa lower at 4000 to 5000 m (QNH 950 to 1050 hPa). Before 0.49.0 the engine scaled the standard pressure ratio by the QNH instead, `station = QNH * (1 - 0.0065 * h / 288.15) ^ 5.25588`. That agrees only at a QNH of exactly 1013.25 hPa or at sea level, and read low at high-elevation airports: 1.52 hPa low at La Paz (QNH 1038 hPa, 4061 m), 1.07 hPa at Cusco (1033 hPa, 3310 m) (MBA-1605).
 
 `h_geopotential_m` is the geopotential height ISA is defined against, not the geometric
 altitude you type in; the engine converts before applying the formula. The difference is

@@ -233,9 +233,17 @@ pub enum PressureReferenceMode {
 /// (288.15 K) and sea-level pressure `P0` (1013.25 hPa), so `n` = 0.190263. This is what an
 /// altimeter setting means: an altimeter set to QNH reads field elevation on the ground, so the
 /// station pressure's ISA pressure altitude is the QNH's own pressure altitude plus `h`. Written
-/// that way it is the additive form `station = P0 * ((QNH/P0)^n + L*h/T0)^(1/n)` (the NWS/ASOS
-/// altimeter-setting algorithm, less its 0.3 hPa sensor offset); the algebraically equal form
-/// above is the one evaluated, because it returns QNH bit-exactly at `h = 0`.
+/// that way it is the additive form `station = P0 * ((QNH/P0)^n + L*h/T0)^(1/n)`; the
+/// algebraically equal form above is the one evaluated, because it returns QNH bit-exactly at
+/// `h = 0`.
+///
+/// This is the altimeter-setting relation on ICAO constants with geopotential height. It has the
+/// shape of the NWS/ASOS altimeter-setting algorithm but is not that algorithm, which uses its
+/// own rounded constants (`n` = 0.190284 and `k` = 8.4228807e-5, `P0^n * 0.0065/T0` at 288 K),
+/// adds the field elevation as entered rather than its geopotential height, and subtracts a
+/// 0.3 hPa sensor offset. Even without that offset, NWS/ASOS gives a station pressure about
+/// 0.1 hPa lower than this function at 1500 m and 0.3 to 0.45 hPa lower at 4000 to 5000 m (QNH
+/// 950 to 1050 hPa).
 ///
 /// Before 0.49.0 this function scaled the standard pressure ratio by QNH,
 /// `station = QNH * (1 + L*h/T0)^(1/n)`, and called that the altimeter-setting reduction. It is
@@ -1558,6 +1566,32 @@ mod tests {
                 "altitude={altitude_m} reduced={reduced} std={}",
                 std_pressure_pa / 100.0
             );
+        }
+    }
+
+    /// The doc comment's comparison with the NWS/ASOS altimeter-setting algorithm, checked:
+    /// with that algorithm's constants (n = 0.190284, k = 8.4228807e-5, the field elevation as
+    /// entered) and without its 0.3 hPa sensor offset, its station pressure is about 0.1 hPa
+    /// below this function's at 1500 m and 0.3 to 0.45 hPa below at 4000 to 5000 m, over QNH
+    /// 950 to 1050 hPa.
+    #[test]
+    fn qnh_reduction_differs_from_nws_asos_by_the_documented_amounts() {
+        let nws_station_hpa = |qnh_hpa: f64, elevation_m: f64| {
+            (qnh_hpa.powf(0.190284) - 8.4228807e-5 * elevation_m).powf(1.0 / 0.190284)
+        };
+        for (altitude_m, low, high) in [
+            (1500.0, 0.09, 0.11),
+            (4000.0, 0.3, 0.45),
+            (5000.0, 0.3, 0.45),
+        ] {
+            for qnh_hpa in [950.0, 980.0, 1013.25, 1030.0, 1050.0] {
+                let gap = reduce_qnh_to_station_pressure(qnh_hpa, altitude_m)
+                    - nws_station_hpa(qnh_hpa, altitude_m);
+                assert!(
+                    (low..=high).contains(&gap),
+                    "QNH {qnh_hpa} at {altitude_m} m: this function is {gap} hPa above NWS/ASOS"
+                );
+            }
         }
     }
 
