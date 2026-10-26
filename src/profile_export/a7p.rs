@@ -857,6 +857,24 @@ fn not_carried_for(p: &ProfileData) -> Vec<NotCarried> {
         "the file's pressure field declares no reference, so it is written as-is; a QNH \
          profile therefore travels as if it were station pressure",
     );
+    // 0.49.0: the file has no notion of an omitted reading, and an import marks its
+    // temperature and pressure as typed. A value the profile did NOT mark as typed (a stored
+    // default) therefore arrives as a reading. That changes what flies only at a real
+    // altitude, where the unmarked default would have flown ICAO air.
+    push(
+        "temperature_supplied",
+        (!p.temperature_supplied && p.altitude != 0.0).then(|| "false".to_string()),
+        "the file has no concept of an omitted reading and an import marks its temperature as \
+         typed, so an unmarked stored temperature travels as a reading; that matters only at a \
+         real altitude, which the file cannot carry either — see `altitude`",
+    );
+    push(
+        "pressure_supplied",
+        (!p.pressure_supplied && p.altitude != 0.0).then(|| "false".to_string()),
+        "the file has no concept of an omitted reading and an import marks its pressure as \
+         typed, so an unmarked stored pressure travels as a reading; that matters only at a \
+         real altitude — see `altitude`",
+    );
     push(
         "bc_reference",
         carried_opt(&p.bc_reference),
@@ -1038,6 +1056,8 @@ mod tests {
         "units": "metric",
         "temperature": 15.0,
         "pressure": 1000.0,
+        "temperature_supplied": true,
+        "pressure_supplied": true,
         "humidity": 50.0,
         "altitude": 300.0,
         "bullet_name": "300GR OTM",
@@ -1231,6 +1251,55 @@ mod tests {
     /// added to the struct later belongs to one side or the other, and until
     /// somebody says which, this fails — which is the whole guarantee behind
     /// "names every field it cannot carry".
+    /// 0.49.0: an import marks the file's temperature and pressure as typed readings, so a
+    /// profile whose stored values were NOT typed loses that fact on the way out. It matters
+    /// only at a real altitude (where the unmarked default flew ICAO air), so only then is it
+    /// reported as lost.
+    #[test]
+    fn unmarked_readings_at_altitude_are_reported_as_not_carried() {
+        let populated = |profile: &ProfileData| {
+            let export = export_a7p(profile).expect("export");
+            export
+                .not_carried
+                .iter()
+                .filter(|n| n.field.ends_with("_supplied"))
+                .map(|n| (n.field, n.populated))
+                .collect::<Vec<_>>()
+        };
+        let marked = full_profile();
+        assert_eq!(
+            populated(&marked),
+            vec![
+                ("temperature_supplied", false),
+                ("pressure_supplied", false)
+            ]
+        );
+        let unmarked = ProfileData {
+            temperature_supplied: false,
+            pressure_supplied: false,
+            ..full_profile()
+        };
+        assert!(
+            unmarked.altitude != 0.0,
+            "the fixture must sit at a real altitude"
+        );
+        assert_eq!(
+            populated(&unmarked),
+            vec![("temperature_supplied", true), ("pressure_supplied", true)]
+        );
+        let at_sea_level = ProfileData {
+            altitude: 0.0,
+            ..unmarked
+        };
+        assert_eq!(
+            populated(&at_sea_level),
+            vec![
+                ("temperature_supplied", false),
+                ("pressure_supplied", false)
+            ]
+        );
+    }
+
     #[test]
     fn not_carried_and_carried_cover_every_profile_field() {
         let profile = full_profile();
