@@ -1103,6 +1103,119 @@ before encoding a success envelope. The corresponding public ceiling is
 fail-closed backstop, but that serializer error is intentionally not a substitute for the protocol
 error envelope.
 
+## Deriving holds from samples
+
+`samples` say where the bullet is, not where to aim. Turning a sample into a hold takes a sign
+and one division, and the engine's own hold outputs (`reticle_hold`, the bridge's `card.*`
+commands, `ballistics lead`) do exactly that arithmetic, so an app that repeats it on the same
+drop gets their numbers.
+
+**Signs.** `drop_m` is positive below the line of sight, so a positive `drop_m` is a hold or a
+dial up, and a negative one, with the bullet above the line of sight, is a hold down.
+`windage_m` is positive to the shooter's right, so a positive `windage_m` is a hold left and a
+negative one a hold right.
+
+**Angles.** The engine converts with the small-angle ratio, never an arctangent:
+
+```text
+elevation_mil = drop_m    / distance_m * 1000    (positive: hold up)
+windage_mil   = windage_m / distance_m * 1000    (positive: hold left)
+```
+
+`reticle_hold` is this arithmetic at `reticle.range_m`: its `down_mil` is `elevation_mil` and its
+`right_mil` is `windage_mil`, unchanged. Both are the reticle point to put on the target,
+measured from the optical center: a bullet that drops is held over with a point below center,
+and a bullet blown right is held left with a point to the right of center, so neither sign
+needs flipping. The `card.*` commands keep the same signs in their angular columns: a positive
+`drop_adj` is a hold up, and `wind_adj` has the sign of `windage_m`.
+
+**MOA.** The engine's MOA figures do not all use one constant:
+
+| Output | MOA per radian |
+| --- | --- |
+| `card.come_ups`, `card.range_table`, `card.wind` and `card.pdf` columns in `"moa"`, the PDF's Lead column included | 3438 |
+| The same columns in `"smoa"` or `"iphy"` | 3600 (one inch per 100 yards) |
+| `ballistics lead` and the `lead_from_tof` formula below | 3438 |
+| `reticle.catalog`'s MOA ladders, and MOA clicks in `true.dial_plan` | 3438 |
+| `summary.aerodynamic_jump_moa`, which the solver divides by this to get its launch-angle offset | 10800/π = 3437.7467707849 |
+| `true.fit` and `true.dsf` drops sent and returned with `drop_unit` `"moa"` | 10800/π |
+
+3438 is the engine's printed-table constant. An MOA column that is meant to agree with
+`card.range_table` converts with it, `moa = drop_m / distance_m * 3438`, which is
+`elevation_mil * 3.438`. The exact 10800/π gives values 0.0074% smaller, which is enough to
+change the last printed digit on some rows.
+
+**Lead.** The bridge has no lead command. `ballistics lead` and the `card.pdf` Lead column
+compute lead with `lead_from_tof` (`src/moving_target.rs`), and an app can apply it to a
+sample:
+
+```text
+lead_m   = target_speed_mps * sin(angle) * time_s
+lead_mil = lead_m / distance_m * 1000
+lead_moa = lead_m / distance_m * 3438
+```
+
+`angle` is the direction the target travels relative to the line of sight: 0° directly away,
+90° crossing left to right, 180° directly toward the shooter, 270° crossing right to left. A
+positive lead is a hold to the right and a negative one a hold to the left, so either way the
+hold is ahead of the target. The ratio is the same small-angle one as above, and it is zero
+under 1 m. Lead is target motion only: the wind is already in `windage_m`, and the lead adds to
+it on the same axis, so the whole horizontal hold, positive left as above, is
+`windage_mil - lead_mil`.
+
+`ballistics lead` also moves the range for a target that is not crossing square. It iterates
+the intercept range `R = R0 + target_speed_mps * cos(angle) * TOF(R)` until a step changes it by
+less than 0.1 m, and evaluates the lead there. `lead_from_tof` on the sample at `R0` does not,
+so the two agree only for a crossing target (90° or 270°). An app that needs the correction can
+iterate the same way, interpolating `time_s` between samples.
+
+### Worked example
+
+The representative request above, with `effects` all `false` (the `card.*` commands and
+`ballistics lead` model neither Coriolis nor spin drift), has this sample at 300 m:
+
+```json
+{"distance_m": 300.0, "time_s": 0.4100179737381975, "speed_mps": 650.9376231518361, "energy_j": 2402.491204959965, "drop_m": 0.4583304990888585, "windage_m": -0.20339285743668, "mach": 1.8998340035015642, "flags": []}
+```
+
+- **Elevation:** `0.4583304990888585 / 300 * 1000` = 1.527768 mil, held up, or 5.252468 MOA.
+  The same request with a `reticle` block at `range_m` 300 returns `reticle_hold.down_mil`
+  1.527768330296195.
+- **Windage:** `-0.20339285743668 / 300 * 1000` = −0.677976 mil. The wind from the right
+  carries the bullet left, so the hold is 0.677976 mil right, or 2.330882 MOA; `reticle_hold`
+  gives `right_mil` −0.6779761914556001.
+- **Against `card.range_table`:** the same load and air as a metric card,
+
+  ```json
+  {"units": "metric", "muzzle_velocity": 823.0, "ballistic_coefficient": 0.243, "mass": 11.34,
+   "diameter": 6.71, "drag_model": "g7", "sight_height": 38.1, "zero_distance": 100.0,
+   "temperature": 18.0, "pressure": 985.0, "humidity": 50.0, "altitude": 250.0,
+   "wind_speed": 4.4704, "wind_direction_deg": 90.0, "start": 100.0, "end": 500.0,
+   "step": 100.0, "adjustment_unit": "moa"}
+  ```
+
+  prints `wind_adj` −2.330882146224353 at 300 m, which is `windage_m / 300 * 3438` from this
+  sample to the last digit. Its `drop_adj` is 5.252455654337169, because its own solve puts the
+  drop at 458.329 mm where this sample has 458.330 mm. This sample's drop with the exact
+  constant would give 5.252081.
+- **Lead:** a target crossing left to right (`angle` 90°) at 3 m/s has
+  `lead_m = 3 * 0.4100179737381975` = 1.230054 m, so `lead_mil` = 4.100180 and `lead_moa` =
+  14.096418, held right. With the wind, the horizontal hold is `-0.677976 - 4.100180` =
+  −4.778156 mil, which is 4.778156 mil right.
+- **Against `ballistics lead`:** with the same load, air and target,
+
+  ```text
+  ballistics lead -u metric -v 823 -b 0.243 --drag-model g7 -m 11.34 -d 6.71 \
+    --sight-height 38.1 --temperature 18 --pressure 985 --humidity 50 --altitude 250 \
+    --wind-speed 4.4704 --wind-direction 90 --target-speed 3 --target-angle 90 \
+    --start 300 --end 300 -o json
+  ```
+
+  reports `lead_mil` 4.100183254173634 and `lead_moa` 14.096430027848953, over a `tof_s` of
+  0.41001832541736344. It flies its own trajectory from a level bore, with no zero, so its time
+  of flight differs from the sample's 0.4100179737381975 s in the seventh significant digit,
+  and the lead with it.
+
 ## Error envelope
 
 `status` is the literal `"error"`. Structurally valid JSON uses `path` and null line/column fields;

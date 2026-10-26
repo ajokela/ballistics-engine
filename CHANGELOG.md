@@ -118,6 +118,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the engine in. A `RegisterNatives` from `JNI_OnLoad` variant replaces the mangled name for
   those who prefer it. All of it was built with NDK 29.0 for `arm64-v8a` and `x86_64`, and the
   Kotlin and C were run on a desktop JVM. Documentation only; the engine is unchanged.
+- **Deriving holds from solve samples is documented.** Bridge apps receive drop and windage in
+  metres and had to guess the sign of each hold, the angle formula and the MOA constant, and
+  the bridge has no lead command. A new section of
+  [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#deriving-holds-from-samples), linked from the
+  Android guide, gives the signs (positive `drop_m` holds up, positive `windage_m` holds
+  left), the small-angle `metres / distance * 1000` that `reticle_hold` uses, and which
+  constant each output uses for MOA: 3438 per radian for the `card.*` columns, `ballistics
+  lead`, the reticle catalog and `true.dial_plan` clicks, and 10800/π for
+  `summary.aerodynamic_jump_moa` and `true.fit`/`true.dsf` drops in `"moa"`. It states
+  `lead_from_tof` exactly, with its sign convention and its small-angle ratio, and notes the
+  intercept-range correction `ballistics lead` adds for a target that is not crossing square.
+  A worked example's numbers come from the engine and match `reticle_hold`,
+  `card.range_table`'s windage column and `ballistics lead`. Documentation only; the engine is
+  unchanged.
 
 ## [0.48.0] - 2026-10-20
 

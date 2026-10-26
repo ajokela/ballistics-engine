@@ -431,6 +431,14 @@ fun call(request: JSONObject): JSONObject {
 Keep `zero_distance_m` in the second request only when it uses `rifle.sight_offset_lateral_m` or
 `shot.zero_poi_right_m`, which need it.
 
+## Turning samples into holds
+
+A `solve` result's `samples` give drop and windage in metres, not holds.
+[Deriving holds from samples](SOLVE_JSON_V1.md#deriving-holds-from-samples) has the signs, the
+mil and MOA arithmetic the engine's own hold outputs use (an MOA column meant to agree with
+`card.range_table` converts with 3438 per radian, not 10800/π), and the `lead_from_tof`
+formula, which a bridge app has to apply itself because the bridge has no lead command.
+
 ## See also
 
 - [`include/ballistics_bridge.h`](../include/ballistics_bridge.h) — the ABI contract:
