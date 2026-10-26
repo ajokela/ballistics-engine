@@ -2474,6 +2474,75 @@ mod station_presence_tests {
         }
     }
 
+    /// An omitted reading at altitude flies the ICAO air the legacy rule resolves it to, bit for
+    /// bit, on all three paths that build truing air: the per-range predictor
+    /// (`solve_truing_trajectory`), the batched one (`predict_many_in_unit`) and the chrono
+    /// back-solve (`velocity_at_distance_fps`).
+    ///
+    /// The altitudes are chosen so that these pins also catch air that is pre-resolved in
+    /// °C/hPa and converted back to °F/inHg instead of resolved after the unit conversion
+    /// (spec mutation 16). That round trip is usually exact, or its last-bit error is absorbed
+    /// later (×100 to Pa, +273.15 to K). At 175 ft it reaches the drop, and at 7135 ft the chrono
+    /// solve.
+    #[test]
+    fn an_omitted_reading_at_altitude_flies_the_legacy_air_on_every_truing_path() {
+        // captured at ab4eb0c, 59 °F / 29.92 inHg
+        const DROP_175_FT: u64 = 0x4011ad497c60a9fe; // 4.419225638770966 mil at 600 yd
+        const CHRONO_7135_FT: u64 = 0x40a4c30ea2569385; // 2657.5285822920873 fps
+        let (single, batched) =
+            model(StationReading::omitted(29.92), 175.0).with_forward_model(DropUnit::Mil, |fm| {
+                (
+                    fm.predict(2700.0, 0.243, 600.0).unwrap(),
+                    fm.predict_many_in_unit(2700.0, 0.243, &[600.0], DropUnit::Mil)
+                        .unwrap()[0]
+                        .unwrap(),
+                )
+            });
+        assert_eq!(single.to_bits(), DROP_175_FT, "{single:?}");
+        assert_eq!(batched.to_bits(), DROP_175_FT, "{batched:?}");
+        let chrono = |presence| {
+            correct_chrono_velocity_fps_with_station_presence(
+                2650.0,
+                4.572,
+                0.243,
+                DragModelArg::G7,
+                168.0,
+                0.308,
+                59.0,
+                29.92,
+                50.0,
+                7135.0,
+                &None,
+                presence,
+            )
+            .unwrap()
+            .muzzle_velocity_fps
+        };
+        let legacy = correct_chrono_velocity_fps(
+            2650.0,
+            4.572,
+            0.243,
+            DragModelArg::G7,
+            168.0,
+            0.308,
+            59.0,
+            29.92,
+            50.0,
+            7135.0,
+            &None,
+        )
+        .unwrap()
+        .muzzle_velocity_fps;
+        assert_eq!(legacy.to_bits(), CHRONO_7135_FT, "{legacy:?}");
+        assert_eq!(
+            chrono(StationAtmospherePresence::NEITHER).to_bits(),
+            CHRONO_7135_FT
+        );
+        // A supplied 59 °F / 29.92 inHg is sea-level air, far denser than ICAO at 7135 ft: more
+        // loss to the screen, so a higher back-solved muzzle velocity.
+        assert!(chrono(StationAtmospherePresence::BOTH) > legacy);
+    }
+
     /// The batched predictor and the per-range one must fly the same air for a supplied reading.
     #[test]
     fn batched_and_single_predictions_agree_for_a_supplied_in_band_reading() {
