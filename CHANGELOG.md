@@ -132,6 +132,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A worked example's numbers come from the engine and match `reticle_hold`,
   `card.range_table`'s windage column and `ballistics lead`. Documentation only; the engine is
   unchanged.
+- **`scripts/build-mobile-android.sh` leaves only the engine in its output.** cargo-ndk copies
+  printpdf's cdylib into each ABI directory beside `libballistics_engine.so`, and the script
+  used to list it as output, so an integrator who copied the directory into an app's `jniLibs`
+  shipped a `libprintpdf-<hash>.so` that nothing loads. After its `DT_SONAME` checks the script
+  now deletes every `.so` that is not `libballistics_engine.so`, and says which. The libraries
+  it keeps are unchanged. The script's comments and
+  [docs/ANDROID_JNI_BRIDGE.md](docs/ANDROID_JNI_BRIDGE.md#loading-the-library) say so.
 
 ## [0.48.0] - 2026-10-20
 

@@ -184,9 +184,11 @@ The app ships two libraries for each ABI, and the worked example needs both.
 `target/mobile/jniLibs/<abi>/libballistics_engine.so` for `arm64-v8a` and `x86_64`. Copy each
 into the module's `jniLibs` source set, as `src/main/jniLibs/<abi>/libballistics_engine.so`.
 
-Copy the engine library by name rather than the whole directory: cargo-ndk also drops any
-`cdylib` a dependency happens to declare next to it (currently a `libprintpdf-<hash>.so`),
-which nothing here loads and which is only APK weight.
+That is all the script leaves there. cargo-ndk also copies in any `cdylib` a dependency happens
+to declare (currently a `libprintpdf-<hash>.so` per ABI), which nothing here loads and which
+would only be APK weight, so the script deletes every other `.so` after its checks. A library
+built with cargo-ndk directly still has that file beside it: copy `libballistics_engine.so` by
+name rather than the whole directory.
 
 **The JNI glue, built by the app.** The engine exports the `ballistics_bridge_*` functions and
 no JNI symbols, so `Java_com_example_ballistics_BallisticsBridge_nativeCall` has to be compiled
