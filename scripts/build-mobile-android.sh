@@ -85,11 +85,13 @@ done
 # Everything else cargo-ndk copied in goes, now that the checks above have read it. Today that
 # is printpdf's libprintpdf-<hash>.so, one per ABI: no app loads it, and an integrator who copies
 # the whole directory into jniLibs would ship it as dead weight. Deleting by "not ours" rather
-# than by printpdf's name also catches any cdylib a future dependency brings.
-while IFS= read -r stray; do
+# than by printpdf's name also catches any cdylib a future dependency brings. find walks only
+# $OUT, skips directories, and hands over NUL-separated paths, so an odd file name can neither
+# split into two paths nor point the rm anywhere outside $OUT.
+while IFS= read -r -d '' stray; do
   echo "    removed ${stray#"$OUT"/} (a dependency's cdylib; no app loads it)"
-  rm -f "$stray"
-done < <(find "$OUT" -name '*.so' ! -name "$SONAME")
+  rm -f -- "$stray"
+done < <(find "$OUT" ! -type d -name '*.so' ! -name "$SONAME" -print0)
 
 echo "OK: $OUT (features: $FEATURES, engine $(grep -m1 '^version' Cargo.toml | cut -d'"' -f2))"
 find "$OUT" -name '*.so' -exec ls -la {} \;
