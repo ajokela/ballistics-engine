@@ -6,7 +6,8 @@
 //! pressure or temperature was left out at altitude (which the solve replaces with ICAO air at
 //! the site), and the QNH itself when one was declared (which the solve reduces to station
 //! pressure). The expected headers here are derived from the air the solve flies,
-//! `atmosphere::resolve_station_conditions_with_pressure_mode`, and the main ones are also
+//! `atmosphere::resolve_station_conditions_with_presence` with the run's presence (0.49.0: a
+//! typed value flies as typed, an omitted one keeps the legacy rule), and the main ones are also
 //! pinned as literals.
 
 #![cfg(feature = "pdf")]
@@ -18,7 +19,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use ballistics_engine::atmosphere::{
-    resolve_station_conditions_with_pressure_mode, PressureReferenceMode,
+    resolve_station_conditions_with_presence, PressureReferenceMode, StationAtmospherePresence,
 };
 use pdf_text::{contains_phrase, header_air_phrase, tokens};
 
@@ -119,25 +120,38 @@ fn assert_header_says(bytes: &[u8], label: &str, phrase: &str) {
     );
 }
 
-/// The header for the air a run flies, from what it hands the solve (°C, hPa, m).
+/// The header for the air a run flies, from what it hands the solve (°C, hPa, m) and which of
+/// the pair it typed.
 fn flown_header(
     temperature_c: f64,
     pressure_hpa: f64,
     altitude_m: f64,
     mode: PressureReferenceMode,
+    presence: StationAtmospherePresence,
 ) -> String {
-    let (temperature_c, pressure_hpa) = resolve_station_conditions_with_pressure_mode(
+    let (temperature_c, pressure_hpa) = resolve_station_conditions_with_presence(
         temperature_c,
         pressure_hpa,
         altitude_m,
         mode,
+        presence,
     );
     header_air_phrase(temperature_c, pressure_hpa)
 }
 
+const NEITHER: StationAtmospherePresence = StationAtmospherePresence::NEITHER;
+const BOTH: StationAtmospherePresence = StationAtmospherePresence::BOTH;
+const PRESSURE_ONLY: StationAtmospherePresence = StationAtmospherePresence::new(false, true);
+
 #[test]
 fn trajectory_header_states_icao_air_when_none_is_supplied_at_altitude() {
-    let want = flown_header(15.0, 1013.25, 1500.0, PressureReferenceMode::Absolute);
+    let want = flown_header(
+        15.0,
+        1013.25,
+        1500.0,
+        PressureReferenceMode::Absolute,
+        NEITHER,
+    );
     assert_eq!(want, "DA:4919 ft Pressure:24.97/846 Temp:41");
     let bytes = card(
         "metric",
@@ -157,6 +171,7 @@ fn trajectory_header_states_icao_air_when_none_is_supplied_at_altitude_imperial(
         29.92 * 33.8639,
         5000.0 * 0.3048,
         PressureReferenceMode::Absolute,
+        NEITHER,
     );
     assert_eq!(want, "DA:4998 ft Pressure:24.90/843 Temp:41");
     let bytes = card(
@@ -170,20 +185,28 @@ fn trajectory_header_states_icao_air_when_none_is_supplied_at_altitude_imperial(
 
 #[test]
 fn trajectory_header_states_the_temperature_flown_when_only_pressure_is_supplied() {
-    let want = flown_header(15.0, 845.6, 1500.0, PressureReferenceMode::Absolute);
+    let want = flown_header(
+        15.0,
+        845.6,
+        1500.0,
+        PressureReferenceMode::Absolute,
+        PRESSURE_ONLY,
+    );
     assert_eq!(want, "DA:4919 ft Pressure:24.97/846 Temp:41");
     let air = ["--altitude", "1500", "--pressure", "845.6"];
     let bytes = card("metric", TRAJECTORY_LOAD, &air, "station pressure");
     assert_header_says(&bytes, "trajectory, 845.6 hPa and no temperature", &want);
 }
 
-/// The ticket's QNH repro. Its expected 6088.6 ft is the DA of 845.6 hPa at 15 °C, but
-/// `--temperature 15` at altitude is the CLI's default-temperature sentinel, so the solve
-/// flies the ICAO 5.25 °C and the header must say about 4919 ft.
+/// The ticket's QNH repro. Its expected 6088.6 ft is the DA of 845.6 hPa at 15 °C. Before
+/// 0.49.0 a typed `--temperature 15` at altitude was read as the CLI's default-temperature
+/// sentinel and flew the ICAO 5.25 °C, so this header said about 4919 ft. A typed value now
+/// flies as typed (the station-sentinel rule), so the run flies 15 °C and the header says the
+/// ticket's 6089 ft.
 #[test]
 fn trajectory_header_states_station_pressure_for_a_declared_qnh() {
-    let want = flown_header(15.0, 1013.25, 1500.0, PressureReferenceMode::Qnh);
-    assert_eq!(want, "DA:4919 ft Pressure:24.97/846 Temp:41");
+    let want = flown_header(15.0, 1013.25, 1500.0, PressureReferenceMode::Qnh, BOTH);
+    assert_eq!(want, "DA:6089 ft Pressure:24.97/846 Temp:59");
     let air = [
         "--altitude",
         "1500",
@@ -199,7 +222,7 @@ fn trajectory_header_states_station_pressure_for_a_declared_qnh() {
 
     // A non-standard QNH and temperature: the header prints the reduced station pressure,
     // not the 1030 hPa typed.
-    let want = flown_header(20.0, 1030.0, 1500.0, PressureReferenceMode::Qnh);
+    let want = flown_header(20.0, 1030.0, 1500.0, PressureReferenceMode::Qnh, BOTH);
     assert_eq!(want, "DA:6126 ft Pressure:25.40/860 Temp:68");
     let air = [
         "--altitude",
@@ -264,7 +287,13 @@ fn trajectory_header_prints_sea_level_and_fully_stated_air_as_before() {
 
 #[test]
 fn adaptive_card_header_states_icao_air_when_none_is_supplied_at_altitude() {
-    let want = flown_header(15.0, 1013.25, 1500.0, PressureReferenceMode::Absolute);
+    let want = flown_header(
+        15.0,
+        1013.25,
+        1500.0,
+        PressureReferenceMode::Absolute,
+        NEITHER,
+    );
     assert_eq!(want, "DA:4919 ft Pressure:24.97/846 Temp:41");
     let bytes = card(
         "metric",
@@ -280,7 +309,13 @@ fn adaptive_card_header_states_icao_air_when_none_is_supplied_at_altitude() {
 /// solve flew the ICAO 5.25 °C), giving `DA:6089 ft` until 0.49.0.
 #[test]
 fn adaptive_card_header_states_the_temperature_flown_for_a_declared_qnh() {
-    let want = flown_header(15.0, 1013.25, 1500.0, PressureReferenceMode::Qnh);
+    let want = flown_header(
+        15.0,
+        1013.25,
+        1500.0,
+        PressureReferenceMode::Qnh,
+        PRESSURE_ONLY,
+    );
     assert_eq!(want, "DA:4919 ft Pressure:24.97/846 Temp:41");
     let air = [
         "--altitude",

@@ -762,6 +762,57 @@ mod pressure_mode_on_calculator_subcommands {
         }
     }
 
+    /// 0.49.0: the same equivalence for a QNH that reduces INTO the old sentinel band. QNH
+    /// 1031 hPa at 150 m reduces to about 1012.86 hPa, within 0.5 hPa of 1013.25. Before
+    /// 0.49.0 the absolute leg's typed 1012.86 hPa was read as "omitted" there and flew ICAO
+    /// air (995.36 hPa), and so did the QNH leg on every subcommand that pre-reduces; a typed
+    /// station pressure now flies as typed, so both legs fly the reduced reading.
+    #[test]
+    fn an_in_band_qnh_matches_absolute_at_its_reduced_station_pressure_on_every_subcommand() {
+        let qnh_inhg = 1031.0 / 33.8639;
+        let altitude_ft = 150.0 / 0.3048;
+        let qnh_hpa = qnh_inhg * 33.8639;
+        let station_hpa = ballistics_engine::atmosphere::reduce_qnh_to_station_pressure(
+            qnh_hpa,
+            altitude_ft * 0.3048,
+        );
+        assert!(
+            (station_hpa - 1013.25).abs() < 0.5,
+            "the fixture must reduce into the old band: {station_hpa}"
+        );
+        let station_inhg = qnh_inhg * (station_hpa / qnh_hpa);
+        let (qnh, altitude, station) = (
+            qnh_inhg.to_string(),
+            altitude_ft.to_string(),
+            station_inhg.to_string(),
+        );
+        for (name, args) in cases() {
+            let swap = |pressure: &str| -> Vec<String> {
+                let mut out: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                for index in 0..out.len() {
+                    match out[index].as_str() {
+                        "24.90" => out[index] = pressure.to_string(),
+                        "--altitude" => out[index + 1] = altitude.clone(),
+                        _ => {}
+                    }
+                }
+                out
+            };
+            let mut qnh_args = swap(&qnh);
+            qnh_args.extend(["--pressure-type".to_string(), "qnh".to_string()]);
+            let mut absolute_args = swap(&station);
+            absolute_args.extend(["--pressure-type".to_string(), "absolute".to_string()]);
+            fn refs(v: &[String]) -> Vec<&str> {
+                v.iter().map(String::as_str).collect()
+            }
+            assert_eq!(
+                stdout_of(&refs(&qnh_args)),
+                stdout_of(&refs(&absolute_args)),
+                "`{name}`: QNH 1031 hPa at 150 m differs from its reduced station pressure"
+            );
+        }
+    }
+
     /// At sea level a QNH IS the station pressure, so `qnh` must be byte-identical to
     /// `absolute` at the same reading. 30.31 inHg converted to hPa and back is
     /// 30.309999999999995, which `compare -o json` echoed and every subcommand flew. JSON,
