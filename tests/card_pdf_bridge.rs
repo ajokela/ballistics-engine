@@ -1255,4 +1255,130 @@ mod pdf_present {
             );
         }
     }
+
+    // -- the header's air (MBA-1593) -------------------------------------------------------
+
+    use ballistics_engine::atmosphere::{
+        resolve_station_conditions_with_pressure_mode, PressureReferenceMode,
+    };
+
+    use crate::pdf_text::{contains_phrase, header_air_phrase};
+
+    /// The MBA-1593 report's metric load at a dry 1500 m site, with `air` merged in.
+    fn altitude_request(air: Value) -> Value {
+        let mut request = json!({
+            "units": "metric",
+            "muzzle_velocity": 823.0,
+            "ballistic_coefficient": 0.475,
+            "mass": 10.9,
+            "diameter": 7.82,
+            "zero_distance": 100.0,
+            "altitude": 1500.0,
+            "humidity": 0.0,
+            "start": 100.0,
+            "end": 300.0,
+            "step": 100.0
+        });
+        for (key, value) in air.as_object().expect("air is an object") {
+            request[key] = value.clone();
+        }
+        request
+    }
+
+    /// The air a card request's rows fly: `card.*` hands its (°C, hPa) to the solver, which
+    /// resolves it as an absolute station reading (a card request has no QNH mode).
+    fn flown_air(temperature_c: f64, pressure_hpa: f64, altitude_m: f64) -> (f64, f64) {
+        resolve_station_conditions_with_pressure_mode(
+            temperature_c,
+            pressure_hpa,
+            altitude_m,
+            PressureReferenceMode::Absolute,
+        )
+    }
+
+    fn assert_header_says(bytes: &[u8], label: &str, phrase: &str) {
+        assert!(
+            contains_phrase(bytes, label, phrase),
+            "{label}: the header must read {phrase:?}: {:?}",
+            tokens(bytes, label)
+        );
+    }
+
+    /// (MBA-1593) A card at altitude with no pressure or temperature flies ICAO air at that
+    /// altitude, so its header must state that air, not the sea-level defaults it was handed.
+    /// Until 0.49.0 it read `DA:0 ft Pressure:29.92/1013 Temp:59`.
+    #[test]
+    fn the_header_states_the_air_the_rows_flew_when_none_is_supplied_at_altitude() {
+        let (temperature_c, pressure_hpa) = flown_air(15.0, 1013.25, 1500.0);
+        let want = header_air_phrase(temperature_c, pressure_hpa);
+        assert_eq!(want, "DA:4919 ft Pressure:24.97/846 Temp:41");
+
+        // The rows really are that air's: the same card with it supplied explicitly.
+        let rows = |request: Value| call("card.range_table", request)["result"]["rows"].clone();
+        assert_eq!(
+            rows(altitude_request(json!({}))),
+            rows(altitude_request(
+                json!({"temperature": temperature_c, "pressure": pressure_hpa})
+            )),
+            "the omitted-air card must fly ICAO air at 1500 m"
+        );
+
+        let (bytes, _pages) = generate(altitude_request(json!({})));
+        assert_header_says(&bytes, "omitted air at 1500 m", &want);
+    }
+
+    /// (MBA-1593) An explicit station pressure with the temperature left out flies the ICAO
+    /// temperature at the site, and the header must say so. Until 0.49.0 it printed the 59 °F
+    /// default and a density altitude about 1170 ft too high (`DA:6088 ft`).
+    #[test]
+    fn the_header_states_the_temperature_flown_when_only_pressure_is_supplied() {
+        let (temperature_c, pressure_hpa) = flown_air(15.0, 845.6, 1500.0);
+        let want = header_air_phrase(temperature_c, pressure_hpa);
+        assert_eq!(want, "DA:4919 ft Pressure:24.97/846 Temp:41");
+
+        let (bytes, _pages) = generate(altitude_request(json!({"pressure": 845.6})));
+        assert_header_says(&bytes, "845.6 hPa, no temperature", &want);
+    }
+
+    /// (MBA-1593) Where the solve flies exactly the air it was handed — sea level, or station
+    /// air stated in full — the header is what it always was, digit for digit. 30.245 inHg is
+    /// a reading whose hPa round trip lands on the other side of the 2-place rounding
+    /// (30.244999…), so it fails if the header ever re-derives a figure it should keep.
+    #[test]
+    fn sea_level_and_fully_stated_station_air_print_as_before() {
+        let (bytes, _pages) = generate(fixture_request());
+        assert_header_says(
+            &bytes,
+            "imperial sea level",
+            "DA:1 ft Pressure:29.92/1013 Temp:59",
+        );
+
+        let (bytes, _pages) = generate(altitude_request(
+            json!({"altitude": 0.0, "pressure": 1013.25, "temperature": 15.0}),
+        ));
+        assert_header_says(
+            &bytes,
+            "metric sea level",
+            "DA:0 ft Pressure:29.92/1013 Temp:59",
+        );
+
+        let (bytes, _pages) = generate(altitude_request(
+            json!({"pressure": 845.6, "temperature": 5.25}),
+        ));
+        assert_header_says(
+            &bytes,
+            "stated station air at 1500 m",
+            "DA:4918 ft Pressure:24.97/846 Temp:41",
+        );
+
+        let mut request = fixture_request();
+        request["pressure"] = json!(30.245);
+        request["temperature"] = json!(59.5);
+        let (bytes, _pages) = generate(request);
+        assert_header_says(
+            &bytes,
+            "stated 30.245 inHg at sea level",
+            "DA:-336 ft Pressure:30.25/1024 Temp:60",
+        );
+    }
 }

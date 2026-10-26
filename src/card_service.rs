@@ -2465,9 +2465,10 @@ pub fn pdf_card_v1(
     req: &CardRequestV1,
     stored: Option<&StoredCardV1>,
 ) -> Result<PdfCardV1, CardServiceError> {
+    use crate::atmosphere::{resolve_station_conditions_with_pressure_mode, PressureReferenceMode};
     use crate::pdf_dope_card::{
-        calculate_density_altitude, dope_card_page_count, generate_dope_card_pdf, ladder_bc_label,
-        DopeCardConfig, RangeUnit,
+        dope_card_page_count, generate_dope_card_pdf, ladder_bc_label, DopeCardConfig,
+        HeaderAtmosphere, RangeUnit,
     };
 
     let opts = req.pdf.clone().unwrap_or_default();
@@ -2613,16 +2614,33 @@ pub fn pdf_card_v1(
     // conditions are the ones the solve used rather than blanks.
     let temperature = req.temperature.unwrap_or_else(|| u.default_temperature());
     let pressure = req.pressure.unwrap_or_else(|| u.default_pressure());
-    // inHg <-> hPa via the CLI dope card's own factor (main.rs uses 33.8639 on both PDF
-    // call sites), NOT pdf_dope_card::INHG_TO_HPA — matching the shipped header exactly.
-    let pressure_inhg = u.pressure_to_inhg(pressure);
-    let pressure_hpa = u.pressure_to_hpa(pressure);
-    let temperature_f = u.temperature_to_fahrenheit(temperature);
     // NOTE: `CardRequestV1::altitude` defaults to METRES whatever the `units` preset says —
     // the one dimension whose fallback is not the preset's, because it never was (see
     // `CardRequestV1::altitude_unit`). The header reports the altitude the solve actually
     // used, so it converts out of whatever `altitude_unit` settled on.
     let altitude_ft = u.altitude_to_feet(req.altitude);
+    // MBA-1593: and the AIR the solve actually flew. `resolve()` hands the solver this
+    // (°C, hPa) pair, which it resolves as an absolute station reading (a card request has no
+    // QNH mode): a sea-level default at a real altitude becomes ICAO air there. The header
+    // used to print the pair as handed, so a 1500 m card with no pressure read DA:0 ft. The
+    // stated figures use the CLI dope card's own 33.8639 inHg <-> hPa factor (main.rs uses it
+    // on both PDF call sites), NOT pdf_dope_card::INHG_TO_HPA, matching the shipped header.
+    let supplied = (
+        u.temperature_to_metric(temperature),
+        u.pressure_to_metric(pressure),
+    );
+    let flown = resolve_station_conditions_with_pressure_mode(
+        supplied.0,
+        supplied.1,
+        u.altitude_to_metric(req.altitude),
+        PressureReferenceMode::Absolute,
+    );
+    let header_air = HeaderAtmosphere::new(
+        u.temperature_to_fahrenheit(temperature),
+        u.pressure_to_inhg(pressure),
+        u.pressure_to_hpa(pressure),
+    )
+    .as_flown(supplied, flown);
 
     let config = DopeCardConfig {
         rifle_name: opts
@@ -2630,10 +2648,10 @@ pub fn pdf_card_v1(
             .clone()
             .unwrap_or_else(|| "Dope Card".to_string()),
         location: opts.location.clone().unwrap_or_default(),
-        density_altitude_ft: calculate_density_altitude(altitude_ft, pressure_inhg, temperature_f),
-        pressure_inhg,
-        pressure_hpa,
-        temperature_f,
+        density_altitude_ft: header_air.density_altitude_ft,
+        pressure_inhg: header_air.pressure_inhg,
+        pressure_hpa: header_air.pressure_hpa,
+        temperature_f: header_air.temperature_f,
         altitude_ft,
         wind_speed_mph: u.wind_to_mph(req.wind_speed),
         // Absent target speed prints 0 here (there is no lead to state) while the Lead

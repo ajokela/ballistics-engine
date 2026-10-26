@@ -46,7 +46,7 @@ use ballistics_engine::optic::{
 };
 #[cfg(feature = "pdf")]
 use ballistics_engine::pdf_dope_card::{
-    calculate_density_altitude, DopeCardConfig, FontSizePreset, RangeUnit,
+    DopeCardConfig, FontSizePreset, HeaderAtmosphere, RangeUnit,
 };
 use ballistics_engine::terminal_plot;
 
@@ -14180,21 +14180,28 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
                 .as_ref()
                 .ok_or("PDF output requires --sample-trajectory flag for trajectory data")?;
 
-            // Calculate density altitude
-            let da_ft = calculate_density_altitude(
-                pdf_meta.altitude_ft,
-                pdf_meta.pressure_inhg,
+            // MBA-1593: the header states the air the rows flew -- `resolved_temperature`/
+            // `resolved_pressure`, the pair the solver above was built with -- not the air the
+            // flags stated: a sea-level default at altitude flies ICAO air there, and a QNH
+            // flies its station pressure. Under --density-altitude the two are the same air.
+            let header_air = HeaderAtmosphere::new(
                 pdf_meta.temperature_f,
+                pdf_meta.pressure_inhg,
+                pdf_meta.pressure_inhg * 33.8639,
+            )
+            .as_flown(
+                (temperature, pressure),
+                (resolved_temperature, resolved_pressure),
             );
 
             // Build PDF config
             let pdf_config = DopeCardConfig {
                 rifle_name: pdf_meta.rifle_name.clone(),
                 location: pdf_meta.location_name.clone(),
-                density_altitude_ft: da_ft,
-                pressure_inhg: pdf_meta.pressure_inhg,
-                pressure_hpa: pdf_meta.pressure_inhg * 33.8639,
-                temperature_f: pdf_meta.temperature_f,
+                density_altitude_ft: header_air.density_altitude_ft,
+                pressure_inhg: header_air.pressure_inhg,
+                pressure_hpa: header_air.pressure_hpa,
+                temperature_f: header_air.temperature_f,
                 altitude_ft: pdf_meta.altitude_ft,
                 wind_speed_mph: pdf_meta.wind_speed_mph,
                 target_speed_mph: pdf_meta.target_speed_mph,
@@ -26608,16 +26615,29 @@ fn handle_adaptive_card(
             // branching on the run's own unit system.
             let velocity_fps =
                 UnitConverter::velocity_from_metric(load.velocity_mps, UnitSystem::Imperial);
-            let temperature_f =
-                UnitConverter::temperature_from_metric(load.temperature_c, UnitSystem::Imperial);
-            let pressure_inhg =
-                UnitConverter::pressure_from_metric(load.pressure_hpa, UnitSystem::Imperial);
             let altitude_ft =
                 UnitConverter::altitude_from_metric(load.altitude_m, UnitSystem::Imperial);
             let wind_speed_mph =
                 UnitConverter::wind_from_metric(load.wind_speed_mps, UnitSystem::Imperial);
             let weight_gr = UnitConverter::mass_from_metric(load.mass_kg, UnitSystem::Imperial);
-            let da_ft = calculate_density_altitude(altitude_ft, pressure_inhg, temperature_f);
+            // MBA-1593: the header states the air the rows flew. `HoldCurve::solve` hands
+            // `load`'s pair to the solver, which resolves it as an absolute station reading (a
+            // declared QNH was already reduced into `load.pressure_hpa` by
+            // `InverseSolverLoadArgs::resolve`), so a sea-level default at altitude flies ICAO
+            // air there.
+            let supplied = (load.temperature_c, load.pressure_hpa);
+            let flown = resolve_station_conditions_with_pressure_mode(
+                load.temperature_c,
+                load.pressure_hpa,
+                load.altitude_m,
+                PressureReferenceMode::Absolute,
+            );
+            let header_air = HeaderAtmosphere::new(
+                UnitConverter::temperature_from_metric(load.temperature_c, UnitSystem::Imperial),
+                UnitConverter::pressure_from_metric(load.pressure_hpa, UnitSystem::Imperial),
+                load.pressure_hpa,
+            )
+            .as_flown(supplied, flown);
 
             let rifle_name = profile_data
                 .as_ref()
@@ -26631,10 +26651,10 @@ fn handle_adaptive_card(
             let pdf_config = DopeCardConfig {
                 rifle_name,
                 location: String::new(),
-                density_altitude_ft: da_ft,
-                pressure_inhg,
-                pressure_hpa: load.pressure_hpa,
-                temperature_f,
+                density_altitude_ft: header_air.density_altitude_ft,
+                pressure_inhg: header_air.pressure_inhg,
+                pressure_hpa: header_air.pressure_hpa,
+                temperature_f: header_air.temperature_f,
                 altitude_ft,
                 wind_speed_mph,
                 target_speed_mph: 0.0,

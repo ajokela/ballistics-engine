@@ -271,6 +271,66 @@ pub fn calculate_density_altitude(_altitude_ft: f64, pressure_inhg: f64, temp_f:
     crate::atmosphere::faa_rule_density_altitude_ft(pressure_inhg * INHG_TO_HPA, temp_f)
 }
 
+/// hPa per inHg as every header call site has always converted it (`main.rs` uses 33.8639 on
+/// both CLI PDF branches, and `card.pdf` copies it), NOT [`INHG_TO_HPA`], which
+/// only the density-altitude formula uses. Kept so a restated header matches the shipped one.
+const HEADER_HPA_PER_INHG: f64 = 33.8639;
+
+/// The atmosphere fields of a dope card's header line, `DA:… ft Pressure:…/… Temp:…`, for the
+/// station air the card's rows were solved in (MBA-1593).
+///
+/// A solve does not always fly the air it is handed: it swaps ICAO air at the site's altitude
+/// in for a sea-level default pressure or temperature, and reduces a declared QNH to station
+/// pressure ([`crate::atmosphere::resolve_station_conditions_with_pressure_mode`]). Before
+/// 0.49.0 every card surface printed the air it was HANDED, so a card at 1500 m with no
+/// pressure or temperature read `DA:0 ft Pressure:29.92/1013 Temp:59` over rows that flew
+/// 846 hPa and 5.25 °C. Each surface now states its air with [`Self::new`] and restates it
+/// with [`Self::as_flown`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HeaderAtmosphere {
+    pub density_altitude_ft: f64,
+    pub pressure_inhg: f64,
+    pub pressure_hpa: f64,
+    pub temperature_f: f64,
+}
+
+impl HeaderAtmosphere {
+    /// The header for air given in the header's own units, with that air's density altitude
+    /// from [`calculate_density_altitude`]. Both pressure figures are taken as given, since
+    /// the surfaces have always derived the second from the first in their own ways.
+    pub fn new(temperature_f: f64, pressure_inhg: f64, pressure_hpa: f64) -> Self {
+        Self {
+            density_altitude_ft: calculate_density_altitude(0.0, pressure_inhg, temperature_f),
+            pressure_inhg,
+            pressure_hpa,
+            temperature_f,
+        }
+    }
+
+    /// This header, restated for the air the solve actually flew.
+    ///
+    /// `supplied` is the `(temperature °C, pressure hPa)` pair the solve was handed, which is
+    /// the air `self` states, and `flown` is the pair it flew: what
+    /// [`crate::atmosphere::resolve_station_conditions_with_pressure_mode`] made of `supplied`.
+    /// A field the solve flew as supplied keeps `self`'s figure exactly, so sea-level and fully
+    /// explicit station air print as they always have (an inHg reading is not round-tripped
+    /// through hPa). A field the solve substituted is restated from `flown`, and the density
+    /// altitude is recomputed from the result.
+    pub fn as_flown(self, supplied: (f64, f64), flown: (f64, f64)) -> Self {
+        let temperature_f = if flown.0 == supplied.0 {
+            self.temperature_f
+        } else {
+            flown.0 * 9.0 / 5.0 + 32.0
+        };
+        let (pressure_inhg, pressure_hpa) = if flown.1 == supplied.1 {
+            (self.pressure_inhg, self.pressure_hpa)
+        } else {
+            (flown.1 / HEADER_HPA_PER_INHG, flown.1)
+        };
+        Self::new(temperature_f, pressure_inhg, pressure_hpa)
+    }
+}
+
 /// Find font file - tries external locations first (for user overrides),
 /// then falls back to embedded fonts compiled into the binary.
 fn find_font_file(font_name: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -1206,6 +1266,60 @@ mod tests {
         let standard_density_altitude =
             calculate_density_altitude(0.0, standard_pressure_inhg, 59.0);
         assert!(standard_density_altitude.abs() < 1e-9);
+    }
+
+    /// MBA-1593: a header restated for the air a solve flew. Where the solve substituted (the
+    /// sea-level defaults at 1500 m), the header is the flown air's; where it flew what it was
+    /// handed, every field is the caller's own figure, bit for bit, density altitude included.
+    #[test]
+    fn header_atmosphere_states_the_flown_air_and_keeps_what_was_flown_as_supplied() {
+        use crate::atmosphere::{
+            resolve_station_conditions_with_pressure_mode, PressureReferenceMode,
+        };
+        let flown_at = |temperature_c: f64, pressure_hpa: f64, altitude_m: f64| {
+            resolve_station_conditions_with_pressure_mode(
+                temperature_c,
+                pressure_hpa,
+                altitude_m,
+                PressureReferenceMode::Absolute,
+            )
+        };
+
+        let stated = HeaderAtmosphere::new(59.0, 1013.25 / 33.8639, 1013.25);
+        let flown = flown_at(15.0, 1013.25, 1500.0);
+        let header = stated.as_flown((15.0, 1013.25), flown);
+        assert_eq!(header.temperature_f, flown.0 * 9.0 / 5.0 + 32.0);
+        assert_eq!(header.pressure_hpa, flown.1);
+        assert_eq!(header.pressure_inhg, flown.1 / 33.8639);
+        assert_eq!(
+            header.density_altitude_ft,
+            calculate_density_altitude(0.0, header.pressure_inhg, header.temperature_f)
+        );
+        assert_eq!(
+            format!(
+                "{:.0} {:.2}/{:.0} {:.0}",
+                header.density_altitude_ft,
+                header.pressure_inhg,
+                header.pressure_hpa,
+                header.temperature_f
+            ),
+            "4919 24.97/846 41"
+        );
+
+        // Explicit pressure, default temperature: only the temperature is substituted.
+        let stated = HeaderAtmosphere::new(59.0, 845.6 / 33.8639, 845.6);
+        let header = stated.as_flown((15.0, 845.6), flown_at(15.0, 845.6, 1500.0));
+        assert_eq!(header.pressure_inhg, stated.pressure_inhg);
+        assert_eq!(header.pressure_hpa, stated.pressure_hpa);
+        assert_ne!(header.temperature_f, stated.temperature_f);
+
+        // Flown as supplied: unchanged, including a figure whose hPa round trip would not
+        // reproduce it ((30.245 * 33.8639) / 33.8639 is 30.244999...).
+        let supplied = ((59.5 - 32.0) * 5.0 / 9.0, 30.245 * 33.8639);
+        let stated = HeaderAtmosphere::new(59.5, 30.245, 30.245 * 33.8639);
+        let header = stated.as_flown(supplied, flown_at(supplied.0, supplied.1, 0.0));
+        assert_eq!(header, stated);
+        assert_ne!(supplied.1 / 33.8639, 30.245);
     }
 
     // -----------------------------------------------------------------------------------

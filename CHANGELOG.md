@@ -128,6 +128,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed with "trajectory cannot reach target distance at any angle", now widens the bracket
   and solves, as the WASM terminal already did. For the .308 above, a 4000 yd zero solves at
   11.732877099642561°. Without the flag such zeros still fail as before.
+- **PDF dope card headers state the station air the rows were solved in.** The header's
+  `DA:… ft Pressure:…/… Temp:…` was computed from the pressure and temperature the card was
+  handed, but the rows fly the air the solve resolves from them: ICAO air at the site's
+  altitude for an omitted pressure or temperature (or one left at the 1013.25 hPa / 29.92 inHg,
+  15 °C / 59 °F default), and the station pressure of a declared QNH. So a card at 1500 m with
+  nothing supplied read `DA:0 ft Pressure:29.92/1013 Temp:59` over rows solved in 846 hPa and
+  5.25 °C, and an explicit 845.6 hPa with no temperature read `DA:6088 ft` and `Temp:59` over
+  rows that flew 5.25 °C. The header now takes its air from
+  `resolve_station_conditions_with_pressure_mode`, the function the solves use, on all three
+  printing surfaces: `trajectory -o pdf`, `adaptive-card -o pdf` and the bridge's `card.pdf`
+  (so the C ABI and JNI embedders too). A new `pdf_dope_card::HeaderAtmosphere` builds the
+  line for each. A field the solve flew as given keeps the figure it always printed (MBA-1593).
+  Only DA, Pressure and Temp move, and only where the solve substituted: at 1500 m with nothing
+  supplied the header now reads `DA:4919 ft Pressure:24.97/846 Temp:41` on all three surfaces,
+  at 5000 ft (imperial) `DA:4998 ft Pressure:24.90/843 Temp:41` (was `DA:1 ft
+  Pressure:29.92/1013 Temp:59`), and with 845.6 hPa and no temperature `DA:4919 ft`, `Temp:41`.
+  `trajectory --pressure-type qnh` prints the station pressure instead of the QNH: 1030 hPa and
+  20 °C at 1500 m went from `DA:38 ft Pressure:30.42/1030 Temp:68` to `DA:6126 ft
+  Pressure:25.40/860 Temp:68`, and 30.31 inHg and 50 °F at 5000 ft from `DA:-1043 ft
+  Pressure:30.31/1026` to `DA:5143 ft Pressure:25.23/854`. `adaptive-card` already printed a
+  reduced QNH but the 15 °C default, so 1013.25 hPa QNH at 1500 m went from `DA:6089 ft
+  Temp:59` to `DA:4919 ft Temp:41`. An explicit 15 °C / 59 °F (within 0.1 °C) or 1013.25 hPa /
+  29.92 inHg (within 0.5 hPa) at altitude is the solve's default sentinel, so it now prints the
+  ICAO value the rows flew; the reported QNH case (`--temperature 15 --pressure 1013.25
+  --pressure-type qnh` at 1500 m) reads `DA:4919 ft Temp:41`, not the 6088.6 ft that 15 °C
+  would give. On 34 cards compared before and after (20 CLI, 14 `card.pdf`), every token outside
+  the header line is identical, rows included. Sea level, fully stated station air, a QNH at sea
+  level and `--density-altitude` runs print the same header text as before: 108 CLI runs
+  (`trajectory` and `adaptive-card`, imperial and metric) and 49 `card.pdf` cards. WASM,
+  solve-json, the typed FFI calls and the Python and Ruby bindings print no card and are
+  unaffected. `calculate_density_altitude` and its unused altitude argument are unchanged.
 
 ### Notes
 - **The solve-json example request now sends a realistic station reading.** The representative

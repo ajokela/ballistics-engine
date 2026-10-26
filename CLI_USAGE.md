@@ -397,7 +397,7 @@ silently — tracked as MBA-1425.
 
 Shooter, Nosler, AB Analytics, Ballistic AE, and TRASOL all let a shooter carry conditions in the field as a single **density altitude** value instead of separately dialing in altitude, pressure, and temperature — it is how many US shooters actually record a day's conditions. `--density-altitude` accepts that same single value (feet imperial / meters metric, like `--altitude`).
 
-**Which density altitude to enter.** This input inverts the humidity-free FAA-rule density altitude (NWS pressure altitude plus 120 ft/°C — the formula the DOPE card header uses), then applies the run's `--humidity` on top. Enter that kind of number. Any other figure — most weather meters' density altitude, the NWS calculator's, or the bridge's `density_matched` — is off by the whole gap between the two definitions: the humidity already inside it, counted again by `--humidity`, plus the FAA rule's own approximation, which is there even in dry air. Warm, humid air comes out too thin (0.6% at 30 °C/50% RH, 1.5% at 35 °C/90%); cold or dry air too dense (0.9% at −20 °C/50%). And give the real `--temperature` with it: without one the air is rebuilt at the standard temperature for that altitude, which is different air (see below). Don't copy the density altitude off a PDF card made with `--pressure-type qnh`, or at altitude without `--pressure`: that header currently applies the formula to the unreduced or sea-level pressure (MBA-1593). See [docs/ATMOSPHERE_DENSITY_ALTITUDE.md](docs/ATMOSPHERE_DENSITY_ALTITUDE.md) for the two definitions side by side.
+**Which density altitude to enter.** This input inverts the humidity-free FAA-rule density altitude (NWS pressure altitude plus 120 ft/°C — the formula the DOPE card header uses), then applies the run's `--humidity` on top. Enter that kind of number. Any other figure — most weather meters' density altitude, the NWS calculator's, or the bridge's `density_matched` — is off by the whole gap between the two definitions: the humidity already inside it, counted again by `--humidity`, plus the FAA rule's own approximation, which is there even in dry air. Warm, humid air comes out too thin (0.6% at 30 °C/50% RH, 1.5% at 35 °C/90%); cold or dry air too dense (0.9% at −20 °C/50%). And give the real `--temperature` with it: without one the air is rebuilt at the standard temperature for that altitude, which is different air (see below). A PDF dope card's header density altitude is this same FAA-rule figure, for the station air the card's rows flew. Cards made before 0.49.0 with `--pressure-type qnh`, or at altitude without `--pressure` or `--temperature`, printed it for the unreduced or sea-level air instead (MBA-1593). See [docs/ATMOSPHERE_DENSITY_ALTITUDE.md](docs/ATMOSPHERE_DENSITY_ALTITUDE.md) for the two definitions side by side.
 
 **This is NOT the direct-density bypass.** `--density-altitude` back-solves an ISA-equivalent station altitude/temperature/pressure and feeds them through the exact same altitude-lapse pipeline every other atmosphere input uses — Mach number, the lapse rate, and downrange-segmented atmosphere (`--wind-segment`'s atmosphere analogue) all behave normally as the shot climbs or falls. Feeding density directly (bypassing that pipeline) would freeze the speed of sound for the whole flight, which is why that path is never used here.
 
@@ -4300,7 +4300,10 @@ Generate a printable dope card with two-column layout, color-coded values, and a
   graduation, Wind/Lead the windage one)
 - Color coding: Black=Range, Red=Drop, Green=Wind, Blue=Lead
 - Alternating row stripes for easy tracking in field conditions
-- Header with rifle, location, density altitude, atmospheric data
+- Header with rifle, location, density altitude, atmospheric data. The pressure, temperature
+  and density altitude are the station air the rows were solved in: ICAO air at `--altitude`
+  for an omitted (or sea-level default) pressure or temperature, and the station pressure for
+  `--pressure-type qnh` (MBA-1593)
 - Footer with timestamp, load data, BC, and velocity
 
 ## Parameters Reference

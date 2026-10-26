@@ -65,3 +65,22 @@ pub fn contains_phrase(pdf: &[u8], label: &str, phrase: &str) -> bool {
     let have = tokens(pdf, label);
     !want.is_empty() && have.windows(want.len()).any(|w| w == want.as_slice())
 }
+
+/// The `DA:… ft Pressure:…/… Temp:…` run a dope card's header prints for STATION air
+/// `(temperature °C, pressure hPa)`, written out independently of the card code (MBA-1593):
+/// the header's own 33.8639 hPa/inHg factor and formats, and the engine's density-altitude
+/// formula. Feed it the air the rows flew, from
+/// `atmosphere::resolve_station_conditions_with_pressure_mode`, to get what the header must say.
+pub fn header_air_phrase(temperature_c: f64, pressure_hpa: f64) -> String {
+    let pressure_inhg = pressure_hpa / 33.8639;
+    let temperature_f = temperature_c * 9.0 / 5.0 + 32.0;
+    let density_altitude_ft = ballistics_engine::pdf_dope_card::calculate_density_altitude(
+        0.0,
+        pressure_inhg,
+        temperature_f,
+    );
+    format!(
+        "DA:{density_altitude_ft:.0} ft Pressure:{pressure_inhg:.2}/{pressure_hpa:.0} \
+         Temp:{temperature_f:.0}"
+    )
+}
