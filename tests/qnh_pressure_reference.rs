@@ -287,6 +287,28 @@ fn qnh_pressure_at_sea_level_matches_absolute_exactly() {
     );
 }
 
+/// MBA-1605: `trajectory --help` names the reduction the engine runs. It used to say "the ICAO
+/// inverse-barometric formula", the ratio form MBA-1605 replaced. Whitespace is collapsed so
+/// clap's line wrapping cannot split the phrase.
+#[test]
+fn pressure_type_help_names_the_altimeter_setting_relation() {
+    let output = run(&["trajectory", "--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let entry = help
+        .split("--pressure-type <")
+        .nth(1)
+        .and_then(|rest| rest.split("--humidity <").next())
+        .expect("--pressure-type entry in help");
+    let expected =
+        "`qnh` is reduced to station pressure at --altitude with the altimeter-setting relation";
+    assert!(entry.contains(expected), "{entry}");
+    assert!(!help.contains("inverse-barometric"), "{entry}");
+}
+
 /// MBA-1605: a QNH with no station pressure at the altitude (500 hPa at 40 km, past where the
 /// altimeter-setting relation has a solution) is refused, never flown as near-vacuum air. The
 /// solving commands refuse it in the solver's input check; `stability` never solves, so it

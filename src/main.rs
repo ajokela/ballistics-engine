@@ -732,7 +732,8 @@ enum Commands {
 
         /// Whether --pressure is absolute station pressure (default) or a sea-level-corrected
         /// altimeter setting (QNH / weather-report "barometer" value, MBA-1397). `qnh` is
-        /// reduced to station pressure at --altitude via the ICAO inverse-barometric formula
+        /// reduced to station pressure at --altitude with the altimeter-setting relation (the
+        /// station's ISA pressure altitude is the QNH's plus the station's geopotential height)
         /// before use; `absolute` is today's behavior unchanged. Entering a QNH value as
         /// `absolute` (the historical default) at a real altitude over-states air density and
         /// under-states drop. No default_value (like --bc-reference): an explicit flag always

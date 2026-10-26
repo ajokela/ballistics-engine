@@ -1406,7 +1406,8 @@ pub(crate) fn resolve_atmosphere(
                 format!(
                     "Station pressure was declared as a QNH (sea-level-corrected altimeter \
                      setting) of {value:.6} Pa; reduced to station pressure {station_pa:.12} Pa \
-                     at {altitude_m:.6} m via the ICAO inverse-barometric formula."
+                     at {altitude_m:.6} m with the altimeter-setting relation (the station's \
+                     ISA pressure altitude is the QNH's plus the station's geopotential height)."
                 ),
                 "$.atmosphere.pressure_pa",
             ));
@@ -2347,6 +2348,33 @@ mod tests {
             .assumptions
             .iter()
             .any(|notice| notice.code == ASSUMPTION_ICAO_STANDARD_PRESSURE));
+    }
+
+    /// MBA-1605: the QNH notice names the reduction the engine actually runs. Before 0.49.0 it
+    /// said "the ICAO inverse-barometric formula", the ratio form MBA-1605 replaced.
+    #[test]
+    fn qnh_notice_names_the_altimeter_setting_relation() {
+        let mut request = minimal_request();
+        request.atmosphere.altitude_m = Some(1_500.0);
+        request.atmosphere.pressure_pa = Some(103_000.0);
+        request.atmosphere.pressure_reference = Some(PressureReferenceV1::Qnh);
+
+        let prepared = prepare_request(&request).expect("valid QNH request");
+        let notice = prepared
+            .assumptions
+            .iter()
+            .find(|notice| notice.code == ASSUMPTION_QNH_REDUCED_TO_STATION_PRESSURE)
+            .expect("QNH notice");
+        assert!(
+            notice.message.contains("altimeter-setting relation"),
+            "{}",
+            notice.message
+        );
+        assert!(
+            !notice.message.contains("inverse-barometric"),
+            "{}",
+            notice.message
+        );
     }
 
     /// MBA-1605: a QNH with no station pressure at the requested altitude (the altimeter-setting

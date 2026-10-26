@@ -128,8 +128,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   envelopes match the engine before the fix, as do a QNH of exactly 1013.25 hPa and any QNH at
   sea level. One case moves slightly: an imperial run that declares `qnh` with no `--pressure`
   reduces the CLI's 29.92 inHg default (1013.21 hPa, not 1013.25) as a reading, now 0.0012 hPa
-  lower at 5000 ft. No API, schema or ABI change, and the `qnh_reduced_to_station_pressure`
-  message wording is unchanged.
+  lower at 5000 ft. No API, schema or ABI change. The `qnh_reduced_to_station_pressure` notice
+  keeps its code, and its message (whose station figure moves anyway) and `trajectory --help`
+  for `--pressure-type` now name the altimeter-setting relation instead of "the ICAO
+  inverse-barometric formula".
 - **`trajectory --auto-zero` solves from a bore at ground level under
   `--ignore-ground-impact`.** The ground plane is height 0 and ends the flight, so a bore height
   of 0 or less stops before its first point. `--ignore-ground-impact` removes the ground for the
