@@ -594,6 +594,50 @@ mod tests {
         }
     }
 
+    /// MBA-1605: `true-velocity` and `true-wind` must fly exactly the station pressure the
+    /// library reduction gives, not merely a different one. Since the reduction stopped being a
+    /// plain ratio, a 24.90 inHg reading fed to it as if it were hPa flies 17.05 inHg instead of
+    /// 20.58; `test_calculators_honor_pressure_type` above only checks that the output moved, so
+    /// it cannot see that. The station pressure is built with native `apply_pressure_mode`'s
+    /// factors and arithmetic (33.8639 hPa/inHg, 0.3048 m/ft, the reading scaled by the
+    /// station/QNH ratio), so at sea level the reading comes back bit-exact. Mirrors native
+    /// `qnh_matches_absolute_at_the_reduced_station_pressure_on_every_subcommand`.
+    #[wasm_bindgen_test]
+    fn test_true_velocity_and_true_wind_qnh_fly_the_reduced_station_pressure() {
+        let wasm = WasmBallistics::new();
+        let commands = [
+            "true-velocity --measured-drop 30 --range 500 -b 0.243 -m 175 -d 0.308 --offline \
+             -o json",
+            "true-wind --miss 600:12 --twist-rate 10 -v 2700 -b 0.243 --drag-model g7 -m 175 \
+             -d 0.308 -o json",
+        ];
+        for (reading, altitude_ft) in [(24.90_f64, 5000.0_f64), (30.31, 0.0)] {
+            let qnh_hpa = reading * 33.8639;
+            let station_hpa =
+                crate::atmosphere::reduce_qnh_to_station_pressure(qnh_hpa, altitude_ft * 0.3048);
+            let station_inhg = reading * (station_hpa / qnh_hpa);
+            for command in commands {
+                let qnh = wasm
+                    .run_command(&format!(
+                        "{command} --pressure {reading} --altitude {altitude_ft} \
+                         --pressure-type qnh"
+                    ))
+                    .unwrap_or_else(|e| panic!("{command}: {e:?}"));
+                let absolute = wasm
+                    .run_command(&format!(
+                        "{command} --pressure {station_inhg} --altitude {altitude_ft} \
+                         --pressure-type absolute"
+                    ))
+                    .unwrap_or_else(|e| panic!("{command}: {e:?}"));
+                assert_eq!(
+                    qnh, absolute,
+                    "`{command} --pressure {reading} --pressure-type qnh` at {altitude_ft} ft \
+                     differs from `--pressure {station_inhg}` absolute"
+                );
+            }
+        }
+    }
+
     /// MBA-1418: `zero --from-angle` works in the browser terminal but had no tests here and
     /// was absent from the help text, so it was effectively undiscoverable. The inverse reports
     /// BOTH line-of-sight crossings a bore angle produces, and names which one `zero_range` is.
