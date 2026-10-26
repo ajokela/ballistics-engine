@@ -8,7 +8,9 @@
 # sets one and then reads it back off the artifacts before declaring success.
 # Mobile feature set matches iOS: bridge + ffi + pdf + profile-import, no online/cli.
 #
-# Output: target/mobile/jniLibs/<abi>/libballistics_engine.so
+# Output: target/mobile/jniLibs/<abi>/libballistics_engine.so, and nothing else. cargo-ndk also
+# copies a dependency's cdylib (printpdf's) into each <abi> directory; the script deletes it once
+# the checks below have run, so the directory holds only what an app ships.
 set -euo pipefail
 
 ENGINE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -33,9 +35,10 @@ rm -rf "$OUT"
 #
 # It goes after `--`, on `rustc`, rather than into RUSTFLAGS next to max-page-size, because
 # RUSTFLAGS reaches EVERY crate in the graph and a dependency here also declares a cdylib
-# (printpdf), which cargo-ndk copies into the same jniLibs directory. A soname in RUSTFLAGS
-# stamps `libballistics_engine.so` onto that file too, leaving two different libraries in one
-# directory claiming one name. `cargo rustc`'s trailing arguments apply to this crate alone.
+# (printpdf), which cargo-ndk copies into the same jniLibs directory (and which this script
+# deletes at the end). A soname in RUSTFLAGS stamps `libballistics_engine.so` onto that file
+# too, leaving two different libraries in one directory claiming one name. `cargo rustc`'s
+# trailing arguments apply to this crate alone.
 # max-page-size stays in RUSTFLAGS on purpose: Play's 16 KB requirement is about every .so
 # shipped in the APK, not just ours.
 RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-z,max-page-size=16384" \
@@ -78,6 +81,17 @@ for so in "$OUT"/*/*.so; do
   fi
 done
 [ "$checked" -gt 0 ] || { echo "FAIL: no $SONAME produced under $OUT" >&2; exit 1; }
+
+# Everything else cargo-ndk copied in goes, now that the checks above have read it. Today that
+# is printpdf's libprintpdf-<hash>.so, one per ABI: no app loads it, and an integrator who copies
+# the whole directory into jniLibs would ship it as dead weight. Deleting by "not ours" rather
+# than by printpdf's name also catches any cdylib a future dependency brings. find walks only
+# $OUT, skips directories, and hands over NUL-separated paths, so an odd file name can neither
+# split into two paths nor point the rm anywhere outside $OUT.
+while IFS= read -r -d '' stray; do
+  echo "    removed ${stray#"$OUT"/} (a dependency's cdylib; no app loads it)"
+  rm -f -- "$stray"
+done < <(find "$OUT" ! -type d -name '*.so' ! -name "$SONAME" -print0)
 
 echo "OK: $OUT (features: $FEATURES, engine $(grep -m1 '^version' Cargo.toml | cut -d'"' -f2))"
 find "$OUT" -name '*.so' -exec ls -la {} \;

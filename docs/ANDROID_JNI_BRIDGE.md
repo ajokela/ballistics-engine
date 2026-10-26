@@ -67,13 +67,19 @@ Return a `jbyteArray` and decode it on the Kotlin side with `Charsets.UTF_8`.
 
 ## Worked example
 
+The example is two pieces of app code: a Kotlin wrapper, and a C function that JNI calls. The C
+function cannot go in the prebuilt engine library, so the app compiles it into a small library
+of its own, `libballistics_jni.so`, which links against the engine. That is the library Kotlin
+loads; [Loading the library](#loading-the-library) has the CMake for it.
+
 Kotlin:
 
 ```kotlin
 package com.example.ballistics
 
 object BallisticsBridge {
-    init { System.loadLibrary("ballistics_engine") }
+    // The JNI glue below, not the engine: its DT_NEEDED entry brings libballistics_engine.so in.
+    init { System.loadLibrary("ballistics_jni") }
 
     /** Bytes in, bytes out. Neither side ever sees a jstring. */
     private external fun nativeCall(request: ByteArray): ByteArray
@@ -83,7 +89,7 @@ object BallisticsBridge {
 }
 ```
 
-C:
+C, in `ballistics_jni.c`:
 
 ```c
 #include <jni.h>
@@ -126,9 +132,35 @@ Java_com_example_ballistics_BallisticsBridge_nativeCall(JNIEnv *env,
 }
 ```
 
-In C++ the `JNIEnv` calls lose their first argument: `env->GetArrayLength(request)`. If you
-would rather not spell out the mangled name, register the method with `RegisterNatives` from
-`JNI_OnLoad` instead; nothing above changes.
+In C++ the `JNIEnv` calls lose their first argument: `env->GetArrayLength(request)`.
+
+If you would rather not spell out the mangled name, give the same function any name, make it
+`static`, and register it with `RegisterNatives` from `JNI_OnLoad` in the same file. It still
+lives in the glue library, and nothing else above changes:
+
+```c
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved)
+{
+    (void)reserved;
+
+    JNIEnv *env;
+    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+        return JNI_ERR;
+    }
+    jclass bridge = (*env)->FindClass(env, "com/example/ballistics/BallisticsBridge");
+    if (bridge == NULL) {
+        return JNI_ERR;
+    }
+    /* native_call is the function above, renamed and static. "([B)[B" is ByteArray -> ByteArray. */
+    static const JNINativeMethod methods[] = {
+        {"nativeCall", "([B)[B", (void *)native_call},
+    };
+    if ((*env)->RegisterNatives(env, bridge, methods, 1) != JNI_OK) {
+        return JNI_ERR;
+    }
+    return JNI_VERSION_1_6;
+}
+```
 
 ### Things the example is relying on
 
@@ -146,30 +178,170 @@ would rather not spell out the mangled name, register the method with `RegisterN
 
 ## Loading the library
 
-`scripts/build-mobile-android.sh` writes `target/mobile/jniLibs/<abi>/libballistics_engine.so`
-for `arm64-v8a` and `x86_64`. Copying those into the module's `jniLibs` source set is enough for
-`System.loadLibrary("ballistics_engine")`.
+The app ships two libraries for each ABI, and the worked example needs both.
 
-Copy the engine library by name rather than the whole directory: cargo-ndk also drops any
-`cdylib` a dependency happens to declare next to it (currently a `libprintpdf-<hash>.so`),
-which nothing here loads and which is only APK weight.
+**The engine, prebuilt.** `scripts/build-mobile-android.sh` writes
+`target/mobile/jniLibs/<abi>/libballistics_engine.so` for `arm64-v8a` and `x86_64`. Copy each
+into the module's `jniLibs` source set, as `src/main/jniLibs/<abi>/libballistics_engine.so`.
 
-If you link against the library from CMake instead, the ordinary imported-target pattern works:
+That is all the script leaves there. cargo-ndk also copies in any `cdylib` a dependency happens
+to declare (currently a `libprintpdf-<hash>.so` per ABI), which nothing here loads and which
+would only be APK weight, so the script deletes every other `.so` after its checks. A library
+built with cargo-ndk directly still has that file beside it: copy `libballistics_engine.so` by
+name rather than the whole directory.
+
+**The JNI glue, built by the app.** The engine exports the `ballistics_bridge_*` functions and
+no JNI symbols, so `Java_com_example_ballistics_BallisticsBridge_nativeCall` has to be compiled
+into a library of the app's own. With `ballistics_jni.c` and a copy of
+`include/ballistics_bridge.h` beside the module's `CMakeLists.txt` in `src/main/cpp`:
+
+```cmake
+cmake_minimum_required(VERSION 3.13)
+project(ballistics_jni C)
+
+# The prebuilt engine for the ABI being built, and the directory holding ballistics_bridge.h.
+set(ENGINE_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}")
+set(ENGINE_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+
+add_library(ballistics_jni SHARED ballistics_jni.c)
+target_include_directories(ballistics_jni PRIVATE "${ENGINE_INCLUDE_DIR}")
+# -L and -l, not a path: the linker records the engine's soname, libballistics_engine.so,
+# in this library's DT_NEEDED, never the directory it was found in.
+target_link_directories(ballistics_jni PRIVATE "${ENGINE_LIB_DIR}")
+target_link_libraries(ballistics_jni PRIVATE ballistics_engine)
+# The 16 KB page alignment scripts/build-mobile-android.sh gives the engine. The glue ships in
+# the same APK, and Play asks it of every .so there.
+target_link_options(ballistics_jni PRIVATE "-Wl,-z,max-page-size=16384")
+```
+
+`System.loadLibrary("ballistics_jni")` then loads both. The glue's `DT_NEEDED` names
+`libballistics_engine.so`, and the dynamic linker finds it among the app's native libraries.
+Loading `ballistics_engine` instead, as if the JNI function were in it, succeeds, and the first
+`nativeCall` then throws `UnsatisfiedLinkError`.
+
+`target_link_libraries` with the bare name `ballistics_engine`, beside
+`target_link_directories`, makes CMake pass `-L<dir> -lballistics_engine`. Linked that way, the
+glue records the engine's `DT_SONAME`, or the bare file name when a library has none, so the
+host path the linker searched never reaches the device. `llvm-readelf -d libballistics_jni.so |
+grep NEEDED` shows the entry. The alignment flag matters with older NDKs: NDK 27.0 links the
+glue at 4 KB pages without it, while NDK 29.0 already defaults to 16 KB.
+
+The imported-target pattern, in place of the `target_link_directories` and
+`target_link_libraries` lines above, works too, but only because the engine declares a
+`DT_SONAME`:
 
 ```cmake
 add_library(ballistics_engine SHARED IMPORTED)
 set_target_properties(ballistics_engine PROPERTIES
-    IMPORTED_LOCATION "${JNI_LIBS}/${ANDROID_ABI}/libballistics_engine.so"
+    IMPORTED_LOCATION "${ENGINE_LIB_DIR}/libballistics_engine.so"
     INTERFACE_INCLUDE_DIRECTORIES "${ENGINE_INCLUDE_DIR}")
-target_link_libraries(your_jni_lib PRIVATE ballistics_engine)
+target_link_libraries(ballistics_jni PRIVATE ballistics_engine)
 ```
 
-This depends on the library declaring a `DT_SONAME`; without one, the linker records the path
-you linked against — here an absolute host path — in your own `DT_NEEDED`, and the app fails to
-`dlopen` it on device. Libraries built by that script carry
-`DT_SONAME libballistics_engine.so`, and the script fails the build if they do not (MBA-1541).
-If you are linking a library from elsewhere, `llvm-readelf -d libballistics_engine.so | grep
-SONAME` says whether it has one.
+That passes the linker a path. Without a soname, the linker records that path, here an absolute
+host path, in your own `DT_NEEDED`, and the app fails to `dlopen` it on device. Libraries built
+by that script carry `DT_SONAME libballistics_engine.so`, and the script fails the build if they
+do not (MBA-1541). If you are linking a library from elsewhere, `llvm-readelf -d
+libballistics_engine.so | grep SONAME` says whether it has one.
+
+## Reading a failure
+
+A failed call is an `{"ok": false}` envelope. Its `error.code` is one of the bridge's own codes:
+`invalid_json`, `unsupported_api_version`, `unknown_command`, `invalid_request`,
+`resource_limit`, `command_failed` or `internal_error`. Only `command_failed` can carry
+`error.details`, which is where a command says what it refused, and its shape depends on the
+command:
+
+| Command | `error.details` on `command_failed` |
+| --- | --- |
+| `solve`, `atmosphere.density_altitude` | The command's whole solve-json error envelope (below). |
+| `reticle.describe`, `reticle.hold`, `reticle.holds`, `reticle.import` | A flat object: a `reason` (one per reticle error) and the `command`, plus the offending values when the error has any. |
+| `true.dsf`, `true.plan`, `true.dial_plan` | A flat object: a `reason`, plus the error's own numbers when it has any (`true.plan` always adds `rejected_candidates`). |
+| `profile.export_a7p` | A flat object: a `reason` of `units`, `drag_model` (with the `drag_model`) or `field` (with the `field`). |
+| Every other command | None. The reason is in `error.message` alone. |
+
+A payload that does not decode is `invalid_request`, with no `details`, for every command except
+`solve` and `atmosphere.density_altitude`. Those two decode their payload with the solve-json
+decoder, so a misspelt or out-of-range field there is a `command_failed` that names it. A
+missing `request` is `invalid_request` for them too.
+
+### The `solve` error envelope
+
+For `solve` and `atmosphere.density_altitude`, `error.details` is the complete envelope from
+[Error envelope](SOLVE_JSON_V1.md#error-envelope), not just its inner `error`, so the code to
+branch on is one level further down, at `error.details.error.code`. A `latitude_rad` of 2.0
+comes back as:
+
+```json
+{
+  "ok": false,
+  "api_version": 1,
+  "engine_version": "…",
+  "error": {
+    "code": "command_failed",
+    "message": "solve failed",
+    "details": {
+      "schema_version": 1,
+      "status": "error",
+      "error": {
+        "code": "invalid_value",
+        "message": "value must be finite and in the inclusive range [-1.5707963267948966, 1.5707963267948966]",
+        "path": "$.atmosphere.latitude_rad",
+        "line": null,
+        "column": null
+      }
+    }
+  }
+}
+```
+
+- **`error.code` is `command_failed`** for every refusal of the payload by these two commands.
+  The solve-json code inside (`unknown_field`, `missing_field`, `invalid_value`,
+  `conflicting_fields`, `resource_limit`, `solve_failed`, …) is the one to branch on.
+- **`error.message` is one of three fixed summaries.** `solve request rejected` means the
+  solve-json decoder refused the document: an unknown or missing field, a wrong type or enum
+  value, or one of the checks the decoder makes itself, such as the projectile bounds and the
+  `bc_segments` rules. `solve failed` means the solve service refused it or could not finish
+  it: the range and cross-field checks the service owns, such as `latitude_rad` above, and
+  engine failures. An `invalid_value` can therefore arrive under either.
+  `atmosphere.density_altitude` uses `atmosphere.density_altitude request rejected` for every
+  refusal.
+- **`path` is a string or JSON `null`.** It is `null` when no single field is at fault. A muzzle
+  velocity of 0.5 m/s with a 100 m zero comes back as `solve_failed`, with the message
+  `Cannot find zero angle: trajectory cannot reach target distance at any angle` and
+  `"path": null`.
+- **`line` and `column` are always present and always `null` here.** They locate malformed JSON
+  when a solve-json document is decoded from text, as the `solve-json` command does. The bridge
+  has already parsed the request as part of the envelope, so malformed JSON is the bridge's own
+  `invalid_json`, with no `details`.
+
+Unwrapping with `org.json`:
+
+```kotlin
+import org.json.JSONObject
+
+/** What an app acts on in a failed call. [path] is null when no single field is at fault. */
+data class BridgeFailure(val code: String, val message: String, val path: String?)
+
+fun failureOf(envelope: JSONObject): BridgeFailure {
+    val error = envelope.getJSONObject("error")
+    // solve and atmosphere.density_altitude: the solve-json envelope, one level down.
+    val inner = error.optJSONObject("details")?.optJSONObject("error")
+        ?: return BridgeFailure(error.getString("code"), error.getString("message"), null)
+    return BridgeFailure(
+        code = inner.getString("code"),
+        message = inner.getString("message"),
+        path = if (inner.isNull("path")) null else inner.getString("path"),
+    )
+}
+```
+
+`optString` is the wrong tool for these lookups. For a missing key it returns `""`, not `null`,
+so `optString("code") ?: outerCode` never falls back. For a JSON `null` Android's `org.json`
+returns the string `"null"`, from `optString` and `getString` alike, so a `solve_failed` would
+highlight a field named `null`. `isNull` is true for a missing key and for a JSON `null`, which
+is why the path is tested with it first. The same holds for the `reason` of the other families:
+`details.optString("reason")` is `""` when there is none.
 
 ## Sending a BC ladder with `solve`
 
@@ -203,8 +375,8 @@ projectile.put("bc_segments", bcSegments(listOf(
 ```
 
 A ladder the contract refuses comes back as an ordinary `{"ok":false}` envelope, and
-`error.details.error.path` names the entry at fault, such as
-`$.projectile.bc_segments[1].velocity_max_mps`. The `card.*` commands take a ladder too, but with
+`error.details.error.path` ([Reading a failure](#reading-a-failure)) names the entry at fault,
+such as `$.projectile.bc_segments[1].velocity_max_mps`. The `card.*` commands take a ladder too, but with
 other member names, the request's `velocity_unit` and no order rule (they still refuse overlapping
 bands, more than 64 bands and band BCs outside 0.0001 to 100), so a stored ladder has to be
 written out for each command. The table at the end of that section lists the differences.
@@ -260,6 +432,14 @@ fun call(request: JSONObject): JSONObject {
 
 Keep `zero_distance_m` in the second request only when it uses `rifle.sight_offset_lateral_m` or
 `shot.zero_poi_right_m`, which need it.
+
+## Turning samples into holds
+
+A `solve` result's `samples` give drop and windage in metres, not holds.
+[Deriving holds from samples](SOLVE_JSON_V1.md#deriving-holds-from-samples) has the signs, the
+mil and MOA arithmetic the engine's own hold outputs use (an MOA column meant to agree with
+`card.range_table` converts with 3438 per radian, not 10800/π), and the `lead_from_tof`
+formula, which a bridge app has to apply itself because the bridge has no lead command.
 
 ## See also
 

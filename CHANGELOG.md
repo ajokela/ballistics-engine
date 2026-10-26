@@ -55,6 +55,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can solve a different `--auto-zero` angle from native's (0.07273878258496781° against
   0.07247650332083931° under `--use-euler` for a 10.9 g, 823 m/s, G1 0.475 load zeroed at
   100 m), which these keys carry, as `summary` and `zero_angle_degrees` already did.
+- **A warning for a station pressure that does not fit the altitude.** solve-json flies an
+  explicit absolute `pressure_pa` as the station reading whatever `altitude_m` says, so a bridge
+  app that always sent 101325 Pa beside Cusco's 3310.128 m flew sea-level air there, 1.503 times
+  the standard pressure, with nothing in the response to say so. A new warning code,
+  `station_pressure_implausible_for_altitude` at `$.atmosphere.pressure_pa`, is raised when an
+  absolute `pressure_pa` (sent, or by the default reference) is outside 0.85 to 1.08 times the
+  ICAO standard pressure at the resolved `altitude_m`. Its message gives the pressure, the
+  altitude and whether it was defaulted, the standard there, and the likely causes for its side:
+  a sea-level placeholder or an altimeter setting sent without `"pressure_reference": "qnh"`
+  above the band, an `altitude_m` that is not the station elevation or a unit error below it.
+  The WMO's sea-level pressure records, 870 hPa and 1089.1 hPa, are 0.859 and 1.075 times
+  standard, so weather does not raise it; a `"qnh"` or omitted pressure never does. Bridge and
+  mobile apps get it through `solve`, as do the C ABI's bridge call, the MCP tool and the CLI's
+  `solve-json`. The CLI's `trajectory` (shot day, and the zero day when `--zero-pressure` or
+  `--zero-altitude` is given) and `zero` print the same check as a `warning:` line on stderr,
+  and never for the default pressure, which the CLI already replaces with the ICAO pressure at
+  a real altitude. The test is the new `atmosphere::station_pressure_plausibility`, with its
+  band in `STATION_PRESSURE_MIN_PLAUSIBLE_RATIO` and `STATION_PRESSURE_MAX_PLAUSIBLE_RATIO`.
+  Additive: only requests outside the band see it, and no number changes. 15 solve-json
+  requests in and out of the band match the 0.48.0 code byte for byte apart from the new
+  `warnings` entry, and 14 CLI runs have identical stdout. `atmosphere.density_altitude` and the
+  `card.*` commands, which have no `warnings` array, the other CLI subcommands and the browser
+  terminal do not check. See [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#atmosphere) and
+  [CLI_USAGE.md](CLI_USAGE.md).
 
 ### Fixed
 - **Boundary-layer wind shear measures height from the ground in every kernel.** The shear
@@ -207,7 +231,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicit absolute pressure as the real station reading, so the example described a day of
   unusually high pressure and modelled the placeholder habit that silently stops the altitude
   from mattering. It now sends 98500 Pa and 291.15 K, and the doc says to omit `pressure_pa` and
-  `temperature_k` when there is no reading. Documentation only; the engine is unchanged.
+  `temperature_k` when there is no reading. Bridge and mobile apps send this same document
+  through `solve`, so one that copied the old example's placeholders should omit them instead.
+  Documentation only; the engine is unchanged.
 - **Gravity is an internal per-simulation value.** The integration kernels take uniform
   gravity as an explicit, immutable per-simulation value instead of reading the 9.80665 m/s²
   constant, and the local atmosphere and the Magnus yaw of repose use that same value; zero
@@ -215,14 +241,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   public gravity option, signature or schema change, and Earth output is byte-identical: 114
   CLI and solve-json runs match the 0.48.0 code exactly. The ICAO tables, geopotential
   conversion, Earth rotation and the empirical aerodynamic calibrations remain Earth models.
-- **Sight-in (zero-day) conditions over the bridge are documented.** solve-json has one
-  atmosphere per request, and the CLI's `--zero-*` flags have no counterpart in it. A new section
-  of [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#sight-in-zero-day-conditions) gives the
+- **Sight-in (zero-day) conditions over the bridge are documented.** solve-json, which bridge
+  and mobile apps send through `solve`, has one atmosphere per request, and the CLI's `--zero-*`
+  flags have no counterpart in it, so this recipe is how such an app honours a zero made in
+  other air. A new section of
+  [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#sight-in-zero-day-conditions) gives the
   two-request recipe: solve the zero in the sight-in air, in still air and level, then fly
   `resolved_request.shot.muzzle_angle_rad` in the shot-day air. Engine output in that section
   shows it reproduces the CLI's zero angle exactly.
   [docs/ANDROID_JNI_BRIDGE.md](docs/ANDROID_JNI_BRIDGE.md) carries the Kotlin version.
   Documentation only; the engine is unchanged.
+- **The bridge's `error.details` is documented per command.** `include/ballistics_bridge.h`
+  showed only `"details": { ... }`, and the one statement that `solve` nests its solve-json
+  error envelope there sat in the BC-ladder section of the Android guide, so a bridge
+  integrator could reasonably look for `code` and `path` directly under `details`. The header
+  and a new [Reading a failure](docs/ANDROID_JNI_BRIDGE.md#reading-a-failure) section now say
+  which commands carry `details` and in what shape. For `solve` and
+  `atmosphere.density_altitude` it is the whole envelope
+  `{schema_version, status, error: {code, message, path, line, column}}`, with `path` possibly
+  JSON `null` and `line`/`column` always `null` over the bridge, under the outer code
+  `command_failed` and a fixed message (`solve request rejected`, `solve failed`, or
+  `atmosphere.density_altitude request rejected`). The reticle commands, `true.dsf`,
+  `true.plan`, `true.dial_plan` and `profile.export_a7p` carry a flat object with a `reason`,
+  and every other command carries none. A Kotlin `org.json` unwrap shows why the path is
+  tested with `isNull`: `optString` returns `""` for a missing key and, on Android, the string
+  `"null"` for a JSON `null`. Documentation only; the engine is unchanged.
+- **The Android guide's worked example now builds and loads the JNI glue.** Its Kotlin called
+  `System.loadLibrary("ballistics_engine")` and then a `Java_..._nativeCall` C function, which
+  cannot live in the prebuilt Rust library, so an app that loaded only the engine, as the
+  example did, failed on its first call with `UnsatisfiedLinkError`.
+  [docs/ANDROID_JNI_BRIDGE.md](docs/ANDROID_JNI_BRIDGE.md) now builds the C file as its own
+  `libballistics_jni.so` in CMake, linked against the engine
+  with `-L`/`-l` so its `DT_NEEDED` is the bare `libballistics_engine.so` (MBA-1541) and with
+  the 16 KB page alignment the engine gets, and the Kotlin loads `ballistics_jni`, which brings
+  the engine in. A `RegisterNatives` from `JNI_OnLoad` variant replaces the mangled name for
+  those who prefer it. All of it was built with NDK 29.0 for `arm64-v8a` and `x86_64`, and the
+  Kotlin and C were run on a desktop JVM. Documentation only; the engine is unchanged.
+- **Deriving holds from solve samples is documented.** Bridge apps receive drop and windage in
+  metres and had to guess the sign of each hold, the angle formula and the MOA constant, and
+  the bridge has no lead command. A new section of
+  [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#deriving-holds-from-samples), linked from the
+  Android guide, gives the signs (positive `drop_m` holds up, positive `windage_m` holds
+  left), the small-angle `metres / distance * 1000` that `reticle_hold` uses, and which
+  constant each output uses for MOA: 3438 per radian for the `card.*` columns, `ballistics
+  lead`, the reticle catalog and `true.dial_plan` clicks, and 10800/π for
+  `summary.aerodynamic_jump_moa` and `true.fit`/`true.dsf` drops in `"moa"`. It states
+  `lead_from_tof` exactly, with its sign convention and its small-angle ratio, and notes the
+  intercept-range correction `ballistics lead` adds for a target that is not crossing square.
+  A worked example's numbers come from the engine and match `reticle_hold`,
+  `card.range_table`'s windage column and `ballistics lead`. Documentation only; the engine is
+  unchanged.
+- **`scripts/build-mobile-android.sh` leaves only the engine in its output.** cargo-ndk copies
+  printpdf's cdylib into each ABI directory beside `libballistics_engine.so`, and the script
+  used to list it as output, so an integrator who copied the directory into an app's `jniLibs`
+  shipped a `libprintpdf-<hash>.so` that nothing loads. After its `DT_SONAME` checks the script
+  now deletes every `.so` that is not `libballistics_engine.so`, and says which. The libraries
+  it keeps are unchanged. The script's comments and
+  [docs/ANDROID_JNI_BRIDGE.md](docs/ANDROID_JNI_BRIDGE.md#loading-the-library) say so.
 
 ## [0.48.0] - 2026-10-20
 

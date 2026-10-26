@@ -21,6 +21,33 @@
  * UTF-8, or a NULL pointer — is answered by this ABI layer with the minimal
  * shape, "ok"/"api_version"/"error", and carries no "engine_version".
  *
+ * "details" appears only when "code" is "command_failed", and not always then.
+ * Its shape depends on the command:
+ *
+ *   - "solve" and "atmosphere.density_altitude": the command's whole solve-json
+ *     error envelope, so the code to branch on is error.details.error.code:
+ *
+ *       "details": { "schema_version": 1, "status": "error",
+ *                    "error": { "code": "invalid_value", "message": "...",
+ *                               "path": "$.atmosphere.latitude_rad",
+ *                               "line": null, "column": null } }
+ *
+ *     "path" is a string, or JSON null when no one field is at fault (as with
+ *     "solve_failed"). "line" and "column" are null: malformed JSON fails the
+ *     envelope itself first, as "invalid_json". The outer "message" is
+ *     "solve request rejected" when the solve-json decoder refused the
+ *     document, "solve failed" when the solve service refused or could not
+ *     finish it, and "atmosphere.density_altitude request rejected" for every
+ *     refusal of that command.
+ *   - "reticle.describe", "reticle.hold", "reticle.holds", "reticle.import",
+ *     "true.dsf", "true.plan", "true.dial_plan" and "profile.export_a7p": a
+ *     flat object with a machine-readable "reason", plus the offending values
+ *     when the error has any.
+ *   - Every other command: no "details"; the reason is in "message" alone.
+ *
+ * Messages are text for a person; branch on codes. Per command, with a Kotlin
+ * unwrap: docs/ANDROID_JNI_BRIDGE.md, "Reading a failure".
+ *
  * Contract:
  *   - The calls NEVER return NULL and NEVER throw/abort; check "ok" in the JSON.
  *   - The caller owns the input buffer; the engine does not retain it.

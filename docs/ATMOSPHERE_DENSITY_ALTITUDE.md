@@ -61,6 +61,11 @@ Two practical rules:
     using the standard atmosphere, so at elevation the two disagree by roughly 1% of pressure
     per 1000 m per 20 °C away from standard. Sent as `qnh` it is approximate; sent as absolute
     it is wrong by the station's elevation. Prefer any of the sources above.
+
+  A `solve` given an absolute pressure outside 0.85 to 1.08 times the ICAO standard at
+  `altitude_m`, such as 101325 Pa at 3310 m, adds a `station_pressure_implausible_for_altitude`
+  warning (see [SOLVE_JSON_V1.md](SOLVE_JSON_V1.md#atmosphere)). This command has no `warnings`
+  array: it reports the air of the pressure as sent, without comment.
 - **Send what you know.** Every omitted field is filled with an ICAO standard value and announced
   in `assumptions`, exactly as a solve would announce it. With an explicit temperature and an
   absolute pressure, `altitude_m` does not move any figure; it matters for a QNH reduction and
@@ -249,8 +254,12 @@ fun densityAltitude(
         val error = response.getJSONObject("error")
         val cause = error.optJSONObject("details")?.optJSONObject("error")
         throw IllegalArgumentException(
-            if (cause != null) "${cause.optString("path")}: ${cause.optString("message")}"
-            else error.getString("message")
+            when {
+                cause == null -> error.getString("message")
+                // A JSON null path: no single field is at fault. optString would read "null".
+                cause.isNull("path") -> cause.getString("message")
+                else -> "${cause.getString("path")}: ${cause.getString("message")}"
+            }
         )
     }
     return response.getJSONObject("result")

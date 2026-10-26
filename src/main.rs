@@ -6188,6 +6188,111 @@ fn cd_scale_range_warning(value: f64) -> Option<String> {
     }
 }
 
+/// Which day's atmosphere [`station_pressure_warning`] describes, and so which flags its text
+/// names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PressureDay {
+    /// `--pressure` / `--pressure-type` / `--altitude`.
+    Shot,
+    /// `trajectory`'s `--zero-pressure` / `--zero-pressure-type` / `--zero-altitude`.
+    /// `inherited_pressure`: no `--zero-pressure` was given, so the zero day flies the
+    /// shot-day pressure at its own altitude. `inherited_altitude`: no `--zero-altitude` was
+    /// given, so the zero day flies its own pressure at `--altitude`, and the text names
+    /// that flag instead.
+    Zero {
+        inherited_pressure: bool,
+        inherited_altitude: bool,
+    },
+}
+
+/// Warning for an absolute station pressure that cannot be a reading at the station's altitude,
+/// using the engine's shared band (`atmosphere::station_pressure_plausibility`, 0.85 to 1.08
+/// times the ICAO standard there). The CLI flies an explicit absolute pressure as given, so a
+/// weather report's altimeter setting typed without `--pressure-type qnh` at a real
+/// `--altitude` flies sea-level air there with nothing said.
+///
+/// Takes the METRIC values the solve receives and `units` only for the text. The caller passes
+/// only an absolute pressure that no `--density-altitude` replaced. A pressure left at the
+/// sea-level standard at a real altitude is not explicit to the solve: the CLI's sentinel
+/// (`resolve_station_pressure`, the same function the solve applies) flies the ICAO pressure
+/// there instead, so it is never warned. Pure/side-effect-free, same shape as
+/// `cd_scale_range_warning`.
+fn station_pressure_warning(
+    day: PressureDay,
+    pressure_hpa: f64,
+    altitude_m: f64,
+    units: UnitSystem,
+) -> Option<String> {
+    let station_hpa =
+        ballistics_engine::atmosphere::resolve_station_pressure(pressure_hpa, altitude_m)?;
+    let check = ballistics_engine::atmosphere::station_pressure_plausibility(
+        station_hpa * 100.0,
+        altitude_m,
+    );
+    if !check.implausible {
+        return None;
+    }
+    let (pressure_unit, altitude_unit, decimals) = match units {
+        UnitSystem::Imperial => ("inHg", "ft", 2),
+        UnitSystem::Metric => ("hPa", "m", 1),
+    };
+    let shown = UnitConverter::pressure_from_metric(station_hpa, units);
+    let standard = UnitConverter::pressure_from_metric(check.icao_standard_pa / 100.0, units);
+    let altitude = UnitConverter::altitude_from_metric(altitude_m, units);
+    let (label, qnh_flag, altitude_flag, pressure_note, altitude_note) = match day {
+        PressureDay::Shot => (
+            "station pressure",
+            "--pressure-type qnh",
+            "--altitude",
+            "",
+            "",
+        ),
+        PressureDay::Zero {
+            inherited_pressure,
+            inherited_altitude,
+        } => (
+            "zero-day station pressure",
+            "--zero-pressure-type qnh",
+            if inherited_altitude {
+                "--altitude"
+            } else {
+                "--zero-altitude"
+            },
+            if inherited_pressure {
+                " The zero day uses the shot-day pressure because --zero-pressure was not given."
+            } else {
+                ""
+            },
+            if inherited_altitude {
+                " The zero day uses --altitude because --zero-altitude was not given."
+            } else {
+                ""
+            },
+        ),
+    };
+    let min = ballistics_engine::atmosphere::STATION_PRESSURE_MIN_PLAUSIBLE_RATIO;
+    let max = ballistics_engine::atmosphere::STATION_PRESSURE_MAX_PLAUSIBLE_RATIO;
+    let advice = if check.ratio > max {
+        format!(
+            "If it is a sea-level altimeter setting (QNH) from a weather report, add {qnh_flag}; \
+             otherwise check that {altitude_flag} is the station elevation, in {altitude_unit}."
+        )
+    } else {
+        format!(
+            "Check that {altitude_flag} is the station elevation, in {altitude_unit}, and that \
+             the pressure is in {pressure_unit}."
+        )
+    };
+    Some(format!(
+        "warning: {label} {shown:.decimals$} {pressure_unit} is {:.3} times the ICAO standard \
+         pressure at {altitude:.0} {altitude_unit} ({standard:.decimals$} {pressure_unit}), \
+         outside the {min} to {max} band that recorded weather stays within.\
+         {pressure_note}{altitude_note} \
+         {advice} The pressure is used as given.",
+        check.ratio
+    ))
+}
+
 /// MBA-1414: `--adjustment-unit` only ever changes two things: the `--target-speed` mover
 /// Ring table column, and the PDF dope card's Drop/Wind/Lead columns. Without a nonzero
 /// `--target-speed` AND without `-o pdf`, the flag is a silent no-op -- the plain table is
@@ -7383,6 +7488,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                         final_pressure_type,
                     ),
                 };
+            // A pressure from a flag, a --location CSV or a saved profile alike: whichever one
+            // this run flies. A density altitude supplied the pressure itself, and a QNH is a
+            // sea-level figure by declaration, so neither is checked.
+            if final_density_altitude.is_none()
+                && final_pressure_type == PressureReferenceMode::Absolute
+            {
+                if let Some(w) = station_pressure_warning(
+                    PressureDay::Shot,
+                    UnitConverter::pressure_to_metric(final_pressure, cli.units),
+                    UnitConverter::altitude_to_metric(final_altitude, cli.units),
+                    cli.units,
+                ) {
+                    eprintln!("{w}");
+                }
+            }
 
             // Get zero range: CLI --auto-zero > selected zero set (MBA-1360) > profile
             // CSV ZERO_RANGE > saved profile auto_zero/zero_distance — resolved through
@@ -8200,6 +8320,27 @@ fn main() -> Result<(), Box<dyn Error>> {
                             zero_altitude_metric,
                         ),
                     };
+                // Checked only when the zero day brings a pressure or an altitude of its own:
+                // otherwise it is the shot-day pair, already checked above. Excluded with it:
+                // a zero-day density altitude, a shot-day one whose pressure the zero day
+                // inherits, and a QNH.
+                if (zero_pressure.is_some() || zero_altitude.is_some())
+                    && zero_density_altitude.is_none()
+                    && !(final_density_altitude.is_some() && zero_pressure.is_none())
+                    && zero_pressure_type_resolved == PressureReferenceMode::Absolute
+                {
+                    if let Some(w) = station_pressure_warning(
+                        PressureDay::Zero {
+                            inherited_pressure: zero_pressure.is_none(),
+                            inherited_altitude: zero_altitude.is_none(),
+                        },
+                        zero_pressure_metric,
+                        zero_altitude_metric,
+                        cli.units,
+                    ) {
+                        eprintln!("{w}");
+                    }
+                }
                 if zero_velocity.is_some()
                     || zero_temperature.is_some()
                     || zero_pressure.is_some()
@@ -9136,6 +9277,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                         pressure_type,
                     ),
                 };
+            if density_altitude.is_none() && pressure_type == PressureReferenceMode::Absolute {
+                if let Some(w) = station_pressure_warning(
+                    PressureDay::Shot,
+                    pressure_metric,
+                    altitude_metric,
+                    cli.units,
+                ) {
+                    eprintln!("{w}");
+                }
+            }
             // Resolve --drag-table; no bc-segments flag exists on this subcommand, so there is
             // nothing to conflict-warn against (mirrors the trajectory resolve at line ~3338).
             let custom_drag_table = drag_table.as_deref().map(load_drag_table_or_exit);
@@ -22634,6 +22785,145 @@ mod drag_model_arg_warning_tests {
         // argument (in addition to the stderr warning `aux_g1_coercion_warning` covers).
         assert_eq!(warn_aux_g1_coercion("test", DragModel::G5), "G1");
         assert_eq!(warn_aux_g1_coercion("test", DragModel::RA4), "G1");
+    }
+}
+
+/// `station_pressure_warning`: the CLI's stderr form of the solve-json
+/// `station_pressure_implausible_for_altitude` warning, on the same shared band.
+#[cfg(test)]
+mod station_pressure_warning_tests {
+    use super::*;
+
+    /// Cusco, 10860 ft.
+    const CUSCO_M: f64 = 3310.128;
+
+    #[test]
+    fn a_qnh_typed_as_station_pressure_at_altitude_is_warned_with_the_qnh_flag() {
+        // 30.50 inHg is a weather-report altimeter setting, not a reading at 10860 ft.
+        let hpa = UnitConverter::pressure_to_metric(30.50, UnitSystem::Imperial);
+        let w = station_pressure_warning(PressureDay::Shot, hpa, CUSCO_M, UnitSystem::Imperial)
+            .expect("a QNH at Cusco must warn");
+        for expected in [
+            "warning: station pressure 30.50 inHg",
+            "1.532 times",
+            "10860 ft",
+            "(19.90 inHg)",
+            "add --pressure-type qnh",
+            "--altitude is the station elevation, in ft",
+        ] {
+            assert!(w.contains(expected), "{expected:?} missing: {w}");
+        }
+
+        let zero = station_pressure_warning(
+            PressureDay::Zero {
+                inherited_pressure: false,
+                inherited_altitude: false,
+            },
+            hpa,
+            CUSCO_M,
+            UnitSystem::Imperial,
+        )
+        .expect("the zero day warns the same way");
+        assert!(zero.contains("zero-day station pressure"), "{zero}");
+        assert!(zero.contains("--zero-pressure-type qnh"), "{zero}");
+        assert!(
+            zero.contains("check that --zero-altitude is the station elevation"),
+            "{zero}"
+        );
+        assert!(!zero.contains("shot-day pressure"), "{zero}");
+        assert!(
+            !zero.contains("because --zero-altitude was not given"),
+            "{zero}"
+        );
+
+        // The same --zero-pressure with no --zero-altitude: the zero day flies it at
+        // --altitude, so the advice names that flag, not one the user never gave.
+        let inherited_altitude = station_pressure_warning(
+            PressureDay::Zero {
+                inherited_pressure: false,
+                inherited_altitude: true,
+            },
+            hpa,
+            CUSCO_M,
+            UnitSystem::Imperial,
+        )
+        .expect("a QNH at the inherited Cusco altitude must warn");
+        for expected in [
+            "warning: zero-day station pressure 30.50 inHg",
+            "The zero day uses --altitude because --zero-altitude was not given.",
+            "add --zero-pressure-type qnh",
+            "otherwise check that --altitude is the station elevation, in ft",
+        ] {
+            assert!(
+                inherited_altitude.contains(expected),
+                "{expected:?} missing: {inherited_altitude}"
+            );
+        }
+        assert!(
+            !inherited_altitude.contains("--zero-altitude is"),
+            "{inherited_altitude}"
+        );
+        assert!(
+            !inherited_altitude.contains("shot-day pressure"),
+            "{inherited_altitude}"
+        );
+
+        // A Cusco reading carried to a 500 ft zero range because --zero-pressure was left out.
+        let station_hpa = UnitConverter::pressure_to_metric(20.33, UnitSystem::Imperial);
+        let inherited = station_pressure_warning(
+            PressureDay::Zero {
+                inherited_pressure: true,
+                inherited_altitude: false,
+            },
+            station_hpa,
+            UnitConverter::altitude_to_metric(500.0, UnitSystem::Imperial),
+            UnitSystem::Imperial,
+        )
+        .expect("a mountain reading at a valley zero range must warn");
+        assert!(
+            inherited.contains("uses the shot-day pressure because --zero-pressure was not given"),
+            "{inherited}"
+        );
+        assert!(
+            inherited.contains("Check that --zero-altitude is the station elevation"),
+            "{inherited}"
+        );
+        assert!(
+            !inherited.contains("because --zero-altitude was not given"),
+            "{inherited}"
+        );
+    }
+
+    #[test]
+    fn a_station_reading_at_sea_level_is_warned_on_the_low_side_without_qnh() {
+        let w = station_pressure_warning(PressureDay::Shot, 688.3, 0.0, UnitSystem::Metric)
+            .expect("688.3 hPa at 0 m must warn");
+        assert!(w.contains("688.3 hPa is 0.679 times"), "{w}");
+        assert!(w.contains("at 0 m (1013.2 hPa)"), "{w}");
+        assert!(w.contains("the pressure is in hPa"), "{w}");
+        assert!(!w.contains("qnh"), "{w}");
+    }
+
+    #[test]
+    fn real_readings_and_the_sea_level_default_are_not_warned() {
+        // A real Cusco reading.
+        assert!(
+            station_pressure_warning(PressureDay::Shot, 688.3, CUSCO_M, UnitSystem::Metric)
+                .is_none()
+        );
+        // The default 29.92 inHg at a real altitude is flown as the ICAO pressure there by
+        // the CLI's sentinel, so it is not an explicit pressure and is not warned.
+        let default_hpa = UnitConverter::pressure_to_metric(29.92, UnitSystem::Imperial);
+        assert!(station_pressure_warning(
+            PressureDay::Shot,
+            default_hpa,
+            CUSCO_M,
+            UnitSystem::Imperial
+        )
+        .is_none());
+        assert!(
+            station_pressure_warning(PressureDay::Shot, 1013.25, 0.0, UnitSystem::Metric).is_none()
+        );
     }
 }
 
