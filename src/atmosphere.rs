@@ -137,6 +137,22 @@ fn geometric_to_geopotential_height_m(geometric_altitude_m: f64) -> f64 {
         / (GEOPOTENTIAL_EARTH_RADIUS_M + geometric_altitude_m)
 }
 
+/// Whether a pressure lies inside the legacy default sentinel's band, within 0.5 hPa of the
+/// 1013.25 hPa sea-level standard. [`resolve_station_pressure`] reads an unmarked value there
+/// as omitted at any altitude above 1 m.
+pub(crate) fn in_legacy_default_pressure_band(pressure_hpa: f64) -> bool {
+    const SEA_LEVEL_HPA: f64 = 1013.25;
+    (pressure_hpa - SEA_LEVEL_HPA).abs() < 0.5
+}
+
+/// Whether a temperature lies inside the legacy default sentinel's band, within 0.1 °C of the
+/// 15 °C sea-level standard. [`resolve_station_temperature`] reads an unmarked value there as
+/// omitted at any altitude above 1 m.
+pub(crate) fn in_legacy_default_temperature_band(temperature_c: f64) -> bool {
+    const SEA_LEVEL_TEMP_C: f64 = 15.0;
+    (temperature_c - SEA_LEVEL_TEMP_C).abs() < 0.1
+}
+
 /// Resolve the station-pressure override for an air-density calculation, by the legacy
 /// default-sentinel convention.
 ///
@@ -154,8 +170,7 @@ fn geometric_to_geopotential_height_m(geometric_altitude_m: f64) -> f64 {
 /// 1012.86 hPa) is indistinguishable from the default here. A caller that knows presence uses
 /// [`resolve_station_conditions_with_presence`], which flies a supplied value as given.
 pub fn resolve_station_pressure(pressure_hpa: f64, altitude_m: f64) -> Option<f64> {
-    const SEA_LEVEL_HPA: f64 = 1013.25;
-    if (pressure_hpa - SEA_LEVEL_HPA).abs() < 0.5 && altitude_m.abs() > 1.0 {
+    if in_legacy_default_pressure_band(pressure_hpa) && altitude_m.abs() > 1.0 {
         None // pressure left at default + real altitude → derive station pressure from altitude
     } else {
         Some(pressure_hpa) // explicit station pressure is authoritative
@@ -180,8 +195,7 @@ pub fn resolve_station_pressure(pressure_hpa: f64, altitude_m: f64) -> Option<f6
 /// reading at altitude is indistinguishable from the default here; a caller that knows presence
 /// uses [`resolve_station_conditions_with_presence`].
 pub fn resolve_station_temperature(temperature_c: f64, altitude_m: f64) -> Option<f64> {
-    const SEA_LEVEL_TEMP_C: f64 = 15.0;
-    if (temperature_c - SEA_LEVEL_TEMP_C).abs() < 0.1 && altitude_m.abs() > 1.0 {
+    if in_legacy_default_temperature_band(temperature_c) && altitude_m.abs() > 1.0 {
         None // temperature left at default + real altitude → derive ICAO lapse temperature
     } else {
         Some(temperature_c) // explicit temperature is authoritative

@@ -122,10 +122,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carries neither, so its stored 59 °F / 29.92 inHg keeps the old meaning (standard air at a real
   altitude); re-save it with the flags to mark a real reading. `profile.import_a7p` and
   `profile.normalize` responses carry the new keys. `profile.export_a7p` lists both under
-  `not_carried` for every profile, so that response gains two entries; they are populated only
-  for an unmarked value that the old rule replaced with ICAO air (15 °C / 59 °F or 1013.25 hPa /
-  29.92 inHg within its band, at an altitude above 1 m, and for the pressure only when it is not
-  a QNH), which an import would read back as a typed reading. The `.a7p` bytes do not change.
+  `not_carried` for every profile, so that response gains two entries. They are populated for an
+  unmarked value inside the old rule's band (15 ± 0.1 °C, which holds 59 °F, or
+  1013.25 ± 0.5 hPa, which holds 29.92 inHg), whatever the profile's altitude and whether or not
+  the pressure is a QNH: an import reads the value back as a typed reading, and the file carries
+  no altitude, so a run at a real altitude (`--altitude`) flies it as typed where the unmarked
+  value flew standard air (a QNH flew its reduction, about the same). The `.a7p` bytes do not
+  change.
 - **`dsf --saved-profile` and `plan-truing --profile` honour a profile's stored
   `--pressure-type qnh`, and `plan-truing` reduces any declared QNH at the altitude it flies.**
   A profile's pressure reading flown as a QNH (its stored mode, or `--pressure-type qnh` typed
