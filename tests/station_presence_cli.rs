@@ -1012,13 +1012,27 @@ fn every_subcommand_flies_the_typed_air_at_its_zero_too() {
             .collect();
         for job in jobs {
             let (case, name, path, now, was, got) = job.join().unwrap();
-            assert_bits(
-                got,
-                now,
-                &format!("case {case} {name} {path} (was {was:?})"),
-            );
+            let what = format!("case {case} {name} {path} (was {was:?})");
+            assert_close_to_pin(got, now, was, &what);
         }
     });
+}
+
+/// These pins were captured on macOS, and a solve that iterates (true-wind's crosswind) can
+/// land a last bit apart under another libm. The tolerance is far below the gap between the
+/// typed air and the old rule's air, which every changed pin is checked to clear (case A of
+/// `zero --from-angle` is the one pin that did not change).
+fn assert_close_to_pin(actual: f64, now: f64, was: f64, what: &str) {
+    const REL_TOL: f64 = 1e-12;
+    let tol = REL_TOL * now.abs();
+    assert!(
+        now == was || (now - was).abs() > 1e3 * tol,
+        "{what}: the pin {now:?} is too close to the old value to tell them apart"
+    );
+    assert!(
+        (actual - now).abs() <= tol,
+        "{what}: {actual:?}, expected {now:?} within {REL_TOL:e} relative"
+    );
 }
 
 const TR_MZ: &[&str] = &[
