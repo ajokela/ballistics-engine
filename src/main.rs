@@ -6691,6 +6691,31 @@ fn parse_observed_drop(s: &str) -> Result<(f64, DropUnit), String> {
     Ok((value, unit))
 }
 
+/// Whether a saved profile's stored pressure is a reading, for a run in `units` (the profile
+/// already converted to them).
+///
+/// A profile saved by 0.49.0 or later says so with `pressure_supplied`. An unmarked profile
+/// was saved without `--pressure`, or before 0.49.0. `profile save` stores exactly the CLI's
+/// omitted default for a missing `--pressure`, 29.92 inHg or 1013.25 hPa, so an unmarked value
+/// equal to either one may be that default and stays omitted. The comparison is in hPa, to well
+/// within a unit conversion's rounding, because a profile loaded (or rewritten by `dsf`) in the
+/// other unit system carries the converted default. Any other stored value was a reading.
+fn saved_pressure_is_reading(profile: &ProfileData, units: UnitSystem) -> bool {
+    const SAME_VALUE_HPA: f64 = 1e-6;
+    if profile.pressure_supplied {
+        return true;
+    }
+    let stored_hpa = UnitConverter::pressure_to_metric(profile.pressure, units);
+    [UnitSystem::Metric, UnitSystem::Imperial]
+        .into_iter()
+        .all(|system| {
+            let omitted = UnitConverter::resolve_pressure(None, system)
+                .expect("the omitted pressure default is always in range");
+            (stored_hpa - UnitConverter::pressure_to_metric(omitted, system)).abs()
+                >= SAME_VALUE_HPA
+        })
+}
+
 /// Solve a saved profile's OWN trajectory for the `dsf` command's derivation step, using
 /// only the profile's stored fields — no CLI overrides, since `dsf` exposes none of the
 /// physics flags (`--saved-profile`/`--range`/`--observed-drop` are its entire surface).
@@ -6791,9 +6816,12 @@ fn solve_profile_for_dsf(
             None => {
                 let altitude_m = UnitConverter::altitude_to_metric(profile.altitude, units);
                 let entered_hpa = UnitConverter::pressure_to_metric(profile.pressure, units);
-                // A stored QNH resolves the way `trajectory --saved-profile` resolves it: in
-                // QNH mode, which never reads the reduced value as an omitted default, so it
-                // flies as a reading even in a profile written before 0.49.0 (no marker).
+                // A stored QNH reading flies its reduced value, as `trajectory --saved-profile`
+                // flies it, even in a profile written before 0.49.0 (no marker): QNH 1031 hPa
+                // at 150 m reduces to 1012.86 hPa, inside the legacy band. A QNH over an
+                // omitted pressure (the default `profile save` stores) stays omitted and goes
+                // through the old rule: where the reduced default lands inside the band, that
+                // is the ICAO air the profile flew before its stored mode was honoured.
                 let (pressure_hpa, pressure_supplied) =
                     match parse_pressure_reference_profile_field(
                         profile.pressure_reference.as_deref(),
@@ -6804,7 +6832,7 @@ fn solve_profile_for_dsf(
                                 entered_hpa,
                                 altitude_m,
                             ),
-                            true,
+                            saved_pressure_is_reading(profile, units),
                         ),
                     };
                 (
@@ -10725,20 +10753,24 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                             None => None,
                         };
-                        // A profile's pressure flown as a QNH (stored or typed mode) resolves
-                        // the way `trajectory --saved-profile` resolves it: in QNH mode, which
-                        // never reads the reduced value as an omitted default. A profile written
-                        // before 0.49.0 has no marker, and its QNH 1031 hPa at 150 m reduces
-                        // to 1012.86 hPa, inside the legacy band; the Absolute rule the
-                        // pre-reduced value would otherwise go through swapped it for ICAO air.
-                        let profile_qnh =
-                            profile_pressure_in_use && mode == Some(PressureReferenceMode::Qnh);
+                        // A profile's pressure reading flown as a QNH (stored or typed mode)
+                        // flies its reduced value, as `trajectory --saved-profile` flies it. A
+                        // profile written before 0.49.0 has no marker, and its QNH 1031 hPa at
+                        // 150 m reduces to 1012.86 hPa, inside the legacy band; the Absolute
+                        // rule the pre-reduced value goes through would swap it for ICAO air.
+                        // A profile saved without --pressure stores the omitted default, which
+                        // stays omitted here exactly as with no profile.
+                        let profile_qnh_reading = profile_pressure_in_use
+                            && mode == Some(PressureReferenceMode::Qnh)
+                            && profile_data
+                                .as_ref()
+                                .is_some_and(|p| saved_pressure_is_reading(p, cli.units));
                         (
                             temperature,
                             apply_pressure_mode(entered_pressure, altitude, mode, cli.units),
                             altitude,
                             temperature_supplied,
-                            pressure_supplied || profile_qnh,
+                            pressure_supplied || profile_qnh_reading,
                         )
                     }
                 };
@@ -22515,6 +22547,94 @@ mod profile_unit_tests {
             angle.to_bits(),
             "clicks*size + residual must reconstruct the quantized angle bit-exactly"
         );
+    }
+
+    /// `profile save` without `--pressure` stores 29.92 inHg / 1013.25 hPa and no marker.
+    /// Under a stored qnh that default is still an omitted pressure on `dsf --saved-profile`:
+    /// at 3 m it reduces into the legacy band and flies ICAO air, bit for bit what the same
+    /// profile flew before the stored mode was honoured (absolute, the old rule). The default
+    /// is recognised after a unit conversion too (1013.207888 hPa is 29.92 inHg). Any other
+    /// stored value is a reading, marker or not, and flies as reduced.
+    #[test]
+    fn dsf_keeps_a_profiles_omitted_pressure_omitted_under_a_stored_qnh() {
+        let solve = |profile: &ProfileData, units: UnitSystem| {
+            let result = solve_profile_for_dsf(profile, units, 300.0, profile.zero_distance)
+                .expect("dsf solve");
+            format!("{result:?}")
+        };
+        let at_low_altitude = |units: &str, altitude: f64, pressure: f64| ProfileData {
+            units: units.to_string(),
+            altitude,
+            pressure,
+            temperature: if units == "metric" { 20.0 } else { 68.0 },
+            pressure_reference: None,
+            use_bc_segments: None,
+            ..metric_profile()
+        };
+        for (units, system, altitude, default) in [
+            ("metric", UnitSystem::Metric, 3.0, 1013.25),
+            ("metric", UnitSystem::Metric, 3.0, 1_013.207_888),
+            ("imperial", UnitSystem::Imperial, 10.0, 29.92),
+        ] {
+            let absolute = at_low_altitude(units, altitude, default);
+            let stored_qnh = ProfileData {
+                pressure_reference: Some("qnh".to_string()),
+                ..absolute.clone()
+            };
+            assert!(
+                solve(&stored_qnh, system) == solve(&absolute, system),
+                "{units} {default}: an omitted pressure under a stored qnh flew other air"
+            );
+        }
+
+        let omitted = at_low_altitude("metric", 3.0, 1013.25);
+        let typed = ProfileData {
+            pressure: 1013.5,
+            pressure_reference: Some("qnh".to_string()),
+            ..omitted.clone()
+        };
+        let reduced = ballistics_engine::atmosphere::reduce_qnh_to_station_pressure(1013.5, 3.0);
+        assert!((reduced - 1013.25).abs() < 0.5, "{reduced} is in the band");
+        let as_absolute = ProfileData {
+            pressure: reduced,
+            pressure_supplied: true,
+            ..omitted.clone()
+        };
+        let typed_run = solve(&typed, UnitSystem::Metric);
+        assert!(
+            typed_run != solve(&omitted, UnitSystem::Metric),
+            "an unmarked QNH reading flew the omitted air"
+        );
+        assert!(
+            typed_run == solve(&as_absolute, UnitSystem::Metric),
+            "an unmarked QNH reading did not fly its reduced value"
+        );
+    }
+
+    /// The omitted default `profile save` stores is recognised in both unit systems and after a
+    /// conversion between them; any other unmarked value, and any marked one, is a reading.
+    #[test]
+    fn saved_pressure_is_reading_recognises_only_the_omitted_default() {
+        let with = |units: &str, pressure: f64, supplied: bool| ProfileData {
+            units: units.to_string(),
+            pressure,
+            pressure_supplied: supplied,
+            ..metric_profile()
+        };
+        let reading = |profile: ProfileData, target: UnitSystem| {
+            saved_pressure_is_reading(&profile.converted_to(target).unwrap(), target)
+        };
+        for target in [UnitSystem::Metric, UnitSystem::Imperial] {
+            assert!(!reading(with("metric", 1013.25, false), target));
+            assert!(!reading(with("imperial", 29.92, false), target));
+            assert!(!reading(with("metric", 1_013.207_888, false), target));
+            assert!(reading(with("metric", 1013.25, true), target));
+            assert!(reading(with("imperial", 29.92, true), target));
+            assert!(reading(with("metric", 1013.5, false), target));
+            assert!(reading(with("metric", 1013.2, false), target));
+            assert!(reading(with("imperial", 29.93, false), target));
+            assert!(reading(with("imperial", 30.4455, false), target));
+        }
     }
 }
 

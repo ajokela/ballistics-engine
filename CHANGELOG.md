@@ -128,13 +128,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a QNH), which an import would read back as a typed reading. The `.a7p` bytes do not change.
 - **`dsf --saved-profile` and `plan-truing --profile` honour a profile's stored
   `--pressure-type qnh`, and `plan-truing` reduces any declared QNH at the altitude it flies.**
-  A profile's pressure flown as a QNH (its stored mode, or `--pressure-type qnh` typed for it) is
-  reduced at the profile's altitude and flies as a reading, as `trajectory --saved-profile`
-  already flew it. That includes a profile saved before 0.49.0, which has no presence marker: its
-  QNH of 1031 hPa at 150 m reduces to 1012.86 hPa and flies, where the old rule would have
-  swapped it for ICAO air. `plan-truing` used to reduce a QNH, stored or typed, at `--altitude`
-  alone, which is sea level (no reduction) when only the profile gives the altitude; it now
-  reduces at the altitude the run flies, the profile's when `--altitude` is not given.
+  A profile's pressure reading flown as a QNH (its stored mode, or `--pressure-type qnh` typed
+  for it) is reduced at the altitude the run flies and flies as a reading, as
+  `trajectory --saved-profile` already flew it. That includes a profile saved before 0.49.0,
+  which has no presence marker: its QNH of 1031 hPa at 150 m reduces to 1012.86 hPa and flies,
+  where the old rule would have swapped it for ICAO air. A profile saved without `--pressure`
+  stores 29.92 inHg / 1013.25 hPa, recognised in either unit system; that is still an omitted
+  pressure, resolved exactly as `--pressure-type qnh` with no `--pressure` and no profile.
+  `plan-truing` used to reduce a QNH, stored or typed, at `--altitude` alone, which is sea level
+  (no reduction) when only the profile gives the altitude; it now reduces at the altitude the run
+  flies, the profile's when `--altitude` is not given.
   **Numeric change** for a profile that stores `qnh`, and for any `plan-truing --profile` run
   with `--pressure-type qnh` and no `--altitude`, whether the profile stores `qnh` or not (a
   profile at 5000 ft with `--pressure 30.40 --pressure-type qnh` typed: condition number 161.03,

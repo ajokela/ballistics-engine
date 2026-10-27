@@ -368,7 +368,10 @@ warning: station pressure 29.92 inHg is 1.202 times the ICAO standard pressure a
   (`temperature_supplied` / `pressure_supplied` in the file, written only when true), and
   `.a7p` import marks both. A profile saved before 0.49.0 carries neither, so its stored
   59 °F / 29.92 inHg keeps the old meaning, standard air at a real altitude; re-save it with
-  `--temperature` / `--pressure` to mark a real reading.
+  `--temperature` / `--pressure` to mark a real reading. On `plan-truing --profile` and
+  `dsf --saved-profile`, a profile's pressure flown as a QNH is a reading even without the
+  marker, unless it is the 29.92 inHg / 1013.25 hPa that `profile save` stores when
+  `--pressure` is omitted, which stays omitted.
 - **Density altitude.** The pressure is derived from the density altitude, never a reading,
   and an explicit temperature wins over the ISA one. Explicit means any supplied source: the
   flag, a `--location` CSV cell, a `--profile` CSV `ZERO_TEMP` cell or a marked saved profile.

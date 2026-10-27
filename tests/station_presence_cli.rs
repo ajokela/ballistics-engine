@@ -1911,6 +1911,169 @@ fn an_unmarked_profiles_stored_qnh_flies_its_reduced_pressure() {
     }
 }
 
+/// A profile saved without `--pressure` stores the sea-level default (29.92 inHg or 1013.25 hPa)
+/// and no marker. Flown as a QNH (stored, or `--pressure-type qnh` typed for it), that default is
+/// still an omitted pressure: `plan-truing` reduces it and the old rule decides, exactly as with
+/// no profile. At 3 m (10 ft) the reduced default lands inside the legacy band and flies the ICAO
+/// pressure there. The default is recognised in either unit system, so a profile loaded in the
+/// other one is omitted too. Every pinned value was captured from ab4eb0c. Only a stored value
+/// other than the default is a reading in an unmarked profile.
+#[test]
+fn a_profiles_omitted_pressure_flown_as_a_qnh_stays_omitted() {
+    let home = private_home();
+    let metric_load = [
+        "--velocity",
+        "823",
+        "--bc",
+        "0.475",
+        "--mass",
+        "10.9",
+        "--diameter",
+        "7.82",
+    ];
+    let imperial_load = [
+        "--velocity",
+        "2700",
+        "--bc",
+        "0.475",
+        "--mass",
+        "168",
+        "--diameter",
+        "0.308",
+    ];
+    let metric_air = ["--altitude", "3", "--temperature", "20"];
+    let imperial_air = ["--altitude", "10", "--temperature", "68"];
+    let save = |units: &str, name: &str, load: &[&str], air: &[&str], extra: &[&str]| {
+        ok(
+            Some(&home),
+            &cat(&[&["-u", units, "profile", "save", name], load, air, extra]),
+        );
+    };
+    let qnh = ["--pressure-type", "qnh"];
+    save("metric", "a-metric", &metric_load, &metric_air, &[]);
+    save("metric", "q-metric", &metric_load, &metric_air, &qnh);
+    save("imperial", "a-imperial", &imperial_load, &imperial_air, &[]);
+    save(
+        "imperial",
+        "q-imperial",
+        &imperial_load,
+        &imperial_air,
+        &qnh,
+    );
+    for name in ["a-metric", "q-metric", "a-imperial", "q-imperial"] {
+        let file = home.join(format!(".ballistics/profiles/{name}.json"));
+        let text = std::fs::read_to_string(file).unwrap();
+        assert!(!text.contains("pressure_supplied"), "{name}: {text}");
+    }
+    let plan = |units: &str, extra: &[&str]| {
+        json_in(
+            Some(&home),
+            &cat(&[
+                &[
+                    "-u",
+                    units,
+                    "plan-truing",
+                    "--measurement-resolution",
+                    "0.25",
+                    "--candidate-ranges",
+                    "300,500,700",
+                ],
+                extra,
+            ]),
+        )["information"]["condition_number"]
+            .as_f64()
+            .unwrap()
+    };
+    // (units, run, condition number captured from ab4eb0c)
+    let cases: [(&str, Vec<&str>, f64); 12] = [
+        (
+            "metric",
+            cat(&[&metric_load, &metric_air, &qnh]),
+            147.22911163966467,
+        ),
+        (
+            "metric",
+            cat(&[&["--profile", "a-metric", "--altitude", "3"], &qnh]),
+            147.22911163966467,
+        ),
+        (
+            "metric",
+            cat(&[&["--profile", "a-metric"], &qnh]),
+            147.22911163966467,
+        ),
+        ("metric", vec!["--profile", "q-metric"], 147.22911163966467),
+        (
+            "metric",
+            cat(&[&["--profile", "a-imperial", "--altitude", "3"], &qnh]),
+            146.77803224676077,
+        ),
+        (
+            "metric",
+            vec!["--profile", "q-imperial"],
+            146.78702305164347,
+        ),
+        (
+            "imperial",
+            cat(&[&imperial_load, &imperial_air, &qnh]),
+            158.11027132668036,
+        ),
+        (
+            "imperial",
+            cat(&[&["--profile", "a-imperial", "--altitude", "10"], &qnh]),
+            158.11027132668036,
+        ),
+        (
+            "imperial",
+            cat(&[&["--profile", "a-imperial"], &qnh]),
+            158.11027132668036,
+        ),
+        (
+            "imperial",
+            vec!["--profile", "q-imperial"],
+            158.11027132668036,
+        ),
+        (
+            "imperial",
+            cat(&[&["--profile", "a-metric", "--altitude", "10"], &qnh]),
+            158.11768242204755,
+        ),
+        (
+            "imperial",
+            vec!["--profile", "q-metric"],
+            158.11766725855364,
+        ),
+    ];
+    for (units, run, was) in &cases {
+        assert_bits(plan(units, run), *was, &format!("{units} {run:?}"));
+    }
+
+    // A stored value other than the default is a reading, marker or not: QNH 1013.5 hPa reduces
+    // to about 1013.14 hPa at 3 m, inside the band, and flies as reduced.
+    save(
+        "metric",
+        "q-typed",
+        &metric_load,
+        &metric_air,
+        &["--pressure", "1013.5", "--pressure-type", "qnh"],
+    );
+    unmark_profile(&home, "q-typed", "q-typed-legacy");
+    let typed = plan(
+        "metric",
+        &cat(&[
+            &metric_load,
+            &metric_air,
+            &["--pressure", "1013.5", "--pressure-type", "qnh"],
+        ]),
+    );
+    assert_ne!(typed.to_bits(), 147.22911163966467_f64.to_bits());
+    assert_bits(plan("metric", &["--profile", "q-typed"]), typed, "marked");
+    assert_bits(
+        plan("metric", &["--profile", "q-typed-legacy"]),
+        typed,
+        "unmarked",
+    );
+}
+
 #[test]
 fn a_typed_implausible_station_pressure_now_warns() {
     let warning = "times the ICAO standard";
