@@ -280,12 +280,46 @@ fn the_canonical_repros_fly_the_typed_air() {
     assert_bits(d, 5.063875736668549, "M2 drop");
 }
 
+/// Write the `hold-corridor` scenarios file and a generated `reticle hold` reticle into `home`,
+/// returning their paths.
+fn hold_fixtures(home: &Path) -> (String, String) {
+    let scenarios = write_csv(
+        home,
+        "scenarios.json",
+        r#"{"version":1,"nominal":"low","scenarios":[{"name":"low","segments":["4:90:1000"]},{"name":"high","segments":["14:90:1000"]},{"name":"switch","segments":["10:90:400","8:270:1000"]}]}"#,
+    );
+    let reticle = ok(
+        None,
+        &[
+            "reticle",
+            "generate",
+            "tree",
+            "--rows",
+            "8",
+            "--row-spacing",
+            "1.0",
+            "--spread-step",
+            "0.5",
+            "-o",
+            "json",
+        ],
+    );
+    let reticle = write_csv(
+        home,
+        "reticle.json",
+        &String::from_utf8(reticle.stdout).unwrap(),
+    );
+    (scenarios, reticle)
+}
+
 /// Every subcommand the probe matrix covers: a typed in-band reading differs from the same
 /// command with it omitted. `stability` has no sentinel (its omitted default is sea-level air
 /// itself), so only its case A and B, whose typed values differ from that default, move.
 #[test]
 fn every_subcommand_flies_a_typed_in_band_reading() {
-    fn commands(units: &'static str) -> Vec<(&'static str, Vec<String>)> {
+    let home = private_home();
+    let (scenarios, reticle) = hold_fixtures(&home);
+    let commands = |units: &'static str| -> Vec<(&'static str, Vec<String>)> {
         let m = units == "metric";
         let (bul, load) = if m {
             (METRIC_BUL, METRIC_LOAD)
@@ -533,8 +567,43 @@ fn every_subcommand_flies_a_typed_in_band_reading() {
                     &["--zero-distance", "100", "--start", "100", "--end", "600"],
                 ])),
             ),
+            (
+                "hold-corridor",
+                s(&cat(&[
+                    &[
+                        "hold-corridor",
+                        "--scenarios",
+                        &scenarios,
+                        "--ranges",
+                        "200,400,600",
+                        "--target",
+                        "rect:12x18",
+                    ],
+                    load,
+                    &["--zero-distance", "100"],
+                ])),
+            ),
+            (
+                "reticle-hold",
+                s(&cat(&[
+                    &[
+                        "reticle",
+                        "hold",
+                        "--reticle-json",
+                        &reticle,
+                        "--range",
+                        "500",
+                    ],
+                    load,
+                    &["--zero-distance", "100"],
+                ])),
+            ),
+            (
+                "zero-from-angle",
+                s(&cat(&[&["zero"], bul, &["--from-angle", "0.1"]])),
+            ),
         ]
-    }
+    };
     let cases: [(&str, &'static str, &[&str], &[&str]); 5] = [
         (
             "A",
@@ -606,6 +675,347 @@ fn every_subcommand_flies_a_typed_in_band_reading() {
             assert_eq!(
                 changed, expect_change,
                 "case {case} {name}: changed={changed}"
+            );
+        }
+    });
+}
+
+/// One number from a command's JSON, by a `/`-separated path; `-1` is an array's last element.
+fn json_at(doc: &Value, path: &str) -> f64 {
+    let mut v = doc;
+    for seg in path.split('/') {
+        v = match v {
+            Value::Array(items) if seg == "-1" => items.last().unwrap(),
+            Value::Array(items) => &items[seg.parse::<usize>().unwrap()],
+            _ => &v[seg],
+        };
+    }
+    v.as_f64()
+        .unwrap_or_else(|| panic!("{path} is not a number: {doc}"))
+}
+
+/// The zero flies the typed air too, on every subcommand that solves one. At a 100 m zero the
+/// zero-angle search lands nearby airs on one angle, so a run whose zero fell back to the old
+/// rule (ICAO air) while its flight used the typed air looked right; at 300 m it does not. Each
+/// value was captured from ab4eb0c with the two sentinels compiled out (a typed value flies as
+/// typed there), and equals this build's output; "was" is what ab4eb0c printed. Case A is QNH
+/// 1031 hPa at 150 m (1012.86 hPa station), B is 1012.9 hPa typed at 150 m, both 20 °C; D is
+/// 59 °F typed at 5000 ft on a 25.0 inHg day. `zero --from-angle` already flew a declared QNH,
+/// so its case A is unchanged.
+#[test]
+fn every_subcommand_flies_the_typed_air_at_its_zero_too() {
+    let home = private_home();
+    let (scenarios, reticle) = hold_fixtures(&home);
+    let command = |name: &str, metric: bool| -> Vec<String> {
+        let (bul, load) = if metric {
+            (METRIC_BUL, METRIC_LOAD)
+        } else {
+            (IMP_BUL, IMP_LOAD)
+        };
+        let (mass, dia, vel) = if metric {
+            ("10.9", "7.82", "823")
+        } else {
+            ("168", "0.308", "2700")
+        };
+        let twist = if metric { "254" } else { "10" };
+        let (load_a, load_b) = if metric {
+            ("A:g1:0.475:10.9:823:7.82", "B:g1:0.500:11.66:838:7.82")
+        } else {
+            ("A:g1:0.475:168:2700:0.308", "B:g1:0.500:180:2750:0.308")
+        };
+        let data = if metric {
+            "300,0.85;500,2.7"
+        } else {
+            "300,34;500,107"
+        };
+        let z: &[&str] = &["--zero-distance", "300"];
+        let tv: &[&str] = &[
+            "--bc",
+            "0.475",
+            "--mass",
+            mass,
+            "--diameter",
+            dia,
+            "--offline",
+            "--zero-distance",
+            "300",
+        ];
+        let args: Vec<&str> = match name {
+            "zero-from-angle" => cat(&[&["zero"], bul, &["--from-angle", "0.1"]]),
+            "mpbr" => cat(&[
+                &["mpbr"],
+                bul,
+                &["--vital-zone", if metric { "20" } else { "8" }],
+            ]),
+            "come-ups" => cat(&[&["come-ups"], bul, z, &["--end", "600"]]),
+            "lead" => cat(&[&["lead"], bul, &["--target-speed", "4"]]),
+            "wind-card" => cat(&[&["wind-card"], bul, z]),
+            "range-table" => cat(&[&["range-table"], bul, z]),
+            "true-velocity" => cat(&[
+                &["true-velocity", "--measured-drop", "8", "--range", "500"],
+                tv,
+            ]),
+            "true-velocity-observed" => cat(&[
+                &[
+                    "true-velocity",
+                    "--measured-drop",
+                    "3.6",
+                    "--range",
+                    "500",
+                    "--observed",
+                    "700:6.6",
+                ],
+                tv,
+            ]),
+            "true-velocity-chrono" => cat(&[
+                &[
+                    "true-velocity",
+                    "--measured-drop",
+                    "8",
+                    "--range",
+                    "500",
+                    "--chrono-velocity",
+                    vel,
+                    "--chrono-distance",
+                    "5",
+                ],
+                tv,
+            ]),
+            "true-wind" => cat(&[
+                &["true-wind", "--miss", "500:15"],
+                bul,
+                &["--twist-rate", twist],
+                z,
+            ]),
+            "plan-truing" => cat(&[
+                &[
+                    "plan-truing",
+                    "--measurement-resolution",
+                    "0.25",
+                    "--candidate-ranges",
+                    "300,500,700",
+                    "--velocity",
+                    vel,
+                    "--bc",
+                    "0.475",
+                    "--mass",
+                    mass,
+                    "--diameter",
+                    dia,
+                ],
+                z,
+            ]),
+            "compare" => cat(&[&["compare", "--load", load_a, "--load", load_b], z]),
+            "estimate-bc" => vec![
+                "estimate-bc",
+                "--velocity",
+                vel,
+                "--mass",
+                mass,
+                "--diameter",
+                dia,
+                "--data",
+                data,
+                "--zero-range",
+                "100",
+            ],
+            "mark-to-range" => cat(&[
+                &["mark-to-range", "--mark", "2.0", "--mark", "5.0"],
+                load,
+                z,
+            ]),
+            "bdc-match" => cat(&[
+                &[
+                    "bdc-match",
+                    "--mark-range",
+                    "2:300",
+                    "--mark-range",
+                    "4:500",
+                    "--mark-range",
+                    "6:700",
+                ],
+                load,
+                &["--reference-mag", "12"],
+                z,
+            ]),
+            "optimal-zero" => cat(&[
+                &[
+                    "optimal-zero",
+                    "--target",
+                    "200:10",
+                    "--target",
+                    "400:12",
+                    "--target",
+                    "600:18",
+                ],
+                load,
+            ]),
+            "adaptive-card" => cat(&[
+                &["adaptive-card"],
+                load,
+                z,
+                &["--start", "100", "--end", "600"],
+            ]),
+            "hold-corridor" => cat(&[
+                &[
+                    "hold-corridor",
+                    "--scenarios",
+                    &scenarios,
+                    "--ranges",
+                    "200,400,600",
+                    "--target",
+                    "rect:12x18",
+                ],
+                load,
+                z,
+            ]),
+            "reticle-hold" => cat(&[
+                &[
+                    "reticle",
+                    "hold",
+                    "--reticle-json",
+                    &reticle,
+                    "--range",
+                    "500",
+                ],
+                load,
+                z,
+            ]),
+            other => panic!("no command {other}"),
+        };
+        args.into_iter().map(String::from).collect()
+    };
+    let air = |case: &str| -> (bool, &'static [&'static str]) {
+        match case {
+            "A" => (
+                true,
+                &[
+                    "--altitude",
+                    "150",
+                    "--temperature",
+                    "20",
+                    "--pressure",
+                    "1031",
+                    "--pressure-type",
+                    "qnh",
+                ],
+            ),
+            "B" => (
+                true,
+                &[
+                    "--altitude",
+                    "150",
+                    "--temperature",
+                    "20",
+                    "--pressure",
+                    "1012.9",
+                ],
+            ),
+            "D" => (
+                false,
+                &[
+                    "--altitude",
+                    "5000",
+                    "--pressure",
+                    "25.0",
+                    "--temperature",
+                    "59",
+                ],
+            ),
+            other => panic!("no case {other}"),
+        }
+    };
+    // (case, command, value, now, was at ab4eb0c)
+    #[rustfmt::skip]
+    let pins: &[(&str, &str, &str, f64, f64)] = &[
+        ("A", "zero-from-angle", "zero_range", 184.44065946144926, 184.44065946144926),
+        ("A", "mpbr", "mpbr", 277.57525170751234, 277.7648122247587),
+        ("A", "come-ups", "data/-1/drop", 3.554752524040378, 3.5188299573131094),
+        ("A", "lead", "rows/-1/lead", 3.7827576282715856, 3.763753693530174),
+        ("A", "wind-card", "data/-1/wind_10", -7.110933393129025, -6.94583022877229),
+        ("A", "range-table", "data/-1/drop", 20206.33848586181, 19840.774089725764),
+        ("A", "true-velocity", "calculated_drop_mil", 7.483927282826406, 7.485529736545842),
+        ("A", "true-velocity-observed", "fitted_muzzle_velocity", 722.3621602163888, 718.6512144304594),
+        ("A", "true-velocity-observed", "mv_window_start_m", 565.6397822977608, 569.2620823181188),
+        ("A", "true-velocity-observed", "mv_window_end_m", 628.488646997512, 632.5134247979098),
+        ("A", "true-velocity-chrono", "adjustment_percent", -44.654661921496206, -44.65095500018336),
+        ("A", "true-wind", "effective_crosswind", 2.12881831805145, 2.172083532303539),
+        ("A", "plan-truing", "information/condition_number", 645.8374395583315, 490.42237919090815),
+        ("A", "compare", "compare/rows/-1/loads/0/drop", 1134.6135560103025, 1124.9489467973397),
+        ("A", "estimate-bc", "variants/0/estimated_bc", 0.25, 0.246),
+        ("A", "mark-to-range", "marks/-1/range", 693.8915418242184, 697.4353937913447),
+        ("A", "bdc-match", "fitted_magnification", 17.046803176810492, 17.234551565451333),
+        ("A", "optimal-zero", "optimal_zero", 428.4605521015392, 427.99036890521256),
+        ("A", "adaptive-card", "rows/-1/drop_adj", 3.554752524040378, 3.5188299573131094),
+        ("A", "hold-corridor", "rows/-1/minimax_elevation_mil", 3.554867259390395, 3.518940460585484),
+        ("A", "reticle-hold", "hold/down_mil", 2.2044838121635126, 2.1855361168682452),
+        ("B", "zero-from-angle", "zero_range", 184.43974635007845, 184.80632783196094),
+        ("B", "mpbr", "mpbr", 277.5736752363296, 277.7648122247587),
+        ("B", "come-ups", "data/-1/drop", 3.554863128953085, 3.5188299573131094),
+        ("B", "lead", "rows/-1/lead", 3.7828053900044294, 3.763753693530174),
+        ("B", "wind-card", "data/-1/wind_10", -7.111347180475116, -6.94583022877229),
+        ("B", "range-table", "data/-1/drop", 20207.28174930798, 19840.774089725764),
+        ("B", "true-velocity", "calculated_drop_mil", 7.483991955554914, 7.485529736545842),
+        ("B", "true-velocity-observed", "fitted_muzzle_velocity", 722.4107728583531, 718.6512144304594),
+        ("B", "true-velocity-observed", "mv_window_start_m", 565.6657738930813, 569.2620823181188),
+        ("B", "true-velocity-observed", "mv_window_end_m", 628.5175265478681, 632.5134247979098),
+        ("B", "true-velocity-chrono", "adjustment_percent", -44.65467119987547, -44.65095500018336),
+        ("B", "true-wind", "effective_crosswind", 2.128711796782978, 2.172083532303539),
+        ("B", "plan-truing", "information/condition_number", 645.139317487319, 490.42237919090815),
+        ("B", "compare", "compare/rows/-1/loads/0/drop", 1134.6473510599828, 1124.9489467973397),
+        ("B", "estimate-bc", "variants/0/estimated_bc", 0.25, 0.246),
+        ("B", "mark-to-range", "marks/-1/range", 693.8815080866484, 697.4353937913447),
+        ("B", "bdc-match", "fitted_magnification", 17.046232235566688, 17.234551565451333),
+        ("B", "optimal-zero", "optimal_zero", 428.4547651761321, 427.99036890521256),
+        ("B", "adaptive-card", "rows/-1/drop_adj", 3.554863128953085, 3.5188299573131094),
+        ("B", "hold-corridor", "rows/-1/minimax_elevation_mil", 3.5549778707511086, 3.518940460585484),
+        ("B", "reticle-hold", "hold/down_mil", 2.204551402110831, 2.1855361168682452),
+        ("D", "zero-from-angle", "zero_range", 204.55089485001628, 203.9627191953953),
+        ("D", "mpbr", "mpbr", 311.3027544989547, 309.4064871371572),
+        ("D", "come-ups", "data/-1/drop", 2.8401683241504876, 2.8771593427158986),
+        ("D", "lead", "rows/-1/lead", 1.5864756044145347, 1.5966150517244653),
+        ("D", "wind-card", "data/-1/wind_10", -2.2555711195619996, -2.3492521052917232),
+        ("D", "range-table", "data/-1/drop", 521.2425486288677, 535.0865231210498),
+        ("D", "true-velocity", "calculated_drop_mil", 6.186676348196818, 6.299968420836825),
+        ("D", "true-velocity-observed", "fitted_muzzle_velocity", 1882.6119671554238, 2140.5495855985573),
+        ("D", "true-velocity-observed", "mv_window_start_m", 803.3096554604081, 549.1094520822987),
+        ("D", "true-velocity-observed", "mv_window_end_m", 892.5662838448978, 610.1216134247763),
+        ("D", "true-velocity-chrono", "adjustment_percent", -44.4931569064095, -44.49484406197996),
+        ("D", "true-wind", "effective_crosswind", 7.279270215377554, 7.058519377470756),
+        ("D", "plan-truing", "information/condition_number", 258.5000158802868, 278.5062568096683),
+        ("D", "compare", "compare/rows/-1/loads/0/drop", 32.530981086706674, 32.909841432326665),
+        ("D", "estimate-bc", "variants/0/estimated_bc", 0.159, 0.164),
+        ("D", "mark-to-range", "marks/-1/range", 777.9575523622334, 771.9128933586179),
+        ("D", "bdc-match", "fitted_magnification", 21.547484910326702, 21.249038846017886),
+        ("D", "optimal-zero", "optimal_zero", 423.81437898352885, 424.39776778488186),
+        ("D", "adaptive-card", "rows/-1/drop_adj", 2.8401683241504876, 2.8771593427158986),
+        ("D", "hold-corridor", "rows/-1/minimax_elevation_mil", 2.8402563969250787, 2.8771198979743846),
+        ("D", "reticle-hold", "hold/down_mil", 1.789278277384567, 1.8095631018860499),
+    ];
+    std::thread::scope(|scope| {
+        let jobs: Vec<_> = pins
+            .iter()
+            .map(|&(case, name, path, now, was)| {
+                let (metric, air) = air(case);
+                let mut args: Vec<String> = vec![
+                    "-u".into(),
+                    if metric { "metric" } else { "imperial" }.into(),
+                ];
+                args.extend(command(name, metric));
+                args.extend(air.iter().map(|x| x.to_string()));
+                scope.spawn(move || {
+                    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                    let got = json_at(&json(&refs), path);
+                    (case, name, path, now, was, got)
+                })
+            })
+            .collect();
+        for job in jobs {
+            let (case, name, path, now, was, got) = job.join().unwrap();
+            assert_bits(
+                got,
+                now,
+                &format!("case {case} {name} {path} (was {was:?})"),
             );
         }
     });
@@ -1542,4 +1952,253 @@ fn a_typed_implausible_station_pressure_now_warns() {
     assert!(!stderr_of(&omitted).contains(warning));
     let omitted_zero = cat(&[TR_IZ, &["--zero-altitude", "5000"]]);
     assert!(!stderr_of(&omitted_zero).contains(warning));
+}
+
+/// A one-shot HTTP service that records the request body and answers 500, so `true-velocity
+/// --offline-fallback` falls back to its local solve.
+#[cfg(feature = "online")]
+fn failing_service() -> (String, std::thread::JoinHandle<String>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let body_start = loop {
+            let n = stream.read(&mut buffer).unwrap();
+            assert!(n > 0, "connection closed before the headers ended");
+            request.extend_from_slice(&buffer[..n]);
+            if let Some(i) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                break i + 4;
+            }
+        };
+        let headers = String::from_utf8_lossy(&request[..body_start]).to_lowercase();
+        let length: usize = headers
+            .lines()
+            .find_map(|l| l.strip_prefix("content-length:"))
+            .map(|v| v.trim().parse().unwrap())
+            .unwrap_or(0);
+        while request.len() < body_start + length {
+            let n = stream.read(&mut buffer).unwrap();
+            assert!(n > 0, "connection closed before the body ended");
+            request.extend_from_slice(&buffer[..n]);
+        }
+        stream
+            .write_all(
+                b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n\
+                  Content-Length: 2\r\nConnection: close\r\n\r\n{}",
+            )
+            .unwrap();
+        String::from_utf8(request[body_start..body_start + length].to_vec()).unwrap()
+    });
+    (url, server)
+}
+
+/// `true-velocity` online sends a typed reading with its presence marker and an omitted one
+/// exactly as before (no marker key). When the service fails, `--offline-fallback` solves
+/// locally with the same presence as `--offline`, so a typed in-band reading flies as typed.
+#[cfg(feature = "online")]
+#[test]
+fn true_velocity_online_sends_presence_and_falls_back_with_it() {
+    let home = private_home();
+    std::fs::create_dir_all(home.join(".ballistics")).unwrap();
+    std::fs::write(
+        home.join(".ballistics/tos.json"),
+        r#"{"accepted": true, "accepted_version": "2026-01-26", "accepted_at": "test", "terms_hash": "test"}"#,
+    )
+    .unwrap();
+    let base: &[&str] = &[
+        "true-velocity",
+        "--measured-drop",
+        "8",
+        "--range",
+        "500",
+        "--bc",
+        "0.475",
+        "--zero-distance",
+        "300",
+        "-o",
+        "json",
+    ];
+    // (units, air flags, expected temperature marker, expected pressure marker)
+    type Case = (
+        &'static str,
+        &'static [&'static str],
+        Option<bool>,
+        Option<bool>,
+    );
+    let cases: [Case; 3] = [
+        (
+            "metric",
+            &[
+                "--mass",
+                "10.9",
+                "--diameter",
+                "7.82",
+                "--altitude",
+                "150",
+                "--temperature",
+                "20",
+                "--pressure",
+                "1012.9",
+            ],
+            Some(true),
+            Some(true),
+        ),
+        (
+            "imperial",
+            &[
+                "--mass",
+                "168",
+                "--diameter",
+                "0.308",
+                "--altitude",
+                "5000",
+                "--temperature",
+                "59",
+            ],
+            Some(true),
+            None,
+        ),
+        (
+            "metric",
+            &["--mass", "10.9", "--diameter", "7.82", "--altitude", "150"],
+            None,
+            None,
+        ),
+    ];
+    for (units, air, temperature_marker, pressure_marker) in cases {
+        let (url, server) = failing_service();
+        let online = run_in(
+            Some(&home),
+            &cat(&[
+                &["-u", units],
+                base,
+                air,
+                &["--offline-fallback", "--api-url", &url],
+            ]),
+        );
+        let body: Value = serde_json::from_str(&server.join().unwrap()).unwrap();
+        assert!(
+            online.status.success(),
+            "{air:?}: {}",
+            String::from_utf8_lossy(&online.stderr)
+        );
+        assert!(String::from_utf8_lossy(&online.stderr).contains("Falling back"));
+        assert_eq!(
+            body.get("temperature_supplied").and_then(Value::as_bool),
+            temperature_marker,
+            "{air:?}: {body}"
+        );
+        assert_eq!(
+            body.get("pressure_supplied").and_then(Value::as_bool),
+            pressure_marker,
+            "{air:?}: {body}"
+        );
+        let offline = stdout_in(
+            Some(&home),
+            &cat(&[&["-u", units], base, air, &["--offline"]]),
+        );
+        assert_eq!(
+            String::from_utf8(online.stdout).unwrap(),
+            offline,
+            "{air:?}: the fallback must fly what --offline flies"
+        );
+    }
+}
+
+/// `dsf --saved-profile` flies a marked in-band reading as typed, and keeps the legacy rule for
+/// the same value in an unmarked (pre-0.49.0) profile, where it is the omitted default.
+#[test]
+fn dsf_flies_a_marked_in_band_reading_and_keeps_the_legacy_rule_unmarked() {
+    let home = private_home();
+    let save = |name: &str, air: &[&str]| {
+        ok(
+            Some(&home),
+            &cat(&[
+                &[
+                    "-u",
+                    "metric",
+                    "profile",
+                    "save",
+                    name,
+                    "--velocity",
+                    "350",
+                    "--bc",
+                    "0.475",
+                    "--drag-model",
+                    "g1",
+                    "--mass",
+                    "10.9",
+                    "--diameter",
+                    "7.82",
+                    "--zero-distance",
+                    "100",
+                ],
+                air,
+            ]),
+        );
+    };
+    let dsf = |name: &str| {
+        let out = ok(
+            Some(&home),
+            &[
+                "-u",
+                "metric",
+                "dsf",
+                "--saved-profile",
+                name,
+                "--range",
+                "200",
+                "--observed-drop",
+                "15moa",
+            ],
+        );
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+        .replace(name, "<P>")
+    };
+    for (what, air, without) in [
+        (
+            "1012.9 hPa at 150 m",
+            &[
+                "--altitude",
+                "150",
+                "--temperature",
+                "20",
+                "--pressure",
+                "1012.9",
+            ][..],
+            &["--altitude", "150", "--temperature", "20"][..],
+        ),
+        (
+            "15 C at 1500 m",
+            &[
+                "--altitude",
+                "1500",
+                "--pressure",
+                "846",
+                "--temperature",
+                "15",
+            ][..],
+            &["--altitude", "1500", "--pressure", "846"][..],
+        ),
+    ] {
+        // dsf writes its point back into the profile, so each profile is solved once.
+        let (typed, legacy, omitted) = (
+            format!("typed-{}", air[1]),
+            format!("legacy-{}", air[1]),
+            format!("omitted-{}", air[1]),
+        );
+        save(&typed, air);
+        unmark_profile(&home, &typed, &legacy);
+        save(&omitted, without);
+        let (typed, legacy, omitted) = (dsf(&typed), dsf(&legacy), dsf(&omitted));
+        assert_ne!(typed, omitted, "{what}: the reading must fly");
+        assert_eq!(legacy, omitted, "{what}: unmarked keeps the legacy rule");
+    }
 }

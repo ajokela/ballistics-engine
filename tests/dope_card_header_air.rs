@@ -363,3 +363,44 @@ fn adaptive_card_header_prints_sea_level_and_fully_stated_air_as_before() {
         assert_header_says(&bytes, &label, want);
     }
 }
+
+/// A typed reading inside the old default band at altitude is a reading (0.49.0), and the
+/// header states it the way the rows fly it. Before, 1012.9 hPa typed at 150 m flew ICAO
+/// 995.36 hPa and the header said `DA:1209 ft Pressure:29.39/995 Temp:68`; a typed 15 °C at
+/// 1500 m flew the ICAO 5.25 °C and said `Temp:41`.
+#[test]
+fn adaptive_card_header_states_a_typed_in_band_reading_as_typed() {
+    let want = flown_header(20.0, 1012.9, 150.0, PressureReferenceMode::Absolute, BOTH);
+    assert_eq!(want, "DA:612 ft Pressure:29.91/1013 Temp:68");
+    let air = [
+        "--altitude",
+        "150",
+        "--temperature",
+        "20",
+        "--pressure",
+        "1012.9",
+    ];
+    let bytes = card("metric", ADAPTIVE_LOAD, &air, "adaptive 1012.9");
+    assert_header_says(&bytes, "adaptive-card, 1012.9 hPa typed at 150 m", &want);
+
+    let want = flown_header(
+        15.0,
+        1013.25,
+        1500.0,
+        PressureReferenceMode::Qnh,
+        StationAtmospherePresence::BOTH,
+    );
+    assert_eq!(want, "DA:6089 ft Pressure:24.97/846 Temp:59");
+    let air = [
+        "--altitude",
+        "1500",
+        "--temperature",
+        "15",
+        "--pressure",
+        "1013.25",
+        "--pressure-type",
+        "qnh",
+    ];
+    let bytes = card("metric", ADAPTIVE_LOAD, &air, "adaptive 15 C");
+    assert_header_says(&bytes, "adaptive-card, 15 C typed at 1500 m", &want);
+}
