@@ -41,6 +41,8 @@ docs/ANDROID_JNI_BRIDGE.md
 docs/ATMOSPHERE_DENSITY_ALTITUDE.md
 docs/embedded-no-std-spike-2026-07.md
 docs/SOLVE_JSON_V1.md
+docs/WIND_FIELD_IMPLEMENTATION.md
+docs/WIND_FIELD_MODELING.md
 fonts/AUTHORS
 fonts/ChangeLog
 fonts/LiberationMono-Bold.ttf
@@ -93,6 +95,7 @@ src/explain.rs
 src/fast_trajectory.rs
 src/ffi.rs
 src/form_factor.rs
+src/gravity.rs
 src/hold_curve.rs
 src/lib.rs
 src/main.rs
@@ -152,3 +155,4 @@ src/wez.rs
 src/wind_scenarios.rs
 src/wind_shear.rs
 src/wind.rs
+src/wind/field.rs
