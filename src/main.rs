@@ -6791,23 +6791,28 @@ fn solve_profile_for_dsf(
             None => {
                 let altitude_m = UnitConverter::altitude_to_metric(profile.altitude, units);
                 let entered_hpa = UnitConverter::pressure_to_metric(profile.pressure, units);
-                let pressure_hpa = match parse_pressure_reference_profile_field(
-                    profile.pressure_reference.as_deref(),
-                )? {
-                    PressureReferenceMode::Absolute => entered_hpa,
-                    PressureReferenceMode::Qnh => {
-                        ballistics_engine::atmosphere::reduce_qnh_to_station_pressure(
-                            entered_hpa,
-                            altitude_m,
-                        )
-                    }
-                };
+                // A stored QNH resolves the way `trajectory --saved-profile` resolves it: in
+                // QNH mode, which never reads the reduced value as an omitted default, so it
+                // flies as a reading even in a profile written before 0.49.0 (no marker).
+                let (pressure_hpa, pressure_supplied) =
+                    match parse_pressure_reference_profile_field(
+                        profile.pressure_reference.as_deref(),
+                    )? {
+                        PressureReferenceMode::Absolute => (entered_hpa, profile.pressure_supplied),
+                        PressureReferenceMode::Qnh => (
+                            ballistics_engine::atmosphere::reduce_qnh_to_station_pressure(
+                                entered_hpa,
+                                altitude_m,
+                            ),
+                            true,
+                        ),
+                    };
                 (
                     UnitConverter::temperature_to_metric(profile.temperature, units),
                     pressure_hpa,
                     altitude_m,
                     profile.temperature_supplied,
-                    profile.pressure_supplied,
+                    pressure_supplied,
                 )
             }
         };
@@ -10720,12 +10725,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                             None => None,
                         };
+                        // A profile's pressure flown as a QNH (stored or typed mode) resolves
+                        // the way `trajectory --saved-profile` resolves it: in QNH mode, which
+                        // never reads the reduced value as an omitted default. A profile written
+                        // before 0.49.0 has no marker, and its QNH 1031 hPa at 150 m reduces
+                        // to 1012.86 hPa, inside the legacy band; the Absolute rule the
+                        // pre-reduced value would otherwise go through swapped it for ICAO air.
+                        let profile_qnh =
+                            profile_pressure_in_use && mode == Some(PressureReferenceMode::Qnh);
                         (
                             temperature,
                             apply_pressure_mode(entered_pressure, altitude, mode, cli.units),
                             altitude,
                             temperature_supplied,
-                            pressure_supplied,
+                            pressure_supplied || profile_qnh,
                         )
                     }
                 };

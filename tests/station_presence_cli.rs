@@ -1338,6 +1338,169 @@ fn dsf_honours_the_profiles_stored_mode_and_density_altitude() {
     assert_eq!(dsf("da"), dsf("triple"));
 }
 
+/// Copy a saved profile to `to` with its presence markers removed, which is how a profile
+/// written before 0.49.0 reads.
+fn unmark_profile(home: &Path, from: &str, to: &str) {
+    let dir = home.join(".ballistics/profiles");
+    let text = std::fs::read_to_string(dir.join(format!("{from}.json"))).unwrap();
+    let legacy: String = text
+        .lines()
+        .filter(|line| !line.contains("_supplied"))
+        .map(|line| {
+            if line.trim_start().starts_with("\"name\"") {
+                format!("  \"name\": \"{to}\",\n")
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect();
+    assert!(!legacy.contains("_supplied"), "{legacy}");
+    std::fs::write(dir.join(format!("{to}.json")), legacy).unwrap();
+}
+
+/// A profile written before 0.49.0 carries no presence markers, but a stored QNH in it is still
+/// a QNH: `trajectory --saved-profile` flies its reduced station pressure whatever the value,
+/// and so must `plan-truing --profile` and `dsf --saved-profile`. QNH 1031 hPa at 150 m (and
+/// 30.4455 inHg at 492.126 ft) reduces to about 1012.86 hPa, inside the legacy band; it used to
+/// fly ICAO air there, the same air as an omitted pressure.
+#[test]
+fn an_unmarked_profiles_stored_qnh_flies_its_reduced_pressure() {
+    struct Case {
+        units: &'static str,
+        load: [&'static str; 8],
+        air: [&'static str; 4],
+        qnh: &'static str,
+        dsf_velocity: &'static str,
+        dsf_range: &'static str,
+        dsf_drop: &'static str,
+    }
+    let cases = [
+        Case {
+            units: "metric",
+            load: [
+                "--velocity",
+                "823",
+                "--bc",
+                "0.475",
+                "--mass",
+                "10.9",
+                "--diameter",
+                "7.82",
+            ],
+            air: ["--altitude", "150", "--temperature", "20"],
+            qnh: "1031",
+            dsf_velocity: "350",
+            dsf_range: "200",
+            dsf_drop: "15moa",
+        },
+        Case {
+            units: "imperial",
+            load: [
+                "--velocity",
+                "2700",
+                "--bc",
+                "0.475",
+                "--mass",
+                "168",
+                "--diameter",
+                "0.308",
+            ],
+            air: ["--altitude", "492.126", "--temperature", "68"],
+            qnh: "30.4455",
+            dsf_velocity: "1150",
+            dsf_range: "250",
+            dsf_drop: "20moa",
+        },
+    ];
+    for case in &cases {
+        // A HOME per unit system: dsf writes its point back into the profile it solves.
+        let home = private_home();
+        let u = case.units;
+        let save = |name: &str, velocity: &str, extra: &[&str]| {
+            let mut load = case.load;
+            load[1] = velocity;
+            ok(
+                Some(&home),
+                &cat(&[
+                    &["-u", u, "profile", "save", name, "--drag-model", "g1"],
+                    &load,
+                    &["--zero-distance", "100"],
+                    &case.air,
+                    extra,
+                ]),
+            );
+        };
+        let typed_qnh = ["--pressure", case.qnh, "--pressure-type", "qnh"];
+        let plan = |extra: &[&str]| {
+            stdout_in(
+                Some(&home),
+                &cat(&[
+                    &[
+                        "-u",
+                        u,
+                        "plan-truing",
+                        "--measurement-resolution",
+                        "0.25",
+                        "--candidate-ranges",
+                        "300,500,700",
+                        "-o",
+                        "json",
+                    ],
+                    extra,
+                ]),
+            )
+        };
+
+        // plan-truing --profile, stored mode.
+        save("marked", case.load[1], &typed_qnh);
+        unmark_profile(&home, "marked", "legacy");
+        let typed = plan(&cat(&[&case.load, &case.air, &typed_qnh]));
+        let omitted = plan(&cat(&[&case.load, &case.air]));
+        assert_ne!(typed, omitted, "{u}: the QNH must move the plan");
+        assert_eq!(plan(&["--profile", "marked"]), typed, "{u}: marked");
+        assert_eq!(plan(&["--profile", "legacy"]), typed, "{u}: unmarked");
+
+        // plan-truing --profile with the mode typed for the profile's own pressure.
+        save("raw", case.load[1], &["--pressure", case.qnh]);
+        unmark_profile(&home, "raw", "raw-legacy");
+        assert_eq!(
+            plan(&["--profile", "raw-legacy", "--pressure-type", "qnh"]),
+            typed,
+            "{u}: unmarked absolute profile flown as a typed QNH"
+        );
+
+        // dsf --saved-profile, stored mode. A subsonic load, where the air shows in the DSF.
+        let dsf = |name: &str| {
+            let out = ok(
+                Some(&home),
+                &[
+                    "-u",
+                    u,
+                    "dsf",
+                    "--saved-profile",
+                    name,
+                    "--range",
+                    case.dsf_range,
+                    "--observed-drop",
+                    case.dsf_drop,
+                ],
+            );
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+            .replace(name, "<P>")
+        };
+        save("dsf-marked", case.dsf_velocity, &typed_qnh);
+        unmark_profile(&home, "dsf-marked", "dsf-legacy");
+        save("dsf-omitted", case.dsf_velocity, &[]);
+        let marked = dsf("dsf-marked");
+        assert_ne!(marked, dsf("dsf-omitted"), "{u}: the QNH must move the DSF");
+        assert_eq!(dsf("dsf-legacy"), marked, "{u}: unmarked dsf");
+    }
+}
+
 #[test]
 fn a_typed_implausible_station_pressure_now_warns() {
     let warning = "times the ICAO standard";
