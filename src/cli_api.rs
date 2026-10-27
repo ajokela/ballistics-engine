@@ -6956,6 +6956,108 @@ mod station_presence_twin_tests {
         assert_ne!(both.mean_impact_velocity_mps.to_bits(), 0x406e99be313a64aa);
     }
 
+    /// Every trial's impact position is its deviation from the baseline solve, so the baseline
+    /// must fly the trials' air. With no dispersion each trial is the baseline itself, so the
+    /// deviation is exactly zero under every presence, in-band readings included.
+    #[test]
+    fn monte_carlo_baseline_flies_the_trials_air() {
+        let params = MonteCarloParams {
+            num_simulations: 3,
+            velocity_std_dev: 0.0,
+            angle_std_dev: 0.0,
+            bc_std_dev: 0.0,
+            wind_speed_std_dev: 0.0,
+            target_distance: Some(500.0),
+            base_wind_speed: 0.0,
+            base_wind_direction: 0.0,
+            azimuth_std_dev: 0.0,
+        };
+        let inputs = BallisticInputs {
+            temperature: 15.0,
+            ..in_band_mc_inputs()
+        };
+        for presence in [
+            StationAtmospherePresence::NEITHER,
+            StationAtmospherePresence::new(true, false),
+            StationAtmospherePresence::new(false, true),
+            StationAtmospherePresence::BOTH,
+        ] {
+            let results = run_monte_carlo_with_station_presence(
+                inputs.clone(),
+                WindConditions::default(),
+                params.clone(),
+                0.0,
+                Some(7),
+                presence,
+            )
+            .unwrap();
+            assert_eq!(results.impact_positions.len(), 3);
+            for position in &results.impact_positions {
+                assert_eq!(position.y.to_bits(), 0.0_f64.to_bits(), "{presence:?}");
+                assert_eq!(position.z.to_bits(), 0.0_f64.to_bits(), "{presence:?}");
+            }
+        }
+    }
+
+    /// A zeroed drop fit zeroes in the air it flies: drops generated from a solve zeroed at
+    /// 100 m in a typed in-band air fit back with no residual. A zero left on the old rule
+    /// (ICAO air) under a flight in the typed air leaves one at every candidate BC.
+    #[test]
+    fn estimate_bc_fit_twin_zeroes_in_the_supplied_air() {
+        let atmosphere = air(15.0, 1013.0, 150.0);
+        let presence = StationAtmospherePresence::BOTH;
+        let mut inputs = BallisticInputs {
+            muzzle_velocity: 823.0,
+            bc_value: 0.475,
+            bc_type: DragModel::G1,
+            bullet_mass: 0.0109,
+            bullet_diameter: 0.00782,
+            sight_height: 0.0381,
+            ..Default::default()
+        };
+        inputs.muzzle_angle = calculate_zero_angle_with_station_presence(
+            inputs.clone(),
+            100.0,
+            0.0381,
+            WindConditions::default(),
+            atmosphere.clone(),
+            presence,
+        )
+        .unwrap();
+        let mut solver = TrajectorySolver::new_with_station_presence(
+            inputs,
+            WindConditions::default(),
+            atmosphere.clone(),
+            presence,
+        );
+        solver.set_max_range(750.0);
+        let flight = solver.solve().unwrap();
+        let points: Vec<(f64, f64)> = [300.0, 500.0]
+            .iter()
+            .map(|&d| {
+                (
+                    d,
+                    fit_value_at(&flight.points, d, BcFitMode::Drop, 0.0381).unwrap(),
+                )
+            })
+            .collect();
+        let fit = estimate_bc_fit_with_station_presence(
+            823.0,
+            0.0109,
+            0.00782,
+            &points,
+            DragModel::G1,
+            BcFitMode::Drop,
+            atmosphere,
+            Some(100.0),
+            0.0381,
+            presence,
+        )
+        .unwrap();
+        assert!((fit.bc - 0.475).abs() < 1e-9, "{fit:?}");
+        assert!(fit.rms_error < 1e-9, "{fit:?}");
+    }
+
     #[test]
     fn estimate_bc_fit_twin_is_pinned_and_both_fits_the_supplied_air() {
         let points = [(300.0, 650.0), (500.0, 560.0)];

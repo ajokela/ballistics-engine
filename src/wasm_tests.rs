@@ -4736,6 +4736,73 @@ mod station_presence_tests {
         );
     }
 
+    /// The multi-observation fit (`--observed`) and the chrono back-solve (`--chrono-velocity`)
+    /// each resolve the air on their own, so each is checked on its own output.
+    #[wasm_bindgen_test]
+    fn true_velocity_observed_and_chrono_fly_a_typed_reading() {
+        const OFFLINE: &str = "--units metric -b 0.475 -m 10.9 -d 7.82 --offline -o json";
+        let observed = |x: &str| {
+            json(&format!(
+                "true-velocity --measured-drop 3.6 --range 500 --observed 700:6.6 {OFFLINE} {x}"
+            ))
+        };
+        let chrono = |x: &str| {
+            json(&format!(
+                "true-velocity --measured-drop 8 --range 500 --chrono-velocity 823 \
+                 --chrono-distance 5 {OFFLINE} {x}"
+            ))
+        };
+        let field = |doc: &serde_json::Value, key: &str| doc[key].as_f64().unwrap();
+        // The muzzle velocity the chrono reading is back-solved to: what the 5 m correction
+        // flies, apart from the drop fit's search grid.
+        let chrono_muzzle = |x: &str| {
+            let doc = chrono(x);
+            field(&doc, "effective_velocity") - field(&doc, "velocity_adjustment")
+        };
+        // Captured from ab4eb0c with the sentinels compiled out: 1013 hPa typed at 150 m.
+        // ab4eb0c flew ICAO 995.36 hPa there: -29.092691771258945, the omitted run's value.
+        assert_eq!(
+            field(
+                &chrono("--temperature 20 --altitude 150 --pressure 1013"),
+                "adjustment_percent"
+            )
+            .to_bits(),
+            (-28.989396602165147_f64).to_bits()
+        );
+        check(
+            "true-velocity --observed pressure",
+            |x| field(&observed(x), "fitted_bc"),
+            "--temperature 20 --altitude 150 --pressure 1012",
+            "--temperature 20 --altitude 150 --pressure 1013",
+            "--temperature 20 --altitude 150 --pressure 1014",
+            "--temperature 20 --altitude 150",
+        );
+        check(
+            "true-velocity --observed temperature",
+            |x| field(&observed(x), "fitted_muzzle_velocity"),
+            "--altitude 1500 --pressure 846 --temperature 14.8",
+            "--altitude 1500 --pressure 846 --temperature 15",
+            "--altitude 1500 --pressure 846 --temperature 15.2",
+            "--altitude 1500 --pressure 846",
+        );
+        check(
+            "true-velocity --chrono-velocity pressure",
+            chrono_muzzle,
+            "--temperature 20 --altitude 150 --pressure 1012",
+            "--temperature 20 --altitude 150 --pressure 1013",
+            "--temperature 20 --altitude 150 --pressure 1014",
+            "--temperature 20 --altitude 150",
+        );
+        check(
+            "true-velocity --chrono-velocity temperature",
+            chrono_muzzle,
+            "--altitude 1500 --pressure 846 --temperature 14.8",
+            "--altitude 1500 --pressure 846 --temperature 15",
+            "--altitude 1500 --pressure 846 --temperature 15.2",
+            "--altitude 1500 --pressure 846",
+        );
+    }
+
     #[wasm_bindgen_test]
     fn true_wind_flies_a_typed_reading() {
         let crosswind = |x: &str| {

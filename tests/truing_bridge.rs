@@ -1079,3 +1079,37 @@ fn true_fit_omitted_readings_fly_icao_air_and_sent_ones_fly_as_sent() {
     assert_eq!(sent["ok"], json!(true), "{sent}");
     assert_ne!(omitted["result"], sent["result"]);
 }
+
+/// `true.dsf` zeroes in the sent air too: a 900 yd zero puts the zero's air into the predicted
+/// drop at 950 yd. 29.92 inHg sent at 500 ft is a reading (0.49.0). Captured from ab4eb0c with
+/// the sentinels compiled out (a sent value flies as sent there); left out, the pressure flies
+/// ICAO air at 500 ft, which is what sending 29.92 gave before 0.49.0.
+#[test]
+fn true_dsf_flies_a_sent_pressure_at_its_zero_too() {
+    let request = |pressure: Option<f64>| {
+        let mut model = json!({
+            "muzzle_velocity_fps": 2700.0, "ballistic_coefficient": 0.243, "drag_model": "g7",
+            "mass_gr": 168.0, "diameter_in": 0.308, "zero_distance_yd": 900.0,
+            "sight_height_in": 2.0, "temperature_f": 68.0, "humidity_pct": 50.0,
+            "altitude_ft": 500.0
+        });
+        if let Some(p) = pressure {
+            model["pressure_inhg"] = json!(p);
+        }
+        json!({"model": model, "range_yd": 950.0, "observed_drop": 1.0, "drop_unit": "mil"})
+    };
+    let result = |pressure| {
+        let v = call("true.dsf", request(pressure));
+        assert_eq!(v["ok"], json!(true), "{v}");
+        let r = &v["result"];
+        (
+            r["predicted_drop"].as_f64().unwrap(),
+            r["dsf"].as_f64().unwrap(),
+        )
+    };
+    let (predicted, dsf) = result(Some(29.92));
+    assert_eq!(predicted.to_bits(), 0.9296793417404231_f64.to_bits());
+    assert_eq!(dsf.to_bits(), 1.0756396911304191_f64.to_bits());
+    let (predicted, _) = result(None);
+    assert_eq!(predicted.to_bits(), 0.9084117581689021_f64.to_bits());
+}

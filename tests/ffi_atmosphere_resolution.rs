@@ -497,6 +497,54 @@ mod station_presence_exports {
         assert!(trajectory_headline(Some(4)).is_none());
     }
 
+    /// The presence export divides each sample's velocity by the speed of sound of the air the
+    /// solve flew: the supplied reading, not the ICAO air the old rule would put in its place.
+    #[test]
+    fn trajectory_export_samples_take_their_mach_from_the_supplied_air() {
+        for (t, p, alt, flags) in [
+            (20.0, 1013.0, 150.0, P),
+            (15.0, 850.0, 1500.0, T),
+            (15.0, 1013.25, 1500.0, T | P),
+        ] {
+            let shot = FFIBallisticInputs {
+                muzzle_angle: 0.002,
+                enable_trajectory_sampling: 1,
+                sample_interval: 50.0,
+                ..inputs(alt, t)
+            };
+            let (_, speed_of_sound) =
+                ballistics_engine::atmosphere::calculate_atmosphere(alt, Some(t), Some(p), 50.0);
+            unsafe {
+                let result = ballistics_calculate_trajectory_with_station_presence(
+                    &shot,
+                    ptr::null(),
+                    &air(t, p, alt),
+                    600.0,
+                    1.0,
+                    ptr::null(),
+                    ptr::null(),
+                    0,
+                    1.0,
+                    flags,
+                );
+                assert!(!result.is_null());
+                let r = &*result;
+                let samples =
+                    std::slice::from_raw_parts(r.sampled_points, r.sampled_point_count as usize);
+                assert!(samples.len() > 6, "({t}, {p}, {alt})");
+                for sample in samples {
+                    assert_eq!(
+                        sample.mach.to_bits(),
+                        (sample.velocity_mps / speed_of_sound).to_bits(),
+                        "({t}, {p}, {alt}) at {} m",
+                        sample.distance
+                    );
+                }
+                ballistics_free_trajectory_result(result);
+            }
+        }
+    }
+
     /// `ballistics_monte_carlo` is unseeded, so the parameters carry no dispersion at all:
     /// every trial is then the baseline, and counts and means are exact.
     fn zero_sigma_monte_carlo(flags: Option<u32>) -> Option<(i32, f64, f64)> {

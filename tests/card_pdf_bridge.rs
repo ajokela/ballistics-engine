@@ -1486,6 +1486,39 @@ mod pdf_present {
         }
     }
 
+    /// (0.49.0) The card's zero flies the typed air too. At a 100 m zero the zero-angle search
+    /// lands nearby airs on one angle, which hides a zero left on the old rule; at 300 m it
+    /// does not. The 600 m come-up was captured from ab4eb0c with the sentinels compiled out
+    /// (a typed value flies as typed there); "was" is what ab4eb0c returned, the ICAO air.
+    #[test]
+    fn a_card_zeroes_in_the_typed_air_too() {
+        let come_up_600 = |air: Value| {
+            let mut request = site_150m_request(air);
+            request["zero_distance"] = json!(300.0);
+            let out = call("card.come_ups", request);
+            assert_eq!(out["ok"], true, "{out}");
+            out["result"]["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["range"] == json!(600.0))
+                .unwrap_or_else(|| panic!("no 600 m row: {out}"))["drop_adj"]
+                .as_f64()
+                .unwrap()
+        };
+        // 1013.0 hPa typed at 150 m, 20 °C. Was 3.5386699839733655.
+        assert_eq!(
+            come_up_600(json!({"pressure": 1013.0})).to_bits(),
+            3.574955759105287_f64.to_bits()
+        );
+        // 15 °C typed at 1500 m, 850 hPa. Was 3.326861364843243.
+        assert_eq!(
+            come_up_600(json!({"altitude": 1500.0, "pressure": 850.0, "temperature": 15.0}))
+                .to_bits(),
+            3.280418798318465_f64.to_bits()
+        );
+    }
+
     /// (0.49.0) The solve path's header states the air the rows flew, now including a typed
     /// in-band pressure (QNH 1031 hPa at 150 m, reduced). Before 0.49.0 it read
     /// `DA:1209 ft Pressure:29.39/995 Temp:68`.
