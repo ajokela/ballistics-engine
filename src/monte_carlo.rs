@@ -29,8 +29,25 @@ pub struct TrajectoryOutput {
 ///
 /// This function evaluates a single trajectory with the given inputs and returns
 /// simplified output suitable for statistical analysis.
+///
+/// Presence-blind: `inputs`' temperature and pressure go through the legacy default-sentinel
+/// rule (a sea-level default at a real altitude flies ICAO standard air). See
+/// [`solve_trajectory_for_monte_carlo_with_station_presence`].
 pub fn solve_trajectory_for_monte_carlo(
     inputs: &BallisticInputs,
+) -> Result<TrajectoryOutput, String> {
+    solve_trajectory_for_monte_carlo_with_station_presence(
+        inputs,
+        crate::atmosphere::StationAtmospherePresence::NEITHER,
+    )
+}
+
+/// [`solve_trajectory_for_monte_carlo`] knowing which of `inputs`' temperature and pressure the
+/// caller supplied (0.49.0): a supplied value flies as given, an omitted one keeps the legacy
+/// default-sentinel rule. `NEITHER` is bit-identical to the presence-blind function.
+pub fn solve_trajectory_for_monte_carlo_with_station_presence(
+    inputs: &BallisticInputs,
+    station_presence: crate::atmosphere::StationAtmospherePresence,
 ) -> Result<TrajectoryOutput, String> {
     // BallisticInputs is SI-canonical (meters, m/s, kg, radians).
     let target_distance_m = inputs.target_distance; // meters
@@ -45,16 +62,19 @@ pub fn solve_trajectory_for_monte_carlo(
         return Err("target_distance must be a positive, finite distance".to_string());
     }
 
-    // Calculate atmosphere at altitude. resolve_station_pressure / _temperature keep explicit
-    // values authoritative (no altitude double-count) but return None when left at the sea-level
-    // default, so altitude drives BOTH the base station pressure AND the lapse-rate temperature
-    // via the ICAO standard (this base_ratio feeds the fast/Monte-Carlo kernel's base_density).
-    // Matches calculate_air_density.
-    let (resolved_temp_c, resolved_pressure_hpa) = crate::atmosphere::resolve_station_conditions(
-        inputs.temperature,
-        inputs.pressure,
-        inputs.altitude,
-    );
+    // Calculate atmosphere at altitude. A supplied value is authoritative (no altitude
+    // double-count); an omitted one left at the sea-level default is replaced by the ICAO
+    // standard at the altitude, so altitude drives BOTH the base station pressure AND the
+    // lapse-rate temperature (this base_ratio feeds the fast/Monte-Carlo kernel's
+    // base_density). Matches calculate_air_density.
+    let (resolved_temp_c, resolved_pressure_hpa) =
+        crate::atmosphere::resolve_station_conditions_with_presence(
+            inputs.temperature,
+            inputs.pressure,
+            inputs.altitude,
+            crate::atmosphere::PressureReferenceMode::Absolute,
+            station_presence,
+        );
     let (air_density, speed_of_sound) = calculate_atmosphere(
         inputs.altitude, // meters
         Some(resolved_temp_c),

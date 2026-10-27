@@ -75,8 +75,8 @@ fn library_request(miss_tokens: &[&str]) -> WindTruingRequest {
         diameter_in: 0.308,
         zero_distance_yd: 100.0,
         sight_height_in: 2.0,
-        temperature_f: 59.0,
-        pressure_inhg: 29.92,
+        temperature_f: ballistics_engine::StationReading::omitted(59.0),
+        pressure_inhg: ballistics_engine::StationReading::omitted(29.92),
         humidity_pct: 50.0,
         altitude_ft: 0.0,
         twist: TruingTwist {

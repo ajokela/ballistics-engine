@@ -81,6 +81,147 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [CLI_USAGE.md](CLI_USAGE.md).
 
 ### Fixed
+- **A temperature or pressure you typed is always flown, on every surface.** Before 0.49.0 the
+  engine read a station pressure within 0.5 hPa of 1013.25 hPa, or a temperature within 0.1 °C
+  of 15 °C, at an altitude above 1 m as "not given", and flew ICAO standard air there instead.
+  A real reading was replaced:
+  - a QNH of 1031 hPa at 150 m reduces to 1012.86 hPa (see the QNH entry below) and flew as
+    995.36 hPa on `come-ups`, `mpbr`, `lead`, `wind-card`, `range-table`, `compare`,
+    `true-velocity`, `true-wind`, `plan-truing`, `estimate-bc`, `mark-to-range`, `bdc-match`,
+    `optimal-zero`, `adaptive-card`, `hold-corridor` and `reticle hold`, and on the browser
+    terminal's `true-velocity`, `true-wind`, `lead` and `estimate-bc`;
+  - a station pressure typed as 1012.9 hPa or 29.92 inHg at altitude, or a temperature typed as
+    15 °C or 59 °F, was replaced on every one of those and on `trajectory` (shot day and zero
+    day), `zero`, a `--density-altitude` zero, `--location` / `--profile` CSV rows and saved
+    profiles; and on the bridge's `card.*` (rows and the PDF header) and `true.*` commands, and
+    the browser terminal's `trajectory`, `zero` and `Calculator`.
+
+  Each now flies exactly as given. **Numeric change:** only for a supplied value inside those
+  bands at an altitude above 1 m. An omitted value still flies ICAO air at the altitude, and a
+  value outside the bands is unchanged, bit for bit (checked against the previous engine on
+  238 CLI, 42 bridge, 7 C ABI and 114 browser-terminal cases, each omitted, in band and out of
+  band). For example,
+  `come-ups` at 600 m with QNH 1031 hPa at 150 m now gives 491.61 m/s and 5.020 mil (was
+  496.40 m/s, 4.976 mil); 29.92 inHg typed at 5000 ft with 70 °F, `trajectory --auto-zero 100`
+  now strikes the ground at 516 yd at 1817.4 fps (was 529 yd at 1935.0 fps, the ICAO 24.90
+  inHg); 1012.9 hPa typed at 150 m now gives a 300 m `zero` of 9.3817 MOA (was 9.3542). A
+  `--density-altitude` with a typed 15 °C or 59 °F now keeps it on the zero day and on `zero`
+  (DA 1500 m: 9.1942 MOA, was 9.1850). `trajectory` and `zero` now also warn for such a typed
+  pressure when it cannot be a reading at that altitude (29.92 inHg at 5000 ft is 1.202 times
+  standard); an omitted pressure is never warned.
+- **Bridge `true.*`: `temperature_f` and `pressure_inhg` are optional.** Omit them, or send
+  `null`, when there is no reading: the engine flies ICAO standard air at `altitude_ft`, which is
+  what sending 59 °F / 29.92 inHg produced before (`card.*` already read `null` as omitted; on
+  `true.*` it used to be refused). **An app that sends 59 / 29.92 as a "no reading" placeholder
+  must omit the field instead**, because a sent number is now a reading and flies as sea-level
+  air at altitude: `true.wind` at 5000 ft and 68 °F with `pressure_inhg` 29.92 now solves 5.054
+  mph, and 6.197 mph (the old answer) with the field left out or `null`.
+- **Saved profiles record whether their temperature and pressure were typed.** `profile save`
+  writes `temperature_supplied` / `pressure_supplied` (only when true; a profile saved without
+  them is byte-identical to before) and `.a7p` import sets both. A profile saved before 0.49.0
+  carries neither, so its stored 59 °F / 29.92 inHg keeps the old meaning (standard air at a real
+  altitude); re-save it with the flags to mark a real reading. `profile.import_a7p` and
+  `profile.normalize` responses carry the new keys. `profile.export_a7p` lists both under
+  `not_carried` for every profile, so that response gains two entries. They are populated for an
+  unmarked value inside the old rule's band (15 ± 0.1 °C, which holds 59 °F, or
+  1013.25 ± 0.5 hPa, which holds 29.92 inHg), whatever the profile's altitude and whether or not
+  the pressure is a QNH: an import reads the value back as a typed reading, and the file carries
+  no altitude, so a run at a real altitude (`--altitude`) flies it as typed where the unmarked
+  value flew standard air (a QNH flew its reduction, about the same). The `.a7p` bytes do not
+  change.
+- **`dsf --saved-profile` and `plan-truing --profile` honour a profile's stored
+  `--pressure-type qnh`, and `plan-truing` reduces any declared QNH at the altitude it flies.**
+  A profile's pressure reading flown as a QNH (its stored mode, or `--pressure-type qnh` typed
+  for it) is reduced at the altitude the run flies and flies as a reading, as
+  `trajectory --saved-profile` already flew it. That includes a profile saved before 0.49.0,
+  which has no presence marker: its QNH of 1031 hPa at 150 m reduces to 1012.86 hPa and flies,
+  where the old rule would have swapped it for ICAO air. A profile saved without `--pressure`
+  stores 29.92 inHg / 1013.25 hPa, recognised in either unit system; that is still an omitted
+  pressure, resolved exactly as `--pressure-type qnh` with no `--pressure` and no profile.
+  `plan-truing` used to reduce a QNH, stored or typed, at `--altitude` alone, which is sea level
+  (no reduction) when only the profile gives the altitude; it now reduces at the altitude the run
+  flies, the profile's when `--altitude` is not given.
+  **Numeric change** for a profile that stores `qnh`, and for any `plan-truing --profile` run
+  with `--pressure-type qnh` and no `--altitude`, whether the profile stores `qnh` or not (a
+  profile at 5000 ft with `--pressure 30.40 --pressure-type qnh` typed: condition number 161.03,
+  was 158.27).
+- **`trajectory --density-altitude`: a temperature from a `--location` CSV, a `--profile` CSV
+  `ZERO_TEMP` cell or a saved profile now counts as the real temperature**, exactly like
+  `--temperature`. Before, only the flag counted, and any other temperature was dropped in favour
+  of the standard temperature at that density altitude (at DA 6000 ft a CSV `TEMPERATURE` of 40,
+  90 or nothing all gave 2024.19 fps). **Numeric change** for any such temperature combined with
+  a density altitude. A profile saved before 0.49.0 has no marker, so its stored temperature is
+  still ignored under a density altitude; re-save it to mark it.
+- **`plan-truing --profile` and `dsf --saved-profile` honour a profile's stored density
+  altitude**, as `trajectory --saved-profile` already did, when the run supplies no pressure or
+  altitude of its own. Before, it was ignored and the stored sea-level placeholders were flown.
+  **Numeric change** for profiles that store one.
+- **`card.pdf` reprints state the air their rows flew.** For stored rows from engine 0.49.0 or
+  later (`engine_version` on the stored card), the header follows the new rule. For older,
+  absent, empty or unreadable versions it is resolved as before 0.49.0, because those rows were
+  solved that way. A `card.pdf` solve with 1012.86 hPa at 150 m and 20 °C prints
+  `DA:613 ft Pressure:29.91/1013 Temp:68` (was `DA:1209 ft Pressure:29.39/995 Temp:68`).
+- **`trajectory --online`: a declared QNH is sent as station pressure**, and `--compare`'s local
+  leg reduces it and resolves the air like the offline solve. A typed temperature or pressure is
+  now sent with `temperature_supplied` / `pressure_supplied` set to `true`, so the online service
+  can fly it as typed once it supports those fields. Until then, the online service still
+  replaces an in-band value, including a QNH that reduces to about 1013 hPa. An omitted value's
+  request is unchanged. `true-velocity` online sends the same markers.
+- **`trajectory`: a typed `--altitude 0` or `--humidity 50` now beats a `--location` or saved
+  profile value**; before, they were indistinguishable from the defaults.
+- **Python and Ruby bindings** (released with this engine) follow the same rule. Python:
+  `AtmosphericConditions(temperature_f=None, pressure_inhg=None)` is the new default, and a
+  value passed or assigned is a reading, so an explicit 59 °F or 29.92 inHg at altitude now flies
+  as typed; leave it out (or clear the new `temperature_supplied` / `pressure_supplied`
+  attributes) for "no reading". `calculate_zero_angle`'s `temperature_f` / `pressure_inhg`
+  default to `None`. An inputs dict reads a present, non-`None` `temperature` / `pressure` key
+  as a reading, and takes optional bool `temperature_supplied` / `pressure_supplied` keys that
+  override that (a marker that is not a bool raises `TypeError`); a column `monte_carlo_parallel`
+  samples counts as supplied. Ruby: `solve` and `calculate_zero_angle` fly a `temperature_f` /
+  `pressure_inhg` key that is present as typed and keep the old rule for a key left out; a `nil`
+  value, which raised `TypeError`, now reads as omitted. `monte_carlo` has no atmosphere input
+  and is unchanged.
+
+  **New API:**
+  - `atmosphere::StationAtmospherePresence`, `atmosphere::StationReading` and
+    `atmosphere::resolve_station_conditions_with_presence` (also at the crate root);
+  - `TrajectorySolver::new_with_station_presence`;
+  - `calculate_zero_angle_with_station_presence` and
+    `calculate_zero_range_from_angle_with_station_presence`;
+  - `run_monte_carlo_with_station_presence` and
+    `run_monte_carlo_adaptive_seeded_with_station_presence`;
+  - `monte_carlo::solve_trajectory_for_monte_carlo_with_station_presence`;
+  - `estimate_bc_fit_with_station_presence`, `calculate_lead_with_station_presence`;
+  - `api_client::TrajectoryRequestBuilder::temperature_supplied` and `::pressure_supplied`;
+  - `hold_curve::run_sampled_flight_with_station_presence`;
+  - `truing::correct_chrono_velocity_fps_with_station_presence`,
+    `truing::calculate_true_velocity_local_with_station_presence` and
+    `truing::run_multi_observation_truing_core_with_station_presence`;
+  - C exports `ballistics_calculate_trajectory_with_station_presence`,
+    `ballistics_calculate_zero_angle_with_station_presence` and
+    `ballistics_monte_carlo_with_station_presence`, with bits
+    `BALLISTICS_STATION_TEMPERATURE_SUPPLIED = 1` and `BALLISTICS_STATION_PRESSURE_SUPPLIED = 2`
+    (other bits are refused). `ballistics_reduce_qnh_pressure`'s and the
+    `ballistics_density_altitude_*` helpers' results should go through these with the matching
+    bit: 1013.0 hPa at 150 m with the pressure bit gives a 600 m zero of 0.006264114 rad,
+    against the struct export's 0.006219864 rad.
+
+  The presence-blind APIs, `TrajectorySolver::new`, `calculate_zero_angle_with_conditions`, the
+  `run_monte_carlo*` family, `solve_trajectory_for_monte_carlo`, `run_sampled_trajectory` and the
+  struct C exports, keep the old rule and say so in their docs.
+
+  **Source-breaking (Rust):**
+  - New fields, which break struct literals:
+    - `HoldCurveLoad` and `CorridorLoad` gain `station_presence`;
+    - `ProfileData` gains `temperature_supplied` and `pressure_supplied`;
+    - `api_client::TrajectoryRequest` and `TrueVelocityRequest` gain `temperature_supplied` and
+      `pressure_supplied` (`Option<bool>`).
+  - Field type changes, which break every read or write of the field, not only literals (for
+    example `model.temperature_f + 1.0`): `TruingModelInputsV1`, `WindTruingRequest` and
+    `DsfSolveInputs` change `temperature_f` / `pressure_inhg` from `f64` to `StationReading`. Use
+    `.value`, or `StationReading::supplied(x)` / `::omitted(x)`.
+  - On the JSON wire, `TruingModelInputsV1` and `WindTruingRequest` change only additively: the
+    two fields become optional. `DsfSolveInputs` has no wire form.
 - **Boundary-layer wind shear measures height from the ground in every kernel.** The shear
   profiles take height above the ground, but the solvers read y as height above the muzzle and
   added an assumed 1.5 m, while `TrajectorySolver` starts the bullet at y = `muzzle_height`,
@@ -187,40 +328,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed with "trajectory cannot reach target distance at any angle", now widens the bracket
   and solves, as the WASM terminal already did. For the .308 above, a 4000 yd zero solves at
   11.732877099642561°. Without the flag such zeros still fail as before.
-- **PDF dope card headers state the station air the rows were solved in.** The header's
-  `DA:… ft Pressure:…/… Temp:…` was computed from the pressure and temperature the card was
-  handed, but the rows fly the air the solve resolves from them: ICAO air at the site's
-  altitude for an omitted pressure or temperature (or one left at the 1013.25 hPa / 29.92 inHg,
-  15 °C / 59 °F default), and the station pressure of a declared QNH. So a card at 1500 m with
-  nothing supplied read `DA:0 ft Pressure:29.92/1013 Temp:59` over rows solved in 846 hPa and
-  5.25 °C, and an explicit 845.6 hPa with no temperature read `DA:6088 ft` and `Temp:59` over
-  rows that flew 5.25 °C. The header now takes its air from
-  `resolve_station_conditions_with_pressure_mode`, the function the solves use, on all three
-  printing surfaces: `trajectory -o pdf`, `adaptive-card -o pdf` and the bridge's `card.pdf`
-  (so the C ABI and JNI embedders too). A new `pdf_dope_card::HeaderAtmosphere` builds the
-  line for each. A field the solve flew as given keeps the figure it always printed (MBA-1593).
-  Only DA, Pressure and Temp move, and only where the solve substituted: at 1500 m with nothing
-  supplied the header now reads `DA:4919 ft Pressure:24.97/846 Temp:41` on all three surfaces,
-  at 5000 ft (imperial) `DA:4998 ft Pressure:24.90/843 Temp:41` (was `DA:1 ft
+- **PDF dope card headers state the station air the rows were solved in.** The header's `DA:… ft
+  Pressure:…/… Temp:…` was computed from the pressure and temperature the card was handed, but
+  the rows fly the air the solve resolves from them: ICAO air at the site's altitude for an
+  omitted pressure or temperature, and the station pressure of a declared QNH. So a card at 1500
+  m with nothing supplied read `DA:0 ft Pressure:29.92/1013 Temp:59` over rows solved in 846 hPa
+  and 5.25 °C, and an explicit 845.6 hPa with no temperature read `DA:6088 ft` and `Temp:59`
+  over rows that flew 5.25 °C. The header now takes its air from the resolver the solves use
+  (`resolve_station_conditions_with_presence` since the station-sentinel fix above), on all
+  three printing surfaces: `trajectory -o pdf`, `adaptive-card -o pdf` and the bridge's
+  `card.pdf` (so the C ABI and JNI embedders too). A new `pdf_dope_card::HeaderAtmosphere`
+  builds the line for each. A field the solve flew as given keeps the figure it always printed
+  (MBA-1593). Only DA, Pressure and Temp move, and only where the solve substituted: at 1500 m
+  with nothing supplied the header now reads `DA:4919 ft Pressure:24.97/846 Temp:41` on all
+  three surfaces, at 5000 ft (imperial) `DA:4998 ft Pressure:24.90/843 Temp:41` (was `DA:1 ft
   Pressure:29.92/1013 Temp:59`), and with 845.6 hPa and no temperature `DA:4919 ft`, `Temp:41`.
   `trajectory --pressure-type qnh` prints the station pressure instead of the QNH: 1030 hPa and
   20 °C at 1500 m went from `DA:38 ft Pressure:30.42/1030 Temp:68` to `DA:6126 ft
   Pressure:25.40/860 Temp:68`, and 30.31 inHg and 50 °F at 5000 ft from `DA:-1043 ft
   Pressure:30.31/1026` to `DA:5143 ft Pressure:25.23/854`. `adaptive-card` already printed a
-  reduced QNH but the 15 °C default, so 1013.25 hPa QNH at 1500 m went from `DA:6089 ft
-  Temp:59` to `DA:4919 ft Temp:41`. An explicit 15 °C / 59 °F (within 0.1 °C) or 1013.25 hPa /
-  29.92 inHg (within 0.5 hPa) at altitude is the solve's default sentinel, so it now prints the
-  ICAO value the rows flew; the reported QNH case (`--temperature 15 --pressure 1013.25
-  --pressure-type qnh` at 1500 m) reads `DA:4919 ft Temp:41`, not the 6088.6 ft that 15 °C
-  would give. On 34 cards compared before and after (20 CLI, 14 `card.pdf`), every token outside
-  the header line is identical, rows included. A `card.pdf` reprint of a saved `stored_card`
-  takes its header from the stored request, so one made at altitude without a pressure or
-  temperature (or with either left at the sea-level default) now prints the corrected header
-  too, while its rows are the stored ones, unchanged: the 1500 m card above reprints as
-  `DA:4919 ft Pressure:24.97/846 Temp:41` where it read `DA:0 ft Pressure:29.92/1013 Temp:59`.
-  Sea level, fully stated station air, a QNH at sea level and `--density-altitude` runs print
-  the same header text as before: 108 CLI runs (`trajectory` and `adaptive-card`, imperial and
-  metric) and 49 `card.pdf` cards. WASM, solve-json, the typed FFI calls and the Python and Ruby
+  reduced QNH but the 15 °C default, so 1013.25 hPa QNH at 1500 m went from `DA:6089 ft Temp:59`
+  to `DA:4919 ft Temp:41` (no `--temperature` was typed there). A typed 15 °C / 59 °F or 1013.25
+  hPa / 29.92 inHg at altitude is a reading since the station-sentinel fix above, and the rows
+  fly it, so the header states it as typed: the reported QNH case (`--temperature 15 --pressure
+  1013.25 --pressure-type qnh` at 1500 m) reads `DA:6089 ft Pressure:24.97/846 Temp:59`, the
+  ticket's 6088.6 ft. On 34 cards compared before and after (20 CLI, 14 `card.pdf`), every token
+  outside the header line is identical, rows included. A `card.pdf` reprint of a saved
+  `stored_card` takes its header from the stored request, so one made at altitude without a
+  pressure or temperature now prints the corrected header too (for a typed in-band value the
+  header follows the stored `engine_version`; see the station-sentinel entry), while its rows
+  are the stored ones, unchanged: the 1500 m card above reprints as `DA:4919 ft
+  Pressure:24.97/846 Temp:41` where it read `DA:0 ft Pressure:29.92/1013 Temp:59`. Sea level,
+  fully stated station air, a QNH at sea level and `--density-altitude` runs print the same
+  header text as before: 108 CLI runs (`trajectory` and `adaptive-card`, imperial and metric)
+  and 49 `card.pdf` cards. WASM, solve-json, the typed FFI calls and the Python and Ruby
   bindings print no card and are unaffected. `calculate_density_altitude` and its unused
   altitude argument are unchanged.
 

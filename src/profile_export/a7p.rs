@@ -857,6 +857,45 @@ fn not_carried_for(p: &ProfileData) -> Vec<NotCarried> {
         "the file's pressure field declares no reference, so it is written as-is; a QNH \
          profile therefore travels as if it were station pressure",
     );
+    // 0.49.0: the file has no notion of an omitted reading, and an import marks its
+    // temperature and pressure as typed. A value the profile did NOT mark as typed therefore
+    // arrives as a reading. That changes what flies wherever the old rule reads the unmarked
+    // value as omitted: inside its band (15 ± 0.1 °C, 1013.25 ± 0.5 hPa), at any altitude above
+    // 1 m. The file carries no altitude, and a run supplies its own with `--altitude` (the
+    // profile's is only the fallback), so the profile's altitude cannot rule it out. Nor can a
+    // declared QNH: the file carries it as station pressure (see `pressure_reference`), which
+    // the old rule reads as omitted when it is unmarked and in band, close to the air the QNH
+    // reduced to, while the imported reading flies as typed. Outside the bands the old rule
+    // flies an unmarked value as given, so nothing is lost.
+    let (temperature_c, pressure_hpa) = match p.unit_system() {
+        Ok(UnitSystem::Imperial) => (
+            (p.temperature - 32.0) * 5.0 / 9.0,
+            p.pressure * HPA_PER_INHG,
+        ),
+        _ => (p.temperature, p.pressure),
+    };
+    let temperature_lost = !p.temperature_supplied
+        && crate::atmosphere::in_legacy_default_temperature_band(temperature_c);
+    let pressure_lost =
+        !p.pressure_supplied && crate::atmosphere::in_legacy_default_pressure_band(pressure_hpa);
+    push(
+        "temperature_supplied",
+        temperature_lost.then(|| "false".to_string()),
+        "the file has no concept of an omitted reading and an import marks its temperature as \
+         typed, so an unmarked stored 15 °C / 59 °F (within the old rule's 0.1 °C band), which \
+         flies the ICAO standard temperature at any altitude above 1 m, the profile's or a \
+         run's --altitude, travels as a reading and flies as typed there; the file cannot carry \
+         the altitude either — see `altitude`",
+    );
+    push(
+        "pressure_supplied",
+        pressure_lost.then(|| "false".to_string()),
+        "the file has no concept of an omitted reading and an import marks its pressure as \
+         typed station pressure, so an unmarked stored 1013.25 hPa / 29.92 inHg (within the old \
+         rule's 0.5 hPa band), which flies ICAO air at any altitude above 1 m, the profile's or \
+         a run's --altitude (a QNH there reduces to about the same), travels as a reading and \
+         flies as typed there — see `altitude` and `pressure_reference`",
+    );
     push(
         "bc_reference",
         carried_opt(&p.bc_reference),
@@ -1038,6 +1077,8 @@ mod tests {
         "units": "metric",
         "temperature": 15.0,
         "pressure": 1000.0,
+        "temperature_supplied": true,
+        "pressure_supplied": true,
         "humidity": 50.0,
         "altitude": 300.0,
         "bullet_name": "300GR OTM",
@@ -1225,6 +1266,112 @@ mod tests {
             "unexpected warnings: {:?}",
             export.warnings
         );
+    }
+
+    /// 0.49.0: an import marks the file's temperature and pressure as typed readings, so a
+    /// profile whose stored values were NOT typed loses that fact on the way out. It changes
+    /// what flies wherever the old rule reads the unmarked value as omitted: inside its band
+    /// (15 ± 0.1 °C, 1013.25 ± 0.5 hPa). The file carries no altitude, and a run supplies its
+    /// own with `--altitude`, so the profile's altitude does not decide it, and neither does a
+    /// declared QNH: the file carries the QNH as station pressure, which the old rule reads as
+    /// omitted too when it is unmarked. Everywhere else the two entries stay unpopulated.
+    #[test]
+    fn unmarked_in_band_readings_are_reported_as_not_carried() {
+        let populated = |profile: &ProfileData| {
+            let export = export_a7p(profile).expect("export");
+            export
+                .not_carried
+                .iter()
+                .filter(|n| n.field.ends_with("_supplied"))
+                .map(|n| (n.field, n.populated))
+                .collect::<Vec<_>>()
+        };
+        let lost = |temperature: bool, pressure: bool| {
+            vec![
+                ("temperature_supplied", temperature),
+                ("pressure_supplied", pressure),
+            ]
+        };
+        // The fixture: 15 °C (in band) and a 1000 hPa QNH at 300 m.
+        let marked = full_profile();
+        assert_eq!(populated(&marked), lost(false, false));
+        let unmarked = ProfileData {
+            temperature_supplied: false,
+            pressure_supplied: false,
+            ..full_profile()
+        };
+        assert_eq!(populated(&unmarked), lost(true, false));
+        // An in-band pressure is lost, absolute or declared as a QNH.
+        let in_band = ProfileData {
+            pressure: 1013.25,
+            pressure_reference: None,
+            ..unmarked.clone()
+        };
+        assert_eq!(populated(&in_band), lost(true, true));
+        let in_band_qnh = ProfileData {
+            pressure_reference: Some("qnh".to_string()),
+            ..in_band.clone()
+        };
+        assert_eq!(populated(&in_band_qnh), lost(true, true));
+        // Inside the bands but not the defaults: still read as omitted when unmarked.
+        let near = ProfileData {
+            temperature: 14.95,
+            pressure: 1012.8,
+            ..in_band.clone()
+        };
+        assert_eq!(populated(&near), lost(true, true));
+        // Outside the bands the round trip flies the same air, at any altitude.
+        let out_of_band = ProfileData {
+            temperature: 15.15,
+            pressure: 1013.8,
+            ..in_band.clone()
+        };
+        assert_eq!(populated(&out_of_band), lost(false, false));
+        // The profile's own altitude does not decide it: sea level included.
+        for altitude in [0.0, 1.0, -1.0, 1.5, 3000.0] {
+            let at = |profile: &ProfileData| ProfileData {
+                altitude,
+                ..profile.clone()
+            };
+            assert_eq!(populated(&at(&in_band)), lost(true, true), "{altitude} m");
+            assert_eq!(
+                populated(&at(&in_band_qnh)),
+                lost(true, true),
+                "{altitude} m"
+            );
+            assert_eq!(
+                populated(&at(&out_of_band)),
+                lost(false, false),
+                "{altitude} m"
+            );
+        }
+        // Imperial values are tested in the units the rule uses: 59 °F and 29.92 inHg are in
+        // band, at 5000 ft or at sea level; 80 °F and 24.9 inHg are not.
+        let imperial = ProfileData {
+            units: "imperial".to_string(),
+            velocity: 2600.0,
+            mass: 300.0,
+            diameter: 0.338,
+            twist_rate: Some(10.0),
+            sight_height: Some(3.5),
+            bullet_length: Some(1.8),
+            temperature: 59.0,
+            pressure: 29.92,
+            altitude: 5000.0,
+            ..in_band.clone()
+        };
+        assert_eq!(populated(&imperial), lost(true, true));
+        let imperial_sea_level = ProfileData {
+            altitude: 0.0,
+            ..imperial.clone()
+        };
+        assert_eq!(populated(&imperial_sea_level), lost(true, true));
+        let imperial_out = ProfileData {
+            temperature: 80.0,
+            pressure: 24.9,
+            ..imperial
+        };
+        assert_eq!(populated(&imperial_out), lost(false, false));
     }
 
     /// `CARRIED_FIELDS` and the not-carried list partition `ProfileData`. A field

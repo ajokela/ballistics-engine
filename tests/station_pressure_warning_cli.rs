@@ -222,8 +222,10 @@ fn the_default_pressure_at_altitude_is_not_warned() {
         &stderr_of(ZERO, &[altitude]),
         "zero with the default pressure",
     );
-    // A zero day that brings only its own altitude inherits the default pressure, which the
-    // sentinel flies as the ICAO pressure there too.
+    // A zero day that brings only its own altitude inherits the omitted pressure with its
+    // presence: still not a reading, still flown as the ICAO pressure there, so not warned.
+    // (Since 0.49.0 the gate is presence, not the old value-based sentinel: a TYPED 29.92 inHg
+    // at altitude is a reading and is warned; tests/station_presence_cli.rs pins that.)
     assert_no_warning(
         &stderr_of(
             TRAJECTORY,

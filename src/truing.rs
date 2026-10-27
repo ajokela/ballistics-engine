@@ -12,6 +12,7 @@ use std::error::Error;
 
 use serde::{Deserialize, Serialize};
 
+use crate::atmosphere::{StationAtmospherePresence, StationReading};
 use crate::cli_api::UnitSystem;
 use crate::constants::GRAINS_TO_KG;
 use crate::{
@@ -202,6 +203,7 @@ fn solve_truing_trajectory(
     altitude_ft: f64,
     bc_segments: &Option<Vec<BCSegmentData>>,
     env: &TruingEnvironment,
+    station_presence: StationAtmospherePresence,
 ) -> Result<crate::TrajectoryResult, Box<dyn Error>> {
     // Convert to SI units
     let velocity_ms = velocity_fps * 0.3048;
@@ -255,19 +257,24 @@ fn solve_truing_trajectory(
     // Target height is sight_height because the bullet must cross the LOS at zero distance
     // The LOS is at y = sight_height (sight is above bore by sight_height)
     // So the bullet (starting at y = 0 = bore level) must rise to y = sight_height at zero distance
-    let zero_angle = crate::calculate_zero_angle_with_conditions(
+    //
+    // The station air is resolved from the converted metric pair inside the presence twins,
+    // never pre-resolved in °C/hPa and converted back (that round trip is not bit-exact).
+    let zero_angle = crate::calculate_zero_angle_with_station_presence(
         inputs.clone(),
         zero_m,
         sight_height_m, // target height at zero distance (LOS height)
         wind.clone(),
         atmosphere.clone(),
+        station_presence,
     )?;
 
     // Set the calculated zero angle
     inputs.muzzle_angle = zero_angle;
 
     // Create solver and solve
-    let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
+    let mut solver =
+        TrajectorySolver::new_with_station_presence(inputs, wind, atmosphere, station_presence);
     solver.set_max_range(range_m + 100.0);
     solver.set_time_step(0.0001);
 
@@ -373,6 +380,7 @@ pub(crate) fn solve_trajectory_sample(
     bc_segments: &Option<Vec<BCSegmentData>>,
     env: &TruingEnvironment,
     interpolate: bool,
+    station_presence: StationAtmospherePresence,
 ) -> Result<TruingSample, Box<dyn Error>> {
     let range_m = range_yd * 0.9144;
     let sight_height_m = sight_height_in * 0.0254;
@@ -392,6 +400,7 @@ pub(crate) fn solve_trajectory_sample(
         altitude_ft,
         bc_segments,
         env,
+        station_presence,
     )?;
 
     sample_truing_result(&result, range_m, sight_height_m, interpolate)
@@ -421,6 +430,7 @@ pub(crate) fn solve_trajectory_drop(
     bc_segments: &Option<Vec<BCSegmentData>>,
     env: &TruingEnvironment,
     interpolate: bool,
+    station_presence: StationAtmospherePresence,
 ) -> Result<(f64, f64), Box<dyn Error>> {
     let sample = solve_trajectory_sample(
         velocity_fps,
@@ -438,6 +448,7 @@ pub(crate) fn solve_trajectory_drop(
         bc_segments,
         env,
         interpolate,
+        station_presence,
     )?;
 
     Ok((sample.drop_m, sample.downrange_m))
@@ -463,6 +474,7 @@ pub(crate) fn calculate_drop_at_velocity(
     humidity: f64,
     altitude_ft: f64,
     bc_segments: &Option<Vec<BCSegmentData>>,
+    station_presence: StationAtmospherePresence,
 ) -> Result<f64, Box<dyn Error>> {
     // Preserve the historical MIL contract by delegating to the shared linear-drop
     // core (MBA-1316). `interpolate = false` reproduces the original "first point
@@ -485,6 +497,7 @@ pub(crate) fn calculate_drop_at_velocity(
         bc_segments,
         &TruingEnvironment::default(),
         false,
+        station_presence,
     )?;
 
     // Convert to MILs: mil = (drop_inches / 36 / range_yards) * 1000
@@ -541,6 +554,7 @@ fn velocity_at_distance_fps(
     altitude_ft: f64,
     bc_segments: &Option<Vec<BCSegmentData>>,
     screen_distance_m: f64,
+    station_presence: StationAtmospherePresence,
 ) -> Result<f64, Box<dyn Error>> {
     let velocity_ms = muzzle_velocity_fps * 0.3048;
     let mass_kg = mass_gr * GRAINS_TO_KG;
@@ -578,7 +592,8 @@ fn velocity_at_distance_fps(
 
     let wind = WindConditions::default();
 
-    let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
+    let mut solver =
+        TrajectorySolver::new_with_station_presence(inputs, wind, atmosphere, station_presence);
     solver.set_max_range(screen_distance_m + 2.0);
     solver.set_time_step(0.0001);
     let result = solver.solve()?;
@@ -625,6 +640,10 @@ fn velocity_at_distance_fps(
 /// and the candidate is iterated until that prediction matches the measured reading. Callers
 /// apply this once, before the corrected value is used for display/comparison --
 /// `solve_truing_trajectory`'s drop-based solves never receive a screen distance.
+///
+/// Presence-blind: `temperature_f` and `pressure_inhg` go through the legacy default-sentinel
+/// rule (59 °F / 29.92 inHg at a real altitude fly ICAO standard air). See
+/// [`correct_chrono_velocity_fps_with_station_presence`].
 #[allow(
     clippy::too_many_arguments,
     reason = "flat arguments mirror the rest of this module's forward-model helpers"
@@ -641,6 +660,44 @@ pub fn correct_chrono_velocity_fps(
     humidity: f64,
     altitude_ft: f64,
     bc_segments: &Option<Vec<BCSegmentData>>,
+) -> Result<ChronoCorrection, Box<dyn Error>> {
+    correct_chrono_velocity_fps_with_station_presence(
+        measured_velocity_fps,
+        screen_distance_m,
+        bc,
+        drag_model,
+        mass_gr,
+        diameter_in,
+        temperature_f,
+        pressure_inhg,
+        humidity,
+        altitude_ft,
+        bc_segments,
+        StationAtmospherePresence::NEITHER,
+    )
+}
+
+/// [`correct_chrono_velocity_fps`] knowing which of `temperature_f` / `pressure_inhg` the
+/// caller supplied (0.49.0): a supplied value flies as given, an omitted one keeps the legacy
+/// default-sentinel rule. [`StationAtmospherePresence::NEITHER`] is bit-identical to
+/// [`correct_chrono_velocity_fps`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments mirror the rest of this module's forward-model helpers"
+)]
+pub fn correct_chrono_velocity_fps_with_station_presence(
+    measured_velocity_fps: f64,
+    screen_distance_m: f64,
+    bc: f64,
+    drag_model: DragModelArg,
+    mass_gr: f64,
+    diameter_in: f64,
+    temperature_f: f64,
+    pressure_inhg: f64,
+    humidity: f64,
+    altitude_ft: f64,
+    bc_segments: &Option<Vec<BCSegmentData>>,
+    station_presence: StationAtmospherePresence,
 ) -> Result<ChronoCorrection, Box<dyn Error>> {
     if !measured_velocity_fps.is_finite() || measured_velocity_fps <= 0.0 {
         return Err("--chrono-velocity must be positive and finite".into());
@@ -670,6 +727,7 @@ pub fn correct_chrono_velocity_fps(
             altitude_ft,
             bc_segments,
             screen_distance_m,
+            station_presence,
         )?;
         Ok(v_screen - measured_velocity_fps)
     };
@@ -745,6 +803,9 @@ pub struct TrueVelocityLocalResult {
 ///
 /// Errors on degenerate inputs (`range_yd` non-positive or non-finite,
 /// `measured_drop_mil` non-finite) and on any trajectory-solver failure.
+///
+/// Presence-blind: `temperature_f` and `pressure_inhg` go through the legacy default-sentinel
+/// rule. See [`calculate_true_velocity_local_with_station_presence`].
 #[allow(
     clippy::too_many_arguments,
     reason = "flat arguments mirror the stable true-velocity CLI command shape"
@@ -763,6 +824,48 @@ pub fn calculate_true_velocity_local(
     humidity: f64,
     altitude_ft: f64,
     bc_segments: &Option<Vec<BCSegmentData>>,
+) -> Result<TrueVelocityLocalResult, Box<dyn Error>> {
+    calculate_true_velocity_local_with_station_presence(
+        measured_drop_mil,
+        range_yd,
+        bc,
+        drag_model,
+        mass_gr,
+        diameter_in,
+        zero_distance_yd,
+        sight_height_in,
+        temperature_f,
+        pressure_inhg,
+        humidity,
+        altitude_ft,
+        bc_segments,
+        StationAtmospherePresence::NEITHER,
+    )
+}
+
+/// [`calculate_true_velocity_local`] knowing which of `temperature_f` / `pressure_inhg` the
+/// caller supplied (0.49.0): a supplied value flies as given, an omitted one keeps the legacy
+/// default-sentinel rule. [`StationAtmospherePresence::NEITHER`] is bit-identical to
+/// [`calculate_true_velocity_local`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments mirror the stable true-velocity CLI command shape"
+)]
+pub fn calculate_true_velocity_local_with_station_presence(
+    measured_drop_mil: f64,
+    range_yd: f64,
+    bc: f64,
+    drag_model: DragModelArg,
+    mass_gr: f64,
+    diameter_in: f64,
+    zero_distance_yd: f64,
+    sight_height_in: f64,
+    temperature_f: f64,
+    pressure_inhg: f64,
+    humidity: f64,
+    altitude_ft: f64,
+    bc_segments: &Option<Vec<BCSegmentData>>,
+    station_presence: StationAtmospherePresence,
 ) -> Result<TrueVelocityLocalResult, Box<dyn Error>> {
     // Reject degenerate inputs instead of letting NaN/inf flow through the
     // solver and come back as Ok(NaN). The native CLI's clap range validators
@@ -803,6 +906,7 @@ pub fn calculate_true_velocity_local(
             humidity,
             altitude_ft,
             bc_segments,
+            station_presence,
         )?;
 
         last_calculated_drop = calculated_drop_mil;
@@ -940,14 +1044,67 @@ pub struct TruingModelInputsV1 {
     pub zero_distance_yd: f64,
     /// Sight height over bore in inches.
     pub sight_height_in: f64,
-    /// Ambient temperature in degrees Fahrenheit.
-    pub temperature_f: f64,
-    /// Station pressure in inches of mercury.
-    pub pressure_inhg: f64,
+    /// Ambient temperature in degrees Fahrenheit, as a [`StationReading`] (0.49.0).
+    ///
+    /// Optional on the wire; omit it (or send `null`) when there is no reading, and the engine
+    /// flies the ICAO standard temperature at `altitude_ft` (what sending 59 °F produced before
+    /// 0.49.0). A number that is sent is a reading and flies as sent, 59 °F included.
+    #[serde(
+        default = "default_truing_temperature_f",
+        deserialize_with = "deserialize_truing_temperature_f",
+        skip_serializing_if = "StationReading::is_omitted"
+    )]
+    pub temperature_f: StationReading,
+    /// Station pressure in inches of mercury, as a [`StationReading`] (0.49.0).
+    ///
+    /// Optional on the wire; omit it (or send `null`) when there is no reading, and the engine
+    /// flies the ICAO standard pressure at `altitude_ft` (what sending 29.92 inHg produced
+    /// before 0.49.0). A number that is sent is a reading and flies as sent, 29.92 inHg
+    /// included.
+    #[serde(
+        default = "default_truing_pressure_inhg",
+        deserialize_with = "deserialize_truing_pressure_inhg",
+        skip_serializing_if = "StationReading::is_omitted"
+    )]
+    pub pressure_inhg: StationReading,
     /// Relative humidity in percent (0 through 100).
     pub humidity_pct: f64,
     /// Altitude in feet.
     pub altitude_ft: f64,
+}
+
+/// The serde default of an absent truing `temperature_f`: an omitted 59 °F, which the legacy
+/// rule resolves to the ICAO standard temperature at a real altitude.
+pub(crate) fn default_truing_temperature_f() -> StationReading {
+    StationReading::omitted(59.0)
+}
+
+/// The serde default of an absent truing `pressure_inhg`: an omitted 29.92 inHg, which the
+/// legacy rule resolves to the ICAO standard pressure at a real altitude.
+pub(crate) fn default_truing_pressure_inhg() -> StationReading {
+    StationReading::omitted(29.92)
+}
+
+/// A present truing `temperature_f`: a number is a supplied reading, and `null` is the same as
+/// leaving the field out (the `card.*` requests read `null` that way too).
+pub(crate) fn deserialize_truing_temperature_f<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<StationReading, D::Error> {
+    Ok(
+        <Option<f64> as serde::Deserialize>::deserialize(deserializer)?
+            .map_or_else(default_truing_temperature_f, StationReading::supplied),
+    )
+}
+
+/// A present truing `pressure_inhg`: a number is a supplied reading, and `null` is the same as
+/// leaving the field out.
+pub(crate) fn deserialize_truing_pressure_inhg<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<StationReading, D::Error> {
+    Ok(
+        <Option<f64> as serde::Deserialize>::deserialize(deserializer)?
+            .map_or_else(default_truing_pressure_inhg, StationReading::supplied),
+    )
 }
 
 impl TruingModelInputsV1 {
@@ -974,13 +1131,13 @@ impl TruingModelInputsV1 {
             ("bullet diameter", self.diameter_in),
             ("zero distance", self.zero_distance_yd),
             ("sight height", self.sight_height_in),
-            ("pressure", self.pressure_inhg),
+            ("pressure", self.pressure_inhg.value),
         ] {
             if !value.is_finite() || value <= 0.0 {
                 return Err(format!("{name} must be positive and finite"));
             }
         }
-        if !self.temperature_f.is_finite() {
+        if !self.temperature_f.value.is_finite() {
             return Err("temperature must be finite".to_string());
         }
         if !self.humidity_pct.is_finite() || !(0.0..=100.0).contains(&self.humidity_pct) {
@@ -1007,13 +1164,17 @@ impl TruingModelInputsV1 {
             diameter_in: self.diameter_in,
             zero_yd: self.zero_distance_yd,
             sight_in: self.sight_height_in,
-            temp_f: self.temperature_f,
-            press_inhg: self.pressure_inhg,
+            temp_f: self.temperature_f.value,
+            press_inhg: self.pressure_inhg.value,
             humidity: self.humidity_pct,
             alt_ft: self.altitude_ft,
             bc_segments: &no_bc_segments,
             drop_unit,
             env: TruingEnvironment::default(),
+            station_presence: StationAtmospherePresence::from_readings(
+                self.temperature_f,
+                self.pressure_inhg,
+            ),
         };
         f(&model)
     }
@@ -1101,6 +1262,9 @@ pub(crate) struct TruingForwardModel<'a> {
     /// drop-only fitter constructs this as [`TruingEnvironment::default()`], which is the
     /// calm, effects-off model truing has always used.
     pub env: TruingEnvironment,
+    /// Which of `temp_f` / `press_inhg` were supplied (0.49.0). `NEITHER` keeps the legacy
+    /// default-sentinel rule every truing fitter used before.
+    pub station_presence: StationAtmospherePresence,
 }
 
 impl TruingForwardModel<'_> {
@@ -1140,6 +1304,7 @@ impl TruingForwardModel<'_> {
             self.bc_segments,
             &self.env,
             true, // interpolate: smooth forward model for the fitter
+            self.station_presence,
         )?;
         Ok(unit.express_drop_m(drop_m, downrange_m))
     }
@@ -1211,15 +1376,21 @@ impl TruingForwardModel<'_> {
             altitude: altitude_m,
         };
         let wind = self.env.wind.clone();
-        inputs.muzzle_angle = crate::calculate_zero_angle_with_conditions(
+        inputs.muzzle_angle = crate::calculate_zero_angle_with_station_presence(
             inputs.clone(),
             zero_m,
             sight_height_m,
             wind.clone(),
             atmosphere.clone(),
+            self.station_presence,
         )?;
 
-        let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
+        let mut solver = TrajectorySolver::new_with_station_presence(
+            inputs,
+            wind,
+            atmosphere,
+            self.station_presence,
+        );
         solver.set_max_range(max_range_m + 100.0);
         solver.set_time_step(0.0001);
         let result = solver.solve()?;
@@ -1539,6 +1710,9 @@ pub struct MultiTruingReport {
 /// (use [`parse_truing_observation`] to build them from `RANGE:DROP` tokens);
 /// every drop is already in `drop_unit` and every range in internal yards. The
 /// set is validated with [`validate_truing_observations`] before any fitting.
+///
+/// Presence-blind: `temp_f` and `press_inhg` go through the legacy default-sentinel rule. See
+/// [`run_multi_observation_truing_core_with_station_presence`].
 #[allow(
     clippy::too_many_arguments,
     reason = "flat arguments mirror the stable true-velocity CLI command shape"
@@ -1558,6 +1732,48 @@ pub fn run_multi_observation_truing_core(
     alt_ft: f64,
     bc_segments: &Option<Vec<BCSegmentData>>,
 ) -> Result<MultiTruingReport, Box<dyn Error>> {
+    run_multi_observation_truing_core_with_station_presence(
+        observations,
+        drop_unit,
+        bc_input,
+        drag_model,
+        mass_gr,
+        diameter_in,
+        zero_yd,
+        sight_in,
+        temp_f,
+        press_inhg,
+        humidity,
+        alt_ft,
+        bc_segments,
+        StationAtmospherePresence::NEITHER,
+    )
+}
+
+/// [`run_multi_observation_truing_core`] knowing which of `temp_f` / `press_inhg` the caller
+/// supplied (0.49.0): a supplied value flies as given, an omitted one keeps the legacy
+/// default-sentinel rule. [`StationAtmospherePresence::NEITHER`] is bit-identical to
+/// [`run_multi_observation_truing_core`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments mirror the stable true-velocity CLI command shape"
+)]
+pub fn run_multi_observation_truing_core_with_station_presence(
+    observations: &[TruingObservation],
+    drop_unit: DropUnit,
+    bc_input: f64,
+    drag_model: DragModelArg,
+    mass_gr: f64,
+    diameter_in: f64,
+    zero_yd: f64,
+    sight_in: f64,
+    temp_f: f64,
+    press_inhg: f64,
+    humidity: f64,
+    alt_ft: f64,
+    bc_segments: &Option<Vec<BCSegmentData>>,
+    station_presence: StationAtmospherePresence,
+) -> Result<MultiTruingReport, Box<dyn Error>> {
     // Validate: finite, positive range, non-zero drop, no duplicate ranges.
     validate_truing_observations(observations)?;
     let observations: Vec<TruingObservation> = observations.to_vec();
@@ -1576,6 +1792,7 @@ pub fn run_multi_observation_truing_core(
         drop_unit,
         // MBA-1392: drop-only truing keeps the historical calm / effects-off model.
         env: TruingEnvironment::default(),
+        station_presence,
     };
 
     // Step 1: MV-only fit holding BC at the supplied value. This is always
@@ -1741,6 +1958,7 @@ fn truing_mv_window_mach_1_2_crossing(
         model.alt_ft,
         model.bc_segments,
         &model.env,
+        model.station_presence,
     )?;
     let muzzle_mach = result.points.first().map_or(0.0, |p| {
         if result.station_speed_of_sound_mps > 0.0 {
@@ -2225,5 +2443,153 @@ mod chrono_correction_tests {
             g1.muzzle_velocity_fps,
             g7.muzzle_velocity_fps
         );
+    }
+}
+
+/// 0.49.0: the truing forward model's station presence.
+#[cfg(test)]
+mod station_presence_tests {
+    use super::*;
+    use crate::atmosphere::StationReading;
+
+    fn model(pressure_inhg: StationReading, altitude_ft: f64) -> TruingModelInputsV1 {
+        TruingModelInputsV1 {
+            muzzle_velocity_fps: 2700.0,
+            ballistic_coefficient: 0.243,
+            drag_model: DragModelArg::G7,
+            mass_gr: 168.0,
+            diameter_in: 0.308,
+            zero_distance_yd: 100.0,
+            sight_height_in: 1.5,
+            temperature_f: StationReading::omitted(59.0),
+            pressure_inhg,
+            humidity_pct: 50.0,
+            altitude_ft,
+        }
+    }
+
+    /// The metric CLI's omitted 1013.25 hPa reaches the truing core as 1013.25 / 33.8639 inHg.
+    /// At or below 1 m the legacy rule flies an omitted value as itself, so the omitted reading
+    /// must carry THAT value, not the 29.92 inHg wire default (1013.2079 hPa). This is what
+    /// `StationReading::omitted(value)` exists for: an `Option` would have moved metric
+    /// sea-level output.
+    #[test]
+    fn a_metric_sourced_omitted_reading_flies_its_own_value_at_sea_level() {
+        for (altitude_ft, pinned) in [
+            // captured at ab4eb0c
+            (0.0, 0x4011b8492bd1c2a2_u64),
+            // captured at ab4eb0c (0.5 m)
+            (0.5 / 0.3048, 0x4011b8492bd1af2b_u64),
+        ] {
+            let predict = |reading| {
+                model(reading, altitude_ft)
+                    .with_forward_model(DropUnit::Mil, |m| m.predict(2700.0, 0.243, 600.0).unwrap())
+            };
+            let omitted = predict(StationReading::omitted(1013.25 / 33.8639));
+            assert_eq!(
+                omitted.to_bits(),
+                pinned,
+                "alt {altitude_ft} ft: {omitted:?}"
+            );
+            // At these altitudes presence cannot change anything: the sentinel is inert.
+            let supplied = predict(StationReading::supplied(1013.25 / 33.8639));
+            assert_eq!(supplied.to_bits(), pinned);
+            // ...but the value itself does: the wire default is a different pressure.
+            assert_ne!(predict(StationReading::omitted(29.92)).to_bits(), pinned);
+        }
+    }
+
+    /// An omitted reading at altitude flies the ICAO air the legacy rule resolves it to, bit for
+    /// bit, on all three paths that build truing air: the per-range predictor
+    /// (`solve_truing_trajectory`), the batched one (`predict_many_in_unit`) and the chrono
+    /// back-solve (`velocity_at_distance_fps`).
+    ///
+    /// The altitudes are chosen so that these pins also catch air that is pre-resolved in
+    /// °C/hPa and converted back to °F/inHg instead of resolved after the unit conversion (a
+    /// mutation no other test caught). That round trip is usually exact, or its last-bit error is
+    /// absorbed later (×100 to Pa, +273.15 to K). At 175 ft it reaches the drop, and at 7135 ft
+    /// the chrono solve.
+    #[test]
+    fn an_omitted_reading_at_altitude_flies_the_legacy_air_on_every_truing_path() {
+        // captured at ab4eb0c, 59 °F / 29.92 inHg
+        const DROP_175_FT: u64 = 0x4011ad497c60a9fe; // 4.419225638770966 mil at 600 yd
+        const CHRONO_7135_FT: u64 = 0x40a4c30ea2569385; // 2657.5285822920873 fps
+        let (single, batched) =
+            model(StationReading::omitted(29.92), 175.0).with_forward_model(DropUnit::Mil, |fm| {
+                (
+                    fm.predict(2700.0, 0.243, 600.0).unwrap(),
+                    fm.predict_many_in_unit(2700.0, 0.243, &[600.0], DropUnit::Mil)
+                        .unwrap()[0]
+                        .unwrap(),
+                )
+            });
+        assert_eq!(single.to_bits(), DROP_175_FT, "{single:?}");
+        assert_eq!(batched.to_bits(), DROP_175_FT, "{batched:?}");
+        let chrono = |presence| {
+            correct_chrono_velocity_fps_with_station_presence(
+                2650.0,
+                4.572,
+                0.243,
+                DragModelArg::G7,
+                168.0,
+                0.308,
+                59.0,
+                29.92,
+                50.0,
+                7135.0,
+                &None,
+                presence,
+            )
+            .unwrap()
+            .muzzle_velocity_fps
+        };
+        let legacy = correct_chrono_velocity_fps(
+            2650.0,
+            4.572,
+            0.243,
+            DragModelArg::G7,
+            168.0,
+            0.308,
+            59.0,
+            29.92,
+            50.0,
+            7135.0,
+            &None,
+        )
+        .unwrap()
+        .muzzle_velocity_fps;
+        assert_eq!(legacy.to_bits(), CHRONO_7135_FT, "{legacy:?}");
+        assert_eq!(
+            chrono(StationAtmospherePresence::NEITHER).to_bits(),
+            CHRONO_7135_FT
+        );
+        // A supplied 59 °F / 29.92 inHg is sea-level air, far denser than ICAO at 7135 ft: more
+        // loss to the screen, so a higher back-solved muzzle velocity.
+        assert!(chrono(StationAtmospherePresence::BOTH) > legacy);
+    }
+
+    /// The batched predictor and the per-range one must fly the same air for a supplied reading.
+    #[test]
+    fn batched_and_single_predictions_agree_for_a_supplied_in_band_reading() {
+        let m = TruingModelInputsV1 {
+            temperature_f: StationReading::supplied(59.0),
+            ..model(StationReading::supplied(29.92), 5000.0)
+        };
+        let (single, batched, omitted) = m.with_forward_model(DropUnit::Mil, |fm| {
+            (
+                fm.predict(2700.0, 0.243, 600.0).unwrap(),
+                fm.predict_many_in_unit(2700.0, 0.243, &[600.0], DropUnit::Mil)
+                    .unwrap()[0]
+                    .unwrap(),
+                TruingModelInputsV1 {
+                    temperature_f: StationReading::omitted(59.0),
+                    ..model(StationReading::omitted(29.92), 5000.0)
+                }
+                .with_forward_model(DropUnit::Mil, |o| o.predict(2700.0, 0.243, 600.0).unwrap()),
+            )
+        });
+        assert_eq!(single.to_bits(), batched.to_bits());
+        // Sea-level air at 5000 ft is far denser than ICAO there: more drop.
+        assert!(single > omitted + 0.1, "{single} vs omitted {omitted}");
     }
 }

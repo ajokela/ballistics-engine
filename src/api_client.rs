@@ -37,6 +37,16 @@ pub struct TrajectoryRequest {
     /// Pressure in hPa/mbar (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pressure: Option<f64>,
+    /// `Some(true)` when `temperature` is a reading the caller typed (0.49.0), so the service
+    /// can fly it as typed even at 15 °C. `None` (never `Some(false)`) for an omitted value,
+    /// whose request is then exactly what it was before 0.49.0. Sent as the
+    /// `temperature_supplied=true` query parameter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature_supplied: Option<bool>,
+    /// `Some(true)` when `pressure` is a station reading the caller typed (0.49.0); see
+    /// [`Self::temperature_supplied`]. Sent as `pressure_supplied=true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pressure_supplied: Option<bool>,
     /// Humidity percentage 0-100 (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub humidity: Option<f64>,
@@ -158,6 +168,14 @@ pub struct TrueVelocityRequest {
     /// Barometric pressure in inHg (default: 29.92)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pressure_inhg: Option<f64>,
+    /// `Some(true)` when `temperature_f` is a reading the caller typed (0.49.0); `None` for an
+    /// omitted value, whose request is then exactly what it was before 0.49.0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature_supplied: Option<bool>,
+    /// `Some(true)` when `pressure_inhg` is a station reading the caller typed (0.49.0); `None`
+    /// for an omitted value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pressure_supplied: Option<bool>,
     /// Humidity percentage (default: 50)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub humidity: Option<f64>,
@@ -332,6 +350,14 @@ impl ApiClient {
         if let Some(pressure) = request.pressure {
             let pressure_inhg = pressure / 33.8639; // hPa to inHg
             req = req.query("pressure", format!("{:.2}", pressure_inhg));
+        }
+        // 0.49.0: opt-in presence markers, only for a value the caller typed. An omitted value
+        // sends no marker, so its request is exactly what it was before.
+        if request.temperature_supplied == Some(true) {
+            req = req.query("temperature_supplied", "true");
+        }
+        if request.pressure_supplied == Some(true) {
+            req = req.query("pressure_supplied", "true");
         }
         if let Some(humidity) = request.humidity {
             req = req.query("humidity", format!("{:.1}", humidity));
@@ -703,6 +729,8 @@ pub struct TrajectoryRequestBuilder {
     wind_angle: Option<f64>,
     temperature: Option<f64>,
     pressure: Option<f64>,
+    temperature_supplied: Option<bool>,
+    pressure_supplied: Option<bool>,
     humidity: Option<f64>,
     altitude: Option<f64>,
     latitude: Option<f64>,
@@ -772,6 +800,19 @@ impl TrajectoryRequestBuilder {
 
     pub fn pressure(mut self, value: f64) -> Self {
         self.pressure = Some(value);
+        self
+    }
+
+    /// Mark the temperature as a typed reading (0.49.0). `false` leaves the marker off, which
+    /// is what an omitted temperature sends.
+    pub fn temperature_supplied(mut self, supplied: bool) -> Self {
+        self.temperature_supplied = supplied.then_some(true);
+        self
+    }
+
+    /// Mark the pressure as a typed station reading (0.49.0). `false` leaves the marker off.
+    pub fn pressure_supplied(mut self, supplied: bool) -> Self {
+        self.pressure_supplied = supplied.then_some(true);
         self
     }
 
@@ -873,6 +914,8 @@ impl TrajectoryRequestBuilder {
             wind_angle: self.wind_angle,
             temperature: self.temperature,
             pressure: self.pressure,
+            temperature_supplied: self.temperature_supplied,
+            pressure_supplied: self.pressure_supplied,
             humidity: self.humidity,
             altitude: self.altitude,
             latitude: self.latitude,
@@ -946,6 +989,77 @@ mod tests {
         assert_eq!(request.zero_range, Some(100.0));
         assert_eq!(request.wind_speed, Some(5.0));
         assert_eq!(request.latitude, Some(45.0));
+    }
+
+    /// 0.49.0: the presence markers are opt-in. An omitted value's request serializes exactly
+    /// as it did before 0.49.0 (no marker key at all); a typed one carries `true`.
+    #[test]
+    fn presence_markers_are_sent_only_for_typed_values() {
+        let base = || {
+            TrajectoryRequestBuilder::new()
+                .bc_value(0.475)
+                .bc_type("G1")
+                .bullet_mass(10.9)
+                .muzzle_velocity(823.0)
+                .target_distance(600.0)
+                .temperature(15.0)
+                .pressure(1013.25)
+                .altitude(150.0)
+        };
+        // Byte for byte what ab4eb0c's TrajectoryRequest serialized for these inputs.
+        let omitted = serde_json::to_string(&base().build().unwrap()).unwrap();
+        assert_eq!(
+            omitted,
+            r#"{"bc_value":0.475,"bc_type":"G1","bullet_mass":10.9,"muzzle_velocity":823.0,"target_distance":600.0,"temperature":15.0,"pressure":1013.25,"altitude":150.0}"#
+        );
+        let omitted_explicitly = base()
+            .temperature_supplied(false)
+            .pressure_supplied(false)
+            .build()
+            .unwrap();
+        assert_eq!(serde_json::to_string(&omitted_explicitly).unwrap(), omitted);
+
+        let typed = base()
+            .temperature_supplied(false)
+            .pressure_supplied(true)
+            .build()
+            .unwrap();
+        let json = serde_json::to_string(&typed).unwrap();
+        assert!(json.contains(r#""pressure_supplied":true"#), "{json}");
+        assert!(!json.contains("temperature_supplied"), "{json}");
+        let both = base()
+            .temperature_supplied(true)
+            .pressure_supplied(true)
+            .build()
+            .unwrap();
+        assert_eq!(both.temperature_supplied, Some(true));
+        assert_eq!(both.pressure_supplied, Some(true));
+
+        let true_velocity = |temperature_supplied, pressure_supplied| TrueVelocityRequest {
+            measured_drop_mil: 3.6,
+            range_yd: 500.0,
+            bc: 0.475,
+            drag_model: "G1".to_string(),
+            weight_gr: 168.0,
+            caliber: 0.308,
+            zero_range_yd: Some(100.0),
+            chrono_velocity_fps: None,
+            altitude_ft: Some(5000.0),
+            temperature_f: Some(59.0),
+            pressure_inhg: Some(29.92),
+            temperature_supplied,
+            pressure_supplied,
+            humidity: Some(50.0),
+            sight_height_in: Some(1.5),
+            use_bc_enhancement: Some(true),
+        };
+        assert_eq!(
+            serde_json::to_string(&true_velocity(None, None)).unwrap(),
+            r#"{"measured_drop_mil":3.6,"range_yd":500.0,"bc":0.475,"drag_model":"G1","weight_gr":168.0,"caliber":0.308,"zero_range_yd":100.0,"altitude_ft":5000.0,"temperature_f":59.0,"pressure_inhg":29.92,"humidity":50.0,"sight_height_in":1.5,"use_bc_enhancement":true}"#
+        );
+        let json = serde_json::to_string(&true_velocity(Some(true), Some(true))).unwrap();
+        assert!(json.contains(r#""temperature_supplied":true"#), "{json}");
+        assert!(json.contains(r#""pressure_supplied":true"#), "{json}");
     }
 
     #[test]

@@ -156,6 +156,11 @@ pub struct CorridorLoad {
     /// Relative humidity, percent (0 through 100).
     pub humidity_pct: f64,
     pub altitude_m: f64,
+    /// Which of `temperature_c` / `pressure_hpa` were supplied (0.49.0). A supplied value flies
+    /// as given; [`crate::atmosphere::StationAtmospherePresence::NEITHER`] keeps the legacy
+    /// default-sentinel rule, under which a sea-level default at a real altitude flies ICAO
+    /// standard air.
+    pub station_presence: crate::atmosphere::StationAtmospherePresence,
 }
 
 /// One robust-hold run.
@@ -647,12 +652,13 @@ pub fn solve_robust_hold(
         use_rk4: true,
         ..Default::default()
     };
-    let zero_angle = crate::cli_api::calculate_zero_angle_with_conditions(
+    let zero_angle = crate::cli_api::calculate_zero_angle_with_station_presence(
         base_inputs.clone(),
         load.zero_distance_m,
         load.sight_height_m,
         WindConditions::default(),
         atmosphere.clone(),
+        load.station_presence,
     )
     .map_err(|e| WindScenarioError::SolveFailed {
         scenario: "<zero>".to_string(),
@@ -673,8 +679,12 @@ pub fn solve_robust_hold(
         inputs.enable_trajectory_sampling = true;
         inputs.sample_interval = SAMPLE_INTERVAL_M;
 
-        let mut solver =
-            TrajectorySolver::new(inputs, WindConditions::default(), atmosphere.clone());
+        let mut solver = TrajectorySolver::new_with_station_presence(
+            inputs,
+            WindConditions::default(),
+            atmosphere.clone(),
+            load.station_presence,
+        );
         solver.set_max_range(max_range_m);
         solver.set_time_step(0.001);
         solver.set_wind_segments(scenario.segments.clone());
@@ -1110,6 +1120,7 @@ mod tests {
             pressure_hpa: 1013.25,
             humidity_pct: 50.0,
             altitude_m: 0.0,
+            station_presence: crate::atmosphere::StationAtmospherePresence::NEITHER,
         }
     }
 

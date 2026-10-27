@@ -1,4 +1,5 @@
 // CLI API module - provides simplified interfaces for command-line tool
+use crate::atmosphere::{PressureReferenceMode, StationAtmospherePresence};
 use crate::cluster_bc::ClusterBCDegradation;
 use crate::gravity::Gravity;
 use crate::mc_stats::{wilson_interval, BernoulliConfidenceSequence, ConfidenceLevel, Welford};
@@ -1032,23 +1033,16 @@ impl TrajectoryResult {
 }
 
 // Trajectory solver
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StationAtmosphereResolution {
-    /// Preserve the historical CLI/FFI convention: sea-level standard values at a nonzero
-    /// altitude are treated as omitted and resolved from the ICAO atmosphere.
-    LegacyDefaultSentinels,
-    /// Temperature and pressure have already been resolved by a presence-aware caller and must
-    /// remain authoritative even when they equal the historical sentinel values.
-    Authoritative,
-}
-
 #[derive(Clone)]
 pub struct TrajectorySolver {
     gravity: Gravity,
     inputs: BallisticInputs,
     wind: WindConditions,
     atmosphere: AtmosphericConditions,
-    station_atmosphere_resolution: StationAtmosphereResolution,
+    /// Which of `atmosphere`'s temperature and pressure the caller supplied (0.49.0). A field
+    /// that is not supplied keeps the legacy default-sentinel rule; see
+    /// [`crate::atmosphere::resolve_station_conditions_with_presence`].
+    station_presence: StationAtmospherePresence,
     max_range: f64,
     time_step: f64,
     max_trajectory_points: usize,
@@ -1109,16 +1103,48 @@ pub struct ZeroCrossings {
 }
 
 impl TrajectorySolver {
+    /// Construct a solver from a presence-blind [`AtmosphericConditions`].
+    ///
+    /// Presence-blind: a bare `f64` cannot say whether it was supplied, so at an altitude above
+    /// 1 m a temperature within 0.1 °C of 15 °C or a pressure within 0.5 hPa of 1013.25 hPa is
+    /// read as omitted and the ICAO standard value at that altitude is flown instead. A caller
+    /// that knows which values were supplied uses [`Self::new_with_station_presence`]; this is
+    /// that constructor with [`StationAtmospherePresence::NEITHER`].
     pub fn new(
         inputs: BallisticInputs,
         wind: WindConditions,
         atmosphere: AtmosphericConditions,
     ) -> Self {
-        Self::new_with_station_atmosphere_resolution(
+        Self::new_with_station_presence(
             inputs,
             wind,
             atmosphere,
-            StationAtmosphereResolution::LegacyDefaultSentinels,
+            StationAtmospherePresence::NEITHER,
+        )
+    }
+
+    /// Construct a solver that knows which of `atmosphere`'s temperature and pressure the
+    /// caller supplied (0.49.0).
+    ///
+    /// A supplied value flies as given, whatever its value: a typed 15 °C or 1013.25 hPa at
+    /// altitude is a reading, not a default. An omitted value keeps the legacy rule of
+    /// [`Self::new`], so [`StationAtmospherePresence::NEITHER`] is bit-identical to it and
+    /// [`StationAtmospherePresence::BOTH`] to [`Self::new_with_resolved_station_atmosphere`].
+    /// The pressure is absolute station pressure; reduce a QNH first, or resolve the pair with
+    /// [`crate::atmosphere::resolve_station_conditions_with_presence`] in
+    /// [`PressureReferenceMode::Qnh`] and pass the result with `BOTH`.
+    pub fn new_with_station_presence(
+        inputs: BallisticInputs,
+        wind: WindConditions,
+        atmosphere: AtmosphericConditions,
+        station_presence: StationAtmospherePresence,
+    ) -> Self {
+        Self::new_with_station_presence_and_gravity(
+            inputs,
+            wind,
+            atmosphere,
+            station_presence,
+            Gravity::EARTH,
         )
     }
 
@@ -1127,44 +1153,24 @@ impl TrajectorySolver {
     /// authoritative at nonzero altitude rather than acting as legacy omission sentinels.
     ///
     /// `pub` (MBA-1397; was `pub(crate)`): a QNH-aware caller (native CLI, WASM) that has
-    /// already reduced a declared altimeter setting to station pressure via
-    /// [`crate::atmosphere::resolve_station_conditions_with_pressure_mode`] needs this
-    /// constructor too, and those callers live in a different crate (`src/main.rs` is a
-    /// separate binary crate over the library). Widening visibility only, no signature
-    /// change: every existing `pub(crate)` caller is unaffected.
+    /// already resolved the station air, for example with
+    /// [`crate::atmosphere::resolve_station_conditions_with_presence`] (which reduces a declared
+    /// altimeter setting to station pressure), needs this constructor too, and those callers
+    /// live in a different crate (`src/main.rs` is a separate binary crate over the library).
+    /// It is [`Self::new_with_station_presence`] with [`StationAtmospherePresence::BOTH`].
     pub fn new_with_resolved_station_atmosphere(
         inputs: BallisticInputs,
         wind: WindConditions,
         atmosphere: AtmosphericConditions,
     ) -> Self {
-        Self::new_with_station_atmosphere_resolution(
-            inputs,
-            wind,
-            atmosphere,
-            StationAtmosphereResolution::Authoritative,
-        )
+        Self::new_with_station_presence(inputs, wind, atmosphere, StationAtmospherePresence::BOTH)
     }
 
-    fn new_with_station_atmosphere_resolution(
-        inputs: BallisticInputs,
-        wind: WindConditions,
-        atmosphere: AtmosphericConditions,
-        station_atmosphere_resolution: StationAtmosphereResolution,
-    ) -> Self {
-        Self::new_with_station_atmosphere_resolution_with_gravity(
-            inputs,
-            wind,
-            atmosphere,
-            station_atmosphere_resolution,
-            Gravity::EARTH,
-        )
-    }
-
-    fn new_with_station_atmosphere_resolution_with_gravity(
+    fn new_with_station_presence_and_gravity(
         mut inputs: BallisticInputs,
         wind: WindConditions,
         atmosphere: AtmosphericConditions,
-        station_atmosphere_resolution: StationAtmosphereResolution,
+        station_presence: StationAtmospherePresence,
         gravity: Gravity,
     ) -> Self {
         // MBA-1415: every input-conditioning step lives in one shared, idempotent helper that
@@ -1190,7 +1196,7 @@ impl TrajectorySolver {
             inputs,
             wind,
             atmosphere,
-            station_atmosphere_resolution,
+            station_presence,
             max_range: 1000.0,
             time_step: 0.001,
             max_trajectory_points: MAX_TRAJECTORY_POINTS,
@@ -2197,18 +2203,14 @@ impl TrajectorySolver {
     }
 
     fn resolved_atmosphere(&self) -> (f64, f64, f64, f64) {
-        let (temp_c, pressure_hpa) = match self.station_atmosphere_resolution {
-            StationAtmosphereResolution::LegacyDefaultSentinels => {
-                crate::atmosphere::resolve_station_conditions(
-                    self.atmosphere.temperature,
-                    self.atmosphere.pressure,
-                    self.atmosphere.altitude,
-                )
-            }
-            StationAtmosphereResolution::Authoritative => {
-                (self.atmosphere.temperature, self.atmosphere.pressure)
-            }
-        };
+        // NEITHER is the old legacy-sentinel arm exactly, BOTH the old authoritative arm.
+        let (temp_c, pressure_hpa) = crate::atmosphere::resolve_station_conditions_with_presence(
+            self.atmosphere.temperature,
+            self.atmosphere.pressure,
+            self.atmosphere.altitude,
+            PressureReferenceMode::Absolute,
+            self.station_presence,
+        );
         let (density, speed_of_sound) = crate::atmosphere::calculate_atmosphere(
             self.atmosphere.altitude,
             Some(temp_c),
@@ -4235,6 +4237,8 @@ struct TrialOutcome {
 struct MonteCarloTrialSampler {
     base_inputs: BallisticInputs,
     atmosphere: AtmosphericConditions,
+    /// Which of `atmosphere`'s temperature and pressure were supplied; every solve uses it.
+    station_presence: StationAtmospherePresence,
     solver_max_range: f64,
     /// Resolved target plane: `params.target_distance` when the caller gave one, else the
     /// baseline solve's own max range.
@@ -4258,6 +4262,7 @@ impl MonteCarloTrialSampler {
         base_wind: &WindConditions,
         params: &MonteCarloParams,
         wind_direction_std_dev: f64,
+        station_presence: StationAtmospherePresence,
     ) -> Result<Self, BallisticsError> {
         use rand_distr::Normal;
 
@@ -4273,8 +4278,12 @@ impl MonteCarloTrialSampler {
         let solver_max_range = target_hint.max(1000.0) * 2.0;
 
         // First, calculate baseline trajectory with no variations
-        let mut baseline_solver =
-            TrajectorySolver::new(base_inputs.clone(), base_wind.clone(), atmosphere.clone());
+        let mut baseline_solver = TrajectorySolver::new_with_station_presence(
+            base_inputs.clone(),
+            base_wind.clone(),
+            atmosphere.clone(),
+            station_presence,
+        );
         baseline_solver.set_max_range(solver_max_range);
         let baseline_result = baseline_solver.solve()?;
 
@@ -4309,6 +4318,7 @@ impl MonteCarloTrialSampler {
         Ok(Self {
             base_inputs,
             atmosphere,
+            station_presence,
             solver_max_range,
             target_distance,
             baseline_at_target,
@@ -4345,7 +4355,12 @@ impl MonteCarloTrialSampler {
         // Run trajectory. The sampled velocity delta is applied to the SOLVER's inputs, after
         // TrajectorySolver::new has resolved any powder-temperature model -- see the MBA-1176
         // note on `velocity_delta_dist` above.
-        let mut solver = TrajectorySolver::new(inputs, wind, self.atmosphere.clone());
+        let mut solver = TrajectorySolver::new_with_station_presence(
+            inputs,
+            wind,
+            self.atmosphere.clone(),
+            self.station_presence,
+        );
         solver.inputs.muzzle_velocity =
             (solver.inputs.muzzle_velocity + muzzle_velocity_delta).max(0.0);
         solver.set_max_range(self.solver_max_range);
@@ -4383,7 +4398,11 @@ impl MonteCarloTrialSampler {
     }
 }
 
-// Run Monte Carlo simulation (backwards compatibility)
+/// Run a Monte Carlo simulation (backwards compatibility).
+///
+/// Presence-blind: `base_inputs`' temperature and pressure go through the legacy
+/// default-sentinel rule (see [`TrajectorySolver::new`]). See
+/// [`run_monte_carlo_with_station_presence`].
 pub fn run_monte_carlo(
     base_inputs: BallisticInputs,
     params: MonteCarloParams,
@@ -4395,6 +4414,8 @@ pub fn run_monte_carlo(
 ///
 /// The older [`run_monte_carlo`] entry point remains source compatible and delegates here with
 /// zero direction uncertainty.
+///
+/// Presence-blind; see [`run_monte_carlo_with_station_presence`].
 pub fn run_monte_carlo_with_direction_std_dev(
     base_inputs: BallisticInputs,
     params: MonteCarloParams,
@@ -4413,7 +4434,9 @@ pub fn run_monte_carlo_with_direction_std_dev(
     )
 }
 
-// Run Monte Carlo simulation with wind
+/// Run a Monte Carlo simulation with an explicit base wind.
+///
+/// Presence-blind; see [`run_monte_carlo_with_station_presence`].
 pub fn run_monte_carlo_with_wind(
     base_inputs: BallisticInputs,
     base_wind: WindConditions,
@@ -4426,20 +4449,67 @@ pub fn run_monte_carlo_with_wind(
 ///
 /// The older [`run_monte_carlo_with_wind`] entry point delegates here with zero direction
 /// uncertainty, preserving its API while removing the former speed-to-angle unit conflation.
+///
+/// Presence-blind; see [`run_monte_carlo_with_station_presence`].
 pub fn run_monte_carlo_with_wind_and_direction_std_dev(
     base_inputs: BallisticInputs,
     base_wind: WindConditions,
     params: MonteCarloParams,
     wind_direction_std_dev: f64,
 ) -> Result<MonteCarloResults, BallisticsError> {
-    let mut rng = rand::rng();
-    run_monte_carlo_with_wind_and_direction_std_dev_using_rng(
+    run_monte_carlo_with_station_presence(
         base_inputs,
         base_wind,
         params,
         wind_direction_std_dev,
-        &mut rng,
+        None,
+        StationAtmospherePresence::NEITHER,
     )
+}
+
+/// Run Monte Carlo knowing which of `base_inputs`' temperature and pressure the caller
+/// supplied (0.49.0).
+///
+/// `seed: None` draws from the process-global RNG, as
+/// [`run_monte_carlo_with_wind_and_direction_std_dev`] does; `Some(seed)` seeds a `StdRng`,
+/// as [`run_monte_carlo_with_wind_and_direction_std_dev_seeded`] does. Every trial and the
+/// baseline solve resolve the station air with `station_presence` (see
+/// [`TrajectorySolver::new_with_station_presence`]): a supplied temperature or pressure flies
+/// as given, an omitted one keeps the legacy default-sentinel rule. With
+/// [`StationAtmospherePresence::NEITHER`] this is bit-identical to those two functions.
+pub fn run_monte_carlo_with_station_presence(
+    base_inputs: BallisticInputs,
+    base_wind: WindConditions,
+    params: MonteCarloParams,
+    wind_direction_std_dev: f64,
+    seed: Option<u64>,
+    station_presence: StationAtmospherePresence,
+) -> Result<MonteCarloResults, BallisticsError> {
+    match seed {
+        None => {
+            let mut rng = rand::rng();
+            run_monte_carlo_with_wind_and_direction_std_dev_using_rng(
+                base_inputs,
+                base_wind,
+                params,
+                wind_direction_std_dev,
+                station_presence,
+                &mut rng,
+            )
+        }
+        Some(seed) => {
+            use rand::{rngs::StdRng, SeedableRng};
+            let mut rng = StdRng::seed_from_u64(seed);
+            run_monte_carlo_with_wind_and_direction_std_dev_using_rng(
+                base_inputs,
+                base_wind,
+                params,
+                wind_direction_std_dev,
+                station_presence,
+                &mut rng,
+            )
+        }
+    }
 }
 
 /// Run Monte Carlo with an explicit PRNG seed, for deterministic/reproducible output.
@@ -4448,6 +4518,8 @@ pub fn run_monte_carlo_with_wind_and_direction_std_dev(
 /// from the process-global RNG instead. Intended for callers that need repeatable results
 /// across runs — e.g. tests, or a WEZ (Weapon Employment Zone, MBA-1317) sweep that a caller
 /// wants to reproduce exactly while tuning target size or wind-call error.
+///
+/// Presence-blind; see [`run_monte_carlo_with_station_presence`].
 pub fn run_monte_carlo_with_wind_and_direction_std_dev_seeded(
     base_inputs: BallisticInputs,
     base_wind: WindConditions,
@@ -4455,14 +4527,13 @@ pub fn run_monte_carlo_with_wind_and_direction_std_dev_seeded(
     wind_direction_std_dev: f64,
     seed: u64,
 ) -> Result<MonteCarloResults, BallisticsError> {
-    use rand::{rngs::StdRng, SeedableRng};
-    let mut rng = StdRng::seed_from_u64(seed);
-    run_monte_carlo_with_wind_and_direction_std_dev_using_rng(
+    run_monte_carlo_with_station_presence(
         base_inputs,
         base_wind,
         params,
         wind_direction_std_dev,
-        &mut rng,
+        Some(seed),
+        StationAtmospherePresence::NEITHER,
     )
 }
 
@@ -4471,14 +4542,20 @@ fn run_monte_carlo_with_wind_and_direction_std_dev_using_rng<R: rand::Rng + ?Siz
     base_wind: WindConditions,
     params: MonteCarloParams,
     wind_direction_std_dev: f64,
+    station_presence: StationAtmospherePresence,
     rng: &mut R,
 ) -> Result<MonteCarloResults, BallisticsError> {
     let mut ranges = Vec::new();
     let mut impact_velocities = Vec::new();
     let mut impact_positions = Vec::new();
 
-    let sampler =
-        MonteCarloTrialSampler::new(base_inputs, &base_wind, &params, wind_direction_std_dev)?;
+    let sampler = MonteCarloTrialSampler::new(
+        base_inputs,
+        &base_wind,
+        &params,
+        wind_direction_std_dev,
+        station_presence,
+    )?;
 
     for _ in 0..params.num_simulations {
         // A dropped trial pushes nothing at all, exactly as the original `continue` arms did,
@@ -4771,6 +4848,9 @@ pub struct AdaptiveMcReportV1 {
 /// Returns `Err` if `convergence` is not usable ([`McConvergence::validate`], which names the
 /// offending field), if the baseline solve or an input distribution is invalid, or if no trial
 /// at all produced an outcome.
+///
+/// Presence-blind: `base_inputs`' temperature and pressure go through the legacy
+/// default-sentinel rule. See [`run_monte_carlo_adaptive_seeded_with_station_presence`].
 pub fn run_monte_carlo_adaptive_seeded(
     base_inputs: &BallisticInputs,
     base_wind: &WindConditions,
@@ -4779,14 +4859,44 @@ pub fn run_monte_carlo_adaptive_seeded(
     hit_radius_m: f64,
     seed: u64,
 ) -> Result<AdaptiveMcReportV1, String> {
+    run_monte_carlo_adaptive_seeded_with_station_presence(
+        base_inputs,
+        base_wind,
+        params,
+        convergence,
+        hit_radius_m,
+        seed,
+        StationAtmospherePresence::NEITHER,
+    )
+}
+
+/// [`run_monte_carlo_adaptive_seeded`] knowing which of `base_inputs`' temperature and
+/// pressure the caller supplied (0.49.0). A supplied value flies as given, an omitted one keeps
+/// the legacy default-sentinel rule; [`StationAtmospherePresence::NEITHER`] is bit-identical to
+/// [`run_monte_carlo_adaptive_seeded`].
+pub fn run_monte_carlo_adaptive_seeded_with_station_presence(
+    base_inputs: &BallisticInputs,
+    base_wind: &WindConditions,
+    params: &MonteCarloParams,
+    convergence: &McConvergence,
+    hit_radius_m: f64,
+    seed: u64,
+    station_presence: StationAtmospherePresence,
+) -> Result<AdaptiveMcReportV1, String> {
     use rand::{rngs::StdRng, SeedableRng};
 
     convergence.validate()?;
 
     // `wind_direction_std_dev = 0.0`: MonteCarloParams carries no direction sigma, so this
     // matches `run_monte_carlo_with_wind`'s treatment rather than inventing one.
-    let sampler = MonteCarloTrialSampler::new(base_inputs.clone(), base_wind, params, 0.0)
-        .map_err(|e| e.to_string())?;
+    let sampler = MonteCarloTrialSampler::new(
+        base_inputs.clone(),
+        base_wind,
+        params,
+        0.0,
+        station_presence,
+    )
+    .map_err(|e| e.to_string())?;
 
     let mut rng = StdRng::seed_from_u64(seed);
     let mut hits_cs = BernoulliConfidenceSequence::new(convergence.level);
@@ -4885,6 +4995,10 @@ pub fn calculate_zero_angle(
     )
 }
 
+/// Solve the bore angle that crosses the line of sight at `target_distance`.
+///
+/// Presence-blind: `atmosphere` goes through the legacy default-sentinel rule (see
+/// [`TrajectorySolver::new`]). See [`calculate_zero_angle_with_station_presence`].
 pub fn calculate_zero_angle_with_conditions(
     inputs: BallisticInputs,
     target_distance: f64,
@@ -4892,13 +5006,36 @@ pub fn calculate_zero_angle_with_conditions(
     wind: WindConditions,
     atmosphere: AtmosphericConditions,
 ) -> Result<f64, BallisticsError> {
-    let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
+    calculate_zero_angle_with_station_presence(
+        inputs,
+        target_distance,
+        target_height,
+        wind,
+        atmosphere,
+        StationAtmospherePresence::NEITHER,
+    )
+}
+
+/// [`calculate_zero_angle_with_conditions`] knowing which of `atmosphere`'s temperature and
+/// pressure the caller supplied (0.49.0); see [`TrajectorySolver::new_with_station_presence`].
+/// [`StationAtmospherePresence::NEITHER`] is bit-identical to the presence-blind function, and
+/// [`StationAtmospherePresence::BOTH`] to [`calculate_zero_angle_with_resolved_conditions`].
+pub fn calculate_zero_angle_with_station_presence(
+    inputs: BallisticInputs,
+    target_distance: f64,
+    target_height: f64,
+    wind: WindConditions,
+    atmosphere: AtmosphericConditions,
+    station_presence: StationAtmospherePresence,
+) -> Result<f64, BallisticsError> {
+    let mut solver =
+        TrajectorySolver::new_with_station_presence(inputs, wind, atmosphere, station_presence);
     solver.calculate_and_set_zero_angle(target_distance, target_height, ZeroTargetFrame::SightLine)
 }
 
 /// [`calculate_zero_angle_with_conditions`] for a presence-aware caller that has already
 /// resolved station temperature/pressure (MBA-1397; e.g. reduced a declared QNH via
-/// [`crate::atmosphere::resolve_station_conditions_with_pressure_mode`]). Unlike the base
+/// [`crate::atmosphere::resolve_station_conditions_with_presence`]). Unlike the base
 /// function, `atmosphere`'s temperature/pressure are trusted as-is and never re-interpreted
 /// through the legacy default-sentinel heuristic.
 pub fn calculate_zero_angle_with_resolved_conditions(
@@ -4936,6 +5073,9 @@ pub const ZERO_RANGE_FROM_ANGLE_MAX_RANGE_M: f64 = 2000.0;
 /// function recovers the ORIGINAL distance as one of the two returned crossings, not
 /// necessarily as `far_m` specifically — for short/flat zeros the forward solver's answer is
 /// often the NEAR crossing.
+///
+/// Presence-blind: `atmosphere` goes through the legacy default-sentinel rule. See
+/// [`calculate_zero_range_from_angle_with_station_presence`].
 pub fn calculate_zero_range_from_angle_with_conditions(
     inputs: BallisticInputs,
     zero_angle_rad: f64,
@@ -4943,7 +5083,30 @@ pub fn calculate_zero_range_from_angle_with_conditions(
     wind: WindConditions,
     atmosphere: AtmosphericConditions,
 ) -> Result<ZeroCrossings, BallisticsError> {
-    let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
+    calculate_zero_range_from_angle_with_station_presence(
+        inputs,
+        zero_angle_rad,
+        target_height,
+        wind,
+        atmosphere,
+        StationAtmospherePresence::NEITHER,
+    )
+}
+
+/// [`calculate_zero_range_from_angle_with_conditions`] knowing which of `atmosphere`'s
+/// temperature and pressure the caller supplied (0.49.0); see
+/// [`TrajectorySolver::new_with_station_presence`]. [`StationAtmospherePresence::NEITHER`] is
+/// bit-identical to the presence-blind function.
+pub fn calculate_zero_range_from_angle_with_station_presence(
+    inputs: BallisticInputs,
+    zero_angle_rad: f64,
+    target_height: f64,
+    wind: WindConditions,
+    atmosphere: AtmosphericConditions,
+    station_presence: StationAtmospherePresence,
+) -> Result<ZeroCrossings, BallisticsError> {
+    let mut solver =
+        TrajectorySolver::new_with_station_presence(inputs, wind, atmosphere, station_presence);
     solver.set_max_range(ZERO_RANGE_FROM_ANGLE_MAX_RANGE_M);
     solver.find_zero_range(zero_angle_rad, target_height, ZeroTargetFrame::SightLine)
 }
@@ -5064,6 +5227,9 @@ fn fit_residual_sse(
 /// - `Some(range_m)` → **sight/dope-card-referenced**: the trajectory is zeroed at
 ///   `range_m` (using `sight_height`), and drop is measured below the horizontal line of
 ///   sight — i.e. exactly what a dope card zeroed at that range prints.
+///
+/// Presence-blind: `atmosphere` goes through the legacy default-sentinel rule. See
+/// [`estimate_bc_fit_with_station_presence`].
 #[allow(clippy::too_many_arguments)] // Public compatibility API; grouping would be breaking.
 pub fn estimate_bc_fit(
     velocity: f64,
@@ -5075,6 +5241,36 @@ pub fn estimate_bc_fit(
     atmosphere: AtmosphericConditions,
     zero_range: Option<f64>,
     sight_height: f64,
+) -> Result<BcEstimate, BallisticsError> {
+    estimate_bc_fit_with_station_presence(
+        velocity,
+        mass,
+        diameter,
+        points,
+        drag_model,
+        mode,
+        atmosphere,
+        zero_range,
+        sight_height,
+        StationAtmospherePresence::NEITHER,
+    )
+}
+
+/// [`estimate_bc_fit`] knowing which of `atmosphere`'s temperature and pressure the caller
+/// supplied (0.49.0): a supplied value is the air the data was shot in, whatever its value.
+/// [`StationAtmospherePresence::NEITHER`] is bit-identical to [`estimate_bc_fit`].
+#[allow(clippy::too_many_arguments)] // Mirrors estimate_bc_fit plus the presence.
+pub fn estimate_bc_fit_with_station_presence(
+    velocity: f64,
+    mass: f64,
+    diameter: f64,
+    points: &[(f64, f64)],
+    drag_model: DragModel,
+    mode: BcFitMode,
+    atmosphere: AtmosphericConditions,
+    zero_range: Option<f64>,
+    sight_height: f64,
+    station_presence: StationAtmospherePresence,
 ) -> Result<BcEstimate, BallisticsError> {
     if points.is_empty() {
         return Err(BallisticsError::from(
@@ -5109,18 +5305,23 @@ pub fn estimate_bc_fit(
             // drop_offset = sight_height, so a bore-referenced zero left drop != 0 at the
             // zero range and the drop-fit no longer round-tripped to the true BC. This
             // matches how range-table / come-up / dope-card generation zero.
-            let za = calculate_zero_angle_with_conditions(
+            let za = calculate_zero_angle_with_station_presence(
                 inputs.clone(),
                 zr,
                 sight_height,
                 WindConditions::default(),
                 atmosphere.clone(),
+                station_presence,
             )
             .ok()?;
             inputs.muzzle_angle = za;
         }
-        let mut solver =
-            TrajectorySolver::new(inputs, WindConditions::default(), atmosphere.clone());
+        let mut solver = TrajectorySolver::new_with_station_presence(
+            inputs,
+            WindConditions::default(),
+            atmosphere.clone(),
+            station_presence,
+        );
         solver.set_max_range(max_dist * 1.5);
         let result = solver.solve().ok()?;
         fit_residual_sse(&result.points, points, mode, drop_offset)
@@ -5422,6 +5623,87 @@ mod mba1302_solver_seam_tests {
             assert_eq!(legacy_density.to_bits(), pre_density.to_bits());
             assert_eq!(legacy_sos.to_bits(), pre_sos.to_bits());
         }
+
+        // In-band rows (0.49.0): 15.05 C / 1013.0 hPa sit inside both sentinel bands at a real
+        // altitude. The presence-blind constructor and NEITHER must reproduce what ab4eb0c
+        // resolved (ICAO air at the altitude), and BOTH must fly the pair as given, exactly
+        // like the authoritative constructor.
+        for (altitude, pinned) in [
+            (
+                150.0,
+                // captured at ab4eb0c: (density, speed of sound, temperature, pressure)
+                [
+                    f64::from_bits(0x3ff344d9d9fd1ea1),
+                    f64::from_bits(0x40754269eee53ba5),
+                    f64::from_bits(0x402c0ccfd0c49b20),
+                    f64::from_bits(0x408f1ae13f434f1f),
+                ],
+            ),
+            (
+                1500.0,
+                // captured at ab4eb0c
+                [
+                    f64::from_bits(0x3ff0e75c08c70bc0),
+                    f64::from_bits(0x4074ec457a661d16),
+                    f64::from_bits(0x4015025af8d136c0),
+                    f64::from_bits(0x408a6cc6358cefbd),
+                ],
+            ),
+        ] {
+            let atmosphere = AtmosphericConditions {
+                temperature: 15.05,
+                pressure: 1013.0,
+                humidity: 50.0,
+                altitude,
+            };
+            let bits = |r: (f64, f64, f64, f64)| [r.0, r.1, r.2, r.3].map(f64::to_bits);
+            let pinned = pinned.map(f64::to_bits);
+            let legacy = TrajectorySolver::new(
+                BallisticInputs::default(),
+                WindConditions::default(),
+                atmosphere.clone(),
+            );
+            assert_eq!(
+                bits(legacy.resolved_atmosphere()),
+                pinned,
+                "new at {altitude} m"
+            );
+            let neither = TrajectorySolver::new_with_station_presence(
+                BallisticInputs::default(),
+                WindConditions::default(),
+                atmosphere.clone(),
+                StationAtmospherePresence::NEITHER,
+            );
+            assert_eq!(
+                bits(neither.resolved_atmosphere()),
+                pinned,
+                "NEITHER at {altitude} m"
+            );
+
+            let both = TrajectorySolver::new_with_station_presence(
+                BallisticInputs::default(),
+                WindConditions::default(),
+                atmosphere.clone(),
+                StationAtmospherePresence::BOTH,
+            );
+            let authoritative = TrajectorySolver::new_with_resolved_station_atmosphere(
+                BallisticInputs::default(),
+                WindConditions::default(),
+                atmosphere,
+            );
+            let both_resolved = both.resolved_atmosphere();
+            assert_eq!(
+                bits(both_resolved),
+                bits(authoritative.resolved_atmosphere())
+            );
+            assert_eq!(both_resolved.2.to_bits(), 15.05_f64.to_bits());
+            assert_eq!(both_resolved.3.to_bits(), 1013.0_f64.to_bits());
+            assert_ne!(
+                bits(both_resolved),
+                pinned,
+                "BOTH must not swap at {altitude} m"
+            );
+        }
     }
 
     fn configured_euler_zero(vertical_wind_mps: f64, time_step_s: f64) -> TrajectorySolver {
@@ -5574,10 +5856,7 @@ mod mba1302_solver_seam_tests {
         assert_eq!(segmented.time_step.to_bits(), 0.02_f64.to_bits());
         assert_eq!(segmented.max_range.to_bits(), 300.0_f64.to_bits());
         assert!(segmented.wind_sock.is_some());
-        assert_eq!(
-            segmented.station_atmosphere_resolution,
-            StationAtmosphereResolution::Authoritative
-        );
+        assert_eq!(segmented.station_presence, StationAtmospherePresence::BOTH);
         let zero_height = segmented
             .zero_trial_height_at(
                 segmented_angle,
@@ -5636,15 +5915,14 @@ mod uniform_gravity_tests {
                 AtmosphericConditions::default(),
             );
             for magnitude in [0.0, 1.62, 9.80665, 20.0] {
-                let mut solver =
-                    TrajectorySolver::new_with_station_atmosphere_resolution_with_gravity(
-                        inputs.clone(),
-                        WindConditions::default(),
-                        AtmosphericConditions::default(),
-                        StationAtmosphereResolution::LegacyDefaultSentinels,
-                        Gravity::new(magnitude).unwrap(),
-                    )
-                    .clone();
+                let mut solver = TrajectorySolver::new_with_station_presence_and_gravity(
+                    inputs.clone(),
+                    WindConditions::default(),
+                    AtmosphericConditions::default(),
+                    StationAtmospherePresence::NEITHER,
+                    Gravity::new(magnitude).unwrap(),
+                )
+                .clone();
                 solver.set_max_range(10.0);
                 let result = solver.solve().unwrap();
                 let end = result.points.last().unwrap();
@@ -5716,11 +5994,11 @@ mod uniform_gravity_tests {
         position: Vector3<f64>,
         velocity: Vector3<f64>,
     ) -> Vector3<f64> {
-        let solver = TrajectorySolver::new_with_station_atmosphere_resolution_with_gravity(
+        let solver = TrajectorySolver::new_with_station_presence_and_gravity(
             inputs.clone(),
             WindConditions::default(),
             station_1000_m(),
-            StationAtmosphereResolution::Authoritative,
+            StationAtmospherePresence::BOTH,
             gravity,
         );
         let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
@@ -6294,6 +6572,572 @@ mod monte_carlo_result_tests {
         assert_eq!(results.rect_hit_probability(0.0, 1.0), 0.0);
         assert_eq!(results.rect_hit_probability(1.0, 0.0), 0.0);
         assert_eq!(results.rect_hit_probability(-1.0, 1.0), 0.0);
+    }
+}
+
+/// 0.49.0: the `*_with_station_presence` twins. Every NEITHER assertion is against a value
+/// pinned at ab4eb0c, never against the legacy name alone: the legacy names now delegate to
+/// the twins, so a twin-against-legacy comparison would move with a broken twin.
+#[cfg(test)]
+mod station_presence_twin_tests {
+    use super::*;
+
+    fn rifle() -> BallisticInputs {
+        BallisticInputs {
+            muzzle_velocity: 823.0,
+            bc_value: 0.475,
+            bc_type: DragModel::G1,
+            bullet_mass: 0.0109,
+            bullet_diameter: 0.00782,
+            sight_height: 0.0381,
+            ..Default::default()
+        }
+    }
+
+    fn air(temperature: f64, pressure: f64, altitude: f64) -> AtmosphericConditions {
+        AtmosphericConditions {
+            temperature,
+            pressure,
+            humidity: 50.0,
+            altitude,
+        }
+    }
+
+    #[test]
+    fn zero_twins_reproduce_ab4eb0c_with_neither_and_fly_a_supplied_reading() {
+        // (temperature, pressure, altitude, zero angle, near crossing, far crossing for a
+        // 0.002 rad bore angle), all captured at ab4eb0c.
+        let cases = [
+            (
+                20.0,
+                1013.0,
+                150.0,
+                f64::from_bits(0x3f65f73333333333),
+                f64::from_bits(0x4034aaf5701ff812),
+                f64::from_bits(0x406c0aa313fbdeae),
+            ),
+            (
+                15.0,
+                850.0,
+                1500.0,
+                f64::from_bits(0x3f6594ccccccccce),
+                f64::from_bits(0x4034aa5d88f5baa5),
+                f64::from_bits(0x406c6ab97964e714),
+            ),
+        ];
+        for (t, p, alt, zero, near, far) in cases {
+            let calm = WindConditions::default;
+            let legacy = calculate_zero_angle_with_conditions(
+                rifle(),
+                300.0,
+                0.0381,
+                calm(),
+                air(t, p, alt),
+            )
+            .unwrap();
+            let neither = calculate_zero_angle_with_station_presence(
+                rifle(),
+                300.0,
+                0.0381,
+                calm(),
+                air(t, p, alt),
+                StationAtmospherePresence::NEITHER,
+            )
+            .unwrap();
+            assert_eq!(
+                legacy.to_bits(),
+                zero.to_bits(),
+                "legacy zero ({t}, {p}, {alt})"
+            );
+            assert_eq!(
+                neither.to_bits(),
+                zero.to_bits(),
+                "NEITHER zero ({t}, {p}, {alt})"
+            );
+
+            let legacy_range = calculate_zero_range_from_angle_with_conditions(
+                rifle(),
+                0.002,
+                0.0381,
+                calm(),
+                air(t, p, alt),
+            )
+            .unwrap();
+            let neither_range = calculate_zero_range_from_angle_with_station_presence(
+                rifle(),
+                0.002,
+                0.0381,
+                calm(),
+                air(t, p, alt),
+                StationAtmospherePresence::NEITHER,
+            )
+            .unwrap();
+            for crossings in [legacy_range, neither_range] {
+                assert_eq!(crossings.near_m.unwrap().to_bits(), near.to_bits());
+                assert_eq!(crossings.far_m.unwrap().to_bits(), far.to_bits());
+            }
+
+            // BOTH flies the pair as given: it equals the authoritative path that existed at
+            // ab4eb0c, and differs from the swapped NEITHER result.
+            let both = calculate_zero_angle_with_station_presence(
+                rifle(),
+                300.0,
+                0.0381,
+                calm(),
+                air(t, p, alt),
+                StationAtmospherePresence::BOTH,
+            )
+            .unwrap();
+            let authoritative = calculate_zero_angle_with_resolved_conditions(
+                rifle(),
+                300.0,
+                0.0381,
+                calm(),
+                air(t, p, alt),
+            )
+            .unwrap();
+            assert_eq!(both.to_bits(), authoritative.to_bits());
+            assert_ne!(
+                both.to_bits(),
+                zero.to_bits(),
+                "BOTH must not swap ({t}, {p}, {alt})"
+            );
+
+            let both_range = calculate_zero_range_from_angle_with_station_presence(
+                rifle(),
+                0.002,
+                0.0381,
+                calm(),
+                air(t, p, alt),
+                StationAtmospherePresence::BOTH,
+            )
+            .unwrap();
+            let authoritative_range = calculate_zero_range_from_angle_with_resolved_conditions(
+                rifle(),
+                0.002,
+                0.0381,
+                calm(),
+                air(t, p, alt),
+            )
+            .unwrap();
+            assert_eq!(both_range, authoritative_range);
+            assert_ne!(both_range.far_m.unwrap().to_bits(), far.to_bits());
+        }
+    }
+
+    #[test]
+    fn solver_twin_with_both_lies_between_out_of_band_neighbours() {
+        let impact = |p: f64, presence| {
+            let mut solver = TrajectorySolver::new_with_station_presence(
+                rifle(),
+                WindConditions::default(),
+                air(20.0, p, 150.0),
+                presence,
+            );
+            solver.set_max_range(600.0);
+            solver.solve().unwrap().impact_velocity
+        };
+        let low = impact(1012.0, StationAtmospherePresence::NEITHER);
+        let high = impact(1014.0, StationAtmospherePresence::NEITHER);
+        let both = impact(1013.0, StationAtmospherePresence::BOTH);
+        let neither = impact(1013.0, StationAtmospherePresence::NEITHER);
+        // Denser air slows the bullet more: velocity falls as pressure rises.
+        assert!(high < both && both < low, "{high} < {both} < {low}");
+        assert_ne!(both.to_bits(), neither.to_bits());
+
+        let temperature = |t: f64, presence| {
+            let mut solver = TrajectorySolver::new_with_station_presence(
+                rifle(),
+                WindConditions::default(),
+                air(t, 850.0, 1500.0),
+                presence,
+            );
+            solver.set_max_range(600.0);
+            solver.solve().unwrap().impact_velocity
+        };
+        let cold = temperature(14.8, StationAtmospherePresence::NEITHER);
+        let warm = temperature(15.2, StationAtmospherePresence::NEITHER);
+        let both = temperature(15.0, StationAtmospherePresence::BOTH);
+        // Warmer air is thinner: velocity rises with temperature.
+        assert!(cold < both && both < warm, "{cold} < {both} < {warm}");
+        assert_ne!(
+            both.to_bits(),
+            temperature(15.0, StationAtmospherePresence::NEITHER).to_bits()
+        );
+    }
+
+    /// The `legacy_seeded_estimates_are_pinned_bit_for_bit` fixture through the twin.
+    #[test]
+    fn monte_carlo_twin_with_neither_reproduces_the_legacy_seeded_pins() {
+        let inputs = BallisticInputs {
+            muzzle_velocity: 800.0,
+            ..BallisticInputs::default()
+        };
+        let params = MonteCarloParams {
+            num_simulations: 200,
+            target_distance: Some(500.0),
+            ..MonteCarloParams::default()
+        };
+        let results = run_monte_carlo_with_station_presence(
+            inputs,
+            WindConditions::default(),
+            params,
+            0.01,
+            Some(0x1352_5EED),
+            StationAtmospherePresence::NEITHER,
+        )
+        .unwrap();
+        assert_eq!(results.ranges.len(), 200);
+        assert_eq!(
+            results.hit_probability(DEFAULT_HIT_RADIUS_M).to_bits(),
+            0.14_f64.to_bits()
+        );
+        let expected_ranges: [f64; 3] = [1907.972891143359, 1936.408435469319, 1912.8150447617645];
+        let expected_velocities: [f64; 3] =
+            [238.6187151542299, 239.91923651600106, 243.14112455427164];
+        let expected_positions: [(f64, f64); 3] = [
+            (-0.0643556039548101, 0.7344970252014579),
+            (0.5769422971539162, 0.27227201756386726),
+            (-0.7440425792472842, 0.1541804446282822),
+        ];
+        for i in 0..3 {
+            assert_eq!(results.ranges[i].to_bits(), expected_ranges[i].to_bits());
+            assert_eq!(
+                results.impact_velocities[i].to_bits(),
+                expected_velocities[i].to_bits()
+            );
+            assert_eq!(
+                results.impact_positions[i].y.to_bits(),
+                expected_positions[i].0.to_bits()
+            );
+            assert_eq!(
+                results.impact_positions[i].z.to_bits(),
+                expected_positions[i].1.to_bits()
+            );
+        }
+    }
+
+    fn in_band_mc_inputs() -> BallisticInputs {
+        BallisticInputs {
+            muzzle_velocity: 800.0,
+            temperature: 20.0,
+            pressure: 1013.0,
+            altitude: 150.0,
+            ..BallisticInputs::default()
+        }
+    }
+
+    #[test]
+    fn monte_carlo_in_band_seeded_case_is_pinned_and_both_differs() {
+        let params = MonteCarloParams {
+            num_simulations: 50,
+            target_distance: Some(500.0),
+            ..MonteCarloParams::default()
+        };
+        // captured at ab4eb0c: (range, impact velocity) of the first three trials
+        let pinned = [
+            (
+                f64::from_bits(0x409e36cf28692da7),
+                f64::from_bits(0x406e6111e25be26e),
+            ),
+            (
+                f64::from_bits(0x409eaa63c504259d),
+                f64::from_bits(0x406e8a3b4e34eef5),
+            ),
+            (
+                f64::from_bits(0x409e4838920e477c),
+                f64::from_bits(0x406ef31c9a289584),
+            ),
+        ];
+        let seeded = run_monte_carlo_with_wind_and_direction_std_dev_seeded(
+            in_band_mc_inputs(),
+            WindConditions::default(),
+            params.clone(),
+            0.01,
+            0x1352_5EED,
+        )
+        .unwrap();
+        let neither = run_monte_carlo_with_station_presence(
+            in_band_mc_inputs(),
+            WindConditions::default(),
+            params.clone(),
+            0.01,
+            Some(0x1352_5EED),
+            StationAtmospherePresence::NEITHER,
+        )
+        .unwrap();
+        for results in [&seeded, &neither] {
+            assert_eq!(results.ranges.len(), 50);
+            for (i, (range, velocity)) in pinned.iter().enumerate() {
+                assert_eq!(results.ranges[i].to_bits(), range.to_bits(), "range[{i}]");
+                assert_eq!(
+                    results.impact_velocities[i].to_bits(),
+                    velocity.to_bits(),
+                    "velocity[{i}]"
+                );
+            }
+        }
+        let both = run_monte_carlo_with_station_presence(
+            in_band_mc_inputs(),
+            WindConditions::default(),
+            params,
+            0.01,
+            Some(0x1352_5EED),
+            StationAtmospherePresence::BOTH,
+        )
+        .unwrap();
+        assert_ne!(both.ranges[0].to_bits(), pinned[0].0.to_bits());
+        // 1013 hPa is denser than the ICAO 995 hPa it used to be swapped for: shorter flights.
+        assert!(both.ranges[0] < pinned[0].0);
+    }
+
+    #[test]
+    fn adaptive_monte_carlo_twin_is_pinned_and_both_differs() {
+        let params = MonteCarloParams {
+            num_simulations: 1,
+            velocity_std_dev: 3.0,
+            angle_std_dev: 3.5e-4,
+            bc_std_dev: 0.01,
+            wind_speed_std_dev: 1.0,
+            target_distance: Some(300.0),
+            base_wind_speed: 0.0,
+            base_wind_direction: 0.0,
+            azimuth_std_dev: 3.5e-4,
+        };
+        let convergence = McConvergence {
+            min_samples: 40,
+            max_samples: 80,
+            batch_size: 40,
+            ..McConvergence::default()
+        };
+        let legacy = run_monte_carlo_adaptive_seeded(
+            &in_band_mc_inputs(),
+            &WindConditions::default(),
+            &params,
+            &convergence,
+            DEFAULT_HIT_RADIUS_M,
+            7,
+        )
+        .unwrap();
+        let neither = run_monte_carlo_adaptive_seeded_with_station_presence(
+            &in_band_mc_inputs(),
+            &WindConditions::default(),
+            &params,
+            &convergence,
+            DEFAULT_HIT_RADIUS_M,
+            7,
+            StationAtmospherePresence::NEITHER,
+        )
+        .unwrap();
+        for report in [&legacy, &neither] {
+            assert_eq!(report.samples, 80);
+            assert_eq!(report.attempts, 80);
+            // captured at ab4eb0c
+            assert_eq!(
+                report.hit_probability.to_bits(),
+                f64::from_bits(0x3fef99999999999a).to_bits()
+            );
+            assert_eq!(
+                report.mean_impact_velocity_mps.to_bits(),
+                0x406e99be313a64aa
+            );
+            assert_eq!(report.mean_drop_at_target_m.to_bits(), 0x3f63de496e905406);
+        }
+        let both = run_monte_carlo_adaptive_seeded_with_station_presence(
+            &in_band_mc_inputs(),
+            &WindConditions::default(),
+            &params,
+            &convergence,
+            DEFAULT_HIT_RADIUS_M,
+            7,
+            StationAtmospherePresence::BOTH,
+        )
+        .unwrap();
+        assert_ne!(both.mean_impact_velocity_mps.to_bits(), 0x406e99be313a64aa);
+    }
+
+    /// Every trial's impact position is its deviation from the baseline solve, so the baseline
+    /// must fly the trials' air. With no dispersion each trial is the baseline itself, so the
+    /// deviation is exactly zero under every presence, in-band readings included.
+    #[test]
+    fn monte_carlo_baseline_flies_the_trials_air() {
+        let params = MonteCarloParams {
+            num_simulations: 3,
+            velocity_std_dev: 0.0,
+            angle_std_dev: 0.0,
+            bc_std_dev: 0.0,
+            wind_speed_std_dev: 0.0,
+            target_distance: Some(500.0),
+            base_wind_speed: 0.0,
+            base_wind_direction: 0.0,
+            azimuth_std_dev: 0.0,
+        };
+        let inputs = BallisticInputs {
+            temperature: 15.0,
+            ..in_band_mc_inputs()
+        };
+        for presence in [
+            StationAtmospherePresence::NEITHER,
+            StationAtmospherePresence::new(true, false),
+            StationAtmospherePresence::new(false, true),
+            StationAtmospherePresence::BOTH,
+        ] {
+            let results = run_monte_carlo_with_station_presence(
+                inputs.clone(),
+                WindConditions::default(),
+                params.clone(),
+                0.0,
+                Some(7),
+                presence,
+            )
+            .unwrap();
+            assert_eq!(results.impact_positions.len(), 3);
+            for position in &results.impact_positions {
+                assert_eq!(position.y.to_bits(), 0.0_f64.to_bits(), "{presence:?}");
+                assert_eq!(position.z.to_bits(), 0.0_f64.to_bits(), "{presence:?}");
+            }
+        }
+    }
+
+    /// A zeroed drop fit zeroes in the air it flies: drops generated from a solve zeroed at
+    /// 100 m in a typed in-band air fit back with no residual. A zero left on the old rule
+    /// (ICAO air) under a flight in the typed air leaves one at every candidate BC.
+    #[test]
+    fn estimate_bc_fit_twin_zeroes_in_the_supplied_air() {
+        let atmosphere = air(15.0, 1013.0, 150.0);
+        let presence = StationAtmospherePresence::BOTH;
+        let mut inputs = BallisticInputs {
+            muzzle_velocity: 823.0,
+            bc_value: 0.475,
+            bc_type: DragModel::G1,
+            bullet_mass: 0.0109,
+            bullet_diameter: 0.00782,
+            sight_height: 0.0381,
+            ..Default::default()
+        };
+        inputs.muzzle_angle = calculate_zero_angle_with_station_presence(
+            inputs.clone(),
+            100.0,
+            0.0381,
+            WindConditions::default(),
+            atmosphere.clone(),
+            presence,
+        )
+        .unwrap();
+        let mut solver = TrajectorySolver::new_with_station_presence(
+            inputs,
+            WindConditions::default(),
+            atmosphere.clone(),
+            presence,
+        );
+        solver.set_max_range(750.0);
+        let flight = solver.solve().unwrap();
+        let points: Vec<(f64, f64)> = [300.0, 500.0]
+            .iter()
+            .map(|&d| {
+                (
+                    d,
+                    fit_value_at(&flight.points, d, BcFitMode::Drop, 0.0381).unwrap(),
+                )
+            })
+            .collect();
+        let fit = estimate_bc_fit_with_station_presence(
+            823.0,
+            0.0109,
+            0.00782,
+            &points,
+            DragModel::G1,
+            BcFitMode::Drop,
+            atmosphere,
+            Some(100.0),
+            0.0381,
+            presence,
+        )
+        .unwrap();
+        assert!((fit.bc - 0.475).abs() < 1e-9, "{fit:?}");
+        assert!(fit.rms_error < 1e-9, "{fit:?}");
+    }
+
+    #[test]
+    fn estimate_bc_fit_twin_is_pinned_and_both_fits_the_supplied_air() {
+        let points = [(300.0, 650.0), (500.0, 560.0)];
+        let fit = |p: f64, presence| {
+            estimate_bc_fit_with_station_presence(
+                823.0,
+                0.0109,
+                0.00782,
+                &points,
+                DragModel::G1,
+                BcFitMode::Velocity,
+                air(20.0, p, 150.0),
+                None,
+                0.0381,
+                presence,
+            )
+            .unwrap()
+            .bc
+        };
+        let legacy = estimate_bc_fit(
+            823.0,
+            0.0109,
+            0.00782,
+            &points,
+            DragModel::G1,
+            BcFitMode::Velocity,
+            air(20.0, 1013.0, 150.0),
+            None,
+            0.0381,
+        )
+        .unwrap()
+        .bc;
+        // captured at ab4eb0c: 1013.0 hPa at 150 m was fitted in ICAO 995 hPa air.
+        let pinned = f64::from_bits(0x3fe0000000000003);
+        assert_eq!(legacy.to_bits(), pinned.to_bits());
+        assert_eq!(
+            fit(1013.0, StationAtmospherePresence::NEITHER).to_bits(),
+            pinned.to_bits()
+        );
+        // The fit searches a 0.001 BC grid and 1 hPa moves the answer by about 0.0005, so the
+        // out-of-band neighbours are 3 hPa away on each side to make "strictly between"
+        // resolvable. They are flown as typed by every rule.
+        let low = fit(1010.0, StationAtmospherePresence::NEITHER);
+        let high = fit(1016.0, StationAtmospherePresence::NEITHER);
+        let both = fit(1013.0, StationAtmospherePresence::BOTH);
+        assert!(low < both && both < high, "{low} < {both} < {high}");
+    }
+
+    #[test]
+    fn monte_carlo_kernel_twin_is_pinned_and_both_lies_between_neighbours() {
+        let kernel_inputs = |p: f64| BallisticInputs {
+            muzzle_velocity: 823.0,
+            bc_value: 0.475,
+            bullet_mass: 0.0109,
+            bullet_diameter: 0.00782,
+            target_distance: 500.0,
+            temperature: 20.0,
+            pressure: p,
+            altitude: 150.0,
+            ..Default::default()
+        };
+        let solve = |p: f64, presence| {
+            crate::monte_carlo::solve_trajectory_for_monte_carlo_with_station_presence(
+                &kernel_inputs(p),
+                presence,
+            )
+            .unwrap()
+        };
+        let legacy =
+            crate::monte_carlo::solve_trajectory_for_monte_carlo(&kernel_inputs(1013.0)).unwrap();
+        let neither = solve(1013.0, StationAtmospherePresence::NEITHER);
+        for output in [&legacy, &neither] {
+            // captured at ab4eb0c
+            assert_eq!(output.drop.to_bits(), 0x40039eddd41bdb44);
+            assert_eq!(output.velocity.to_bits(), 0x4080fe7009642434);
+        }
+        let low = solve(1012.0, StationAtmospherePresence::NEITHER).velocity;
+        let high = solve(1014.0, StationAtmospherePresence::NEITHER).velocity;
+        let both = solve(1013.0, StationAtmospherePresence::BOTH).velocity;
+        assert!(high < both && both < low, "{high} < {both} < {low}");
     }
 }
 
@@ -6970,6 +7814,7 @@ mod monte_carlo_powder_curve_tests {
             WindConditions::default(),
             params,
             0.0,
+            StationAtmospherePresence::NEITHER,
             &mut rng,
         )
         .expect("Monte Carlo solve");

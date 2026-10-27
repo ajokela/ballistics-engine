@@ -280,8 +280,9 @@ const HEADER_HPA_PER_INHG: f64 = 33.8639;
 /// station air the card's rows were solved in (MBA-1593).
 ///
 /// A solve does not always fly the air it is handed: it swaps ICAO air at the site's altitude
-/// in for a sea-level default pressure or temperature, and reduces a declared QNH to station
-/// pressure ([`crate::atmosphere::resolve_station_conditions_with_pressure_mode`]). Before
+/// in for an omitted pressure or temperature, and reduces a declared QNH to station pressure
+/// ([`crate::atmosphere::resolve_station_conditions_with_presence`]; a typed value flies as
+/// typed since 0.49.0). Before
 /// 0.49.0 every card surface printed the air it was HANDED, so a card at 1500 m with no
 /// pressure or temperature read `DA:0 ft Pressure:29.92/1013 Temp:59` over rows that flew
 /// 846 hPa and 5.25 °C. Each surface now states its air with [`Self::new`] and restates it
@@ -311,7 +312,7 @@ impl HeaderAtmosphere {
     ///
     /// `supplied` is the `(temperature °C, pressure hPa)` pair the solve was handed, which is
     /// the air `self` states, and `flown` is the pair it flew: what
-    /// [`crate::atmosphere::resolve_station_conditions_with_pressure_mode`] made of `supplied`.
+    /// [`crate::atmosphere::resolve_station_conditions_with_presence`] made of `supplied`.
     /// A field the solve flew as supplied keeps `self`'s figure exactly, so sea-level and fully
     /// explicit station air print as they always have (an inHg reading is not round-tripped
     /// through hPa). A field the solve substituted is restated from `flown`, and the density

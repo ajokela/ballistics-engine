@@ -1,40 +1,42 @@
 //! FFI bindings for iOS/Swift integration
 //!
-//! # Station temperature and pressure: this ABI uses the legacy default sentinels
+//! # Station temperature and pressure: say which ones you supplied
 //!
-//! Every export here that takes an [`FFIAtmosphericConditions`] resolves its `temperature`
-//! and `pressure` through [`crate::atmosphere::resolve_station_conditions`] — the
-//! `StationAtmosphereResolution::LegacyDefaultSentinels` behaviour of
-//! [`crate::cli_api::TrajectorySolver::new`]. Concretely: at an `altitude` above 1 m, a
-//! `temperature` of 15 °C (±0.1) or a `pressure` of 1013.25 hPa (±0.5) is read as "not
-//! supplied — give me the ICAO standard atmosphere at this altitude", NOT as a station
-//! reading of exactly 15 °C / 1013.25 hPa.
+//! [`FFIAtmosphericConditions`] is a `repr(C)` struct of plain `c_double`s with no presence
+//! channel, so the struct exports (`ballistics_calculate_trajectory*`,
+//! `ballistics_calculate_zero_angle*`, `ballistics_monte_carlo*`) still resolve its
+//! `temperature` and `pressure` through the legacy default sentinels of
+//! [`crate::cli_api::TrajectorySolver::new`]: at an `altitude` above 1 m, a `temperature` of
+//! 15 °C (±0.1) or a `pressure` of 1013.25 hPa (±0.5) is read as "not supplied — give me the
+//! ICAO standard atmosphere at this altitude", NOT as a station reading of exactly 15 °C /
+//! 1013.25 hPa. Existing callers that use the sentinel to say "omitted", as `tests/test_ffi.c`
+//! and every shipped example do, keep getting exactly the numbers they always got.
 //!
-//! solve-json ([`crate::solve_json`], [`mod@crate::solve_v1`]) does the opposite: it builds through
-//! [`crate::cli_api::TrajectorySolver::new_with_resolved_station_atmosphere`], so a supplied
-//! `temperature_k`/`pressure_pa` is authoritative even when it happens to equal a sentinel
-//! value. The two surfaces therefore return DIFFERENT numbers for the same nominal inputs —
-//! a 300 m zero at 2000 m with 15 °C / 1013.25 hPa differs by about 0.29 MOA, because this
-//! ABI is solving it at the ICAO 2.00 °C / 795.01 hPa instead.
+//! Since 0.49.0 a caller that knows which values it actually has uses the presence-aware
+//! exports instead: [`ballistics_calculate_trajectory_with_station_presence`],
+//! [`ballistics_calculate_zero_angle_with_station_presence`] and
+//! [`ballistics_monte_carlo_with_station_presence`]. They take the same struct plus a
+//! `station_presence` bit set: [`BALLISTICS_STATION_TEMPERATURE_SUPPLIED`] and
+//! [`BALLISTICS_STATION_PRESSURE_SUPPLIED`]. A field whose bit is set flies as given, whatever
+//! its value, so a shooter who really is at 15 °C at 2000 m, or whose barometer reads
+//! 1013 hPa at 150 m, gets that air. A field whose bit is clear keeps the legacy rule, so
+//! `station_presence = 0` is bit-identical to the struct exports. The results of
+//! [`ballistics_reduce_qnh_pressure`] and the `ballistics_density_altitude_*` helpers are
+//! readings by definition: pass them with the matching bit set (see those functions).
 //!
-//! This divergence is deliberate, and is the only correct answer for each surface. The
-//! difference is the input type, not the physics: `AtmosphereV1` carries `Option<f64>` behind a
-//! presence-preserving deserializer, so a JSON caller can say "omitted" directly and needs no
-//! heuristic (MBA-1397). [`FFIAtmosphericConditions`] is a `repr(C)` struct of plain
-//! `c_double`s with no presence channel at all, so the sentinel IS how a C caller says
-//! "omitted" — and it is what `tests/test_ffi.c` and every shipped example do. Making the C
-//! ABI authoritative would leave those callers computing sea-level density at altitude and
-//! under-stating drop, which is the exact defect `resolve_station_pressure` /
-//! `resolve_station_temperature` were introduced to fix. A C caller that genuinely IS at
-//! 15 °C at 2000 m must perturb the value (e.g. 15.2 °C) to escape the sentinel band, or use
-//! the JSON bridge (`crate::bridge`, behind the `bridge` feature) instead.
+//! solve-json ([`crate::solve_json`], [`mod@crate::solve_v1`]) and the JSON bridge carry
+//! presence in their own wire format (an absent field is omitted), so they never needed the
+//! sentinel. Fed 15 °C / 1013.25 hPa at 2000 m, a 300 m zero through a struct export differs
+//! from solve-json by about 0.29 MOA (the struct export solves it at the ICAO 2.00 °C /
+//! 795.01 hPa); through the presence-aware export with both bits set, the two agree.
 //!
 //! `tests/ffi_atmosphere_resolution.rs` pins both halves of this.
 
+use crate::atmosphere::{PressureReferenceMode, StationAtmospherePresence};
 use crate::{
-    calculate_zero_angle_with_conditions, run_monte_carlo_with_direction_std_dev,
-    AtmosphericConditions, BallisticInputs, DragModel, MonteCarloParams, TrajectorySolver,
-    WindConditions,
+    calculate_zero_angle_with_conditions, calculate_zero_angle_with_station_presence,
+    run_monte_carlo_with_station_presence, AtmosphericConditions, BallisticInputs, DragModel,
+    MonteCarloParams, TrajectorySolver, WindConditions,
 };
 use std::os::raw::{c_char, c_double, c_int};
 use std::ptr;
@@ -53,6 +55,52 @@ pub const MIN_FFI_STEP_SIZE_MS: c_double = 0.1;
 /// (the embedded G1/G7 references are under 100 rows; doppler exports run a few
 /// hundred), so 4096 is far above any legitimate deck.
 pub const MAX_FFI_DRAG_TABLE_LEN: c_int = 4096;
+
+/// `station_presence` bit (0.49.0): the [`FFIAtmosphericConditions::temperature`] passed is a
+/// reading the caller supplied and flies as given, even 15 °C at altitude.
+pub const BALLISTICS_STATION_TEMPERATURE_SUPPLIED: u32 = 1;
+
+/// `station_presence` bit (0.49.0): the [`FFIAtmosphericConditions::pressure`] passed is a
+/// station reading the caller supplied and flies as given, even 1013.25 hPa at altitude. Set
+/// it for a pressure produced by [`ballistics_reduce_qnh_pressure`].
+pub const BALLISTICS_STATION_PRESSURE_SUPPLIED: u32 = 2;
+
+/// Decode a `station_presence` bit set. Bits other than the two defined ones are refused
+/// (`None`), so a later bit can be added without an old library silently ignoring it.
+fn station_presence_from_bits(bits: u32) -> Option<StationAtmospherePresence> {
+    const KNOWN: u32 =
+        BALLISTICS_STATION_TEMPERATURE_SUPPLIED | BALLISTICS_STATION_PRESSURE_SUPPLIED;
+    if bits & !KNOWN != 0 {
+        return None;
+    }
+    Some(StationAtmospherePresence::new(
+        bits & BALLISTICS_STATION_TEMPERATURE_SUPPLIED != 0,
+        bits & BALLISTICS_STATION_PRESSURE_SUPPLIED != 0,
+    ))
+}
+
+/// The optional custom drag deck of the presence-aware exports: null arrays with
+/// `drag_table_len == 0` mean "no deck" (and then `cd_scale` must be exactly `1.0`, the
+/// neutral scale); anything else is validated like
+/// [`ballistics_calculate_trajectory_with_drag_table_scaled`]'s deck and scale.
+///
+/// # Safety
+///
+/// As [`drag_table_from_raw`] for a non-null pair.
+unsafe fn optional_drag_table_from_raw(
+    mach: *const c_double,
+    cd: *const c_double,
+    len: c_int,
+    cd_scale: c_double,
+) -> Result<Option<crate::drag::DragTable>, ()> {
+    if !cd_scale.is_finite() || cd_scale <= 0.0 {
+        return Err(());
+    }
+    if mach.is_null() && cd.is_null() && len == 0 {
+        return if cd_scale == 1.0 { Ok(None) } else { Err(()) };
+    }
+    unsafe { drag_table_from_raw(mach, cd, len) }.map(Some)
+}
 
 // FFI-safe structures with C-compatible layouts
 
@@ -134,12 +182,13 @@ pub struct FFIWindConditions {
 
 /// Station atmosphere for the C ABI.
 ///
-/// `temperature` and `pressure` are resolved through the LEGACY DEFAULT SENTINELS: at a
-/// nonzero `altitude`, 15 °C and/or 1013.25 hPa mean "omitted, use the ICAO standard at this
-/// altitude" rather than a literal station reading. This struct has no presence channel, so
-/// that sentinel is the only way a C caller can express omission — see this module's
-/// documentation for why solve-json deliberately does NOT behave this way, and for the size
-/// of the resulting divergence.
+/// This struct has no presence channel. Through the struct exports, `temperature` and
+/// `pressure` are resolved through the LEGACY DEFAULT SENTINELS: at a nonzero `altitude`,
+/// 15 °C and/or 1013.25 hPa mean "omitted, use the ICAO standard at this altitude" rather than
+/// a literal station reading. Since 0.49.0 the three `*_with_station_presence` exports take a
+/// presence bit set beside it ([`BALLISTICS_STATION_TEMPERATURE_SUPPLIED`],
+/// [`BALLISTICS_STATION_PRESSURE_SUPPLIED`]): a field whose bit is set flies as given, even at
+/// a sentinel value. See this module's documentation.
 #[repr(C)]
 pub struct FFIAtmosphericConditions {
     pub temperature: c_double, // Celsius
@@ -410,6 +459,10 @@ unsafe fn drag_table_from_raw(
 /// density — see `BallisticInputs::custom_drag_denominator`). `cd_scale` multiplies the
 /// deck's interpolated Cd (MBA-1356); callers that don't expose a scale pass `1.0`
 /// (neutral, byte-identical to no scale). It is inert when `custom_drag_table` is `None`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the shared body of the flat C trajectory exports, plus the station presence"
+)]
 unsafe fn calculate_trajectory_impl(
     inputs: *const FFIBallisticInputs,
     wind: *const FFIWindConditions,
@@ -418,6 +471,7 @@ unsafe fn calculate_trajectory_impl(
     step_size: c_double,
     custom_drag_table: Option<crate::drag::DragTable>,
     cd_scale: c_double,
+    station_presence: StationAtmospherePresence,
 ) -> *mut FFITrajectoryResult {
     if inputs.is_null() {
         return ptr::null_mut();
@@ -443,24 +497,35 @@ unsafe fn calculate_trajectory_impl(
         }
     };
 
-    let atmospheric_conditions = if atmosphere.is_null() {
-        AtmosphericConditions::default()
+    // A null atmosphere carries no reading, so presence does not apply to it.
+    let (atmospheric_conditions, station_presence) = if atmosphere.is_null() {
+        (
+            AtmosphericConditions::default(),
+            StationAtmospherePresence::NEITHER,
+        )
     } else {
         let atmo = unsafe { &*atmosphere };
-        AtmosphericConditions {
-            temperature: atmo.temperature,
-            pressure: atmo.pressure,
-            humidity: atmo.humidity,
-            altitude: atmo.altitude,
-        }
+        (
+            AtmosphericConditions {
+                temperature: atmo.temperature,
+                pressure: atmo.pressure,
+                humidity: atmo.humidity,
+                altitude: atmo.altitude,
+            },
+            station_presence,
+        )
     };
 
-    // Create solver and calculate trajectory
-    let (sample_temp_c, sample_pressure_hpa) = crate::atmosphere::resolve_station_conditions(
-        atmospheric_conditions.temperature,
-        atmospheric_conditions.pressure,
-        atmospheric_conditions.altitude,
-    );
+    // Create solver and calculate trajectory. The sample Mach divisor resolves the station
+    // air exactly as the solver below does.
+    let (sample_temp_c, sample_pressure_hpa) =
+        crate::atmosphere::resolve_station_conditions_with_presence(
+            atmospheric_conditions.temperature,
+            atmospheric_conditions.pressure,
+            atmospheric_conditions.altitude,
+            PressureReferenceMode::Absolute,
+            station_presence,
+        );
     let (_, sample_speed_of_sound) = crate::atmosphere::calculate_atmosphere(
         atmospheric_conditions.altitude,
         Some(sample_temp_c),
@@ -468,8 +533,12 @@ unsafe fn calculate_trajectory_impl(
         atmospheric_conditions.humidity,
     );
 
-    let mut solver =
-        TrajectorySolver::new(ballistic_inputs, wind_conditions, atmospheric_conditions);
+    let mut solver = TrajectorySolver::new_with_station_presence(
+        ballistic_inputs,
+        wind_conditions,
+        atmospheric_conditions,
+        station_presence,
+    );
 
     // Set max range and time step
     solver.set_max_range(max_range);
@@ -577,6 +646,12 @@ unsafe fn calculate_trajectory_impl(
 /// an enabled sampling grid above [`crate::MAX_TRAJECTORY_SAMPLES`] does likewise. Callers can
 /// increase `step_size`, reduce `max_range`, or select adaptive RK45.
 ///
+/// Presence-blind: `atmosphere` is a plain struct that cannot say which values were measured, so a
+/// temperature within 0.1 °C of 15 °C or a pressure within 0.5 hPa of 1013.25 hPa at an altitude
+/// above 1 m is read as omitted and replaced with ICAO standard air (the pre-0.49.0 rule).
+/// [`ballistics_calculate_trajectory_with_station_presence`] takes the presence beside the
+/// atmosphere, and flies a flagged value as given.
+///
 /// # Safety
 ///
 /// `inputs` may be null, in which case this function returns null. When non-null,
@@ -594,7 +669,18 @@ pub unsafe extern "C" fn ballistics_calculate_trajectory(
     max_range: c_double,
     step_size: c_double,
 ) -> *mut FFITrajectoryResult {
-    unsafe { calculate_trajectory_impl(inputs, wind, atmosphere, max_range, step_size, None, 1.0) }
+    unsafe {
+        calculate_trajectory_impl(
+            inputs,
+            wind,
+            atmosphere,
+            max_range,
+            step_size,
+            None,
+            1.0,
+            StationAtmospherePresence::NEITHER,
+        )
+    }
 }
 
 /// [`ballistics_calculate_trajectory`] with a caller-supplied custom drag deck
@@ -608,6 +694,12 @@ pub unsafe extern "C" fn ballistics_calculate_trajectory(
 /// Returns null for an invalid deck (null arrays, `drag_table_len` outside
 /// `[2, MAX_FFI_DRAG_TABLE_LEN]`, or failed validation), in addition to every
 /// failure mode of the base function.
+///
+/// Presence-blind: `atmosphere` is a plain struct that cannot say which values were measured, so a
+/// temperature within 0.1 °C of 15 °C or a pressure within 0.5 hPa of 1013.25 hPa at an altitude
+/// above 1 m is read as omitted and replaced with ICAO standard air (the pre-0.49.0 rule).
+/// [`ballistics_calculate_trajectory_with_station_presence`] takes the presence beside the
+/// atmosphere and the same deck, and flies a flagged value as given.
 ///
 /// # Safety
 ///
@@ -641,6 +733,7 @@ pub unsafe extern "C" fn ballistics_calculate_trajectory_with_drag_table(
             step_size,
             Some(table),
             1.0,
+            StationAtmospherePresence::NEITHER,
         )
     }
 }
@@ -657,6 +750,12 @@ pub unsafe extern "C" fn ballistics_calculate_trajectory_with_drag_table(
 /// Returns null when `cd_scale` is not finite or not `> 0`, in addition to every failure
 /// mode of [`ballistics_calculate_trajectory_with_drag_table`] (matching that export's
 /// null sentinel for an invalid deck).
+///
+/// Presence-blind: `atmosphere` is a plain struct that cannot say which values were measured, so a
+/// temperature within 0.1 °C of 15 °C or a pressure within 0.5 hPa of 1013.25 hPa at an altitude
+/// above 1 m is read as omitted and replaced with ICAO standard air (the pre-0.49.0 rule).
+/// [`ballistics_calculate_trajectory_with_station_presence`] takes the presence beside the
+/// atmosphere and the same deck and `cd_scale`, and flies a flagged value as given.
 ///
 /// # Safety
 ///
@@ -689,6 +788,61 @@ pub unsafe extern "C" fn ballistics_calculate_trajectory_with_drag_table_scaled(
             step_size,
             Some(table),
             cd_scale,
+            StationAtmospherePresence::NEITHER,
+        )
+    }
+}
+
+/// [`ballistics_calculate_trajectory_with_drag_table_scaled`] that knows which of
+/// `atmosphere`'s `temperature` and `pressure` the caller supplied (0.49.0).
+///
+/// `station_presence` is a bit set of [`BALLISTICS_STATION_TEMPERATURE_SUPPLIED`] and
+/// [`BALLISTICS_STATION_PRESSURE_SUPPLIED`]. A supplied field flies as given, whatever its
+/// value; a field whose bit is clear keeps the legacy default-sentinel rule (see the module
+/// documentation), so `station_presence = 0` is bit-identical to
+/// [`ballistics_calculate_trajectory`] (no deck) or
+/// [`ballistics_calculate_trajectory_with_drag_table_scaled`] (with one). A null `atmosphere`
+/// is the sea-level default, which carries no reading, so the bits do not apply to it.
+///
+/// The deck is optional: pass null `drag_mach`/`drag_cd` with `drag_table_len == 0` and
+/// `cd_scale == 1.0` for the G-model + BC drag. A non-null deck is validated like
+/// [`ballistics_calculate_trajectory_with_drag_table`]'s.
+///
+/// Returns null for any bit other than those two, for `cd_scale != 1.0` without a deck, for a
+/// non-finite or non-positive `cd_scale`, for an invalid deck, and in every failure mode of
+/// [`ballistics_calculate_trajectory`].
+///
+/// # Safety
+///
+/// Same contract as [`ballistics_calculate_trajectory_with_drag_table`]; `drag_mach` and
+/// `drag_cd` may both be null when `drag_table_len` is 0. The returned pointer, when non-null,
+/// must be released exactly once with [`ballistics_free_trajectory_result`].
+#[no_mangle]
+#[allow(clippy::too_many_arguments)] // The frozen C ABI shape: flat parameters.
+pub unsafe extern "C" fn ballistics_calculate_trajectory_with_station_presence(
+    inputs: *const FFIBallisticInputs,
+    wind: *const FFIWindConditions,
+    atmosphere: *const FFIAtmosphericConditions,
+    max_range: c_double,
+    step_size: c_double,
+    drag_mach: *const c_double,
+    drag_cd: *const c_double,
+    drag_table_len: c_int,
+    cd_scale: c_double,
+    station_presence: u32,
+) -> *mut FFITrajectoryResult {
+    let Some(presence) = station_presence_from_bits(station_presence) else {
+        return ptr::null_mut();
+    };
+    let table =
+        match unsafe { optional_drag_table_from_raw(drag_mach, drag_cd, drag_table_len, cd_scale) }
+        {
+            Ok(table) => table,
+            Err(()) => return ptr::null_mut(),
+        };
+    unsafe {
+        calculate_trajectory_impl(
+            inputs, wind, atmosphere, max_range, step_size, table, cd_scale, presence,
         )
     }
 }
@@ -740,6 +894,7 @@ unsafe fn calculate_zero_angle_impl(
     zero_distance: c_double,
     custom_drag_table: Option<crate::drag::DragTable>,
     cd_scale: c_double,
+    station_presence: StationAtmospherePresence,
 ) -> c_double {
     if inputs.is_null() {
         return f64::NAN;
@@ -761,28 +916,36 @@ unsafe fn calculate_zero_angle_impl(
         }
     };
 
-    let atmospheric_conditions = if atmosphere.is_null() {
-        AtmosphericConditions::default()
+    // A null atmosphere carries no reading, so presence does not apply to it.
+    let (atmospheric_conditions, station_presence) = if atmosphere.is_null() {
+        (
+            AtmosphericConditions::default(),
+            StationAtmospherePresence::NEITHER,
+        )
     } else {
         let atmo = unsafe { &*atmosphere };
-        AtmosphericConditions {
-            temperature: atmo.temperature,
-            pressure: atmo.pressure,
-            humidity: atmo.humidity,
-            altitude: atmo.altitude,
-        }
+        (
+            AtmosphericConditions {
+                temperature: atmo.temperature,
+                pressure: atmo.pressure,
+                humidity: atmo.humidity,
+                altitude: atmo.altitude,
+            },
+            station_presence,
+        )
     };
 
     // For zero angle, we want the bullet to hit at sight height at the zero distance
     // This means the bullet crosses the line of sight at the zero distance
     let target_height = ballistic_inputs.sight_height;
 
-    calculate_zero_angle_with_conditions(
+    calculate_zero_angle_with_station_presence(
         ballistic_inputs,
         zero_distance,
         target_height,
         wind_conditions,
         atmospheric_conditions,
+        station_presence,
     )
     .unwrap_or(f64::NAN)
 }
@@ -820,6 +983,12 @@ unsafe fn calculate_zero_angle_impl(
 /// A caller that needs solve-json's semantics over a C ABI should use the JSON bridge
 /// (`crate::bridge`, `src/bridge/ffi.rs`) rather than this export.
 ///
+/// Presence-blind: `atmosphere` is a plain struct that cannot say which values were measured, so a
+/// temperature within 0.1 °C of 15 °C or a pressure within 0.5 hPa of 1013.25 hPa at an altitude
+/// above 1 m is read as omitted and replaced with ICAO standard air (the pre-0.49.0 rule).
+/// [`ballistics_calculate_zero_angle_with_station_presence`] takes the presence beside the
+/// atmosphere, and flies a flagged value as given.
+///
 /// # Safety
 ///
 /// `inputs` may be null, in which case this function returns NaN. When non-null,
@@ -834,7 +1003,17 @@ pub unsafe extern "C" fn ballistics_calculate_zero_angle(
     atmosphere: *const FFIAtmosphericConditions,
     zero_distance: c_double,
 ) -> c_double {
-    unsafe { calculate_zero_angle_impl(inputs, wind, atmosphere, zero_distance, None, 1.0) }
+    unsafe {
+        calculate_zero_angle_impl(
+            inputs,
+            wind,
+            atmosphere,
+            zero_distance,
+            None,
+            1.0,
+            StationAtmospherePresence::NEITHER,
+        )
+    }
 }
 
 /// [`ballistics_calculate_zero_angle`] with a caller-supplied custom drag deck
@@ -850,6 +1029,12 @@ pub unsafe extern "C" fn ballistics_calculate_zero_angle(
 /// Returns NaN for an invalid deck (null arrays, `drag_table_len` outside
 /// `[2, MAX_FFI_DRAG_TABLE_LEN]`, or failed validation), in addition to every
 /// failure mode of the base function.
+///
+/// Presence-blind: `atmosphere` is a plain struct that cannot say which values were measured, so a
+/// temperature within 0.1 °C of 15 °C or a pressure within 0.5 hPa of 1013.25 hPa at an altitude
+/// above 1 m is read as omitted and replaced with ICAO standard air (the pre-0.49.0 rule).
+/// [`ballistics_calculate_zero_angle_with_station_presence`] takes the presence beside the
+/// atmosphere and the same deck, and flies a flagged value as given.
 ///
 /// # Safety
 ///
@@ -872,7 +1057,17 @@ pub unsafe extern "C" fn ballistics_calculate_zero_angle_with_drag_table(
         Ok(t) => t,
         Err(()) => return f64::NAN,
     };
-    unsafe { calculate_zero_angle_impl(inputs, wind, atmosphere, zero_distance, Some(table), 1.0) }
+    unsafe {
+        calculate_zero_angle_impl(
+            inputs,
+            wind,
+            atmosphere,
+            zero_distance,
+            Some(table),
+            1.0,
+            StationAtmospherePresence::NEITHER,
+        )
+    }
 }
 
 /// [`ballistics_calculate_zero_angle_with_drag_table`] with an additional whole-curve
@@ -888,6 +1083,12 @@ pub unsafe extern "C" fn ballistics_calculate_zero_angle_with_drag_table(
 /// Returns NaN when `cd_scale` is not finite or not `> 0`, in addition to every failure
 /// mode of [`ballistics_calculate_zero_angle_with_drag_table`] (matching that export's
 /// NaN sentinel for an invalid deck).
+///
+/// Presence-blind: `atmosphere` is a plain struct that cannot say which values were measured, so a
+/// temperature within 0.1 °C of 15 °C or a pressure within 0.5 hPa of 1013.25 hPa at an altitude
+/// above 1 m is read as omitted and replaced with ICAO standard air (the pre-0.49.0 rule).
+/// [`ballistics_calculate_zero_angle_with_station_presence`] takes the presence beside the
+/// atmosphere and the same deck and `cd_scale`, and flies a flagged value as given.
 ///
 /// # Safety
 ///
@@ -918,6 +1119,62 @@ pub unsafe extern "C" fn ballistics_calculate_zero_angle_with_drag_table_scaled(
             zero_distance,
             Some(table),
             cd_scale,
+            StationAtmospherePresence::NEITHER,
+        )
+    }
+}
+
+/// [`ballistics_calculate_zero_angle_with_drag_table_scaled`] that knows which of
+/// `atmosphere`'s `temperature` and `pressure` the caller supplied (0.49.0).
+///
+/// `station_presence` is a bit set of [`BALLISTICS_STATION_TEMPERATURE_SUPPLIED`] and
+/// [`BALLISTICS_STATION_PRESSURE_SUPPLIED`]: a supplied field flies as given, a field whose
+/// bit is clear keeps the legacy default-sentinel rule, so `station_presence = 0` is
+/// bit-identical to [`ballistics_calculate_zero_angle`] (no deck) or
+/// [`ballistics_calculate_zero_angle_with_drag_table_scaled`] (with one). A null `atmosphere`
+/// is the sea-level default, which carries no reading, so the bits do not apply to it. The
+/// deck is optional exactly as for [`ballistics_calculate_trajectory_with_station_presence`],
+/// and the same deck, scale and bits fly the solved angle there.
+///
+/// Returns NaN for any bit other than those two, for `cd_scale != 1.0` without a deck, for a
+/// non-finite or non-positive `cd_scale`, for an invalid deck, and in every failure mode of
+/// [`ballistics_calculate_zero_angle`].
+///
+/// # Safety
+///
+/// Same contract as [`ballistics_calculate_zero_angle_with_drag_table`]; `drag_mach` and
+/// `drag_cd` may both be null when `drag_table_len` is 0.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)] // The frozen C ABI shape: flat parameters.
+pub unsafe extern "C" fn ballistics_calculate_zero_angle_with_station_presence(
+    inputs: *const FFIBallisticInputs,
+    wind: *const FFIWindConditions,
+    atmosphere: *const FFIAtmosphericConditions,
+    zero_distance: c_double,
+    drag_mach: *const c_double,
+    drag_cd: *const c_double,
+    drag_table_len: c_int,
+    cd_scale: c_double,
+    station_presence: u32,
+) -> c_double {
+    let Some(presence) = station_presence_from_bits(station_presence) else {
+        return f64::NAN;
+    };
+    let table =
+        match unsafe { optional_drag_table_from_raw(drag_mach, drag_cd, drag_table_len, cd_scale) }
+        {
+            Ok(table) => table,
+            Err(()) => return f64::NAN,
+        };
+    unsafe {
+        calculate_zero_angle_impl(
+            inputs,
+            wind,
+            atmosphere,
+            zero_distance,
+            table,
+            cd_scale,
+            presence,
         )
     }
 }
@@ -978,6 +1235,12 @@ pub extern "C" fn ballistics_quick_trajectory(
 
 /// Run a Monte Carlo simulation through the C ABI.
 ///
+/// Presence-blind: `atmosphere` is a plain struct that cannot say which values were measured, so a
+/// temperature within 0.1 °C of 15 °C or a pressure within 0.5 hPa of 1013.25 hPa at an altitude
+/// above 1 m is read as omitted and replaced with ICAO standard air (the pre-0.49.0 rule).
+/// [`ballistics_monte_carlo_with_station_presence`] takes the presence beside the atmosphere, and
+/// flies a flagged value as given.
+///
 /// # Safety
 ///
 /// `inputs` and `params` may be null, in which case this function returns null.
@@ -993,7 +1256,15 @@ pub unsafe extern "C" fn ballistics_monte_carlo(
     atmosphere: *const FFIAtmosphericConditions,
     params: *const FFIMonteCarloParams,
 ) -> *mut FFIMonteCarloResults {
-    unsafe { ballistics_monte_carlo_impl(inputs, atmosphere, params, 0.0) }
+    unsafe {
+        ballistics_monte_carlo_impl(
+            inputs,
+            atmosphere,
+            params,
+            0.0,
+            StationAtmospherePresence::NEITHER,
+        )
+    }
 }
 
 /// Run a Monte Carlo simulation with independent wind-direction uncertainty through the C ABI.
@@ -1001,6 +1272,12 @@ pub unsafe extern "C" fn ballistics_monte_carlo(
 /// `wind_direction_std_dev` is in radians. This additive entry point keeps
 /// [`FFIMonteCarloParams`] and [`ballistics_monte_carlo`] binary-compatible; the older function
 /// delegates with zero wind-direction uncertainty.
+///
+/// Presence-blind: `atmosphere` is a plain struct that cannot say which values were measured, so a
+/// temperature within 0.1 °C of 15 °C or a pressure within 0.5 hPa of 1013.25 hPa at an altitude
+/// above 1 m is read as omitted and replaced with ICAO standard air (the pre-0.49.0 rule).
+/// [`ballistics_monte_carlo_with_station_presence`] takes the presence beside the atmosphere and
+/// the same `wind_direction_std_dev`, and flies a flagged value as given.
 ///
 /// # Safety
 ///
@@ -1012,7 +1289,45 @@ pub unsafe extern "C" fn ballistics_monte_carlo_with_direction_std_dev(
     params: *const FFIMonteCarloParams,
     wind_direction_std_dev: c_double,
 ) -> *mut FFIMonteCarloResults {
-    unsafe { ballistics_monte_carlo_impl(inputs, atmosphere, params, wind_direction_std_dev) }
+    unsafe {
+        ballistics_monte_carlo_impl(
+            inputs,
+            atmosphere,
+            params,
+            wind_direction_std_dev,
+            StationAtmospherePresence::NEITHER,
+        )
+    }
+}
+
+/// [`ballistics_monte_carlo_with_direction_std_dev`] that knows which of `atmosphere`'s
+/// `temperature` and `pressure` the caller supplied (0.49.0).
+///
+/// `station_presence` is a bit set of [`BALLISTICS_STATION_TEMPERATURE_SUPPLIED`] and
+/// [`BALLISTICS_STATION_PRESSURE_SUPPLIED`]: a supplied field flies as given in the baseline
+/// and every trial, a field whose bit is clear keeps the legacy default-sentinel rule, so
+/// `station_presence = 0` is bit-identical to [`ballistics_monte_carlo_with_direction_std_dev`]
+/// (statistically: like it, this draws from the process-global RNG). A null `atmosphere`
+/// carries no reading, so the bits do not apply to it. Returns null for any bit other than
+/// those two, and in every failure mode of [`ballistics_monte_carlo`].
+///
+/// # Safety
+///
+/// The pointer and ownership requirements are identical to [`ballistics_monte_carlo`].
+#[no_mangle]
+pub unsafe extern "C" fn ballistics_monte_carlo_with_station_presence(
+    inputs: *const FFIBallisticInputs,
+    atmosphere: *const FFIAtmosphericConditions,
+    params: *const FFIMonteCarloParams,
+    wind_direction_std_dev: c_double,
+    station_presence: u32,
+) -> *mut FFIMonteCarloResults {
+    let Some(presence) = station_presence_from_bits(station_presence) else {
+        return ptr::null_mut();
+    };
+    unsafe {
+        ballistics_monte_carlo_impl(inputs, atmosphere, params, wind_direction_std_dev, presence)
+    }
 }
 
 unsafe fn ballistics_monte_carlo_impl(
@@ -1020,6 +1335,7 @@ unsafe fn ballistics_monte_carlo_impl(
     atmosphere: *const FFIAtmosphericConditions,
     params: *const FFIMonteCarloParams,
     wind_direction_std_dev: f64,
+    station_presence: StationAtmospherePresence,
 ) -> *mut FFIMonteCarloResults {
     if inputs.is_null() || params.is_null() {
         return ptr::null_mut();
@@ -1042,6 +1358,12 @@ unsafe fn ballistics_monte_carlo_impl(
     let mut ballistic_inputs = convert_inputs(inputs);
     ballistic_inputs.muzzle_height = 1.5;
     ballistic_inputs.ground_threshold = 0.0;
+    // A null atmosphere leaves the inputs' own defaults, which are not readings.
+    let station_presence = if atmosphere.is_null() {
+        StationAtmospherePresence::NEITHER
+    } else {
+        station_presence
+    };
     if !atmosphere.is_null() {
         let atmo = unsafe { &*atmosphere };
         ballistic_inputs.temperature = atmo.temperature;
@@ -1067,11 +1389,21 @@ unsafe fn ballistics_monte_carlo_impl(
         azimuth_std_dev: params.azimuth_std_dev,
     };
 
-    // Run Monte Carlo simulation
-    match run_monte_carlo_with_direction_std_dev(
+    // Run Monte Carlo simulation. The base wind is built exactly as
+    // `run_monte_carlo_with_direction_std_dev` builds it, and `seed: None` draws from the
+    // process-global RNG as it does.
+    let base_wind = WindConditions {
+        speed: mc_params.base_wind_speed,
+        direction: mc_params.base_wind_direction,
+        vertical_speed: 0.0,
+    };
+    match run_monte_carlo_with_station_presence(
         ballistic_inputs,
+        base_wind,
         mc_params,
         wind_direction_std_dev,
+        None,
+        station_presence,
     ) {
         Ok(results) => {
             let num_results = results.ranges.len() as c_int;
@@ -1296,6 +1628,11 @@ pub extern "C" fn ballistics_bc_for_reference_standard(
 /// reading (× 33.8639) before calling, not after. A finite pair for which no station pressure
 /// exists (a QNH whose pressure altitude plus `altitude_m` reaches 44,331 m, or a non-positive
 /// QNH) returns NaN, which the trajectory exports refuse as a non-finite pressure.
+///
+/// The result is a station reading by definition, so pass it to the `*_with_station_presence`
+/// exports with [`BALLISTICS_STATION_PRESSURE_SUPPLIED`] set. Through a struct export it is
+/// presence-blind: a QNH that reduces to within 0.5 hPa of 1013.25 hPa (QNH 1031 hPa at 150 m
+/// reduces to 1012.86 hPa) is read there as "omitted" and replaced with ICAO air.
 #[no_mangle]
 pub extern "C" fn ballistics_reduce_qnh_pressure(
     qnh_hpa: c_double,
@@ -1334,6 +1671,12 @@ pub const FFI_NO_EXPLICIT_TEMPERATURE: c_double = f64::NAN;
 /// A non-finite `density_altitude_m` returns NaN for all three exports (there is no plausible
 /// station value to fall back to, unlike the QNH/BC conversions above, which return their input
 /// unchanged).
+///
+/// Fly the triple through a `*_with_station_presence` export, and set
+/// [`BALLISTICS_STATION_TEMPERATURE_SUPPLIED`] when an explicit temperature was passed: the
+/// temperature is then the caller's reading and must fly as given, even 15 °C. The derived
+/// pressure is not a reading; leave its bit clear. Through a struct export an explicit 15 °C
+/// at altitude is read as "omitted".
 #[no_mangle]
 pub extern "C" fn ballistics_density_altitude_temperature_c(
     density_altitude_m: c_double,

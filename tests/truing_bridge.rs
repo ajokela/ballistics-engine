@@ -1009,3 +1009,147 @@ fn true_dial_plan_matches_cli() {
         v["result"]
     );
 }
+
+/// 0.49.0: `temperature_f` / `pressure_inhg` are optional on `true.*`. A field that is present
+/// is a reading and flies as sent, even 29.92 inHg at 5000 ft; a field that is absent flies
+/// ICAO standard air at `altitude_ft`, which is what sending the 29.92 placeholder produced
+/// before. The sent value was captured from ab4eb0c with the sentinels compiled out; the
+/// omitted one is what ab4eb0c returned.
+#[test]
+fn true_wind_flies_a_sent_pressure_and_omits_an_absent_one() {
+    let request = |pressure: Option<f64>| {
+        let mut r = json!({
+            "observations": [{"range_m": 457.2, "miss_right_m": 0.315, "sigma_m": null}],
+            "muzzle_velocity_fps": 2700.0, "bc": 0.243, "drag_model": "g7",
+            "mass_gr": 168.0, "diameter_in": 0.308, "zero_distance_yd": 100.0,
+            "sight_height_in": 2.0, "temperature_f": 68.0,
+            "humidity_pct": 50.0, "altitude_ft": 5000.0,
+            "twist": {"rate_in": 11.0, "right_hand": true},
+            "earth": null, "called_crosswind_mph": null
+        });
+        if let Some(p) = pressure {
+            r["pressure_inhg"] = json!(p);
+        }
+        r
+    };
+    let mean = |r| {
+        let v = call("true.wind", r);
+        assert_eq!(v["ok"], json!(true), "{v}");
+        v["result"]["mean_crosswind_mph"].as_f64().unwrap()
+    };
+    assert_eq!(
+        mean(request(Some(29.92))).to_bits(),
+        5.053688506163011_f64.to_bits()
+    );
+    assert_eq!(
+        mean(request(None)).to_bits(),
+        6.197365422146237_f64.to_bits()
+    );
+}
+
+/// An omitted `true.fit` model reading equals what the 59 °F / 29.92 inHg placeholder gave
+/// before 0.49.0 at altitude; a sent one now differs from it.
+#[test]
+fn true_fit_omitted_readings_fly_icao_air_and_sent_ones_fly_as_sent() {
+    let request = |with_readings: bool| {
+        let mut m = model();
+        m["altitude_ft"] = json!(5000.0);
+        if !with_readings {
+            let obj = m.as_object_mut().unwrap();
+            obj.remove("temperature_f");
+            obj.remove("pressure_inhg");
+        }
+        json!({
+            "model": m, "drop_unit": "mil",
+            "observations": [
+                {"range_yd": 400.0, "drop": 2.6882, "sigma": 0.1},
+                {"range_yd": 600.0, "drop": 4.8626, "sigma": 0.1},
+                {"range_yd": 800.0, "drop": 7.6598, "sigma": 0.1}
+            ],
+            "priors": {
+                "muzzle_velocity_fps": {"mean": 2700.0, "sigma": 20.0},
+                "ballistic_coefficient": {"mean": 0.243, "sigma": 0.01}
+            },
+            "predictions": []
+        })
+    };
+    let omitted = call("true.fit", request(false));
+    let sent = call("true.fit", request(true));
+    assert_eq!(omitted["ok"], json!(true), "{omitted}");
+    assert_eq!(sent["ok"], json!(true), "{sent}");
+    assert_ne!(omitted["result"], sent["result"]);
+}
+
+/// `true.dsf` zeroes in the sent air too: a 900 yd zero puts the zero's air into the predicted
+/// drop at 950 yd. 29.92 inHg sent at 500 ft is a reading (0.49.0). Captured from ab4eb0c with
+/// the sentinels compiled out (a sent value flies as sent there); left out, the pressure flies
+/// ICAO air at 500 ft, which is what sending 29.92 gave before 0.49.0.
+#[test]
+fn true_dsf_flies_a_sent_pressure_at_its_zero_too() {
+    let request = |pressure: Option<f64>| {
+        let mut model = json!({
+            "muzzle_velocity_fps": 2700.0, "ballistic_coefficient": 0.243, "drag_model": "g7",
+            "mass_gr": 168.0, "diameter_in": 0.308, "zero_distance_yd": 900.0,
+            "sight_height_in": 2.0, "temperature_f": 68.0, "humidity_pct": 50.0,
+            "altitude_ft": 500.0
+        });
+        if let Some(p) = pressure {
+            model["pressure_inhg"] = json!(p);
+        }
+        json!({"model": model, "range_yd": 950.0, "observed_drop": 1.0, "drop_unit": "mil"})
+    };
+    let result = |pressure| {
+        let v = call("true.dsf", request(pressure));
+        assert_eq!(v["ok"], json!(true), "{v}");
+        let r = &v["result"];
+        (
+            r["predicted_drop"].as_f64().unwrap(),
+            r["dsf"].as_f64().unwrap(),
+        )
+    };
+    let (predicted, dsf) = result(Some(29.92));
+    assert_eq!(predicted.to_bits(), 0.9296793417404231_f64.to_bits());
+    assert_eq!(dsf.to_bits(), 1.0756396911304191_f64.to_bits());
+    let (predicted, _) = result(None);
+    assert_eq!(predicted.to_bits(), 0.9084117581689021_f64.to_bits());
+}
+
+/// A `null` reading on `true.*` is the same as leaving the field out, as on `card.*`, so an
+/// app with nullable fields (kotlinx `explicitNulls`, `NSNull`) can send "no reading".
+#[test]
+fn true_star_reads_a_null_reading_as_omitted() {
+    let request = |pressure: Value, temperature: Value| {
+        let mut r = json!({
+            "observations": [{"range_m": 457.2, "miss_right_m": 0.315, "sigma_m": null}],
+            "muzzle_velocity_fps": 2700.0, "bc": 0.243, "drag_model": "g7",
+            "mass_gr": 168.0, "diameter_in": 0.308, "zero_distance_yd": 100.0,
+            "sight_height_in": 2.0, "humidity_pct": 50.0, "altitude_ft": 5000.0,
+            "twist": {"rate_in": 11.0, "right_hand": true},
+            "earth": null, "called_crosswind_mph": null
+        });
+        r["pressure_inhg"] = pressure;
+        r["temperature_f"] = temperature;
+        r
+    };
+    let mean = |r| {
+        let v = call("true.wind", r);
+        assert_eq!(v["ok"], json!(true), "{v}");
+        v["result"]["mean_crosswind_mph"].as_f64().unwrap()
+    };
+    let absent = {
+        let mut r = request(Value::Null, Value::Null);
+        let obj = r.as_object_mut().unwrap();
+        obj.remove("pressure_inhg");
+        obj.remove("temperature_f");
+        mean(r)
+    };
+    assert_eq!(
+        mean(request(Value::Null, Value::Null)).to_bits(),
+        absent.to_bits()
+    );
+    // The 5000 ft, 68 °F case of `true_wind_flies_a_sent_pressure_and_omits_an_absent_one`.
+    assert_eq!(
+        mean(request(Value::Null, json!(68.0))).to_bits(),
+        6.197365422146237_f64.to_bits()
+    );
+}

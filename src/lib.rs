@@ -15,13 +15,20 @@
 //! - FFI bindings for iOS and Android development
 
 // Re-export the main types and functions
-pub use atmosphere::{AtmoSegment, AtmoSock};
+pub use atmosphere::{
+    resolve_station_conditions_with_presence, AtmoSegment, AtmoSock, StationAtmospherePresence,
+    StationReading,
+};
 pub use cli_api::{
     calculate_zero_angle, calculate_zero_angle_with_conditions,
-    calculate_zero_angle_with_resolved_conditions, calculate_zero_range_from_angle_with_conditions,
-    calculate_zero_range_from_angle_with_resolved_conditions, estimate_bc_fit,
-    estimate_bc_from_trajectory, interpolate_powder_temp_curve, resolve_powder_adjusted_velocity,
-    run_monte_carlo, run_monte_carlo_adaptive_seeded, run_monte_carlo_with_direction_std_dev,
+    calculate_zero_angle_with_resolved_conditions, calculate_zero_angle_with_station_presence,
+    calculate_zero_range_from_angle_with_conditions,
+    calculate_zero_range_from_angle_with_resolved_conditions,
+    calculate_zero_range_from_angle_with_station_presence, estimate_bc_fit,
+    estimate_bc_fit_with_station_presence, estimate_bc_from_trajectory,
+    interpolate_powder_temp_curve, resolve_powder_adjusted_velocity, run_monte_carlo,
+    run_monte_carlo_adaptive_seeded, run_monte_carlo_adaptive_seeded_with_station_presence,
+    run_monte_carlo_with_direction_std_dev, run_monte_carlo_with_station_presence,
     run_monte_carlo_with_wind, run_monte_carlo_with_wind_and_direction_std_dev,
     run_monte_carlo_with_wind_and_direction_std_dev_seeded, AdaptiveMcReportV1,
     AtmosphericConditions, BallisticInputs, BallisticsError, BcEstimate, BcFitMode,
@@ -34,7 +41,8 @@ pub use cli_api::{
 pub use drag_model::DragModel;
 pub use mc_stats::{wilson_interval, ConfidenceLevel};
 pub use moving_target::{
-    calculate_lead, lead_from_tof, mover_ring, LeadComponents, LeadError, LeadSolution,
+    calculate_lead, calculate_lead_with_station_presence, lead_from_tof, mover_ring,
+    LeadComponents, LeadError, LeadSolution,
 };
 pub use solve_json::{
     decode_solve_request_v1, ResolvedSolveRequestV1, SolveErrorCodeV1, SolveErrorEnvelopeV1,

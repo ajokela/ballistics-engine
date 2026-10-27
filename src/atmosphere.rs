@@ -137,48 +137,65 @@ fn geometric_to_geopotential_height_m(geometric_altitude_m: f64) -> f64 {
         / (GEOPOTENTIAL_EARTH_RADIUS_M + geometric_altitude_m)
 }
 
-/// Resolve the station-pressure override for an air-density calculation.
-///
-/// Altitude and pressure are redundant inputs for density. The rule:
-/// * An explicitly-supplied pressure is the authoritative STATION pressure (already
-///   altitude-reduced); it is returned as `Some` and used directly, so altitude is NOT
-///   double-counted.
-/// * When pressure is left at the sea-level standard default (≈1013.25 hPa) while a real
-///   altitude is given, the caller meant "standard atmosphere at this altitude": return
-///   `None` so [`calculate_atmosphere`] derives the station pressure from altitude (ICAO
-///   standard) instead of silently using sea-level density.
-///
-/// Without this, `--altitude` with the default pressure produced sea-level density (altitude
-/// had no effect on drag). The ±0.5 hPa tolerance covers the `29.92 inHg ≈ 1013.21 hPa`
-/// conversion, and `>1 m` avoids triggering at sea level. (Mirrors the existing
-/// `pressure != 29.92` "user override" sentinel used elsewhere in the CLI.)
-pub fn resolve_station_pressure(pressure_hpa: f64, altitude_m: f64) -> Option<f64> {
+/// Whether a pressure lies inside the legacy default sentinel's band, within 0.5 hPa of the
+/// 1013.25 hPa sea-level standard. [`resolve_station_pressure`] reads an unmarked value there
+/// as omitted at any altitude above 1 m.
+pub(crate) fn in_legacy_default_pressure_band(pressure_hpa: f64) -> bool {
     const SEA_LEVEL_HPA: f64 = 1013.25;
-    if (pressure_hpa - SEA_LEVEL_HPA).abs() < 0.5 && altitude_m.abs() > 1.0 {
+    (pressure_hpa - SEA_LEVEL_HPA).abs() < 0.5
+}
+
+/// Whether a temperature lies inside the legacy default sentinel's band, within 0.1 °C of the
+/// 15 °C sea-level standard. [`resolve_station_temperature`] reads an unmarked value there as
+/// omitted at any altitude above 1 m.
+pub(crate) fn in_legacy_default_temperature_band(temperature_c: f64) -> bool {
+    const SEA_LEVEL_TEMP_C: f64 = 15.0;
+    (temperature_c - SEA_LEVEL_TEMP_C).abs() < 0.1
+}
+
+/// Resolve the station-pressure override for an air-density calculation, by the legacy
+/// default-sentinel convention.
+///
+/// Presence-blind legacy convention: a bare `f64` cannot say whether it was supplied, so a
+/// sea-level default at a real altitude is read as omitted. The rule:
+/// * A pressure within 0.5 hPa of the 1013.25 hPa sea-level standard at an altitude above 1 m
+///   is read as "omitted, standard atmosphere at this altitude": `None`, so
+///   [`calculate_atmosphere`] derives the station pressure from altitude (ICAO standard)
+///   instead of flying sea-level density there.
+/// * Any other value is returned as `Some` and used as the STATION pressure, so altitude is
+///   not double-counted.
+///
+/// The ±0.5 hPa tolerance covers the `29.92 inHg ≈ 1013.21 hPa` conversion, and `>1 m` avoids
+/// triggering at sea level. A real reading inside that band (QNH 1031 hPa at 150 m reduces to
+/// 1012.86 hPa) is indistinguishable from the default here. A caller that knows presence uses
+/// [`resolve_station_conditions_with_presence`], which flies a supplied value as given.
+pub fn resolve_station_pressure(pressure_hpa: f64, altitude_m: f64) -> Option<f64> {
+    if in_legacy_default_pressure_band(pressure_hpa) && altitude_m.abs() > 1.0 {
         None // pressure left at default + real altitude → derive station pressure from altitude
     } else {
         Some(pressure_hpa) // explicit station pressure is authoritative
     }
 }
 
-/// Resolve the temperature override for an air-density calculation, mirroring
-/// [`resolve_station_pressure`].
+/// Resolve the temperature override for an air-density calculation, by the legacy
+/// default-sentinel convention, mirroring [`resolve_station_pressure`].
 ///
-/// * An explicitly-supplied temperature is authoritative (returned as `Some`).
-/// * When temperature is left at the sea-level standard default (15 °C) while a real altitude
-///   is given, the caller meant "standard atmosphere at this altitude": return `None` so
+/// Presence-blind legacy convention: a bare `f64` cannot say whether it was supplied, so a
+/// sea-level default at a real altitude is read as omitted.
+/// * A temperature within 0.1 °C of the 15 °C sea-level standard at an altitude above 1 m is
+///   read as "omitted, standard atmosphere at this altitude": `None`, so
 ///   [`calculate_atmosphere`] applies the ICAO lapse-rate temperature for that altitude
 ///   (≈ −6.5 °C/km).
+/// * Any other value is returned as `Some` and used as given.
 ///
-/// Without this, `--altitude` with the default temperature held the air at 15 °C, which
-/// under-estimates density (warm air is thinner) by ~2.4% at 1 km up to ~7% at 3 km versus the
-/// standard atmosphere — validated against py_ballisticcalc, which derives both temperature and
-/// pressure from altitude. The 0.1 °C tolerance matches the `59 °F = 15.0 °C` default exactly,
-/// and `>1 m` avoids triggering at sea level. A shooter at a genuinely non-standard temperature
-/// at altitude should pass an explicit temperature (same contract as station pressure).
+/// Without the omitted case, `--altitude` with the default temperature held the air at 15 °C,
+/// which under-estimates density by ~2.4% at 1 km up to ~7% at 3 km versus the standard
+/// atmosphere (validated against py_ballisticcalc). The 0.1 °C tolerance matches the
+/// `59 °F = 15.0 °C` default exactly, and `>1 m` avoids triggering at sea level. A real 15 °C
+/// reading at altitude is indistinguishable from the default here; a caller that knows presence
+/// uses [`resolve_station_conditions_with_presence`].
 pub fn resolve_station_temperature(temperature_c: f64, altitude_m: f64) -> Option<f64> {
-    const SEA_LEVEL_TEMP_C: f64 = 15.0;
-    if (temperature_c - SEA_LEVEL_TEMP_C).abs() < 0.1 && altitude_m.abs() > 1.0 {
+    if in_legacy_default_temperature_band(temperature_c) && altitude_m.abs() > 1.0 {
         None // temperature left at default + real altitude → derive ICAO lapse temperature
     } else {
         Some(temperature_c) // explicit temperature is authoritative
@@ -191,6 +208,10 @@ pub fn resolve_station_temperature(temperature_c: f64, altitude_m: f64) -> Optio
 /// A thin, byte-identical delegate to
 /// [`resolve_station_conditions_with_pressure_mode`] at [`PressureReferenceMode::Absolute`]
 /// (MBA-1397) — kept as a separate name/signature so no existing caller needs to change.
+///
+/// Presence-blind: both values go through the legacy default sentinels
+/// ([`resolve_station_temperature`], [`resolve_station_pressure`]). See
+/// [`resolve_station_conditions_with_presence`].
 pub fn resolve_station_conditions(
     temperature_c: f64,
     pressure_hpa: f64,
@@ -261,9 +282,11 @@ pub enum PressureReferenceMode {
 /// uses for its own non-isothermal-layer pressure formula, rather than re-hardcoding the
 /// lapse rate / sea-level temperature / exponent a second time. `altitude_m` is clamped and
 /// converted to geopotential height exactly like `calculate_icao_standard_atmosphere`, and
-/// `(P0/QNH)^n` is exactly 1 at QNH = 1013.25 hPa, so a QNH of exactly 1013.25 hPa reduces to
-/// precisely the ICAO standard station pressure at every altitude (this is what makes the
-/// omitted-pressure default byte-identical under either [`PressureReferenceMode`]).
+/// `(P0/QNH)^n` is exactly 1 at QNH = 1013.25 hPa. At QNH = 1013.25 hPa the reduction therefore
+/// equals the ICAO standard station pressure to rounding, but not bit for bit at every altitude
+/// (for example 1012.0492647136854 against 1012.0492647136847 at 10 m; the two agree exactly at
+/// 150 m). Callers that must stay bit-identical for an omitted pressure keep the mode they
+/// already used for it.
 ///
 /// The reduction is only physically meaningful within the troposphere (the altitude range
 /// real shooting takes place in); it is not re-derived per-layer for higher altitudes. No
@@ -315,19 +338,166 @@ pub fn resolve_station_pressure_with_mode(
 /// [`resolve_station_pressure_with_mode`] for [`PressureReferenceMode::Qnh`] before applying
 /// the same standard-atmosphere fallback used when either input is left at its sea-level
 /// default.
+///
+/// Presence-blind: this is [`resolve_station_conditions_with_presence`] with
+/// [`StationAtmospherePresence::NEITHER`], bit for bit. The temperature sentinel runs in BOTH
+/// arms, so a typed 15 °C at altitude flies the ICAO lapse temperature here even with a
+/// declared QNH; only the pressure sentinel is bypassed in the `Qnh` arm. A caller that knows
+/// which values were supplied uses [`resolve_station_conditions_with_presence`].
 pub fn resolve_station_conditions_with_pressure_mode(
     temperature_c: f64,
     pressure_hpa: f64,
     altitude_m: f64,
     pressure_mode: PressureReferenceMode,
 ) -> (f64, f64) {
-    let temp_override = resolve_station_temperature(temperature_c, altitude_m);
-    let press_override =
-        resolve_station_pressure_with_mode(pressure_hpa, altitude_m, pressure_mode);
+    resolve_station_conditions_with_presence(
+        temperature_c,
+        pressure_hpa,
+        altitude_m,
+        pressure_mode,
+        StationAtmospherePresence::NEITHER,
+    )
+}
+
+/// Which of a station temperature / pressure pair the caller actually supplied (0.49.0).
+///
+/// A field that is not supplied is resolved by the pre-0.49.0 default-sentinel rule
+/// ([`resolve_station_temperature`] / [`resolve_station_pressure_with_mode`]): the ICAO
+/// standard at |altitude| > 1 m when the value is the sea-level default, the value itself
+/// otherwise. That makes [`Self::NEITHER`] exactly the old behaviour of every presence-blind
+/// API, which is why it is the `Default`, and makes a supplied field authoritative whatever
+/// its value: a typed 15 °C, 59 °F, 1013.25 hPa or 29.92 inHg at altitude flies as typed.
+///
+/// Pass it to [`resolve_station_conditions_with_presence`], or to one of the
+/// `*_with_station_presence` twins of the solver, zero, Monte Carlo, lead, hold-curve and
+/// truing entry points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct StationAtmospherePresence {
+    /// The station temperature was a reading the caller supplied.
+    pub temperature_supplied: bool,
+    /// The station pressure (or the QNH it is reduced from) was a reading the caller supplied.
+    pub pressure_supplied: bool,
+}
+
+impl StationAtmospherePresence {
+    /// Neither value was supplied: the pre-0.49.0 default-sentinel rule, bit for bit.
+    pub const NEITHER: Self = Self::new(false, false);
+    /// Both values were supplied: both fly as given (a declared QNH after its reduction).
+    pub const BOTH: Self = Self::new(true, true);
+
+    /// Presence from two flags.
+    pub const fn new(temperature_supplied: bool, pressure_supplied: bool) -> Self {
+        Self {
+            temperature_supplied,
+            pressure_supplied,
+        }
+    }
+
+    /// Presence of a temperature reading and a pressure reading.
+    pub const fn from_readings(temperature: StationReading, pressure: StationReading) -> Self {
+        Self::new(temperature.supplied, pressure.supplied)
+    }
+}
+
+/// A station temperature or pressure on a presence-carrying request (0.49.0): the value the
+/// engine is handed and whether the caller supplied it.
+///
+/// On the wire it is a bare JSON number when supplied and ABSENT when omitted. The type's own
+/// `Deserialize` rejects a JSON `null`; the truing DTOs (`TruingModelInputsV1`,
+/// `WindTruingRequest`) read a `null` field as omitted, as the `card.*` requests do. An omitted
+/// reading carries the surface's legacy default (59 °F / 29.92 inHg on
+/// the truing DTOs, the metric CLI's 1013.25 hPa expressed in inHg, and so on), so it resolves
+/// exactly as that default did before 0.49.0. Use [`Self::omitted`] for that, never a bare
+/// `Option`: at |altitude| <= 1 m an omitted value flies as itself, so the default it carries
+/// is part of the result.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StationReading {
+    /// The value handed to the engine.
+    pub value: f64,
+    /// Whether the caller supplied it. `false` means the legacy default-sentinel rule decides.
+    pub supplied: bool,
+}
+
+impl StationReading {
+    /// A reading the caller supplied: it flies as given.
+    pub const fn supplied(value: f64) -> Self {
+        Self {
+            value,
+            supplied: true,
+        }
+    }
+
+    /// No reading: `default_value` is the surface's legacy default, resolved by the
+    /// pre-0.49.0 rule (ICAO standard at a real altitude when it is the sea-level default).
+    pub const fn omitted(default_value: f64) -> Self {
+        Self {
+            value: default_value,
+            supplied: false,
+        }
+    }
+
+    /// `true` when no reading was supplied. Used as `skip_serializing_if`.
+    pub fn is_omitted(&self) -> bool {
+        !self.supplied
+    }
+}
+
+impl serde::Serialize for StationReading {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_f64(self.value)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for StationReading {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        <f64 as serde::Deserialize>::deserialize(deserializer).map(Self::supplied)
+    }
+}
+
+/// Resolve the station temperature and pressure a solve flies, honouring which of them the
+/// caller supplied (0.49.0). This is the presence-aware resolver every surface that knows
+/// presence goes through.
+///
+/// For each field:
+/// * supplied: returned as given; a pressure declared as QNH ([`PressureReferenceMode::Qnh`])
+///   is first reduced to station pressure with [`reduce_qnh_to_station_pressure`];
+/// * omitted: resolved exactly as before 0.49.0, through [`resolve_station_temperature`] /
+///   [`resolve_station_pressure_with_mode`], then the ICAO standard at `altitude_m` when the
+///   value is the sea-level default at a real altitude.
+///
+/// With [`StationAtmospherePresence::NEITHER`] the result is bit-identical to
+/// [`resolve_station_conditions_with_pressure_mode`] (which now delegates here). With
+/// [`StationAtmospherePresence::BOTH`] in [`PressureReferenceMode::Absolute`] it returns the
+/// pair unchanged.
+pub fn resolve_station_conditions_with_presence(
+    temperature_c: f64,
+    pressure_hpa: f64,
+    altitude_m: f64,
+    pressure_mode: PressureReferenceMode,
+    presence: StationAtmospherePresence,
+) -> (f64, f64) {
+    let temp_override = if presence.temperature_supplied {
+        Some(temperature_c)
+    } else {
+        resolve_station_temperature(temperature_c, altitude_m)
+    };
+    let press_override = if presence.pressure_supplied {
+        Some(match pressure_mode {
+            PressureReferenceMode::Absolute => pressure_hpa,
+            PressureReferenceMode::Qnh => reduce_qnh_to_station_pressure(pressure_hpa, altitude_m),
+        })
+    } else {
+        resolve_station_pressure_with_mode(pressure_hpa, altitude_m, pressure_mode)
+    };
+    if let (Some(temp_c), Some(pressure_hpa)) = (temp_override, press_override) {
+        // Value-neutral fast path: the ICAO evaluation below would be discarded.
+        return (temp_c, pressure_hpa);
+    }
     let (std_temp_k, std_pressure_pa) = calculate_icao_standard_atmosphere(altitude_m);
-    let temp_c = temp_override.unwrap_or(std_temp_k - 273.15);
-    let pressure_hpa = press_override.unwrap_or(std_pressure_pa / 100.0);
-    (temp_c, pressure_hpa)
+    (
+        temp_override.unwrap_or(std_temp_k - 273.15),
+        press_override.unwrap_or(std_pressure_pa / 100.0),
+    )
 }
 
 // ---------------------------------------------------------------------------------------
@@ -2212,5 +2382,304 @@ mod tests {
                 "da_ft={da_ft} (explicit {explicit_temp_c}C): round-tripped {round_tripped_explicit_ft}"
             );
         }
+    }
+}
+
+/// Station-presence resolution (0.49.0): a supplied station reading is never read as omitted.
+#[cfg(test)]
+mod station_presence_tests {
+    use super::*;
+
+    /// The body of `resolve_station_conditions_with_pressure_mode` exactly as it stood at
+    /// ab4eb0c, before presence existed. It calls only the primitives this change leaves
+    /// alone, so comparing against it cannot pass by comparing the new code with itself.
+    fn legacy_resolve_ab4eb0c(
+        temperature_c: f64,
+        pressure_hpa: f64,
+        altitude_m: f64,
+        pressure_mode: PressureReferenceMode,
+    ) -> (f64, f64) {
+        let temp_override = resolve_station_temperature(temperature_c, altitude_m);
+        let press_override =
+            resolve_station_pressure_with_mode(pressure_hpa, altitude_m, pressure_mode);
+        let (std_temp_k, std_pressure_pa) = calculate_icao_standard_atmosphere(altitude_m);
+        let temp_c = temp_override.unwrap_or(std_temp_k - 273.15);
+        let pressure_hpa = press_override.unwrap_or(std_pressure_pa / 100.0);
+        (temp_c, pressure_hpa)
+    }
+
+    const TEMPERATURES_C: [f64; 10] = [
+        -40.0, 14.89, 14.9, 14.95, 15.0, 15.05, 15.0999, 15.1, 15.2, 30.0,
+    ];
+    const PRESSURES_HPA: [f64; 11] = [
+        1012.7,
+        1012.75,
+        1012.8562053925472,
+        1013.0,
+        1013.2079,
+        1013.25,
+        1013.5,
+        1013.75,
+        1014.0,
+        850.0,
+        1031.0,
+    ];
+    const ALTITUDES_M: [f64; 13] = [
+        -2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 1.0000001, 3.0, 10.0, 150.0, 1500.0, 1524.0, 5000.0,
+    ];
+    const MODES: [PressureReferenceMode; 2] =
+        [PressureReferenceMode::Absolute, PressureReferenceMode::Qnh];
+
+    fn assert_bits(actual: (f64, f64), expected: (f64, f64), context: &str) {
+        assert_eq!(
+            actual.0.to_bits(),
+            expected.0.to_bits(),
+            "temperature {context}: {actual:?} vs {expected:?}"
+        );
+        assert_eq!(
+            actual.1.to_bits(),
+            expected.1.to_bits(),
+            "pressure {context}: {actual:?} vs {expected:?}"
+        );
+    }
+
+    #[test]
+    fn neither_is_bit_identical_to_ab4eb0c() {
+        for t in TEMPERATURES_C {
+            for p in PRESSURES_HPA {
+                for alt in ALTITUDES_M {
+                    for mode in MODES {
+                        let expected = legacy_resolve_ab4eb0c(t, p, alt, mode);
+                        let context = format!("({t}, {p}, {alt}, {mode:?})");
+                        assert_bits(
+                            resolve_station_conditions_with_presence(
+                                t,
+                                p,
+                                alt,
+                                mode,
+                                StationAtmospherePresence::NEITHER,
+                            ),
+                            expected,
+                            &context,
+                        );
+                        assert_bits(
+                            resolve_station_conditions_with_pressure_mode(t, p, alt, mode),
+                            expected,
+                            &context,
+                        );
+                    }
+                }
+            }
+        }
+
+        // Six points captured at ab4eb0c, so a change to a shared primitive cannot pass
+        // unseen through the verbatim copy above.
+        let pinned = [
+            (
+                (15.05, 1013.0, 150.0, PressureReferenceMode::Absolute),
+                // captured at ab4eb0c
+                (
+                    f64::from_bits(0x402c0ccfd0c49b20),
+                    f64::from_bits(0x408f1ae13f434f1f),
+                ),
+            ),
+            (
+                (15.0, 1013.25, 1500.0, PressureReferenceMode::Absolute),
+                // captured at ab4eb0c
+                (
+                    f64::from_bits(0x4015025af8d136c0),
+                    f64::from_bits(0x408a6cc6358cefbd),
+                ),
+            ),
+            (
+                (15.0, 1013.25, 10.0, PressureReferenceMode::Qnh),
+                // captured at ab4eb0c
+                (
+                    f64::from_bits(0x402ddeb85559de00),
+                    f64::from_bits(0x408fa064e4e5f101),
+                ),
+            ),
+            (
+                (15.0, 1013.2079, 1524.0, PressureReferenceMode::Qnh),
+                // captured at ab4eb0c
+                (
+                    f64::from_bits(0x401462aff47e8bc0),
+                    f64::from_bits(0x408a58982cf0204f),
+                ),
+            ),
+            (
+                (
+                    14.95,
+                    1012.8562053925472,
+                    1.0000001,
+                    PressureReferenceMode::Absolute,
+                ),
+                // captured at ab4eb0c
+                (
+                    f64::from_bits(0x402dfcac08345a20),
+                    f64::from_bits(0x408fa909fb979713),
+                ),
+            ),
+            (
+                (15.0, 1013.25, 3.0, PressureReferenceMode::Absolute),
+                // captured at ab4eb0c
+                (
+                    f64::from_bits(0x402df60418e281e0),
+                    f64::from_bits(0x408fa71e04fe2409),
+                ),
+            ),
+        ];
+        for ((t, p, alt, mode), expected) in pinned {
+            let context = format!("pinned ({t}, {p}, {alt}, {mode:?})");
+            assert_bits(
+                resolve_station_conditions_with_presence(
+                    t,
+                    p,
+                    alt,
+                    mode,
+                    StationAtmospherePresence::NEITHER,
+                ),
+                expected,
+                &context,
+            );
+            assert_bits(
+                resolve_station_conditions_with_pressure_mode(t, p, alt, mode),
+                expected,
+                &context,
+            );
+        }
+    }
+
+    #[test]
+    fn both_returns_the_supplied_pair() {
+        for t in TEMPERATURES_C {
+            for p in PRESSURES_HPA {
+                for alt in ALTITUDES_M {
+                    let context = format!("({t}, {p}, {alt})");
+                    assert_bits(
+                        resolve_station_conditions_with_presence(
+                            t,
+                            p,
+                            alt,
+                            PressureReferenceMode::Absolute,
+                            StationAtmospherePresence::BOTH,
+                        ),
+                        (t, p),
+                        &context,
+                    );
+                    assert_bits(
+                        resolve_station_conditions_with_presence(
+                            t,
+                            p,
+                            alt,
+                            PressureReferenceMode::Qnh,
+                            StationAtmospherePresence::BOTH,
+                        ),
+                        (t, reduce_qnh_to_station_pressure(p, alt)),
+                        &context,
+                    );
+                }
+            }
+        }
+        // The headline repro: QNH 1031 hPa at 150 m reduces into the band and still flies.
+        let (_, p) = resolve_station_conditions_with_presence(
+            20.0,
+            1031.0,
+            150.0,
+            PressureReferenceMode::Qnh,
+            StationAtmospherePresence::BOTH,
+        );
+        assert_eq!(p.to_bits(), 1012.8562053925472_f64.to_bits(), "{p:?}");
+    }
+
+    #[test]
+    fn presence_is_per_field() {
+        let (icao_t_k, icao_p_pa) = calculate_icao_standard_atmosphere(1500.0);
+        let temperature_only = resolve_station_conditions_with_presence(
+            15.0,
+            1013.25,
+            1500.0,
+            PressureReferenceMode::Absolute,
+            StationAtmospherePresence::new(true, false),
+        );
+        assert_bits(temperature_only, (15.0, icao_p_pa / 100.0), "(true, false)");
+        let pressure_only = resolve_station_conditions_with_presence(
+            15.0,
+            1013.0,
+            1500.0,
+            PressureReferenceMode::Absolute,
+            StationAtmospherePresence::new(false, true),
+        );
+        assert_bits(pressure_only, (icao_t_k - 273.15, 1013.0), "(false, true)");
+    }
+
+    #[test]
+    fn presence_constructors_agree() {
+        assert_eq!(
+            StationAtmospherePresence::default(),
+            StationAtmospherePresence::NEITHER
+        );
+        assert_eq!(
+            StationAtmospherePresence::NEITHER,
+            StationAtmospherePresence::new(false, false)
+        );
+        assert_eq!(
+            StationAtmospherePresence::BOTH,
+            StationAtmospherePresence::new(true, true)
+        );
+        assert_eq!(
+            StationAtmospherePresence::from_readings(
+                StationReading::supplied(15.0),
+                StationReading::omitted(1013.25)
+            ),
+            StationAtmospherePresence::new(true, false)
+        );
+        assert_eq!(
+            StationAtmospherePresence::from_readings(
+                StationReading::omitted(59.0),
+                StationReading::supplied(29.92)
+            ),
+            StationAtmospherePresence::new(false, true)
+        );
+        assert!(StationReading::omitted(29.92).is_omitted());
+        assert!(!StationReading::supplied(29.92).is_omitted());
+        assert_eq!(
+            StationReading::omitted(29.92).value.to_bits(),
+            29.92_f64.to_bits()
+        );
+    }
+
+    #[derive(Debug, serde::Serialize, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Probe {
+        #[serde(
+            default = "probe_default",
+            skip_serializing_if = "StationReading::is_omitted"
+        )]
+        pressure_inhg: StationReading,
+    }
+
+    fn probe_default() -> StationReading {
+        StationReading::omitted(29.92)
+    }
+
+    #[test]
+    fn station_reading_serde() {
+        let absent: Probe = serde_json::from_str("{}").unwrap();
+        assert!(!absent.pressure_inhg.supplied);
+        assert_eq!(absent.pressure_inhg.value.to_bits(), 29.92_f64.to_bits());
+
+        let present: Probe = serde_json::from_str(r#"{"pressure_inhg": 29.92}"#).unwrap();
+        assert!(present.pressure_inhg.supplied);
+        assert_eq!(present.pressure_inhg.value.to_bits(), 29.92_f64.to_bits());
+
+        assert_eq!(serde_json::to_string(&absent).unwrap(), "{}");
+        assert_eq!(
+            serde_json::to_string(&present).unwrap(),
+            r#"{"pressure_inhg":29.92}"#
+        );
+
+        assert!(serde_json::from_str::<Probe>(r#"{"pressure_inhg": null}"#).is_err());
+        assert!(serde_json::from_str::<Probe>(r#"{"pressure_inhg": "29.92"}"#).is_err());
     }
 }

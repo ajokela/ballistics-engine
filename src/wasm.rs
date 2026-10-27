@@ -2,30 +2,29 @@
 use serde_json;
 use wasm_bindgen::prelude::*;
 
-use crate::atmosphere::{resolve_station_conditions_with_pressure_mode, PressureReferenceMode};
+use crate::atmosphere::{
+    resolve_station_conditions_with_presence, PressureReferenceMode, StationAtmospherePresence,
+};
 use crate::bc_table_5d::Bc5dTable;
+#[cfg(feature = "wasm-zero")]
+use crate::cli_api::calculate_zero_range_from_angle_with_resolved_conditions;
 #[cfg(feature = "wasm-estimate-bc")]
-use crate::cli_api::estimate_bc_fit;
+use crate::cli_api::estimate_bc_fit_with_station_presence;
 #[cfg(feature = "wasm-monte-carlo")]
 use crate::cli_api::run_monte_carlo_with_direction_std_dev;
 #[cfg(feature = "wasm-estimate-bc")]
 use crate::cli_api::BcFitMode;
 use crate::cli_api::{
-    calculate_zero_angle_with_conditions, calculate_zero_angle_with_resolved_conditions,
-    AtmosphericConditions, BallisticInputs as InternalBallisticInputs, BcReferenceStandard,
-    TrajectorySolver, WindConditions,
-};
-#[cfg(feature = "wasm-zero")]
-use crate::cli_api::{
-    calculate_zero_range_from_angle_with_conditions,
-    calculate_zero_range_from_angle_with_resolved_conditions,
+    calculate_zero_angle_with_resolved_conditions, AtmosphericConditions,
+    BallisticInputs as InternalBallisticInputs, BcReferenceStandard, TrajectorySolver,
+    WindConditions,
 };
 #[cfg(feature = "wasm-monte-carlo")]
 use crate::cli_api::{MonteCarloParams, BC_REFERENCE_STANDARD_INERT_WARNING};
 use crate::constants::GRAINS_PER_GRAM;
 use crate::drag_model::DragModel;
 #[cfg(feature = "wasm-lead")]
-use crate::moving_target::calculate_lead;
+use crate::moving_target::calculate_lead_with_station_presence;
 use crate::moving_target::mover_ring;
 #[cfg(feature = "wasm-power-factor")]
 use crate::power_factor::{evaluate_all as pf_evaluate_all, scored_power_factor};
@@ -57,6 +56,171 @@ fn parse_pressure_type_arg(s: &str) -> Result<PressureReferenceMode, JsValue> {
             "Invalid --pressure-type '{other}' (expected 'absolute' or 'qnh')"
         ))),
     }
+}
+
+/// The zero day's station presence (0.49.0), shared with the native CLI's rule:
+///
+/// 1. a zero-day density altitude: `(--zero-temperature given, false)`;
+/// 2. a shot-day density altitude the zero day inherits (no `--zero-pressure`):
+///    `(--zero-temperature given || shot-day temperature supplied, false)`;
+/// 3. otherwise each field is supplied when its `--zero-*` flag was given or, inherited, when
+///    the shot-day value was.
+///
+/// A pressure derived from a density altitude is not a reading; it is resolved by the legacy
+/// rule, which keeps every omitted-temperature density-altitude run bit-identical.
+pub(crate) fn zero_day_station_presence(
+    zero_temperature_given: bool,
+    zero_pressure_given: bool,
+    zero_density_altitude_given: bool,
+    shot_density_altitude_active: bool,
+    shot: StationAtmospherePresence,
+) -> StationAtmospherePresence {
+    if zero_density_altitude_given {
+        StationAtmospherePresence::new(zero_temperature_given, false)
+    } else if shot_density_altitude_active && !zero_pressure_given {
+        StationAtmospherePresence::new(zero_temperature_given || shot.temperature_supplied, false)
+    } else {
+        StationAtmospherePresence::new(
+            zero_temperature_given || shot.temperature_supplied,
+            zero_pressure_given || shot.pressure_supplied,
+        )
+    }
+}
+
+/// The station `(temperature °C, pressure hPa)` the `zero` command flies (0.49.0), from the
+/// atmosphere it assembled and which inputs were given.
+///
+/// A given temperature or pressure flies as given. A declared QNH is reduced to station
+/// pressure, but only when a pressure was actually given and no `--density-altitude`
+/// supersedes it: an omitted pressure under `--pressure-type qnh` stays in Absolute mode, as
+/// it always has on this command, because reducing the 1013.25 hPa default is not bit-equal to
+/// the ICAO pressure the legacy rule flies. A density-altitude pressure is derived, never a
+/// reading; an explicit temperature under a density altitude is one.
+#[cfg(feature = "wasm-zero")]
+pub(crate) fn zero_station_air(
+    atmosphere: &AtmosphericConditions,
+    temperature_given: bool,
+    pressure_given: bool,
+    density_altitude_given: bool,
+    pressure_type: Option<PressureReferenceMode>,
+) -> (f64, f64) {
+    let qnh_declared = pressure_given
+        && !density_altitude_given
+        && matches!(pressure_type, Some(PressureReferenceMode::Qnh));
+    let mode = if qnh_declared {
+        PressureReferenceMode::Qnh
+    } else {
+        PressureReferenceMode::Absolute
+    };
+    let presence = StationAtmospherePresence::new(
+        temperature_given,
+        pressure_given && !density_altitude_given,
+    );
+    resolve_station_conditions_with_presence(
+        atmosphere.temperature,
+        atmosphere.pressure,
+        atmosphere.altitude,
+        mode,
+        presence,
+    )
+}
+
+/// The station air the `lead` command flies, and which of it was typed (0.49.0).
+///
+/// Built from the parsed flags exactly as the command always built it: an omitted value keeps
+/// the `AtmosphericConditions` default (15 °C, 1013.25 hPa, 50 %, 0 m in both unit systems),
+/// and a typed QNH is reduced against this command's own `--altitude` (MBA-1426 item 3,
+/// matching native `lead` since MBA-1416; the reduction takes hPa, so it runs after the unit
+/// conversion). An omitted pressure is never reduced, `--pressure-type qnh` or not. The lead
+/// solve then resolves the air in Absolute mode with the presence returned here.
+#[cfg(feature = "wasm-lead")]
+pub(crate) fn lead_station_air(
+    temperature: Option<f64>,
+    pressure: Option<f64>,
+    humidity: Option<f64>,
+    altitude: Option<f64>,
+    pressure_type: Option<PressureReferenceMode>,
+    imperial: bool,
+) -> (AtmosphericConditions, StationAtmospherePresence) {
+    let mut atmosphere = AtmosphericConditions::default();
+    if let Some(t) = temperature {
+        atmosphere.temperature = if imperial {
+            (t - 32.0) * 5.0 / 9.0 // F to C
+        } else {
+            t
+        };
+    }
+    if let Some(p) = pressure {
+        let p_hpa = if imperial {
+            p * 33.863886666667 // inHg to hPa
+        } else {
+            p
+        };
+        atmosphere.pressure = match pressure_type.unwrap_or(PressureReferenceMode::Absolute) {
+            PressureReferenceMode::Absolute => p_hpa,
+            PressureReferenceMode::Qnh => {
+                let altitude_m = altitude
+                    .map(|alt| if imperial { alt * 0.3048 } else { alt })
+                    .unwrap_or(0.0);
+                crate::atmosphere::reduce_qnh_to_station_pressure(p_hpa, altitude_m)
+            }
+        };
+    }
+    if let Some(h) = humidity {
+        atmosphere.humidity = h; // percent
+    }
+    if let Some(a) = altitude {
+        atmosphere.altitude = if imperial {
+            a * 0.3048 // feet to meters
+        } else {
+            a
+        };
+    }
+    let presence = StationAtmospherePresence::new(temperature.is_some(), pressure.is_some());
+    (atmosphere, presence)
+}
+
+/// The atmosphere `estimate-bc`'s data was measured in, and which of it was typed (0.49.0).
+///
+/// Built exactly as the command always built it: an omitted temperature is 15 °C and an
+/// omitted pressure 1013.25 hPa in both unit systems, and the pressure mode applies only to a
+/// pressure that was actually typed (MBA-1426 item 3, the same rule as native `estimate-bc`
+/// since MBA-1416), so an omitted pressure is never reduced. The fit then resolves the air in
+/// Absolute mode with the presence returned here.
+#[cfg(feature = "wasm-estimate-bc")]
+pub(crate) fn estimate_bc_station_air(
+    temperature: Option<f64>,
+    pressure: Option<f64>,
+    humidity: f64,
+    altitude: f64,
+    pressure_type: Option<PressureReferenceMode>,
+    imperial: bool,
+) -> (AtmosphericConditions, StationAtmospherePresence) {
+    let altitude_m = if imperial {
+        altitude * 0.3048
+    } else {
+        altitude
+    };
+    let atmosphere = AtmosphericConditions {
+        temperature: temperature
+            .map(|t| if imperial { (t - 32.0) * 5.0 / 9.0 } else { t })
+            .unwrap_or(15.0),
+        pressure: pressure
+            .map(|p| {
+                let p_hpa = if imperial { p * 33.8639 } else { p };
+                match pressure_type.unwrap_or(PressureReferenceMode::Absolute) {
+                    PressureReferenceMode::Absolute => p_hpa,
+                    PressureReferenceMode::Qnh => {
+                        crate::atmosphere::reduce_qnh_to_station_pressure(p_hpa, altitude_m)
+                    }
+                }
+            })
+            .unwrap_or(1013.25),
+        humidity,
+        altitude: altitude_m,
+    };
+    let presence = StationAtmospherePresence::new(temperature.is_some(), pressure.is_some());
+    (atmosphere, presence)
 }
 
 /// Reduce a display-unit QNH (inHg imperial / hPa metric) to display-unit station pressure at a
@@ -2406,34 +2570,34 @@ impl WasmBallistics {
                 (None, _, _) => pressure_type,
             };
             let zero_target_height = zero_inputs.muzzle_height + zero_inputs.sight_height; // Zero crosses the line of sight (matches CLI)
-            let zero_solve_result = match zero_pressure_type_resolved {
-                PressureReferenceMode::Absolute => calculate_zero_angle_with_conditions(
-                    zero_inputs.clone(),
-                    zero_distance_m,
-                    zero_target_height,
-                    wind.clone(),
-                    zero_atmosphere.clone(),
-                ),
-                PressureReferenceMode::Qnh => {
-                    let (resolved_temp_c, resolved_pressure_hpa) =
-                        resolve_station_conditions_with_pressure_mode(
-                            zero_atmosphere.temperature,
-                            zero_atmosphere.pressure,
-                            zero_atmosphere.altitude,
-                            PressureReferenceMode::Qnh,
-                        );
-                    let mut resolved_zero_atmosphere = zero_atmosphere.clone();
-                    resolved_zero_atmosphere.temperature = resolved_temp_c;
-                    resolved_zero_atmosphere.pressure = resolved_pressure_hpa;
-                    calculate_zero_angle_with_resolved_conditions(
-                        zero_inputs.clone(),
-                        zero_distance_m,
-                        zero_target_height,
-                        wind.clone(),
-                        resolved_zero_atmosphere,
-                    )
-                }
-            };
+                                                                                           // 0.49.0: which of the zero day's temperature and pressure were supplied. A value
+                                                                                           // the zero day inherits from the shot day carries the shot day's presence; a
+                                                                                           // density-altitude-derived pressure is never a reading, while an explicit
+                                                                                           // temperature under a density altitude is.
+            let zero_presence = zero_day_station_presence(
+                zero_temperature.is_some(),
+                zero_pressure.is_some(),
+                zero_density_altitude.is_some(),
+                density_altitude_active,
+                StationAtmospherePresence::new(temperature_supplied, pressure_supplied),
+            );
+            let (resolved_temp_c, resolved_pressure_hpa) = resolve_station_conditions_with_presence(
+                zero_atmosphere.temperature,
+                zero_atmosphere.pressure,
+                zero_atmosphere.altitude,
+                zero_pressure_type_resolved,
+                zero_presence,
+            );
+            let mut resolved_zero_atmosphere = zero_atmosphere.clone();
+            resolved_zero_atmosphere.temperature = resolved_temp_c;
+            resolved_zero_atmosphere.pressure = resolved_pressure_hpa;
+            let zero_solve_result = calculate_zero_angle_with_resolved_conditions(
+                zero_inputs.clone(),
+                zero_distance_m,
+                zero_target_height,
+                wind.clone(),
+                resolved_zero_atmosphere,
+            );
             match zero_solve_result {
                 Ok(zero_angle) => {
                     inputs.muzzle_angle = zero_angle;
@@ -2483,40 +2647,30 @@ impl WasmBallistics {
             }
         }
 
-        // Create solver and calculate. MBA-1397: Absolute is byte-identical to today
-        // (unchanged constructor); Qnh reduces the declared altimeter setting to station
-        // pressure and uses the Authoritative constructor so it is never re-interpreted
-        // through the legacy default-sentinel heuristic. MBA-1366: density altitude is
-        // ALREADY fully resolved above (`resolve_atmosphere_for_density_altitude`) and must
-        // use the Authoritative constructor unconditionally too — routing it through the
-        // Absolute branch's legacy `TrajectorySolver::new` would re-derive it through that
-        // same default-sentinel heuristic a second time, risking a misfire exactly like the
-        // QNH case above (see the comment where `density_altitude_active` is set).
+        // Create solver and calculate. 0.49.0: the station air is resolved by presence in
+        // both pressure modes: a typed --temperature / --pressure flies as typed (a declared
+        // QNH after its reduction), an omitted one keeps the legacy default-sentinel rule (ICAO
+        // air at --altitude). The result is authoritative, so it is never re-derived through
+        // that rule a second time. MBA-1366: density altitude is ALREADY fully resolved above
+        // (`resolve_atmosphere_for_density_altitude`) and is authoritative as it stands.
         let mut solver = if density_altitude_active {
             TrajectorySolver::new_with_resolved_station_atmosphere(inputs.clone(), wind, atmosphere)
         } else {
-            match pressure_type {
-                PressureReferenceMode::Absolute => {
-                    TrajectorySolver::new(inputs.clone(), wind, atmosphere)
-                }
-                PressureReferenceMode::Qnh => {
-                    let (resolved_temp_c, resolved_pressure_hpa) =
-                        resolve_station_conditions_with_pressure_mode(
-                            atmosphere.temperature,
-                            atmosphere.pressure,
-                            atmosphere.altitude,
-                            PressureReferenceMode::Qnh,
-                        );
-                    let mut resolved_atmosphere = atmosphere.clone();
-                    resolved_atmosphere.temperature = resolved_temp_c;
-                    resolved_atmosphere.pressure = resolved_pressure_hpa;
-                    TrajectorySolver::new_with_resolved_station_atmosphere(
-                        inputs.clone(),
-                        wind,
-                        resolved_atmosphere,
-                    )
-                }
-            }
+            let (resolved_temp_c, resolved_pressure_hpa) = resolve_station_conditions_with_presence(
+                atmosphere.temperature,
+                atmosphere.pressure,
+                atmosphere.altitude,
+                pressure_type,
+                StationAtmospherePresence::new(temperature_supplied, pressure_supplied),
+            );
+            let mut resolved_atmosphere = atmosphere.clone();
+            resolved_atmosphere.temperature = resolved_temp_c;
+            resolved_atmosphere.pressure = resolved_pressure_hpa;
+            TrajectorySolver::new_with_resolved_station_atmosphere(
+                inputs.clone(),
+                wind,
+                resolved_atmosphere,
+            )
         };
         let max_range_m = match units {
             UnitSystem::Imperial => max_range * 0.9144, // yards to meters
@@ -3144,14 +3298,8 @@ impl WasmBallistics {
                 UnitSystem::Imperial => p * 33.863886666667, // inHg to hPa
                 UnitSystem::Metric => p,
             };
-            // The RAW declared pressure is stored; a declared QNH is resolved at the solve
-            // sites below via resolve_station_conditions_with_pressure_mode + the
-            // *_with_resolved_conditions solvers — NOT pre-reduced here. Review finding: a
-            // pre-reduced QNH that lands inside resolve_station_pressure's 1013.25±0.5 hPa
-            // legacy-sentinel window would be silently re-derived from altitude by the base
-            // solvers, discarding the user's pressure (an ordinary winter high-pressure QNH
-            // at a few hundred meters reduces into exactly that window). Native zero routes
-            // through the mode-aware resolver unconditionally; this now mirrors it.
+            // The RAW declared pressure is stored; a declared QNH is reduced when the station
+            // air is resolved below (`zero_station_air`), NOT pre-reduced here.
             atmosphere.pressure = p_hpa;
             inputs.pressure = p_hpa;
         }
@@ -3167,16 +3315,6 @@ impl WasmBallistics {
             atmosphere.altitude = a_m;
             inputs.altitude = a_m;
         }
-        // Whether the solves below must run through the mode-aware resolver (Qnh declared
-        // with a pressure, and not superseded by --density-altitude). Absolute keeps the
-        // base solvers so their legacy-sentinel behavior stays bit-identical to native's
-        // Absolute path. A DA-resolved pressure keeps the base path too — native zero does
-        // the same, and a DA value recaptured by the ±0.5 hPa sentinel is ISA-adjacent by
-        // construction (≤0.05% density), unlike a discarded QNH (~1%).
-        let qnh_declared = pressure.is_some()
-            && density_altitude.is_none()
-            && matches!(pressure_type, Some(PressureReferenceMode::Qnh));
-
         // --density-altitude supersedes --altitude and --pressure/--pressure-type entirely
         // (MBA-1422 precedence); an explicit --temperature still wins. Notices ride the
         // output text — this surface has no stderr (MBA-1414 convention).
@@ -3265,6 +3403,19 @@ impl WasmBallistics {
         // ignored sight height entirely (off by the sight-height angle — ~2 MOA at 100 yd).
         let los_height = inputs.sight_height;
 
+        // 0.49.0: the station air both solves below fly, resolved by presence and then
+        // trusted as-is (see `zero_station_air`).
+        let (resolved_temp_c, resolved_pressure_hpa) = zero_station_air(
+            &atmosphere,
+            temperature.is_some(),
+            pressure.is_some(),
+            density_altitude.is_some(),
+            pressure_type,
+        );
+        let mut resolved_atmosphere = atmosphere.clone();
+        resolved_atmosphere.temperature = resolved_temp_c;
+        resolved_atmosphere.pressure = resolved_pressure_hpa;
+
         let result = if let Some(angle_deg) = from_angle {
             // MBA-1402, corrected by the Tier 2 review (C2): inverse mode — given a
             // previously solved/stored bore angle (degrees), solve the zero RANGE(S) it
@@ -3274,35 +3425,13 @@ impl WasmBallistics {
             // being silently chosen — see calculate_zero_range_from_angle_with_conditions's
             // doc comment.
             let angle_rad = angle_deg * std::f64::consts::PI / 180.0;
-            let from_angle_result = if qnh_declared {
-                let (resolved_temp_c, resolved_pressure_hpa) =
-                    resolve_station_conditions_with_pressure_mode(
-                        atmosphere.temperature,
-                        atmosphere.pressure,
-                        atmosphere.altitude,
-                        PressureReferenceMode::Qnh,
-                    );
-                let mut resolved_atmosphere = atmosphere.clone();
-                resolved_atmosphere.temperature = resolved_temp_c;
-                resolved_atmosphere.pressure = resolved_pressure_hpa;
-                calculate_zero_range_from_angle_with_resolved_conditions(
-                    inputs,
-                    angle_rad,
-                    los_height,
-                    WindConditions::default(),
-                    resolved_atmosphere,
-                )
-            } else {
-                calculate_zero_range_from_angle_with_conditions(
-                    inputs,
-                    angle_rad,
-                    los_height,
-                    WindConditions::default(),
-                    // MBA-1426: was AtmosphericConditions::default() — typed conditions never
-                    // reached this solve at all.
-                    atmosphere.clone(),
-                )
-            };
+            let from_angle_result = calculate_zero_range_from_angle_with_resolved_conditions(
+                inputs,
+                angle_rad,
+                los_height,
+                WindConditions::default(),
+                resolved_atmosphere,
+            );
             match from_angle_result {
                 Ok(crossings) => {
                     let to_display = |m: f64| match units {
@@ -3377,35 +3506,13 @@ impl WasmBallistics {
                 UnitSystem::Imperial => target_distance * 0.9144,
                 UnitSystem::Metric => target_distance,
             };
-            let zero_result = if qnh_declared {
-                let (resolved_temp_c, resolved_pressure_hpa) =
-                    resolve_station_conditions_with_pressure_mode(
-                        atmosphere.temperature,
-                        atmosphere.pressure,
-                        atmosphere.altitude,
-                        PressureReferenceMode::Qnh,
-                    );
-                let mut resolved_atmosphere = atmosphere.clone();
-                resolved_atmosphere.temperature = resolved_temp_c;
-                resolved_atmosphere.pressure = resolved_pressure_hpa;
-                calculate_zero_angle_with_resolved_conditions(
-                    inputs,
-                    target_distance_m,
-                    los_height,
-                    WindConditions::default(),
-                    resolved_atmosphere,
-                )
-            } else {
-                calculate_zero_angle_with_conditions(
-                    inputs,
-                    target_distance_m,
-                    los_height,
-                    WindConditions::default(),
-                    // MBA-1426: was AtmosphericConditions::default() — typed conditions never
-                    // reached this solve at all.
-                    atmosphere.clone(),
-                )
-            };
+            let zero_result = calculate_zero_angle_with_resolved_conditions(
+                inputs,
+                target_distance_m,
+                los_height,
+                WindConditions::default(),
+                resolved_atmosphere,
+            );
             match zero_result {
                 Ok(zero_angle) => {
                     let zero_degrees = zero_angle * 180.0 / std::f64::consts::PI;
@@ -3893,51 +4000,21 @@ impl WasmBallistics {
         // contract, while atmosphere.humidity takes percent — same split as
         // handle_trajectory_command).
         let mut wind = WindConditions::default();
-        let mut atmosphere = AtmosphericConditions::default();
-        if let Some(t) = temperature {
-            let t_c = match units {
-                UnitSystem::Imperial => (t - 32.0) * 5.0 / 9.0, // F to C
-                UnitSystem::Metric => t,
-            };
-            atmosphere.temperature = t_c;
-            inputs.temperature = t_c;
+        // 0.49.0: the station air and which of it was typed (see `lead_station_air`).
+        let (atmosphere, station_presence) = lead_station_air(
+            temperature,
+            pressure,
+            humidity,
+            altitude,
+            pressure_type,
+            units == UnitSystem::Imperial,
+        );
+        inputs.temperature = atmosphere.temperature;
+        inputs.pressure = atmosphere.pressure;
+        if humidity.is_some() {
+            inputs.humidity = (atmosphere.humidity / 100.0).clamp(0.0, 1.0); // fraction
         }
-        if let Some(p) = pressure {
-            let p_hpa = match units {
-                UnitSystem::Imperial => p * 33.863886666667, // inHg to hPa
-                UnitSystem::Metric => p,
-            };
-            // MBA-1426 item 3: a declared QNH is reduced to station pressure against this
-            // command's own --altitude, matching native lead since MBA-1416. The reduction takes
-            // hPa (the altimeter-setting relation is not a plain ratio, MBA-1605), which is why
-            // it runs after the unit conversion above.
-            let p_hpa = match pressure_type.unwrap_or(PressureReferenceMode::Absolute) {
-                PressureReferenceMode::Absolute => p_hpa,
-                PressureReferenceMode::Qnh => {
-                    let altitude_m = altitude
-                        .map(|alt| match units {
-                            UnitSystem::Imperial => alt * 0.3048,
-                            UnitSystem::Metric => alt,
-                        })
-                        .unwrap_or(0.0);
-                    crate::atmosphere::reduce_qnh_to_station_pressure(p_hpa, altitude_m)
-                }
-            };
-            atmosphere.pressure = p_hpa;
-            inputs.pressure = p_hpa;
-        }
-        if let Some(h) = humidity {
-            atmosphere.humidity = h; // percent
-            inputs.humidity = (h / 100.0).clamp(0.0, 1.0); // fraction
-        }
-        if let Some(a) = altitude {
-            let a_m = match units {
-                UnitSystem::Imperial => a * 0.3048, // feet to meters
-                UnitSystem::Metric => a,
-            };
-            atmosphere.altitude = a_m;
-            inputs.altitude = a_m;
-        }
+        inputs.altitude = atmosphere.altitude;
         if let Some(w) = wind_speed {
             let w_ms = match units {
                 UnitSystem::Imperial => w * 0.44704, // mph to m/s
@@ -3965,13 +4042,14 @@ impl WasmBallistics {
             UnitSystem::Metric => range,
         };
 
-        match calculate_lead(
+        match calculate_lead_with_station_presence(
             inputs,
             wind,
             atmosphere,
             target_speed_mps,
             target_angle,
             range_m,
+            station_presence,
         ) {
             Ok(sol) => {
                 let (dist_unit, speed_unit) = match units {
@@ -4989,6 +5067,9 @@ impl WasmBallistics {
             )));
         }
 
+        // 0.49.0: presence is taken from the flags BEFORE the defaults below collapse it.
+        let station_presence =
+            StationAtmospherePresence::new(temperature.is_some(), pressure.is_some());
         // Resolve temperature/pressure AFTER units are known — replicates the native
         // UnitConverter::resolve_temperature / resolve_pressure defaults and range
         // checks (identical error strings).
@@ -5106,7 +5187,7 @@ impl WasmBallistics {
                     UnitSystem::Imperial => d * 0.3048, // feet to meters
                     UnitSystem::Metric => d,
                 };
-                let correction = crate::truing::correct_chrono_velocity_fps(
+                let correction = crate::truing::correct_chrono_velocity_fps_with_station_presence(
                     measured,
                     screen_distance_m,
                     bc,
@@ -5118,6 +5199,7 @@ impl WasmBallistics {
                     humidity,
                     alt_ft,
                     &bc_segments,
+                    station_presence,
                 )
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
                 Some(correction.muzzle_velocity_fps)
@@ -5156,7 +5238,7 @@ impl WasmBallistics {
                 observation.drop *= observation_cf;
                 observations.push(observation);
             }
-            let report = crate::truing::run_multi_observation_truing_core(
+            let report = crate::truing::run_multi_observation_truing_core_with_station_presence(
                 &observations,
                 drop_unit,
                 bc,
@@ -5170,6 +5252,7 @@ impl WasmBallistics {
                 humidity,
                 alt_ft,
                 &bc_segments,
+                station_presence,
             )
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
             // MBA-1358: dial-unit report values are shown back in scope units (÷CF) via
@@ -5184,7 +5267,7 @@ impl WasmBallistics {
             ))
         } else {
             // Classic single-observation velocity truing (drop is always MIL here).
-            let result = crate::truing::calculate_true_velocity_local(
+            let result = crate::truing::calculate_true_velocity_local_with_station_presence(
                 measured_drop,
                 range_yd,
                 bc,
@@ -5198,6 +5281,7 @@ impl WasmBallistics {
                 humidity,
                 alt_ft,
                 &bc_segments,
+                station_presence,
             )
             .map_err(|e| JsValue::from_str(&format!("Local calculation failed: {}", e)))?;
 
@@ -5495,6 +5579,9 @@ impl WasmBallistics {
             ));
         }
 
+        // 0.49.0: presence is taken from the flags BEFORE the defaults below collapse it.
+        let station_presence =
+            StationAtmospherePresence::new(temperature.is_some(), pressure.is_some());
         // Resolve temperature/pressure AFTER units are known — replicates the native
         // UnitConverter::resolve_temperature / resolve_pressure defaults and range checks.
         let temperature = match (temperature, units) {
@@ -5630,8 +5717,14 @@ impl WasmBallistics {
             diameter_in: caliber_in,
             zero_distance_yd: zero_yd,
             sight_height_in: sight_in,
-            temperature_f: temp_f,
-            pressure_inhg: press_inhg,
+            temperature_f: crate::atmosphere::StationReading {
+                value: temp_f,
+                supplied: station_presence.temperature_supplied,
+            },
+            pressure_inhg: crate::atmosphere::StationReading {
+                value: press_inhg,
+                supplied: station_presence.pressure_supplied,
+            },
             humidity_pct: humidity,
             altitude_ft: alt_ft,
             twist: TruingTwist {
@@ -5869,40 +5962,15 @@ impl WasmBallistics {
 
         // Atmosphere the data was measured at (defaults = ICAO standard). BC only means
         // something relative to air density, so this must match the dope card's conditions.
-        let atmosphere = AtmosphericConditions {
-            temperature: temperature
-                .map(|t| match units {
-                    UnitSystem::Imperial => (t - 32.0) * 5.0 / 9.0,
-                    UnitSystem::Metric => t,
-                })
-                .unwrap_or(15.0),
-            // MBA-1426 item 3: the mode applies only when a pressure was actually supplied —
-            // the 1013.25 default is sea-level standard by definition (same rule as native
-            // estimate-bc since MBA-1416).
-            pressure: pressure
-                .map(|p| {
-                    let p_hpa = match units {
-                        UnitSystem::Imperial => p * 33.8639,
-                        UnitSystem::Metric => p,
-                    };
-                    match pressure_type.unwrap_or(PressureReferenceMode::Absolute) {
-                        PressureReferenceMode::Absolute => p_hpa,
-                        PressureReferenceMode::Qnh => {
-                            let altitude_m = match units {
-                                UnitSystem::Imperial => altitude * 0.3048,
-                                UnitSystem::Metric => altitude,
-                            };
-                            crate::atmosphere::reduce_qnh_to_station_pressure(p_hpa, altitude_m)
-                        }
-                    }
-                })
-                .unwrap_or(1013.25),
+        // 0.49.0: with which of it was typed (see `estimate_bc_station_air`).
+        let (atmosphere, station_presence) = estimate_bc_station_air(
+            temperature,
+            pressure,
             humidity,
-            altitude: match units {
-                UnitSystem::Imperial => altitude * 0.3048,
-                UnitSystem::Metric => altitude,
-            },
-        };
+            altitude,
+            pressure_type,
+            units == UnitSystem::Imperial,
+        );
         let zero_m = zero_range.map(|z| match units {
             UnitSystem::Imperial => z * 0.9144,
             UnitSystem::Metric => z,
@@ -5998,7 +6066,7 @@ impl WasmBallistics {
                     BcFitMode::Drop => zero_m,
                     BcFitMode::Velocity => None,
                 };
-                let est = estimate_bc_fit(
+                let est = estimate_bc_fit_with_station_presence(
                     velocity_mps,
                     mass_kg,
                     diameter_m,
@@ -6008,6 +6076,7 @@ impl WasmBallistics {
                     atmosphere.clone(),
                     zr,
                     sight_m,
+                    station_presence,
                 )
                 .map_err(|e| JsValue::from_str(&format!("Error estimating BC: {}", e)))?;
                 if est.at_bound {
@@ -8594,8 +8663,10 @@ True Velocity Command:
                                  requires --chrono-velocity
     --zero-distance <DIST>       Zero distance (yd/m) [default: 100]
     --sight-height <HEIGHT>      Sight height above bore (in/mm) [default: 2/50]
-    --temperature <T>            Temperature (°F/°C) [default: 59/15]
-    --pressure <P>               Pressure (inHg/hPa) [default: 29.92/1013.25]
+    --temperature <T>            Temperature (°F/°C). Omitted: ICAO standard at
+                                 --altitude; a typed value flies as typed
+    --pressure <P>               Pressure (inHg/hPa). Omitted: ICAO standard at
+                                 --altitude; a typed value flies as typed
     --pressure-type <TYPE>       absolute (default) or qnh (reduced vs --altitude)
     --humidity <H>               Humidity (0-100%) [default: 50]
     --altitude <A>               Altitude (ft/m) [default: 0]
@@ -8645,8 +8716,10 @@ True Wind Command:
                                  convention). Adds a wind-call correction factor
     --zero-distance <DIST>       Zero distance (yd/m) [default: 100]
     --sight-height <HEIGHT>      Sight height above bore (in/mm) [default: 2/50]
-    --temperature <T>            Temperature (°F/°C) [default: 59/15]
-    --pressure <P>               Pressure (inHg/hPa) [default: 29.92/1013.25]
+    --temperature <T>            Temperature (°F/°C). Omitted: ICAO standard at
+                                 --altitude; a typed value flies as typed
+    --pressure <P>               Pressure (inHg/hPa). Omitted: ICAO standard at
+                                 --altitude; a typed value flies as typed
     --pressure-type <TYPE>       absolute (default) or qnh (reduced vs --altitude)
     --humidity <H>               Humidity (0-100%) [default: 50]
     --altitude <A>               Altitude (ft/m) [default: 0]
@@ -8723,8 +8796,10 @@ Lead Command:
                                   (1.0 = neutral, typical 0.90-1.10). Requires a
                                   drag table (loadDragTable)
     --sight-height <HEIGHT>       Sight height above bore (inches/mm)
-    --temperature <T>             Air temperature (°F/°C) [default: 15°C standard]
-    --pressure <P>                Barometric pressure (inHg/hPa) [default: 1013.25 hPa]
+    --temperature <T>             Air temperature (°F/°C). Omitted: ICAO standard at
+                                  --altitude; a typed value flies as typed
+    --pressure <P>                Barometric pressure (inHg/hPa). Omitted: ICAO
+                                  standard at --altitude; a typed value flies as typed
     --pressure-type <TYPE>       absolute (default) or qnh (reduced vs --altitude)
     --humidity <H>                Relative humidity (percent) [default: 50]
     --altitude <A>                Altitude (ft/m) [default: 0]
@@ -8915,8 +8990,12 @@ pub struct Calculator {
     // Downrange wind segments as (speed_mph, angle_deg, until_yards); when non-empty
     // these are emitted as --wind-segment flags and override the scalar wind above.
     wind_segments: Vec<(f64, f64, f64)>,
-    temperature_f: f64,
-    pressure_inhg: f64,
+    // 0.49.0: `None` until the setter is called, so a never-set Calculator sends no
+    // `--temperature` / `--pressure` and flies the terminal's omitted-value rule (ICAO air at
+    // the altitude), exactly the 59 F / 29.92 inHg-through-the-legacy-rule it always flew. A
+    // set value is a reading and flies as set, even 59 / 29.92.
+    temperature_f: Option<f64>,
+    pressure_inhg: Option<f64>,
     humidity_percent: f64,
     altitude_ft: f64,
 
@@ -8962,8 +9041,8 @@ impl Calculator {
             wind_speed_mph: 0.0,
             wind_direction_deg: 0.0, // wind-FROM convention: 0 = headwind, matching the CLI/trajectory defaults
             wind_segments: Vec::new(),
-            temperature_f: 59.0,
-            pressure_inhg: 29.92,
+            temperature_f: None,
+            pressure_inhg: None,
             humidity_percent: 50.0,
             altitude_ft: 0.0,
 
@@ -9073,13 +9152,13 @@ impl Calculator {
 
     #[wasm_bindgen(js_name = setTemperature)]
     pub fn set_temperature(mut self, temp_f: f64) -> Self {
-        self.temperature_f = temp_f;
+        self.temperature_f = Some(temp_f);
         self
     }
 
     #[wasm_bindgen(js_name = setPressure)]
     pub fn set_pressure(mut self, pressure_inhg: f64) -> Self {
-        self.pressure_inhg = pressure_inhg;
+        self.pressure_inhg = Some(pressure_inhg);
         self
     }
 
@@ -9193,9 +9272,15 @@ impl Calculator {
             cmd.push_str(&format!(" --wind-ref {}", reference));
         }
 
+        if let Some(temperature_f) = self.temperature_f {
+            cmd.push_str(&format!(" --temperature {}", temperature_f));
+        }
+        if let Some(pressure_inhg) = self.pressure_inhg {
+            cmd.push_str(&format!(" --pressure {}", pressure_inhg));
+        }
         cmd.push_str(&format!(
-            " --temperature {} --pressure {} --humidity {} --altitude {}",
-            self.temperature_f, self.pressure_inhg, self.humidity_percent, self.altitude_ft
+            " --humidity {} --altitude {}",
+            self.humidity_percent, self.altitude_ft
         ));
 
         // Add shooting parameters
@@ -9365,9 +9450,15 @@ impl Calculator {
             cmd.push_str(&format!(" --wind-ref {}", reference));
         }
 
+        if let Some(temperature_f) = self.temperature_f {
+            cmd.push_str(&format!(" --temperature {}", temperature_f));
+        }
+        if let Some(pressure_inhg) = self.pressure_inhg {
+            cmd.push_str(&format!(" --pressure {}", pressure_inhg));
+        }
         cmd.push_str(&format!(
-            " --temperature {} --pressure {} --humidity {} --altitude {}",
-            self.temperature_f, self.pressure_inhg, self.humidity_percent, self.altitude_ft
+            " --humidity {} --altitude {}",
+            self.humidity_percent, self.altitude_ft
         ));
 
         cmd.push_str(&format!(" --sight-height {}", self.sight_height_inches));

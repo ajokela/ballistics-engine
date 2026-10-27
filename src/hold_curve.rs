@@ -8,6 +8,7 @@
 //! argument resolution, `InverseSolverLoadArgs::resolve`, stays in `main.rs` and constructs
 //! [`HoldCurveLoad`] there).
 
+use crate::atmosphere::StationAtmospherePresence;
 use crate::constants::GRAINS_TO_KG;
 use crate::trajectory_observation::{bracket_param, Bracket};
 use crate::truing::fallback_bullet_length_m;
@@ -125,6 +126,10 @@ pub struct SampledFlight {
 ///
 /// Discards the flight's own reach; [`run_sampled_flight`] keeps it, and every card surface
 /// uses that one because a truncated card has to state how far the load actually flew.
+///
+/// Presence-blind: `temperature` and `pressure` go through the legacy default-sentinel rule
+/// (see [`TrajectorySolver::new`]). A caller that knows which were supplied uses
+/// [`run_sampled_flight_with_station_presence`] and reads its `.samples`.
 #[allow(
     clippy::too_many_arguments,
     reason = "flat arguments preserve the shared sampled-trajectory compatibility helper"
@@ -182,11 +187,73 @@ pub fn run_sampled_trajectory(
 
 /// Run a trajectory and return its sampled points AND its terminal reach at the given zero
 /// angle. See [`SampledFlight`] for why the reach is carried out alongside the samples.
+///
+/// Presence-blind: `temperature` and `pressure` go through the legacy default-sentinel rule.
+/// See [`run_sampled_flight_with_station_presence`].
 #[allow(
     clippy::too_many_arguments,
     reason = "flat arguments preserve the shared sampled-trajectory compatibility helper"
 )]
 pub fn run_sampled_flight(
+    velocity: f64,
+    bc: f64,
+    mass: f64,
+    diameter: f64,
+    drag_model: DragModel,
+    sight_height: f64,
+    temperature: f64,
+    pressure: f64,
+    humidity: f64,
+    altitude: f64,
+    wind_speed: f64,
+    wind_direction: f64,
+    max_range: f64,
+    sample_interval: f64,
+    zero_angle_rad: f64,
+    bc_segments_data: Option<Vec<BCSegmentData>>,
+    custom_drag_table: Option<crate::drag::DragTable>,
+    dsf_table: Option<&DsfTable>,
+    zero_poi_vertical_m: f64,
+    zero_poi_horizontal_m: f64,
+    sight_offset_lateral_m: f64,
+    zero_solve_distance_m: Option<f64>,
+) -> Result<SampledFlight, Box<dyn Error>> {
+    run_sampled_flight_with_station_presence(
+        velocity,
+        bc,
+        mass,
+        diameter,
+        drag_model,
+        sight_height,
+        temperature,
+        pressure,
+        humidity,
+        altitude,
+        wind_speed,
+        wind_direction,
+        max_range,
+        sample_interval,
+        zero_angle_rad,
+        bc_segments_data,
+        custom_drag_table,
+        dsf_table,
+        zero_poi_vertical_m,
+        zero_poi_horizontal_m,
+        sight_offset_lateral_m,
+        zero_solve_distance_m,
+        StationAtmospherePresence::NEITHER,
+    )
+}
+
+/// [`run_sampled_flight`] knowing which of `temperature` and `pressure` the caller supplied
+/// (0.49.0): a supplied value flies as given, an omitted one keeps the legacy default-sentinel
+/// rule (see [`TrajectorySolver::new_with_station_presence`]).
+/// [`StationAtmospherePresence::NEITHER`] is bit-identical to [`run_sampled_flight`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat arguments preserve the shared sampled-trajectory compatibility helper"
+)]
+pub fn run_sampled_flight_with_station_presence(
     velocity: f64,
     bc: f64,
     mass: f64,
@@ -221,6 +288,7 @@ pub fn run_sampled_flight(
     // below when a zero was solved.
     sight_offset_lateral_m: f64,
     zero_solve_distance_m: Option<f64>,
+    station_presence: StationAtmospherePresence,
 ) -> Result<SampledFlight, Box<dyn Error>> {
     let (mut inputs, wind, atmosphere) = build_trajectory_components(
         velocity,
@@ -248,7 +316,8 @@ pub fn run_sampled_flight(
         inputs.azimuth_angle += inputs.windage_zero_bias_rad(zero_distance_m);
     }
 
-    let mut solver = TrajectorySolver::new(inputs, wind, atmosphere);
+    let mut solver =
+        TrajectorySolver::new_with_station_presence(inputs, wind, atmosphere, station_presence);
     solver.set_max_range(max_range);
     solver.set_time_step(0.001);
     let result = solver.solve()?;
@@ -445,6 +514,10 @@ pub struct HoldCurveLoad {
     pub altitude_m: f64,
     pub wind_speed_mps: f64,
     pub wind_direction_deg: f64,
+    /// Which of `temperature_c` / `pressure_hpa` were supplied (0.49.0). A supplied value flies
+    /// as given; [`StationAtmospherePresence::NEITHER`] keeps the legacy default-sentinel rule,
+    /// under which a sea-level default at a real altitude flies ICAO standard air.
+    pub station_presence: StationAtmospherePresence,
 }
 
 /// One point read off a [`HoldCurve`], in the ANGULAR units a hold is expressed in.
@@ -527,18 +600,19 @@ impl HoldCurve {
             humidity: load.humidity,
             altitude: load.altitude_m,
         };
-        let zero_angle = crate::calculate_zero_angle_with_conditions(
+        let zero_angle = crate::calculate_zero_angle_with_station_presence(
             zero_inputs,
             load.zero_distance_m,
             load.sight_height_m,
             WindConditions::default(),
             atmosphere,
+            load.station_presence,
         )?;
 
         // MBA-1478: the FLIGHT, not just its samples. A card built on this curve has to be
         // able to quote how far the load actually flew (see `SampledFlight::reach_m`), and
         // the last sample is not that figure — it moves with the span the caller asked for.
-        let flight = run_sampled_flight(
+        let flight = run_sampled_flight_with_station_presence(
             load.velocity_mps,
             load.bc,
             load.mass_kg,
@@ -561,6 +635,7 @@ impl HoldCurve {
             0.0,
             0.0,
             Some(load.zero_distance_m),
+            load.station_presence,
         )?;
         let SampledFlight { samples, reach_m } = flight;
         if samples.len() < 2 {
@@ -724,6 +799,7 @@ mod tests {
             altitude_m: 0.0,
             wind_speed_mps: 3.0,
             wind_direction_deg: 90.0,
+            station_presence: StationAtmospherePresence::NEITHER,
         }
     }
 
