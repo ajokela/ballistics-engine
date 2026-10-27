@@ -646,6 +646,12 @@ unsafe fn calculate_trajectory_impl(
 /// an enabled sampling grid above [`crate::MAX_TRAJECTORY_SAMPLES`] does likewise. Callers can
 /// increase `step_size`, reduce `max_range`, or select adaptive RK45.
 ///
+/// Presence-blind: `atmosphere` is a plain struct that cannot say which values were measured, so a
+/// temperature within 0.1 °C of 15 °C or a pressure within 0.5 hPa of 1013.25 hPa at an altitude
+/// above 1 m is read as omitted and replaced with ICAO standard air (the pre-0.49.0 rule).
+/// [`ballistics_calculate_trajectory_with_station_presence`] takes the presence beside the
+/// atmosphere, and flies a flagged value as given.
+///
 /// # Safety
 ///
 /// `inputs` may be null, in which case this function returns null. When non-null,
@@ -688,6 +694,12 @@ pub unsafe extern "C" fn ballistics_calculate_trajectory(
 /// Returns null for an invalid deck (null arrays, `drag_table_len` outside
 /// `[2, MAX_FFI_DRAG_TABLE_LEN]`, or failed validation), in addition to every
 /// failure mode of the base function.
+///
+/// Presence-blind: `atmosphere` is a plain struct that cannot say which values were measured, so a
+/// temperature within 0.1 °C of 15 °C or a pressure within 0.5 hPa of 1013.25 hPa at an altitude
+/// above 1 m is read as omitted and replaced with ICAO standard air (the pre-0.49.0 rule).
+/// [`ballistics_calculate_trajectory_with_station_presence`] takes the presence beside the
+/// atmosphere and the same deck, and flies a flagged value as given.
 ///
 /// # Safety
 ///
@@ -738,6 +750,12 @@ pub unsafe extern "C" fn ballistics_calculate_trajectory_with_drag_table(
 /// Returns null when `cd_scale` is not finite or not `> 0`, in addition to every failure
 /// mode of [`ballistics_calculate_trajectory_with_drag_table`] (matching that export's
 /// null sentinel for an invalid deck).
+///
+/// Presence-blind: `atmosphere` is a plain struct that cannot say which values were measured, so a
+/// temperature within 0.1 °C of 15 °C or a pressure within 0.5 hPa of 1013.25 hPa at an altitude
+/// above 1 m is read as omitted and replaced with ICAO standard air (the pre-0.49.0 rule).
+/// [`ballistics_calculate_trajectory_with_station_presence`] takes the presence beside the
+/// atmosphere and the same deck and `cd_scale`, and flies a flagged value as given.
 ///
 /// # Safety
 ///
@@ -965,6 +983,12 @@ unsafe fn calculate_zero_angle_impl(
 /// A caller that needs solve-json's semantics over a C ABI should use the JSON bridge
 /// (`crate::bridge`, `src/bridge/ffi.rs`) rather than this export.
 ///
+/// Presence-blind: `atmosphere` is a plain struct that cannot say which values were measured, so a
+/// temperature within 0.1 °C of 15 °C or a pressure within 0.5 hPa of 1013.25 hPa at an altitude
+/// above 1 m is read as omitted and replaced with ICAO standard air (the pre-0.49.0 rule).
+/// [`ballistics_calculate_zero_angle_with_station_presence`] takes the presence beside the
+/// atmosphere, and flies a flagged value as given.
+///
 /// # Safety
 ///
 /// `inputs` may be null, in which case this function returns NaN. When non-null,
@@ -1005,6 +1029,12 @@ pub unsafe extern "C" fn ballistics_calculate_zero_angle(
 /// Returns NaN for an invalid deck (null arrays, `drag_table_len` outside
 /// `[2, MAX_FFI_DRAG_TABLE_LEN]`, or failed validation), in addition to every
 /// failure mode of the base function.
+///
+/// Presence-blind: `atmosphere` is a plain struct that cannot say which values were measured, so a
+/// temperature within 0.1 °C of 15 °C or a pressure within 0.5 hPa of 1013.25 hPa at an altitude
+/// above 1 m is read as omitted and replaced with ICAO standard air (the pre-0.49.0 rule).
+/// [`ballistics_calculate_zero_angle_with_station_presence`] takes the presence beside the
+/// atmosphere and the same deck, and flies a flagged value as given.
 ///
 /// # Safety
 ///
@@ -1053,6 +1083,12 @@ pub unsafe extern "C" fn ballistics_calculate_zero_angle_with_drag_table(
 /// Returns NaN when `cd_scale` is not finite or not `> 0`, in addition to every failure
 /// mode of [`ballistics_calculate_zero_angle_with_drag_table`] (matching that export's
 /// NaN sentinel for an invalid deck).
+///
+/// Presence-blind: `atmosphere` is a plain struct that cannot say which values were measured, so a
+/// temperature within 0.1 °C of 15 °C or a pressure within 0.5 hPa of 1013.25 hPa at an altitude
+/// above 1 m is read as omitted and replaced with ICAO standard air (the pre-0.49.0 rule).
+/// [`ballistics_calculate_zero_angle_with_station_presence`] takes the presence beside the
+/// atmosphere and the same deck and `cd_scale`, and flies a flagged value as given.
 ///
 /// # Safety
 ///
@@ -1199,6 +1235,12 @@ pub extern "C" fn ballistics_quick_trajectory(
 
 /// Run a Monte Carlo simulation through the C ABI.
 ///
+/// Presence-blind: `atmosphere` is a plain struct that cannot say which values were measured, so a
+/// temperature within 0.1 °C of 15 °C or a pressure within 0.5 hPa of 1013.25 hPa at an altitude
+/// above 1 m is read as omitted and replaced with ICAO standard air (the pre-0.49.0 rule).
+/// [`ballistics_monte_carlo_with_station_presence`] takes the presence beside the atmosphere, and
+/// flies a flagged value as given.
+///
 /// # Safety
 ///
 /// `inputs` and `params` may be null, in which case this function returns null.
@@ -1230,6 +1272,12 @@ pub unsafe extern "C" fn ballistics_monte_carlo(
 /// `wind_direction_std_dev` is in radians. This additive entry point keeps
 /// [`FFIMonteCarloParams`] and [`ballistics_monte_carlo`] binary-compatible; the older function
 /// delegates with zero wind-direction uncertainty.
+///
+/// Presence-blind: `atmosphere` is a plain struct that cannot say which values were measured, so a
+/// temperature within 0.1 °C of 15 °C or a pressure within 0.5 hPa of 1013.25 hPa at an altitude
+/// above 1 m is read as omitted and replaced with ICAO standard air (the pre-0.49.0 rule).
+/// [`ballistics_monte_carlo_with_station_presence`] takes the presence beside the atmosphere and
+/// the same `wind_direction_std_dev`, and flies a flagged value as given.
 ///
 /// # Safety
 ///

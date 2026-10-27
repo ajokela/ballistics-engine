@@ -109,23 +109,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (DA 1500 m: 9.1942 MOA, was 9.1850). `trajectory` and `zero` now also warn for such a typed
   pressure when it cannot be a reading at that altitude (29.92 inHg at 5000 ft is 1.202 times
   standard); an omitted pressure is never warned.
-- **Bridge `true.*`: `temperature_f` and `pressure_inhg` are optional.** Omit them when there is
-  no reading: the engine flies ICAO standard air at `altitude_ft`, which is what sending 59 °F /
-  29.92 inHg produced before. **An app that sends 59 / 29.92 as a "no reading" placeholder must
-  omit the field instead**, because a sent value is now a reading and flies as sea-level air at
-  altitude: `true.wind` at 5000 ft and 68 °F with `pressure_inhg` 29.92 now solves 5.054 mph,
-  and 6.197 mph (the old answer) with the field left out.
+- **Bridge `true.*`: `temperature_f` and `pressure_inhg` are optional.** Omit them, or send
+  `null`, when there is no reading: the engine flies ICAO standard air at `altitude_ft`, which is
+  what sending 59 °F / 29.92 inHg produced before (`card.*` already read `null` as omitted; on
+  `true.*` it used to be refused). **An app that sends 59 / 29.92 as a "no reading" placeholder
+  must omit the field instead**, because a sent number is now a reading and flies as sea-level
+  air at altitude: `true.wind` at 5000 ft and 68 °F with `pressure_inhg` 29.92 now solves 5.054
+  mph, and 6.197 mph (the old answer) with the field left out or `null`.
 - **Saved profiles record whether their temperature and pressure were typed.** `profile save`
   writes `temperature_supplied` / `pressure_supplied` (only when true; a profile saved without
   them is byte-identical to before) and `.a7p` import sets both. A profile saved before 0.49.0
   carries neither, so its stored 59 °F / 29.92 inHg keeps the old meaning (standard air at a real
   altitude); re-save it with the flags to mark a real reading. `profile.import_a7p` and
-  `profile.normalize` responses carry the new keys, and `profile.export_a7p` lists both under
-  `not_carried` (populated for an unmarked value at a real altitude, which an import would
-  read back as a typed reading).
-- **A profile's stored `--pressure-type qnh` is honoured by `dsf --saved-profile` and
-  `plan-truing --profile`**, and `plan-truing` reduces a QNH at the profile's altitude rather than
-  at sea level. **Numeric change** for such profiles.
+  `profile.normalize` responses carry the new keys. `profile.export_a7p` lists both under
+  `not_carried` for every profile, so that response gains two entries; they are populated only
+  for an unmarked value that the old rule replaced with ICAO air (15 °C / 59 °F or 1013.25 hPa /
+  29.92 inHg within its band, at an altitude above 1 m, and for the pressure only when it is not
+  a QNH), which an import would read back as a typed reading. The `.a7p` bytes do not change.
+- **`dsf --saved-profile` and `plan-truing --profile` honour a profile's stored
+  `--pressure-type qnh`, and `plan-truing` reduces any declared QNH at the altitude it flies.**
+  A profile's pressure flown as a QNH (its stored mode, or `--pressure-type qnh` typed for it) is
+  reduced at the profile's altitude and flies as a reading, as `trajectory --saved-profile`
+  already flew it. That includes a profile saved before 0.49.0, which has no presence marker: its
+  QNH of 1031 hPa at 150 m reduces to 1012.86 hPa and flies, where the old rule would have
+  swapped it for ICAO air. `plan-truing` used to reduce a QNH, stored or typed, at `--altitude`
+  alone, which is sea level (no reduction) when only the profile gives the altitude; it now
+  reduces at the altitude the run flies, the profile's when `--altitude` is not given.
+  **Numeric change** for a profile that stores `qnh`, and for any `plan-truing --profile` run
+  with `--pressure-type qnh` and no `--altitude`, whether the profile stores `qnh` or not (a
+  profile at 5000 ft with `--pressure 30.40 --pressure-type qnh` typed: condition number 161.03,
+  was 158.27).
 - **`trajectory --density-altitude`: a temperature from a `--location` CSV, a `--profile` CSV
   `ZERO_TEMP` cell or a saved profile now counts as the real temperature**, exactly like
   `--temperature`. Before, only the flag counted, and any other temperature was dropped in favour
@@ -150,6 +163,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request is unchanged. `true-velocity` online sends the same markers.
 - **`trajectory`: a typed `--altitude 0` or `--humidity 50` now beats a `--location` or saved
   profile value**; before, they were indistinguishable from the defaults.
+- **Python and Ruby bindings** (released with this engine) follow the same rule. Python:
+  `AtmosphericConditions(temperature_f=None, pressure_inhg=None)` is the new default, and a
+  value passed or assigned is a reading, so an explicit 59 °F or 29.92 inHg at altitude now flies
+  as typed; leave it out (or clear the new `temperature_supplied` / `pressure_supplied`
+  attributes) for "no reading". `calculate_zero_angle`'s `temperature_f` / `pressure_inhg`
+  default to `None`. An inputs dict reads a present, non-`None` `temperature` / `pressure` key
+  as a reading, and takes optional bool `temperature_supplied` / `pressure_supplied` keys that
+  override that (a marker that is not a bool raises `TypeError`); a column `monte_carlo_parallel`
+  samples counts as supplied. Ruby: `solve` and `calculate_zero_angle` fly a `temperature_f` /
+  `pressure_inhg` key that is present as typed and keep the old rule for a key left out; a `nil`
+  value, which raised `TypeError`, now reads as omitted. `monte_carlo` has no atmosphere input
+  and is unchanged.
 
   **New API:**
   - `atmosphere::StationAtmospherePresence`, `atmosphere::StationReading` and
@@ -161,6 +186,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `run_monte_carlo_adaptive_seeded_with_station_presence`;
   - `monte_carlo::solve_trajectory_for_monte_carlo_with_station_presence`;
   - `estimate_bc_fit_with_station_presence`, `calculate_lead_with_station_presence`;
+  - `api_client::TrajectoryRequestBuilder::temperature_supplied` and `::pressure_supplied`;
   - `hold_curve::run_sampled_flight_with_station_presence`;
   - `truing::correct_chrono_velocity_fps_with_station_presence`,
     `truing::calculate_true_velocity_local_with_station_presence` and
