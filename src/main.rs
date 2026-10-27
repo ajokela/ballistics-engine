@@ -23944,13 +23944,17 @@ mod drg_extension_dispatch_tests {
 
     /// Writes `contents` to a uniquely-named temp file whose name ends in `suffix` (e.g.
     /// `".drg"`, `".csv"`, or `""` for no extension at all) and returns its path.
+    /// The counter keeps two tests apart when their clock reads agree: on a case-insensitive
+    /// filesystem `.DRG` and `.drg` with the same nonce name one file.
     fn write_temp(suffix: &str, contents: &str) -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "mba1409_drg_dispatch_{}_{nonce}{suffix}",
+            "mba1409_drg_dispatch_{}_{seq}_{nonce}{suffix}",
             std::process::id()
         ));
         std::fs::write(&path, contents).unwrap();
