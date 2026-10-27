@@ -255,11 +255,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `enable_wind_shear` set, the name fell into the unrecognized-name fallback and applied the
   power law, while `fast_integrate` and the RK45 kernel applied nothing; the CLI's
   `--enable-wind-shear --wind-shear-model none` drifted like `power_law`. It is now
-  byte-identical to shear off (108 of 108 CLI runs), as in the other kernels. A Rust caller, or
-  a binding's dict or hash input, that sets `enable_wind_shear` without naming a model leaves it
-  at the default `"none"` and so now gets no shear from `TrajectorySolver` either; name the
-  model. The C ABI already names `power_law`, and an unrecognized name still falls back to the
-  power law in `TrajectorySolver` (and to no shear in the fast kernels), unchanged.
+  byte-identical to shear off (108 of 108 CLI runs), as in the other kernels. A Rust caller that
+  sets `enable_wind_shear` without naming a model leaves it at the default `"none"` and so now
+  gets no shear from `TrajectorySolver` either; name the model. The Python and Ruby bindings
+  released with this engine resolve an omitted model from the flag instead (`"power_law"` when
+  `enable_wind_shear` is set, `"none"` when it is not), so a dict or hash that sets only the
+  flag keeps the power law it already flew. The C ABI already names `power_law`, and an
+  unrecognized name still falls back to the power law in `TrajectorySolver` (and to no shear in
+  the fast kernels), unchanged.
 - **A QNH is reduced to station pressure with the altimeter-setting relation.**
   `reduce_qnh_to_station_pressure`, behind every QNH input, scaled the standard pressure ratio
   by the QNH, `QNH·(1 − 0.0065·h/288.15)^5.2559`, and its doc comment called that the ICAO/NOAA
