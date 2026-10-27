@@ -5,9 +5,8 @@
 //! 15 °C at an altitude above 1 m was read as "not given" and replaced with ICAO standard air,
 //! because the CLI resolved every `Option` flag to its default and then guessed presence back
 //! from the value. Presence now comes from the flag (or the CSV cell, or the saved profile's
-//! marker) itself. An omitted value still flies ICAO air at the altitude, bit for bit; the
-//! station-sentinel golden matrix checks that byte for byte, and these tests pin the
-//! owner-visible numbers and the special paths.
+//! marker) itself. An omitted value still flies ICAO air at the altitude, bit for bit (checked
+//! against ab4eb0c), and these tests pin the user-visible numbers and the special paths.
 //!
 //! Hermetic: anything touching saved profiles points `HOME` at a private temp dir.
 
@@ -212,8 +211,8 @@ const E: &[&str] = &[
     "15",
 ];
 
-/// The station-sentinel spec's canonical repros (section 3), from its oracle with the
-/// sentinels off. "Was" is what ab4eb0c printed (ICAO air at the altitude).
+/// The reported cases, captured from ab4eb0c with the two sentinels compiled out (a typed value
+/// flies as typed there). "Was" is what ab4eb0c printed (ICAO air at the altitude).
 #[test]
 fn the_canonical_repros_fly_the_typed_air() {
     // A: QNH 1031 hPa at 150 m reduces to 1012.856 hPa. come-ups was 496.40 m/s, 4.976 mil.
@@ -934,7 +933,7 @@ fn location_and_profile_csv_cells_are_readings() {
     );
 }
 
-/// E9: under a density altitude, a CSV, profile-CSV or marked saved-profile temperature is the
+/// Under a density altitude, a CSV, profile-CSV or marked saved-profile temperature is the
 /// explicit DA temperature, exactly like `--temperature`. An empty cell and an unmarked legacy
 /// profile are not.
 #[test]
@@ -1113,7 +1112,7 @@ fn saved_profiles_fly_a_marked_reading_and_keep_the_legacy_rule_unmarked() {
         1934.971466102828,
         "unmarked 29.92 at 5000 ft (ICAO)",
     );
-    // E7: a typed --altitude 0 beats the profile's 5000 ft.
+    // A typed --altitude 0 beats the profile's 5000 ft.
     let at_zero = json_in(
         Some(&home),
         &cat(&[TR_I100, &["--saved-profile", "typed", "--altitude", "0"]]),
@@ -1136,8 +1135,8 @@ fn saved_profiles_fly_a_marked_reading_and_keep_the_legacy_rule_unmarked() {
     );
 }
 
-/// E1 / E2: `plan-truing --profile` applies the profile's stored QNH mode, at the profile's
-/// altitude. E10: it honours a stored density altitude, as `trajectory --saved-profile` does.
+/// `plan-truing --profile` applies the profile's stored QNH mode, at the profile's altitude, and
+/// honours a stored density altitude, as `trajectory --saved-profile` does.
 #[test]
 fn plan_truing_honours_the_profiles_stored_mode_and_density_altitude() {
     let home = private_home();
@@ -1241,7 +1240,7 @@ fn plan_truing_honours_the_profiles_stored_mode_and_density_altitude() {
     assert_ne!(plan(&["--profile", "da"]), plan(&["--profile", "plain"]));
 }
 
-/// E3 / E10: `dsf --saved-profile` applies a stored QNH and a stored density altitude.
+/// `dsf --saved-profile` applies a stored QNH and a stored density altitude.
 #[test]
 fn dsf_honours_the_profiles_stored_mode_and_density_altitude() {
     let home = private_home();

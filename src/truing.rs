@@ -2480,10 +2480,10 @@ mod station_presence_tests {
     /// back-solve (`velocity_at_distance_fps`).
     ///
     /// The altitudes are chosen so that these pins also catch air that is pre-resolved in
-    /// °C/hPa and converted back to °F/inHg instead of resolved after the unit conversion
-    /// (spec mutation 16). That round trip is usually exact, or its last-bit error is absorbed
-    /// later (×100 to Pa, +273.15 to K). At 175 ft it reaches the drop, and at 7135 ft the chrono
-    /// solve.
+    /// °C/hPa and converted back to °F/inHg instead of resolved after the unit conversion (a
+    /// mutation no other test caught). That round trip is usually exact, or its last-bit error is
+    /// absorbed later (×100 to Pa, +273.15 to K). At 175 ft it reaches the drop, and at 7135 ft
+    /// the chrono solve.
     #[test]
     fn an_omitted_reading_at_altitude_flies_the_legacy_air_on_every_truing_path() {
         // captured at ab4eb0c, 59 °F / 29.92 inHg

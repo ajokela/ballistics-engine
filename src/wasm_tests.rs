@@ -4699,7 +4699,8 @@ mod station_presence_tests {
             "--temperature 20 --altitude 150 --pressure 1023",
             "--temperature 20 --altitude 150",
         );
-        // The spec's QNH 1031 at 150 m run: 3.01 m (was 2.99 m, the ICAO air).
+        // QNH 1031 at 150 m, captured from ab4eb0c with the sentinels compiled out: 3.01 m (was
+        // 2.99 m, the ICAO air).
         let out = run(&format!(
             "lead {LOAD} --target-speed 4 --range 500 --temperature 20 --altitude 150 \
              --pressure 1031 --pressure-type qnh"
@@ -4718,7 +4719,8 @@ mod station_presence_tests {
                 .as_f64()
                 .unwrap()
         };
-        // The spec's engine run: 586.68046875 m/s (was 585.7875, the ICAO air).
+        // Captured from ab4eb0c with the sentinels compiled out: 586.68046875 m/s (was
+        // 585.7875, the ICAO air).
         assert_eq!(
             effective("--temperature 20 --altitude 150 --pressure 1031 --pressure-type qnh")
                 .to_bits(),

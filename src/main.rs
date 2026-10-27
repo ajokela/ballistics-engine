@@ -6201,7 +6201,7 @@ fn cd_scale_range_warning(value: f64) -> Option<String> {
 }
 
 /// Whether a `trajectory` flag that carries a clap default (`--altitude`, `--humidity`) was
-/// actually typed (0.49.0, E7): a typed `--altitude 0` or `--humidity 50` is a value and beats a
+/// actually typed (0.49.0): a typed `--altitude 0` or `--humidity 50` is a value and beats a
 /// `--location` CSV or saved-profile value, which comparing against the default could not tell.
 fn trajectory_flag_typed(matches: &clap::ArgMatches, id: &str) -> bool {
     matches
@@ -6769,8 +6769,8 @@ fn solve_profile_for_dsf(
     };
 
     // 0.49.0: the profile's air as a SET, the way `trajectory --saved-profile` reads it.
-    // E10: a stored density altitude flies its derived station triple authoritatively (both
-    // readings supplied); a marked stored temperature is its explicit temperature. E3: a stored
+    // A stored density altitude flies its derived station triple authoritatively (both
+    // readings supplied); a marked stored temperature is its explicit temperature. A stored
     // `pressure_reference` of qnh is reduced to station pressure at the profile's altitude
     // before use. Otherwise each reading's presence is the profile's marker (a profile written
     // before 0.49.0 has none and keeps the legacy rule).
@@ -7474,7 +7474,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let pressure_supplied = pressure.is_some()
                 || csv_has(&location_data, &["PRESSURE", "PRESSURE(HPA OR INHG)"])
                 || saved_atmo.is_some_and(|p| p.pressure_supplied);
-            // E7: a typed `--altitude 0` / `--humidity 50` is a value, not the clap default.
+            // A typed `--altitude 0` / `--humidity 50` is a value, not the clap default.
             let altitude_typed = trajectory_flag_typed(&matches, "altitude");
             let humidity_typed = trajectory_flag_typed(&matches, "humidity");
             let final_humidity = if humidity_typed {
@@ -7556,7 +7556,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     Some(da_display) => {
                         let da_m = UnitConverter::altitude_to_metric(da_display, cli.units);
                         // "Explicit temperature" for DA precedence is the temperature in use
-                        // whenever its source supplied it (E9, 0.49.0): the flag, a --location
+                        // whenever its source supplied it (0.49.0): the flag, a --location
                         // CSV cell, a --profile CSV ZERO_TEMP cell or a marked saved profile.
                         // Before 0.49.0 only the flag counted and every other source was thrown
                         // away for the ISA temperature at the density altitude. A legacy
@@ -10653,7 +10653,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let pressure_supplied = pressure.is_some()
                 || (profile_pressure_in_use
                     && profile_data.as_ref().is_some_and(|p| p.pressure_supplied));
-            // E10: a stored density altitude is honoured, exactly as `trajectory
+            // 0.49.0: a stored density altitude is honoured, exactly as `trajectory
             // --saved-profile` honours it (MBA-1417), only when this run supplies no pressure
             // or altitude of its own to supersede.
             let stored_density_altitude = profile_data
@@ -10667,7 +10667,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let humidity = humidity
                 .or_else(|| profile_data.as_ref().map(|profile| profile.humidity))
                 .unwrap_or(50.0);
-            // E2: the altitude is resolved (the flag, falling back to the profile) BEFORE the
+            // 0.49.0: the altitude is resolved (the flag, falling back to the profile) BEFORE the
             // pressure mode is applied, so a declared QNH reduces at the altitude flown.
             let altitude = altitude
                 .or_else(|| profile_data.as_ref().map(|profile| profile.altitude))
@@ -10705,7 +10705,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         )
                     }
                     None => {
-                        // MBA-1416: honor --pressure-type here too. E1: with no
+                        // MBA-1416: honor --pressure-type here too. 0.49.0: with no
                         // --pressure-type, a profile's stored mode applies when the profile's
                         // pressure is the one in use (trajectory's `profile_supplied_pressure`
                         // rule); a stored mode never describes a typed --pressure.

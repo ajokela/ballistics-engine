@@ -193,9 +193,9 @@ fn the_two_surfaces_agree_once_the_station_reading_escapes_the_sentinel_bands() 
 //
 // `FFIAtmosphericConditions` still cannot say which of its doubles were supplied, so the
 // struct exports above keep the legacy rule. The `*_with_station_presence` exports take the
-// presence beside it as bits. Every expected number below is from the station-sentinel spec's
-// golden C ABI block (legacy values captured at ab4eb0c, new-export values from the oracle with
-// the sentinels off) or was captured at ab4eb0c.
+// presence beside it as bits. Every legacy number below was captured at ab4eb0c; every
+// new-export number was captured from ab4eb0c with the two sentinels compiled out, where a
+// supplied value flies as given.
 
 mod station_presence_exports {
     use ballistics_engine::ffi::{
@@ -213,8 +213,8 @@ mod station_presence_exports {
     const T: u32 = BALLISTICS_STATION_TEMPERATURE_SUPPLIED;
     const P: u32 = BALLISTICS_STATION_PRESSURE_SUPPLIED;
 
-    /// The golden's C ABI rifle (`bridge_golden.py`'s FFI worker), with `temperature` echoed
-    /// into the inputs as that worker does.
+    /// The C ABI rifle the pinned rows were captured with, with `temperature` echoed into the
+    /// inputs.
     fn inputs(altitude: f64, temperature: f64) -> FFIBallisticInputs {
         FFIBallisticInputs {
             muzzle_velocity: 823.0,
@@ -281,17 +281,17 @@ mod station_presence_exports {
         }
     }
 
-    /// One golden row: (label, (t, p, alt), flags, legacy today, new export).
-    type GoldenRow = (&'static str, (f64, f64, f64), u32, f64, f64);
+    /// One pinned row: (label, (t, p, alt), flags, legacy export, new export).
+    type PinnedRow = (&'static str, (f64, f64, f64), u32, f64, f64);
 
-    /// The golden block, row for row.
+    /// The pinned zero angles (rad, 600 m), row for row.
     #[test]
-    fn zero_export_matches_the_golden_c_abi_block() {
+    fn zero_export_matches_the_pinned_rows() {
         let qnh = ballistics_reduce_qnh_pressure(1031.0, 150.0);
         let da_t = ballistics_density_altitude_temperature_c(1000.0, 15.0);
         let da_p = ballistics_density_altitude_pressure_hpa(1000.0, 15.0);
         let da_a = ballistics_density_altitude_altitude_m(1000.0, 15.0);
-        let rows: [GoldenRow; 7] = [
+        let rows: [PinnedRow; 7] = [
             (
                 "abs 1013.0 at 150 m",
                 (20.0, 1013.0, 150.0),
@@ -353,7 +353,7 @@ mod station_presence_exports {
                 new.to_bits(),
                 "{label}: new export, flags {flags}"
             );
-            // Flags 0 IS the legacy export, whatever the inputs: compared with the golden's
+            // Flags 0 IS the legacy export, whatever the inputs: compared with the pinned
             // legacy number, not just with the legacy export.
             assert_eq!(
                 presence_zero(t, p, alt, 0).to_bits(),

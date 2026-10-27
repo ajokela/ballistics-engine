@@ -1414,7 +1414,7 @@ mod pdf_present {
 
     // -- station presence (0.49.0) ---------------------------------------------------------
 
-    /// The station-sentinel spec's metric card at a 150 m site, 20 °C, with `air` merged in.
+    /// A metric card at a 150 m site, 20 °C, with `air` merged in.
     fn site_150m_request(air: Value) -> Value {
         let mut request = json!({
             "units": "metric",
@@ -1487,7 +1487,8 @@ mod pdf_present {
     }
 
     /// (0.49.0) The solve path's header states the air the rows flew, now including a typed
-    /// in-band pressure. The spec's engine run: before, `DA:1209 ft Pressure:29.39/995 Temp:68`.
+    /// in-band pressure (QNH 1031 hPa at 150 m, reduced). Before 0.49.0 it read
+    /// `DA:1209 ft Pressure:29.39/995 Temp:68`.
     #[test]
     fn the_header_states_a_typed_in_band_pressure() {
         let (bytes, _pages) = generate(site_150m_request(json!({"pressure": 1012.8562053925472})));

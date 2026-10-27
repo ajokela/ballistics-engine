@@ -1013,7 +1013,8 @@ fn true_dial_plan_matches_cli() {
 /// 0.49.0: `temperature_f` / `pressure_inhg` are optional on `true.*`. A field that is present
 /// is a reading and flies as sent, even 29.92 inHg at 5000 ft; a field that is absent flies
 /// ICAO standard air at `altitude_ft`, which is what sending the 29.92 placeholder produced
-/// before. Both numbers are the station-sentinel spec's engine runs.
+/// before. The sent value was captured from ab4eb0c with the sentinels compiled out; the
+/// omitted one is what ab4eb0c returned.
 #[test]
 fn true_wind_flies_a_sent_pressure_and_omits_an_absent_one() {
     let request = |pressure: Option<f64>| {
