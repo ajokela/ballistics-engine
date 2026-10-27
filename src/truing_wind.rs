@@ -175,21 +175,24 @@ pub struct WindTruingRequest {
     pub sight_height_in: f64,
     /// Ambient temperature in degrees Fahrenheit, as a [`StationReading`] (0.49.0).
     ///
-    /// Optional on the wire; omit it when there is no reading, and the engine flies the ICAO
-    /// standard temperature at `altitude_ft` (what sending 59 °F produced before 0.49.0). A
-    /// value that is sent is a reading and flies as sent, 59 °F included.
+    /// Optional on the wire; omit it (or send `null`) when there is no reading, and the engine
+    /// flies the ICAO standard temperature at `altitude_ft` (what sending 59 °F produced before
+    /// 0.49.0). A number that is sent is a reading and flies as sent, 59 °F included.
     #[serde(
         default = "crate::truing::default_truing_temperature_f",
+        deserialize_with = "crate::truing::deserialize_truing_temperature_f",
         skip_serializing_if = "StationReading::is_omitted"
     )]
     pub temperature_f: StationReading,
     /// Station pressure in inches of mercury, as a [`StationReading`] (0.49.0).
     ///
-    /// Optional on the wire; omit it when there is no reading, and the engine flies the ICAO
-    /// standard pressure at `altitude_ft` (what sending 29.92 inHg produced before 0.49.0). A
-    /// value that is sent is a reading and flies as sent, 29.92 inHg included.
+    /// Optional on the wire; omit it (or send `null`) when there is no reading, and the engine
+    /// flies the ICAO standard pressure at `altitude_ft` (what sending 29.92 inHg produced
+    /// before 0.49.0). A number that is sent is a reading and flies as sent, 29.92 inHg
+    /// included.
     #[serde(
         default = "crate::truing::default_truing_pressure_inhg",
+        deserialize_with = "crate::truing::deserialize_truing_pressure_inhg",
         skip_serializing_if = "StationReading::is_omitted"
     )]
     pub pressure_inhg: StationReading,

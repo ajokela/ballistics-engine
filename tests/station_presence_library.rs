@@ -677,13 +677,20 @@ fn truing_dtos_accept_omitted_readings_on_the_wire() {
     let round_trip = serde_json::to_value(omitted).unwrap();
     assert!(round_trip.get("temperature_f").is_none());
     assert!(round_trip.get("pressure_inhg").is_none());
-    // deny_unknown_fields still holds, and null is not "omitted".
+    // deny_unknown_fields still holds. A `null` reading is omitted, as on `card.*`; a
+    // string is still refused.
     let mut unknown = json.clone();
     unknown["pressure_hpa"] = serde_json::json!(1013.25);
     assert!(serde_json::from_value::<TruingModelInputsV1>(unknown).is_err());
-    let mut null = json;
+    let mut null = json.clone();
+    null["temperature_f"] = serde_json::Value::Null;
     null["pressure_inhg"] = serde_json::Value::Null;
-    assert!(serde_json::from_value::<TruingModelInputsV1>(null).is_err());
+    let from_null: TruingModelInputsV1 = serde_json::from_value(null).unwrap();
+    assert_eq!(from_null.temperature_f, StationReading::omitted(59.0));
+    assert_eq!(from_null.pressure_inhg, StationReading::omitted(29.92));
+    let mut string = json;
+    string["pressure_inhg"] = serde_json::json!("29.92");
+    assert!(serde_json::from_value::<TruingModelInputsV1>(string).is_err());
 
     let mut wind = serde_json::to_value(wind_request(
         StationReading::supplied(59.0),
@@ -697,6 +704,12 @@ fn truing_dtos_accept_omitted_readings_on_the_wire() {
     let omitted: WindTruingRequest = serde_json::from_value(wind.clone()).unwrap();
     assert_eq!(omitted.temperature_f, StationReading::omitted(59.0));
     assert_eq!(omitted.pressure_inhg, StationReading::omitted(29.92));
+    let mut null = wind.clone();
+    null["temperature_f"] = serde_json::Value::Null;
+    null["pressure_inhg"] = serde_json::Value::Null;
+    let from_null: WindTruingRequest = serde_json::from_value(null).unwrap();
+    assert_eq!(from_null.temperature_f, StationReading::omitted(59.0));
+    assert_eq!(from_null.pressure_inhg, StationReading::omitted(29.92));
     wind["bogus"] = serde_json::json!(1);
     assert!(serde_json::from_value::<WindTruingRequest>(wind).is_err());
 }

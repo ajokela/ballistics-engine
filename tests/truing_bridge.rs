@@ -1113,3 +1113,43 @@ fn true_dsf_flies_a_sent_pressure_at_its_zero_too() {
     let (predicted, _) = result(None);
     assert_eq!(predicted.to_bits(), 0.9084117581689021_f64.to_bits());
 }
+
+/// A `null` reading on `true.*` is the same as leaving the field out, as on `card.*`, so an
+/// app with nullable fields (kotlinx `explicitNulls`, `NSNull`) can send "no reading".
+#[test]
+fn true_star_reads_a_null_reading_as_omitted() {
+    let request = |pressure: Value, temperature: Value| {
+        let mut r = json!({
+            "observations": [{"range_m": 457.2, "miss_right_m": 0.315, "sigma_m": null}],
+            "muzzle_velocity_fps": 2700.0, "bc": 0.243, "drag_model": "g7",
+            "mass_gr": 168.0, "diameter_in": 0.308, "zero_distance_yd": 100.0,
+            "sight_height_in": 2.0, "humidity_pct": 50.0, "altitude_ft": 5000.0,
+            "twist": {"rate_in": 11.0, "right_hand": true},
+            "earth": null, "called_crosswind_mph": null
+        });
+        r["pressure_inhg"] = pressure;
+        r["temperature_f"] = temperature;
+        r
+    };
+    let mean = |r| {
+        let v = call("true.wind", r);
+        assert_eq!(v["ok"], json!(true), "{v}");
+        v["result"]["mean_crosswind_mph"].as_f64().unwrap()
+    };
+    let absent = {
+        let mut r = request(Value::Null, Value::Null);
+        let obj = r.as_object_mut().unwrap();
+        obj.remove("pressure_inhg");
+        obj.remove("temperature_f");
+        mean(r)
+    };
+    assert_eq!(
+        mean(request(Value::Null, Value::Null)).to_bits(),
+        absent.to_bits()
+    );
+    // The 5000 ft, 68 °F case of `true_wind_flies_a_sent_pressure_and_omits_an_absent_one`.
+    assert_eq!(
+        mean(request(Value::Null, json!(68.0))).to_bits(),
+        6.197365422146237_f64.to_bits()
+    );
+}

@@ -388,8 +388,10 @@ impl StationAtmospherePresence {
 /// A station temperature or pressure on a presence-carrying request (0.49.0): the value the
 /// engine is handed and whether the caller supplied it.
 ///
-/// On the wire it is a bare JSON number when supplied and ABSENT when omitted; a JSON `null`
-/// is rejected. An omitted reading carries the surface's legacy default (59 °F / 29.92 inHg on
+/// On the wire it is a bare JSON number when supplied and ABSENT when omitted. The type's own
+/// `Deserialize` rejects a JSON `null`; the truing DTOs (`TruingModelInputsV1`,
+/// `WindTruingRequest`) read a `null` field as omitted, as the `card.*` requests do. An omitted
+/// reading carries the surface's legacy default (59 °F / 29.92 inHg on
 /// the truing DTOs, the metric CLI's 1013.25 hPa expressed in inHg, and so on), so it resolves
 /// exactly as that default did before 0.49.0. Use [`Self::omitted`] for that, never a bare
 /// `Option`: at |altitude| <= 1 m an omitted value flies as itself, so the default it carries
