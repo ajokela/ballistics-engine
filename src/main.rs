@@ -6820,8 +6820,10 @@ fn solve_profile_for_dsf(
                 // flies it, even in a profile written before 0.49.0 (no marker): QNH 1031 hPa
                 // at 150 m reduces to 1012.86 hPa, inside the legacy band. A QNH over an
                 // omitted pressure (the default `profile save` stores) stays omitted and goes
-                // through the old rule: where the reduced default lands inside the band, that
-                // is the ICAO air the profile flew before its stored mode was honoured.
+                // through the old rule: where the reduced default lands inside the band above
+                // 1 m, that is the ICAO air the profile flew before its stored mode was
+                // honoured. At or below 1 m, or where the reduced default leaves the band, the
+                // stored QNH now flies the reduced default.
                 let (pressure_hpa, pressure_supplied) =
                     match parse_pressure_reference_profile_field(
                         profile.pressure_reference.as_deref(),
