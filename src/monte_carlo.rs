@@ -33,8 +33,8 @@ pub struct TrajectoryOutput {
 /// It flies `inputs`' station air, its humidity included, exactly as `TrajectorySolver` does
 /// (the station is a [`StationAir`], and `fast_integrate` takes each step's air from
 /// [`crate::atmosphere::air_at`]); the reported Mach is the final speed over that station's
-/// sound speed. An out-of-range `inputs.humidity` (a fraction, `0..=1`) or air that cannot
-/// exist is an `Err`, never clamped.
+/// sound speed. An `inputs.humidity_percent` outside `0..=100` or air that cannot exist is an
+/// `Err`, never clamped.
 ///
 /// Presence-blind: `inputs`' temperature and pressure go through the legacy default-sentinel
 /// rule (a sea-level default at a real altitude flies ICAO standard air). See
@@ -83,9 +83,9 @@ pub fn solve_trajectory_for_monte_carlo_with_station_presence(
     // ONE station air, built once: its density ratio seeds the flight's density and its RH the
     // flight's sound speed (both at every step, through air_at), and its sound speed is the
     // reference the reported Mach divides by. So the flight and the report cannot disagree
-    // about the humidity (H2, H13). BallisticInputs.humidity is a 0-1 FRACTION (MBA-722).
-    let humidity = RelativeHumidity::try_fraction(inputs.humidity)
-        .map_err(|error| error.at_field("humidity").to_string())?;
+    // about the humidity (H2, H13).
+    let humidity = RelativeHumidity::try_percent(inputs.humidity_percent)
+        .map_err(|error| error.at_field("humidity_percent").to_string())?;
     let station = StationAir::new(
         inputs.altitude, // meters
         resolved_temp_c,

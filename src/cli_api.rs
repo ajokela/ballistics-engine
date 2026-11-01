@@ -1,6 +1,7 @@
 // CLI API module - provides simplified interfaces for command-line tool
 use crate::atmosphere::{
     KernelAtmosphere, PressureReferenceMode, StationAir, StationAtmospherePresence,
+    DEFAULT_HUMIDITY_PERCENT,
 };
 use crate::cluster_bc::ClusterBCDegradation;
 use crate::gravity::Gravity;
@@ -203,11 +204,18 @@ pub struct BallisticInputs {
     pub altitude: f64,    // meters
     pub temperature: f64, // Celsius
     pub pressure: f64,    // millibars/hPa
-    /// Relative humidity as a FRACTION in `[0, 1]` (e.g. 0.5 = 50%). NOTE the scale
-    /// differs from [`AtmosphericConditions::humidity`], which is a PERCENT in `[0, 100]`.
-    /// The atmosphere helpers (`calculate_air_density_*`) expect percent, so convert via
-    /// [`BallisticInputs::humidity_percent`] before passing this value to them (MBA-722).
-    pub humidity: f64,
+    /// Relative humidity, PERCENT, `0..=100` (50.0 = 50 %): the unit of
+    /// [`AtmosphericConditions::humidity`] and of every atmosphere function, so it passes
+    /// between them unconverted. Default [`DEFAULT_HUMIDITY_PERCENT`].
+    ///
+    /// A [`TrajectorySolver`] flies its [`AtmosphericConditions`] and sets this field from it.
+    /// The entry points that take inputs alone (the `run_monte_carlo*` family and
+    /// [`crate::monte_carlo::solve_trajectory_for_monte_carlo`]) fly this value.
+    ///
+    /// 0.50.0 renamed it from `humidity`, a 0-1 FRACTION, and removed the clamping
+    /// `humidity_percent()` method that converted that. To migrate, write the percent, or
+    /// convert a fraction with [`crate::RelativeHumidity::try_fraction`].
+    pub humidity_percent: f64,
     pub latitude: Option<f64>, // degrees
 
     // Wind conditions
@@ -345,14 +353,6 @@ pub struct BallisticInputs {
 }
 
 impl BallisticInputs {
-    /// `humidity` as a PERCENT in `[0, 100]`, clamped — the scale the atmosphere
-    /// density helpers expect. Centralizes the 0–1 → 0–100 conversion so callers don't
-    /// re-derive it (and can't accidentally feed the raw 0–1 fraction as a percentage).
-    /// See the field doc on [`BallisticInputs::humidity`] (MBA-722).
-    pub fn humidity_percent(&self) -> f64 {
-        (self.humidity * 100.0).clamp(0.0, 100.0)
-    }
-
     /// Azimuth bias (radians) a zero solved at `zero_distance_m` applies to the launch
     /// direction. Two independent terms share this one convergence point:
     /// * MBA-1359 — the deliberate horizontal POI offset at the zero range
@@ -580,7 +580,7 @@ impl Default for BallisticInputs {
             altitude: 0.0,
             temperature: 15.0,
             pressure: 1013.25, // Standard sea level pressure (millibars)
-            humidity: 0.5,     // 50% relative humidity
+            humidity_percent: DEFAULT_HUMIDITY_PERCENT,
             latitude: None,
 
             // Wind conditions
@@ -794,9 +794,8 @@ impl Default for WindConditions {
 pub struct AtmosphericConditions {
     pub temperature: f64, // Celsius
     pub pressure: f64,    // hPa
-    /// Relative humidity as a PERCENT in `[0, 100]`. NOTE: [`BallisticInputs::humidity`]
-    /// uses a 0–1 FRACTION instead — convert with `BallisticInputs::humidity_percent` when
-    /// crossing between them (MBA-722).
+    /// Relative humidity, PERCENT, `0..=100`, the same unit as
+    /// [`BallisticInputs::humidity_percent`]. Default [`DEFAULT_HUMIDITY_PERCENT`].
     pub humidity: f64,
     pub altitude: f64, // meters
 }
@@ -806,7 +805,7 @@ impl Default for AtmosphericConditions {
         Self {
             temperature: 15.0,
             pressure: 1013.25,
-            humidity: 50.0,
+            humidity: DEFAULT_HUMIDITY_PERCENT,
             altitude: 0.0,
         }
     }
@@ -1180,6 +1179,9 @@ impl TrajectorySolver {
         // point: conditioning that lives only here is invisible to the external bindings that
         // call the fast path directly.
         inputs.normalize_for_solve();
+        // The atmosphere is what a solve flies, so its humidity wins and the inputs then say
+        // the same thing (H5). Copied as given; an out-of-range value is the solve's to judge.
+        inputs.humidity_percent = atmosphere.humidity;
 
         // Initialize cluster BC if enabled
         let cluster_bc = if inputs.use_cluster_bc {
@@ -4243,7 +4245,7 @@ impl MonteCarloTrialSampler {
         let atmosphere = AtmosphericConditions {
             temperature: base_inputs.temperature,
             pressure: base_inputs.pressure,
-            humidity: base_inputs.humidity_percent(),
+            humidity: base_inputs.humidity_percent,
             altitude: base_inputs.altitude,
         };
         let target_hint = params
@@ -9866,19 +9868,29 @@ mod coriolis_direction_tests {
     }
 
     #[test]
-    fn humidity_percent_converts_and_clamps() {
-        // MBA-722: BallisticInputs.humidity is a 0-1 fraction; the helper yields 0-100 percent.
-        let mut i = BallisticInputs {
-            humidity: 0.5,
-            ..BallisticInputs::default()
-        };
-        assert!((i.humidity_percent() - 50.0).abs() < 1e-9, "0.5 -> 50%");
-        i.humidity = 0.0;
-        assert_eq!(i.humidity_percent(), 0.0);
-        i.humidity = 1.0;
-        assert_eq!(i.humidity_percent(), 100.0);
-        i.humidity = 1.5; // out of range -> clamped, never > 100
-        assert_eq!(i.humidity_percent(), 100.0);
+    fn humidity_percent_is_a_percent_field_that_relative_humidity_validates_never_clamps() {
+        // 0.50.0 (H5): the field is a PERCENT with the engine's one default, and the clamping
+        // 0-1 -> 0-100 helper is gone. RelativeHumidity::try_percent is its validator: it keeps
+        // 0..=100 bit for bit and refuses anything else. 0.49.0's helper clamped 1.5 to 100 %.
+        let inputs = BallisticInputs::default();
+        assert_eq!(
+            inputs.humidity_percent.to_bits(),
+            DEFAULT_HUMIDITY_PERCENT.to_bits()
+        );
+        assert_eq!(
+            inputs.humidity_percent.to_bits(),
+            AtmosphericConditions::default().humidity.to_bits()
+        );
+        for percent in [0.0, 7.0, 50.0, 55.0, 100.0] {
+            let validated = crate::RelativeHumidity::try_percent(percent).expect("in range");
+            assert_eq!(validated.percent().to_bits(), percent.to_bits());
+        }
+        for percent in [150.0, -5.0, 100.0001, f64::NAN, f64::INFINITY] {
+            assert!(
+                crate::RelativeHumidity::try_percent(percent).is_err(),
+                "{percent} must be refused, not clamped"
+            );
+        }
     }
 
     /// Vertical position (m) at a given downrange `range_m`, for a shot fired along
@@ -11273,3 +11285,9 @@ mod station_air_tests {
 // acceleration.
 #[cfg(test)]
 mod humidity_consistency_tests;
+
+// H5 builder pins: every builder of a BallisticInputs leaves the humidity in it as the percent
+// the engine flies (humidity-consistency train, plan C3). A child module so it can read the
+// solver's and the Monte Carlo sampler's own inputs.
+#[cfg(test)]
+mod humidity_inputs_tests;

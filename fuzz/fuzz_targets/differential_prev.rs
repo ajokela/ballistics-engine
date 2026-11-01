@@ -1,8 +1,8 @@
 #![no_main]
 use arbitrary::Unstructured;
 use ballistics_engine::{
-    AtmosphericConditions as Atmo, BallisticInputs as Inp, TrajectorySolver as Solver,
-    WindConditions as Wind,
+    AtmosphericConditions as Atmo, BallisticInputs as Inp, RelativeHumidity,
+    TrajectorySolver as Solver, WindConditions as Wind,
 };
 use ballistics_engine_fuzz::domain::valid_inputs;
 use libfuzzer_sys::fuzz_target;
@@ -86,7 +86,10 @@ fn to_prev(c: &Inp) -> PInp {
         temperature: c.temperature,
         pressure: c.pressure,
         altitude: c.altitude,
-        humidity: c.humidity,
+        // The 0.21.5 field is the 0-1 fraction; the current one is a percent.
+        humidity: RelativeHumidity::try_percent(c.humidity_percent)
+            .expect("valid_inputs draws 0..=100 %")
+            .fraction(),
         use_rk4: true,
         ..Default::default()
     }

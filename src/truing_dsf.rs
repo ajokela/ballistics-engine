@@ -607,6 +607,59 @@ pub fn solve_for_dsf(
     inputs: &DsfSolveInputs,
     max_range_m: f64,
 ) -> Result<TrajectoryResult, String> {
+    let DsfFlight {
+        inputs: mut ballistic_inputs,
+        wind,
+        atmosphere,
+        station_presence,
+        zero_target_height_m,
+    } = dsf_flight(inputs, max_range_m);
+
+    // Zero angle: flat (0.0) when no zero is configured, same as a bare
+    // `trajectory --saved-profile NAME` with no --auto-zero (MBA-1357 Task 8 review,
+    // Finding 2 — restores the historical Option<f64> semantics the first version of this
+    // function dropped).
+    if let Some(zero_distance_yd) = inputs.zero_distance_yd {
+        let zero_distance_m = zero_distance_yd * 0.9144;
+        ballistic_inputs.muzzle_angle = calculate_zero_angle_with_station_presence(
+            ballistic_inputs.clone(),
+            zero_distance_m,
+            zero_target_height_m,
+            wind.clone(),
+            atmosphere.clone(),
+            station_presence,
+        )
+        .map_err(|e| e.to_string())?;
+        // MBA-1359: the returned angle carries the vertical POI bias; the horizontal bias
+        // is an azimuth term the flight inputs must apply themselves.
+        ballistic_inputs.azimuth_angle += ballistic_inputs.windage_zero_bias_rad(zero_distance_m);
+    }
+
+    let mut solver = TrajectorySolver::new_with_station_presence(
+        ballistic_inputs,
+        wind,
+        atmosphere,
+        station_presence,
+    );
+    solver.set_max_range(max_range_m);
+    solver.set_time_step(0.001);
+    solver.solve().map_err(|e| e.to_string())
+}
+
+/// What [`solve_for_dsf`] flies, before its zero: the solver's inputs, wind, atmosphere and
+/// station presence, and the line-of-sight height the zero aims at. A separate builder so the
+/// units it writes are testable (humidity-consistency train, H5).
+pub(crate) struct DsfFlight {
+    pub(crate) inputs: BallisticInputs,
+    pub(crate) wind: WindConditions,
+    pub(crate) atmosphere: AtmosphericConditions,
+    pub(crate) station_presence: StationAtmospherePresence,
+    /// Bore height plus sight height, meters: the zero's target height.
+    pub(crate) zero_target_height_m: f64,
+}
+
+/// Build [`solve_for_dsf`]'s [`DsfFlight`] from `inputs` and the solve envelope `max_range_m`.
+pub(crate) fn dsf_flight(inputs: &DsfSolveInputs, max_range_m: f64) -> DsfFlight {
     let velocity_m = inputs.muzzle_velocity_fps * 0.3048;
     let mass_kg = inputs.mass_gr * crate::constants::GRAINS_TO_KG;
     let diameter_m = inputs.diameter_in * 0.0254;
@@ -658,17 +711,12 @@ pub fn solve_for_dsf(
     let atmosphere = AtmosphericConditions {
         temperature: temperature_c,
         pressure: pressure_hpa,
-        // NOTE: matches solve_profile_for_dsf's (and run_trajectory's) own convention —
-        // the same raw (0-100) value feeds both AtmosphericConditions.humidity (percent,
-        // what the solve actually reads) and BallisticInputs.humidity below (nominally a
-        // 0-1 fraction per its own doc comment). Replicated rather than "fixed" — see
-        // that helper's own note; BallisticInputs.humidity is otherwise inert for a plain
-        // (non-Monte-Carlo) solve.
+        // A percent, as is BallisticInputs.humidity_percent below: the one value feeds both.
         humidity: inputs.humidity_pct,
         altitude: altitude_m,
     };
 
-    let mut ballistic_inputs = BallisticInputs {
+    let ballistic_inputs = BallisticInputs {
         bc_value: inputs.ballistic_coefficient,
         bc_type: drag_model,
         bc_reference_standard,
@@ -697,7 +745,7 @@ pub fn solve_for_dsf(
         altitude: altitude_m,
         temperature: temperature_c,
         pressure: pressure_hpa,
-        humidity: inputs.humidity_pct,
+        humidity_percent: inputs.humidity_pct,
         latitude: None,
 
         wind_speed: wind_speed_m,
@@ -755,35 +803,13 @@ pub fn solve_for_dsf(
         bc_type_str: None,
     };
 
-    // Zero angle: flat (0.0) when no zero is configured, same as a bare
-    // `trajectory --saved-profile NAME` with no --auto-zero (MBA-1357 Task 8 review,
-    // Finding 2 — restores the historical Option<f64> semantics the first version of this
-    // function dropped).
-    if let Some(zero_distance_yd) = inputs.zero_distance_yd {
-        let zero_distance_m = zero_distance_yd * 0.9144;
-        ballistic_inputs.muzzle_angle = calculate_zero_angle_with_station_presence(
-            ballistic_inputs.clone(),
-            zero_distance_m,
-            bore_height_m + sight_height_m,
-            wind.clone(),
-            atmosphere.clone(),
-            station_presence,
-        )
-        .map_err(|e| e.to_string())?;
-        // MBA-1359: the returned angle carries the vertical POI bias; the horizontal bias
-        // is an azimuth term the flight inputs must apply themselves.
-        ballistic_inputs.azimuth_angle += ballistic_inputs.windage_zero_bias_rad(zero_distance_m);
-    }
-
-    let mut solver = TrajectorySolver::new_with_station_presence(
-        ballistic_inputs,
+    DsfFlight {
+        inputs: ballistic_inputs,
         wind,
         atmosphere,
         station_presence,
-    );
-    solver.set_max_range(max_range_m);
-    solver.set_time_step(0.001);
-    solver.solve().map_err(|e| e.to_string())
+        zero_target_height_m: bore_height_m + sight_height_m,
+    }
 }
 
 #[cfg(test)]

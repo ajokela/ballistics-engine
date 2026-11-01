@@ -20,8 +20,8 @@
 
 use ballistics_engine::drag::DragTable;
 use ballistics_engine::{
-    AtmosphericConditions, BallisticInputs, DragModel, TrajectoryResult, TrajectorySolver,
-    WindConditions,
+    AtmosphericConditions, BallisticInputs, DragModel, RelativeHumidity, TrajectoryResult,
+    TrajectorySolver, WindConditions,
 };
 use serde::Deserialize;
 use std::fs;
@@ -175,7 +175,7 @@ fn build_inputs(inp: &Inputs) -> BallisticInputs {
         altitude: inp.altitude_m,
         temperature: inp.temperature_c,
         pressure: inp.pressure_hpa,
-        humidity: inp.humidity_frac,
+        humidity_percent: humidity_percent(inp),
         wind_speed: inp.wind_speed_mps,
         wind_angle: inp.wind_angle_rad,
         use_rk4: inp.use_rk4,
@@ -211,12 +211,18 @@ fn build_wind(inp: &Inputs) -> WindConditions {
     }
 }
 
+/// The dataset's `humidity_frac` (a 0-1 fraction) as the percent both engine structs carry.
+fn humidity_percent(inp: &Inputs) -> f64 {
+    RelativeHumidity::try_fraction(inp.humidity_frac)
+        .expect("dataset humidity_frac is a 0-1 fraction")
+        .percent()
+}
+
 fn build_atmosphere(inp: &Inputs) -> AtmosphericConditions {
     AtmosphericConditions {
         temperature: inp.temperature_c,
         pressure: inp.pressure_hpa,
-        // BallisticInputs.humidity is a 0-1 fraction; AtmosphericConditions.humidity is a percent.
-        humidity: (inp.humidity_frac * 100.0).clamp(0.0, 100.0),
+        humidity: humidity_percent(inp),
         altitude: inp.altitude_m,
     }
 }

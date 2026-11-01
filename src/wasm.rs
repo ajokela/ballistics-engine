@@ -2363,7 +2363,7 @@ impl WasmBallistics {
         atmosphere.humidity = humidity;
         inputs.temperature = atmosphere.temperature;
         inputs.pressure = atmosphere.pressure;
-        inputs.humidity = (humidity / 100.0).clamp(0.0, 1.0);
+        inputs.humidity_percent = humidity;
         inputs.altitude = atmosphere.altitude;
 
         // MBA-1366: --density-altitude supersedes altitude/pressure/pressure-type entirely,
@@ -2480,7 +2480,7 @@ impl WasmBallistics {
             }
             if let Some(zh) = zero_humidity {
                 zero_atmosphere.humidity = zh;
-                zero_inputs.humidity = (zh / 100.0).clamp(0.0, 1.0);
+                zero_inputs.humidity_percent = zh;
                 zero_day_overridden = true;
             }
             if let Some(za) = zero_altitude {
@@ -3305,7 +3305,7 @@ impl WasmBallistics {
         }
         if let Some(h) = humidity {
             atmosphere.humidity = h; // percent
-            inputs.humidity = (h / 100.0).clamp(0.0, 1.0); // fraction
+            inputs.humidity_percent = h; // percent
         }
         if let Some(alt) = altitude {
             let a_m = match units {
@@ -3996,9 +3996,7 @@ impl WasmBallistics {
         // and mirrors native handle_lead's plumbing: the value lands BOTH on the solver
         // condition object (wind/atmosphere — what the solve consumes) and on the
         // matching BallisticInputs field (native's build_trajectory_components sets
-        // both; inputs.humidity takes the documented 0-1 fraction per its field
-        // contract, while atmosphere.humidity takes percent — same split as
-        // handle_trajectory_command).
+        // both; inputs.humidity_percent and atmosphere.humidity are both percent).
         let mut wind = WindConditions::default();
         // 0.49.0: the station air and which of it was typed (see `lead_station_air`).
         let (atmosphere, station_presence) = lead_station_air(
@@ -4012,7 +4010,7 @@ impl WasmBallistics {
         inputs.temperature = atmosphere.temperature;
         inputs.pressure = atmosphere.pressure;
         if humidity.is_some() {
-            inputs.humidity = (atmosphere.humidity / 100.0).clamp(0.0, 1.0); // fraction
+            inputs.humidity_percent = atmosphere.humidity; // percent
         }
         inputs.altitude = atmosphere.altitude;
         if let Some(w) = wind_speed {

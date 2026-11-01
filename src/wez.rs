@@ -25,7 +25,7 @@ use crate::solve_json::{
 };
 use crate::{
     AtmosphericConditions, BallisticInputs, BallisticsError, DragModel, MonteCarloParams,
-    MonteCarloResults, TrajectorySolver, WindConditions,
+    MonteCarloResults, RelativeHumidity, TrajectorySolver, WindConditions,
 };
 
 /// A parsed `--target-size` value, still in the CLI's chosen unit (inches imperial / cm
@@ -244,13 +244,15 @@ fn wez_kernel_drag_model(model: DragModel) -> DragModelV1 {
 /// perturbed solves to see the identical trajectory truncation the row's own baseline solve
 /// used.
 ///
-/// Returns `None` only for a loaded custom drag table (`base_inputs.custom_drag_table`), which
+/// Returns `None` for a loaded custom drag table (`base_inputs.custom_drag_table`), which
 /// replaces G-model+BC drag entirely. solve-json v1 can carry one since MBA-1597
 /// (`projectile.drag_table`), but this mapping does not yet translate a deck and its `cd_scale`
 /// into that field. Differentiating under a built-in fallback model would silently misattribute
 /// variance, so custom-deck attribution remains explicitly unavailable. Every built-in [`DragModel`] is represented exactly by
-/// [`wez_kernel_drag_model`].
-fn wez_resolved_request(
+/// [`wez_kernel_drag_model`]. It is `None` too for a `base_inputs.humidity_percent` outside
+/// `0..=100`, which the SI wire cannot carry (unreachable from `compute_wez`, which flies the
+/// default humidity).
+pub(crate) fn wez_resolved_request(
     base_inputs: &BallisticInputs,
     base_wind: &WindConditions,
     solver_max_range: f64,
@@ -306,7 +308,11 @@ fn wez_resolved_request(
             altitude_m: base_inputs.altitude,
             temperature_k: base_inputs.temperature + 273.15,
             pressure_pa: base_inputs.pressure * 100.0,
-            relative_humidity: base_inputs.humidity,
+            // The SI wire's fraction, from the inputs' percent. A humidity outside 0..=100 has
+            // no wire fraction, so it gets no attribution.
+            relative_humidity: RelativeHumidity::try_percent(base_inputs.humidity_percent)
+                .ok()?
+                .fraction(),
             latitude_rad: base_inputs.latitude.map(f64::to_radians),
             pressure_reference: None,
         },
@@ -732,7 +738,7 @@ pub fn compute_wez(
     let atmosphere = AtmosphericConditions {
         temperature: base_inputs.temperature,
         pressure: base_inputs.pressure,
-        humidity: base_inputs.humidity_percent(),
+        humidity: base_inputs.humidity_percent,
         altitude: base_inputs.altitude,
     };
     let line_of_sight_height_m = base_inputs.muzzle_height + base_inputs.sight_height;
@@ -872,7 +878,7 @@ mod wez_tests {
         AtmosphericConditions {
             temperature: inputs.temperature,
             pressure: inputs.pressure,
-            humidity: inputs.humidity_percent(),
+            humidity: inputs.humidity_percent,
             altitude: inputs.altitude,
         }
     }

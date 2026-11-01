@@ -212,7 +212,7 @@ fn direct_representative_solver() -> TrajectorySolver {
         altitude: 0.0,
         temperature: 20.0,
         pressure: 1000.0,
-        humidity: 0.4,
+        humidity_percent: 40.0,
         wind_speed: 4.0,
         wind_angle: std::f64::consts::FRAC_PI_2,
         twist_rate: 8.0,

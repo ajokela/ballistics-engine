@@ -1328,7 +1328,7 @@ fn probe_kernel_standard_rh0() -> Probe {
 
         // The lean Monte Carlo kernel (fast_integrate behind one BallisticInputs) at RH 0.
         let inputs = BallisticInputs {
-            humidity: 0.0,
+            humidity_percent: 0.0,
             target_distance: 800.0,
             ..kernel_inputs(station)
         };

@@ -73,7 +73,8 @@ pub fn build_trajectory_components(
         altitude,
         temperature,
         pressure,
-        humidity,
+        // A percent, the unit of both structs (H5).
+        humidity_percent: humidity,
         wind_speed,
         wind_angle: wind_direction_rad,
         use_rk4: true,           // Required for non-Euler solver

@@ -119,8 +119,7 @@ fn load(station: Station, muzzle_angle_rad: f64, humidity_percent: f64) -> Balli
         altitude: station.altitude_m,
         temperature: station.temperature_c,
         pressure: station.pressure_hpa,
-        // BallisticInputs.humidity is a FRACTION.
-        humidity: humidity_percent / 100.0,
+        humidity_percent,
         ground_threshold: -10_000.0,
         ..BallisticInputs::default()
     }

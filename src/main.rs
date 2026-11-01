@@ -8545,7 +8545,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     altitude: zero_altitude_metric,
                     temperature: zero_temperature_metric,
                     pressure: zero_pressure_metric,
-                    humidity: zero_humidity_value,
+                    humidity_percent: zero_humidity_value,
                     use_powder_sensitivity: apply_zero_linear,
                     powder_temp_sensitivity: if apply_zero_linear {
                         UnitConverter::velocity_to_metric(powder_temp_sensitivity, cli.units)
@@ -8901,7 +8901,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     altitude: altitude_metric,
                                     temperature: temperature_metric,
                                     pressure: pressure_metric,
-                                    humidity: final_humidity,
+                                    humidity_percent: final_humidity,
                                     latitude,
                                     wind_speed: wind_speed_metric,
                                     wind_angle: local_wind_direction_rad,
@@ -13599,7 +13599,7 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
         altitude,
         temperature,
         pressure,
-        humidity,
+        humidity_percent: humidity,
         latitude,
 
         // Wind conditions
@@ -15682,7 +15682,7 @@ fn run_zero_calculation(
         sight_height,
         temperature,
         pressure,
-        humidity,
+        humidity_percent: humidity,
         altitude,
         custom_drag_table,
         cd_scale,
@@ -15910,7 +15910,7 @@ fn run_zero_range_calculation(
         sight_height,
         temperature,
         pressure,
-        humidity,
+        humidity_percent: humidity,
         altitude,
         custom_drag_table,
         cd_scale,

@@ -15,7 +15,9 @@
 //!   comments too);
 //! - a per-step acceleration file (`cli_api.rs`, `derivatives.rs`, `fast_trajectory.rs`) that
 //!   does not call `air_at`;
-//! - a fixed sound speed (`340.29`, `343.0`) outside its allowlisted, documented sites.
+//! - a fixed sound speed (`340.29`, `343.0`) outside its allowlisted, documented sites;
+//! - a humidity scaled by 100 or clamped into a 0-1 fraction by hand (plan C3, H5): a Rust
+//!   humidity is a percent, and a wire fraction converts through `RelativeHumidity`.
 //!
 //! Together with `-D warnings` on the deprecated dry `get_local_atmosphere`, no in-crate path can
 //! silently go dry.
@@ -455,4 +457,113 @@ fn fixed_sound_speeds_appear_only_at_their_documented_sites() {
         }
     }
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+}
+
+/// Offsets in `line` (production code) of a scaling by 100: `* 100`, `/ 100`, `100 *`, `100 /`,
+/// with or without `.0` and spaces, the `100` not part of a longer number.
+fn scalings_by_100(line: &str) -> Vec<usize> {
+    let bytes = line.as_bytes();
+    let is_num = |b: u8| b.is_ascii_digit() || b == b'.' || b == b'_';
+    let mut out = Vec::new();
+    for (at, _) in line.match_indices("100") {
+        if at > 0 && is_num(bytes[at - 1]) {
+            continue;
+        }
+        let mut end = at + 3;
+        if line[end..].starts_with(".0") {
+            end += 2;
+            while bytes.get(end) == Some(&b'0') {
+                end += 1;
+            }
+        }
+        if bytes.get(end).is_some_and(|b| is_num(*b)) {
+            continue;
+        }
+        let before = line[..at].trim_end();
+        let after = line[end..].trim_start();
+        let operator_before = before.ends_with('*') || before.ends_with('/');
+        let operator_after = (after.starts_with('*') || after.starts_with('/'))
+            && !after.starts_with("//")
+            && !after.starts_with("/*");
+        if operator_before || operator_after {
+            out.push(at);
+        }
+    }
+    out
+}
+
+#[test]
+fn the_scaling_finder_finds_scalings_only() {
+    for line in [
+        "humidity / 100.0",
+        "h*100.0",
+        "x * 100",
+        "100.0 * f",
+        "100.00/ h",
+        "(h / 100.0).clamp(0.0, 1.0)",
+    ] {
+        assert_eq!(scalings_by_100(line).len(), 1, "{line}");
+    }
+    for line in [
+        "humidity: 100.0,",
+        "1000.0 * h",
+        "h / 1000.0",
+        "h / 100.5",
+        "0.100 * h",
+        "x = 100.0;",
+        "let pct = 100.0 - h;",
+        "1_100.0 / x",
+    ] {
+        assert!(scalings_by_100(line).is_empty(), "{line}");
+    }
+}
+
+#[test]
+fn no_production_path_converts_a_humidity_by_hand() {
+    // H5: one unit per contract. Rust types and functions carry a relative humidity as a
+    // PERCENT (`BallisticInputs.humidity_percent`, `AtmosphericConditions.humidity`), and the
+    // fraction<->percent conversion is `RelativeHumidity::try_fraction` / `fraction()`, so no
+    // production line outside src/atmosphere.rs scales a humidity by 100 itself, or clamps one
+    // into a 0-1 fraction. 0.49.0 did both at every site that wrote the old fraction field.
+    //
+    // The allowlist names each remaining site, with the step that moves it onto
+    // RelativeHumidity: the `atmosphere.density_altitude` service converts its SI-wire fraction
+    // (plan C5).
+    let allowed: BTreeMap<&str, usize> = BTreeMap::from([("src/atmosphere_service.rs", 1)]);
+    let mut found: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (path, text, production) in production_sources() {
+        for (index, line) in production.lines().enumerate() {
+            if !line.to_ascii_lowercase().contains("humid") {
+                continue;
+            }
+            let scales = !scalings_by_100(line).is_empty();
+            let clamps_to_a_fraction = line.contains("clamp(0.0, 1.0)");
+            if scales || clamps_to_a_fraction {
+                let raw = text.lines().nth(index).unwrap_or("").trim();
+                found
+                    .entry(path.clone())
+                    .or_default()
+                    .push(format!("{path}:{}: {raw}", index + 1));
+            }
+        }
+    }
+    let mut offenders = Vec::new();
+    for (path, sites) in &found {
+        if allowed.get(path.as_str()) != Some(&sites.len()) {
+            offenders.extend(sites.iter().cloned());
+        }
+    }
+    for (path, count) in &allowed {
+        if !found.contains_key(*path) {
+            offenders.push(format!(
+                "{path}: allowlisted for {count} but has none (update the list)"
+            ));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a humidity is converted by hand; carry a percent, and convert a wire fraction with \
+         RelativeHumidity::try_fraction:\n{}",
+        offenders.join("\n")
+    );
 }

@@ -40,7 +40,7 @@ fn parity_inputs() -> BallisticInputs {
         altitude: 0.0,
         temperature: 15.0,
         pressure: 1013.25,
-        humidity: 0.5,
+        humidity_percent: 50.0,
         // Canonical spin-drift + advanced effects.
         use_enhanced_spin_drift: true,
         enable_advanced_effects: true,
@@ -73,13 +73,13 @@ fn lateral_monte_carlo(i: &BallisticInputs) -> f64 {
 fn lateral_fast_segments(i: &BallisticInputs) -> f64 {
     let (resolved_temp_c, resolved_pressure_hpa) =
         resolve_station_conditions(i.temperature, i.pressure, i.altitude);
-    // The station at the inputs' own humidity (a FRACTION), as the lean Monte Carlo builds it:
+    // The station at the inputs' own humidity (a percent), as the lean Monte Carlo builds it:
     // its density ratio AND its sound speed carry that humidity.
     let station = StationAir::new(
         i.altitude,
         resolved_temp_c,
         resolved_pressure_hpa,
-        RelativeHumidity::try_fraction(i.humidity).expect("valid humidity"),
+        RelativeHumidity::try_percent(i.humidity_percent).expect("valid humidity"),
     )
     .expect("valid station");
 
@@ -107,13 +107,13 @@ fn lateral_fast_segments(i: &BallisticInputs) -> f64 {
 fn lateral_fast_integrate(i: &BallisticInputs) -> f64 {
     let (resolved_temp_c, resolved_pressure_hpa) =
         resolve_station_conditions(i.temperature, i.pressure, i.altitude);
-    // The station at the inputs' own humidity (a FRACTION), as the lean Monte Carlo builds it:
+    // The station at the inputs' own humidity (a percent), as the lean Monte Carlo builds it:
     // its density ratio AND its sound speed carry that humidity.
     let station = StationAir::new(
         i.altitude,
         resolved_temp_c,
         resolved_pressure_hpa,
-        RelativeHumidity::try_fraction(i.humidity).expect("valid humidity"),
+        RelativeHumidity::try_percent(i.humidity_percent).expect("valid humidity"),
     )
     .expect("valid station");
 

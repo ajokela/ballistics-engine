@@ -154,13 +154,12 @@ fn spin_drift_station(atmosphere: &KernelAtmosphere) -> (f64, f64) {
 /// Copy the station `atmosphere` flies into `inputs`' own station fields, so the two cannot
 /// disagree: the kernel's atmosphere wins, for every field. Uniform air has no station and
 /// leaves them as the caller set them.
-fn station_into_inputs(atmosphere: &KernelAtmosphere, inputs: &mut BallisticInputs) {
+pub(crate) fn station_into_inputs(atmosphere: &KernelAtmosphere, inputs: &mut BallisticInputs) {
     if let KernelAtmosphere::Station(station) = atmosphere {
         inputs.altitude = station.altitude_m();
         inputs.temperature = station.temperature_c();
         inputs.pressure = station.pressure_hpa();
-        // BallisticInputs.humidity is a FRACTION.
-        inputs.humidity = station.humidity().fraction();
+        inputs.humidity_percent = station.humidity().percent();
     }
 }
 

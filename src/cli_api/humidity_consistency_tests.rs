@@ -209,8 +209,7 @@ fn load(station: Station) -> BallisticInputs {
         altitude: station.altitude_m,
         temperature: station.temperature_c,
         pressure: station.pressure_hpa,
-        // BallisticInputs.humidity is a FRACTION.
-        humidity: station.humidity_percent / 100.0,
+        humidity_percent: station.humidity_percent,
         target_distance: 600.0,
         ..BallisticInputs::default()
     }
@@ -781,7 +780,7 @@ fn the_kernel_atmosphere_wins_over_the_inputs_own_station_fields() {
                 altitude: 0.0,
                 temperature: 15.0,
                 pressure: 1013.25,
-                humidity: 0.0,
+                humidity_percent: 0.0,
                 ..load(station)
             };
             let sock = scenario.sock();

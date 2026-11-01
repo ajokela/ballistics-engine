@@ -58,7 +58,7 @@ pub fn valid_inputs(u: &mut Unstructured) -> Result<BallisticInputs> {
         temperature: ranged(u, -40.0, 50.0)?, // C
         pressure: ranged(u, 800.0, 1100.0)?,  // hPa
         altitude: ranged(u, 0.0, 4000.0)?,    // m
-        humidity: ranged(u, 0.0, 1.0)?,       // FRACTION
+        humidity_percent: ranged(u, 0.0, 100.0)?, // PERCENT
         use_rk4: true,
         ..Default::default()
     })
@@ -80,7 +80,7 @@ pub fn hostile_inputs(u: &mut Unstructured) -> Result<BallisticInputs> {
         temperature: wild(u)?,
         pressure: wild(u)?,
         altitude: wild(u)?,
-        humidity: wild(u)?,
+        humidity_percent: wild(u)?,
         target_distance: ranged(u, 10.0, 3000.0)?, // bounded on purpose
         use_rk4: true,
         ..Default::default()

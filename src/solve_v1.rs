@@ -21,8 +21,8 @@ use crate::trajectory_observation::{
 };
 use crate::wind::WindSegment;
 use crate::{
-    AtmosphericConditions, BallisticInputs, BallisticsError, DragModel, TrajectorySolver,
-    WindConditions,
+    AtmosphericConditions, BallisticInputs, BallisticsError, DragModel, RelativeHumidity,
+    TrajectorySolver, WindConditions,
 };
 
 const DEFAULT_SIGHT_HEIGHT_M: f64 = 0.05;
@@ -603,11 +603,14 @@ pub(crate) fn prepare_request(
         "$.atmosphere.pressure_pa",
         "pressure conversion to hectopascals overflowed",
     )?;
-    let humidity_percent = checked_conversion(
-        resolved_request.atmosphere.relative_humidity * 100.0,
-        "$.atmosphere.relative_humidity",
-        "relative-humidity conversion to percent overflowed",
-    )?;
+    // The wire's fraction (already checked to be in [0, 1]) as the one percent both engine
+    // structs carry.
+    let humidity_percent =
+        RelativeHumidity::try_fraction(resolved_request.atmosphere.relative_humidity)
+            .map_err(|error| {
+                invalid_value("$.atmosphere.relative_humidity", error.reason().to_string())
+            })?
+            .percent();
     let twist_rate_inches = checked_conversion(
         resolved_request.rifle.twist_rate_m_per_turn / METERS_PER_INCH,
         "$.rifle.twist_rate_m_per_turn",
@@ -677,7 +680,7 @@ pub(crate) fn prepare_request(
         altitude: resolved_request.atmosphere.altitude_m,
         temperature: temperature_c,
         pressure: pressure_hpa,
-        humidity: resolved_request.atmosphere.relative_humidity,
+        humidity_percent,
         latitude: latitude_degrees,
         wind_speed,
         wind_angle: wind_direction,
@@ -2375,7 +2378,7 @@ mod tests {
         );
         assert!((prepared.inputs.twist_rate - 12.0).abs() < 1.0e-12);
         assert_eq!(prepared.atmosphere.humidity, 50.0);
-        assert_eq!(prepared.inputs.humidity, 0.5);
+        assert_eq!(prepared.inputs.humidity_percent, 50.0);
     }
 
     #[test]

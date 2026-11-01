@@ -356,15 +356,14 @@ pub struct TrajectoryParams {
 /// the struct is constant for the whole integration.
 pub(crate) fn build_inputs(params: &TrajectoryParams, muzzle_velocity_mps: f64) -> BallisticInputs {
     // The station the kernel flies, so every station field of the derivative inputs agrees with
-    // `params.atmosphere` (the per-step air itself comes from `params.atmosphere`). The humidity
-    // is the FRACTION BallisticInputs carries. Uniform air has no station, so these keep
-    // BallisticInputs' defaults.
+    // `params.atmosphere` (the per-step air itself comes from `params.atmosphere`), the humidity
+    // as its percent. Uniform air has no station, so these keep BallisticInputs' defaults.
     let (altitude, temperature, pressure, humidity) = match &params.atmosphere {
         KernelAtmosphere::Station(station) => (
             station.altitude_m(),
             station.temperature_c(),
             station.pressure_hpa(),
-            station.humidity().fraction(),
+            station.humidity().percent(),
         ),
         _ => {
             let defaults = BallisticInputs::default();
@@ -372,7 +371,7 @@ pub(crate) fn build_inputs(params: &TrajectoryParams, muzzle_velocity_mps: f64) 
                 defaults.altitude,
                 defaults.temperature,
                 defaults.pressure,
-                defaults.humidity,
+                defaults.humidity_percent,
             )
         }
     };
@@ -401,7 +400,7 @@ pub(crate) fn build_inputs(params: &TrajectoryParams, muzzle_velocity_mps: f64) 
         altitude,
         temperature,
         pressure,
-        humidity,
+        humidity_percent: humidity,
         tipoff_yaw: 0.0,
         cd_delta2: 7.5,
         target_distance: 1000.0, // default
@@ -1134,8 +1133,8 @@ mod tests {
     #[test]
     fn build_inputs_mirrors_the_station_it_flies_never_a_density_ratio() {
         // The derivative inputs' station fields are the kernel atmosphere's own station, the
-        // humidity as the FRACTION BallisticInputs carries (0.49.0 wrote the density ratio
-        // into it). Uniform air has no station, so the fields keep BallisticInputs' defaults.
+        // humidity as its PERCENT (0.49.0 wrote the density ratio into the humidity field).
+        // Uniform air has no station, so the fields keep BallisticInputs' defaults.
         let mut params = create_test_params(300.0);
         params.atmosphere = KernelAtmosphere::Station(
             StationAir::new(
@@ -1152,9 +1151,9 @@ mod tests {
                 inputs.altitude,
                 inputs.temperature,
                 inputs.pressure,
-                inputs.humidity
+                inputs.humidity_percent
             ],
-            [1_500.0, 25.0, 830.0, 0.3]
+            [1_500.0, 25.0, 830.0, 30.0]
         );
 
         params.atmosphere = KernelAtmosphere::uniform(1.1, 335.0).unwrap();
@@ -1165,13 +1164,13 @@ mod tests {
                 inputs.altitude,
                 inputs.temperature,
                 inputs.pressure,
-                inputs.humidity
+                inputs.humidity_percent
             ],
             [
                 defaults.altitude,
                 defaults.temperature,
                 defaults.pressure,
-                defaults.humidity
+                defaults.humidity_percent
             ]
         );
     }

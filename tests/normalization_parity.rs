@@ -53,13 +53,13 @@ fn asm_inputs() -> BallisticInputs {
 fn fast_impact_velocity(i: &BallisticInputs, segmented: bool) -> f64 {
     let (resolved_temp_c, resolved_pressure_hpa) =
         resolve_station_conditions(i.temperature, i.pressure, i.altitude);
-    // The station at the inputs' own humidity (a FRACTION), as the lean Monte Carlo builds it:
+    // The station at the inputs' own humidity (a percent), as the lean Monte Carlo builds it:
     // its density ratio AND its sound speed carry that humidity.
     let station = StationAir::new(
         i.altitude,
         resolved_temp_c,
         resolved_pressure_hpa,
-        RelativeHumidity::try_fraction(i.humidity).expect("valid humidity"),
+        RelativeHumidity::try_percent(i.humidity_percent).expect("valid humidity"),
     )
     .expect("valid station");
     let v = i.muzzle_velocity;
