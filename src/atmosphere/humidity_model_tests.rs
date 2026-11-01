@@ -1083,3 +1083,144 @@ fn air_at_flies_the_station_humidity_into_the_sound_speed() {
         humid.speed_of_sound_mps().to_bits()
     );
 }
+
+#[test]
+fn atmo_sock_validate_accepts_valid_and_empty_zone_sets() {
+    assert!(AtmoSock::new(Vec::new()).validate().is_ok());
+    assert!(AtmoSock::new(vec![
+        (15.0, 1013.25, 0.0, 300.0),
+        (-5.0, 900.0, 100.0, 1_000.0),
+        (35.0, 1013.25, 50.0, f64::INFINITY),
+    ])
+    .validate()
+    .is_ok());
+}
+
+#[test]
+fn atmo_sock_validate_refuses_each_bad_zone_field_by_name_without_clamping() {
+    use AtmosphereErrorReason as Reason;
+    let cases: [(AtmoSegment, &str, Reason); 12] = [
+        (
+            (15.0, 1013.25, 150.0, 300.0),
+            "humidity_percent",
+            Reason::HumidityPercentOutOfRange,
+        ),
+        (
+            (15.0, 1013.25, 100.0001, 300.0),
+            "humidity_percent",
+            Reason::HumidityPercentOutOfRange,
+        ),
+        (
+            (15.0, 1013.25, -0.0001, 300.0),
+            "humidity_percent",
+            Reason::HumidityPercentOutOfRange,
+        ),
+        (
+            (15.0, 1013.25, f64::NAN, 300.0),
+            "humidity_percent",
+            Reason::NotFinite,
+        ),
+        (
+            (-273.15, 1013.25, 50.0, 300.0),
+            "temperature_c",
+            Reason::AtOrBelowAbsoluteZero,
+        ),
+        (
+            (f64::NAN, 1013.25, 50.0, 300.0),
+            "temperature_c",
+            Reason::NotFinite,
+        ),
+        (
+            (15.0, 0.0, 50.0, 300.0),
+            "pressure_hpa",
+            Reason::NonPositivePressure,
+        ),
+        (
+            (15.0, f64::INFINITY, 50.0, 300.0),
+            "pressure_hpa",
+            Reason::NotFinite,
+        ),
+        // The density-altitude service's impossible air: saturated at 100 C and 1013.25 hPa.
+        (
+            (100.0, 1013.25, 100.0, 300.0),
+            "humidity_percent",
+            Reason::ImpossibleAir,
+        ),
+        (
+            (15.0, 1013.25, 50.0, 0.0),
+            "until_distance_m",
+            Reason::NonPositiveZoneThreshold,
+        ),
+        (
+            (15.0, 1013.25, 50.0, -5.0),
+            "until_distance_m",
+            Reason::NonPositiveZoneThreshold,
+        ),
+        (
+            (15.0, 1013.25, 50.0, f64::NAN),
+            "until_distance_m",
+            Reason::NonPositiveZoneThreshold,
+        ),
+    ];
+    for (zone, field, reason) in cases {
+        let error = AtmoSock::new(vec![zone]).validate().unwrap_err();
+        assert_eq!(
+            error.field(),
+            format!("atmo_sock.zones[0].{field}"),
+            "{zone:?}"
+        );
+        assert_eq!(error.reason(), reason, "{zone:?}");
+        assert!(
+            error.value().to_bits() == zone.0.to_bits()
+                || error.value().to_bits() == zone.1.to_bits()
+                || error.value().to_bits() == zone.2.to_bits()
+                || error.value().to_bits() == zone.3.to_bits(),
+            "the refused value is reported unchanged: {error}"
+        );
+    }
+    // The index is the zone's place in threshold order: a valid near zone comes first.
+    let error = AtmoSock::new(vec![
+        (15.0, 1013.25, 150.0, 900.0),
+        (15.0, 1013.25, 50.0, 300.0),
+    ])
+    .validate()
+    .unwrap_err();
+    assert_eq!(error.field(), "atmo_sock.zones[1].humidity_percent");
+    assert_eq!(
+        error.to_string(),
+        "atmo_sock.zones[1].humidity_percent = 150: relative humidity must be a percent from 0 \
+         to 100"
+    );
+}
+
+#[test]
+fn an_empty_atmo_sock_lookup_falls_back_at_the_one_default_humidity() {
+    // air_at never asks an empty sock (it means the station); the raw lookup's own fallback is
+    // the engine's default humidity, not a 0 % of its own.
+    let (_, _, humidity) = AtmoSock::new(Vec::new()).atmo_for_range(250.0);
+    assert_eq!(humidity.to_bits(), DEFAULT_HUMIDITY_PERCENT.to_bits());
+}
+
+#[test]
+#[allow(deprecated)] // the dry legacy lookup is what is under test
+fn the_deprecated_dry_lookup_is_the_shared_composition_at_zero_humidity() {
+    // One dry constant: get_local_atmosphere is get_local_atmosphere_humid at 0 %, to the bit,
+    // over heights below, at and far above the base, so a dry path can only differ from a humid
+    // one by its humidity.
+    for (base_alt, base_t, base_p, ratio) in [
+        (0.0, 15.0, 1013.25, 1.0),
+        (1_500.0, 25.0, 830.0, 0.79),
+        (500.0, -10.0, 950.0, 1.05),
+    ] {
+        for offset in ALT_OFFSETS_M {
+            let altitude = base_alt + offset;
+            let dry = get_local_atmosphere(altitude, base_alt, base_t, base_p, ratio);
+            let humid0 = get_local_atmosphere_humid(altitude, base_alt, base_t, base_p, ratio, 0.0);
+            assert_eq!(
+                [dry.0.to_bits(), dry.1.to_bits()],
+                [humid0.0.to_bits(), humid0.1.to_bits()],
+                "{base_alt} m {base_t} C {base_p} hPa, query {altitude} m"
+            );
+        }
+    }
+}

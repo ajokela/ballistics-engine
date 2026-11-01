@@ -6,7 +6,7 @@
 //! must agree on the final lateral (McCoy Z, windage) within < 0.3 in (0.00762 m). This locks the
 //! three families together so no path silently uses a different (or stacked) spin-drift model.
 
-use ballistics_engine::atmosphere::{calculate_atmosphere, resolve_station_conditions};
+use ballistics_engine::atmosphere::resolve_station_conditions;
 use ballistics_engine::fast_trajectory::{
     fast_integrate, fast_integrate_with_segments, FastIntegrationParams,
 };
@@ -15,6 +15,7 @@ use ballistics_engine::wind::WindSock;
 use ballistics_engine::{
     AtmosphericConditions, BallisticInputs, DragModel, TrajectorySolver, WindConditions,
 };
+use ballistics_engine::{KernelAtmosphere, RelativeHumidity, StationAir};
 
 const TARGET_M: f64 = 914.4; // 1000 yd
 const TOL_M: f64 = 0.00762; // 0.3 in
@@ -72,13 +73,15 @@ fn lateral_monte_carlo(i: &BallisticInputs) -> f64 {
 fn lateral_fast_segments(i: &BallisticInputs) -> f64 {
     let (resolved_temp_c, resolved_pressure_hpa) =
         resolve_station_conditions(i.temperature, i.pressure, i.altitude);
-    let (air_density, _) = calculate_atmosphere(
+    // The station at the inputs' own humidity (a FRACTION), as the lean Monte Carlo builds it:
+    // its density ratio AND its sound speed carry that humidity.
+    let station = StationAir::new(
         i.altitude,
-        Some(resolved_temp_c),
-        Some(resolved_pressure_hpa),
-        i.humidity_percent(),
-    );
-    let base_ratio = air_density / 1.225;
+        resolved_temp_c,
+        resolved_pressure_hpa,
+        RelativeHumidity::try_fraction(i.humidity).expect("valid humidity"),
+    )
+    .expect("valid station");
 
     let v = i.muzzle_velocity;
     let a = i.muzzle_angle;
@@ -89,12 +92,7 @@ fn lateral_fast_segments(i: &BallisticInputs) -> f64 {
         t_span: (0.0, 30.0),
         horiz: TARGET_M,
         vert: sight_position,
-        atmo_params: (
-            i.altitude,
-            resolved_temp_c,
-            resolved_pressure_hpa,
-            base_ratio,
-        ),
+        atmosphere: KernelAtmosphere::Station(station),
         atmo_sock: None,
     };
     let sol = fast_integrate_with_segments(i, vec![], params);
@@ -109,13 +107,15 @@ fn lateral_fast_segments(i: &BallisticInputs) -> f64 {
 fn lateral_fast_integrate(i: &BallisticInputs) -> f64 {
     let (resolved_temp_c, resolved_pressure_hpa) =
         resolve_station_conditions(i.temperature, i.pressure, i.altitude);
-    let (air_density, _) = calculate_atmosphere(
+    // The station at the inputs' own humidity (a FRACTION), as the lean Monte Carlo builds it:
+    // its density ratio AND its sound speed carry that humidity.
+    let station = StationAir::new(
         i.altitude,
-        Some(resolved_temp_c),
-        Some(resolved_pressure_hpa),
-        i.humidity_percent(),
-    );
-    let base_ratio = air_density / 1.225;
+        resolved_temp_c,
+        resolved_pressure_hpa,
+        RelativeHumidity::try_fraction(i.humidity).expect("valid humidity"),
+    )
+    .expect("valid station");
 
     let v = i.muzzle_velocity;
     let a = i.muzzle_angle;
@@ -126,12 +126,7 @@ fn lateral_fast_integrate(i: &BallisticInputs) -> f64 {
         t_span: (0.0, 30.0),
         horiz: TARGET_M,
         vert: sight_position,
-        atmo_params: (
-            i.altitude,
-            resolved_temp_c,
-            resolved_pressure_hpa,
-            base_ratio,
-        ),
+        atmosphere: KernelAtmosphere::Station(station),
         atmo_sock: None,
     };
     let sol = fast_integrate(i, &WindSock::new(vec![]), params);

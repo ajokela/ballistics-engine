@@ -5,7 +5,7 @@
 //!
 //! MBA-157: Upstreamed from ballistics_rust for shared use across the ecosystem
 
-use crate::atmosphere::calculate_atmosphere;
+use crate::atmosphere::{KernelAtmosphere, RelativeHumidity, StationAir};
 use crate::fast_trajectory::{fast_integrate, FastIntegrationParams};
 use crate::wind::WindSock;
 use crate::BallisticInputs;
@@ -29,6 +29,12 @@ pub struct TrajectoryOutput {
 ///
 /// This function evaluates a single trajectory with the given inputs and returns
 /// simplified output suitable for statistical analysis.
+///
+/// It flies `inputs`' station air, its humidity included, exactly as `TrajectorySolver` does
+/// (the station is a [`StationAir`], and `fast_integrate` takes each step's air from
+/// [`crate::atmosphere::air_at`]); the reported Mach is the final speed over that station's
+/// sound speed. An out-of-range `inputs.humidity` (a fraction, `0..=1`) or air that cannot
+/// exist is an `Err`, never clamped.
 ///
 /// Presence-blind: `inputs`' temperature and pressure go through the legacy default-sentinel
 /// rule (a sea-level default at a real altitude flies ICAO standard air). See
@@ -62,11 +68,10 @@ pub fn solve_trajectory_for_monte_carlo_with_station_presence(
         return Err("target_distance must be a positive, finite distance".to_string());
     }
 
-    // Calculate atmosphere at altitude. A supplied value is authoritative (no altitude
-    // double-count); an omitted one left at the sea-level default is replaced by the ICAO
-    // standard at the altitude, so altitude drives BOTH the base station pressure AND the
-    // lapse-rate temperature (this base_ratio feeds the fast/Monte-Carlo kernel's
-    // base_density). Matches calculate_air_density.
+    // Resolve the station. A supplied value is authoritative (no altitude double-count); an
+    // omitted one left at the sea-level default is replaced by the ICAO standard at the
+    // altitude, so altitude drives BOTH the base station pressure AND the lapse-rate temperature.
+    // Matches calculate_air_density.
     let (resolved_temp_c, resolved_pressure_hpa) =
         crate::atmosphere::resolve_station_conditions_with_presence(
             inputs.temperature,
@@ -75,15 +80,20 @@ pub fn solve_trajectory_for_monte_carlo_with_station_presence(
             crate::atmosphere::PressureReferenceMode::Absolute,
             station_presence,
         );
-    let (air_density, speed_of_sound) = calculate_atmosphere(
+    // ONE station air, built once: its density ratio seeds the flight's density and its RH the
+    // flight's sound speed (both at every step, through air_at), and its sound speed is the
+    // reference the reported Mach divides by. So the flight and the report cannot disagree
+    // about the humidity (H2, H13). BallisticInputs.humidity is a 0-1 FRACTION (MBA-722).
+    let humidity = RelativeHumidity::try_fraction(inputs.humidity)
+        .map_err(|error| error.at_field("humidity").to_string())?;
+    let station = StationAir::new(
         inputs.altitude, // meters
-        Some(resolved_temp_c),
-        Some(resolved_pressure_hpa),
-        // BallisticInputs.humidity is a 0-1 fraction; calculate_atmosphere expects 0-100 percent
-        // (matching AtmosphericConditions.humidity). Passing the raw fraction under-applied
-        // humidity 100x. Centralized in humidity_percent() (MBA-722).
-        inputs.humidity_percent(),
-    );
+        resolved_temp_c,
+        resolved_pressure_hpa,
+        humidity,
+    )
+    .map_err(|error| error.to_string())?;
+    let speed_of_sound = station.speed_of_sound_mps();
 
     // Create wind segments. WindSock expects (speed_kmh, angle_deg, until_distance_m);
     // convert from the SI fields (m/s, radians) at this boundary.
@@ -120,24 +130,13 @@ pub fn solve_trajectory_for_monte_carlo_with_station_presence(
         initial_velocity.z,
     ]);
 
-    // Create integration params. fast_integrate's atmo_params is
-    // (base_alt_m, base_temp_c, base_press_hpa, base_ratio) — NOT
-    // (temp, pressure, density, sound). Packing it wrong scrambled the base
-    // density (~417 kg/m^3) and produced ~340x drag. base_ratio is the
-    // density relative to 1.225 (get_local_atmosphere returns base_ratio*1.225
-    // at the base altitude), so derive it from the computed air density.
-    let base_ratio = air_density / 1.225;
+    // Create integration params: the station itself, humidity included.
     let params = FastIntegrationParams {
         initial_state: initial_state_array,
         t_span: (0.0, 30.0),
         horiz: target_distance_m,
         vert: line_of_sight_y,
-        atmo_params: (
-            inputs.altitude,
-            resolved_temp_c,
-            resolved_pressure_hpa,
-            base_ratio,
-        ),
+        atmosphere: KernelAtmosphere::Station(station),
         // MBA-1137: the Monte-Carlo entry takes a single BallisticInputs with no downrange
         // atmosphere, so no zones here. The fast kernel still honors the field for callers that
         // build a FastIntegrationParams directly with a Some(AtmoSock).
@@ -172,6 +171,7 @@ pub fn solve_trajectory_for_monte_carlo_with_station_presence(
     let final_vz = solution.y[5][final_idx];
 
     let final_speed = (final_vx * final_vx + final_vy * final_vy + final_vz * final_vz).sqrt();
+    // Station Mach, against the sound speed of the station this flight flew (H13).
     let final_mach = final_speed / speed_of_sound;
     let final_energy = 0.5 * mass_kg * final_speed * final_speed;
 

@@ -7100,9 +7100,13 @@ mod station_presence_twin_tests {
             crate::monte_carlo::solve_trajectory_for_monte_carlo(&kernel_inputs(1013.0)).unwrap();
         let neither = solve(1013.0, StationAtmospherePresence::NEITHER);
         for output in [&legacy, &neither] {
-            // captured at ab4eb0c
-            assert_eq!(output.drop.to_bits(), 0x40039eddd41bdb44);
-            assert_eq!(output.velocity.to_bits(), 0x4080fe7009642434);
+            // Captured at ab4eb0c (drop 0x40039eddd41bdb44, velocity 0x4080fe7009642434) when
+            // this kernel flew the default 50 % RH in its density but 0 % in its sound speed.
+            // Re-captured in 0.50.0 (humidity train, H2), where it flies 50 % in both, exactly
+            // as TrajectorySolver does: the drop is 0.61 mm longer and the speed
+            // 0.19 m/s lower at 500 m.
+            assert_eq!(output.drop.to_bits(), 0x4003a01ea6854164);
+            assert_eq!(output.velocity.to_bits(), 0x4080fcf3502e5d14);
         }
         let low = solve(1012.0, StationAtmospherePresence::NEITHER).velocity;
         let high = solve(1014.0, StationAtmospherePresence::NEITHER).velocity;
@@ -8492,7 +8496,7 @@ mod cd_scale_tests {
                 nalgebra::Vector3::new(700.0, 0.0, 0.0),
                 &inputs,
                 nalgebra::Vector3::zeros(),
-                (1.225, 340.0, 0.0, 0.0),
+                &KernelAtmosphere::uniform(1.225, 340.0).unwrap(),
                 inputs.bc_value,
                 None,
                 0.0,
@@ -8516,7 +8520,11 @@ mod cd_scale_tests {
                 vert: 0.0,
                 initial_state: [0.0, 0.0, 0.0, 850.0, 0.0, 0.0],
                 t_span: (0.0, 5.0),
-                atmo_params: (0.0, 15.0, 1013.25, 1.0),
+                atmosphere: KernelAtmosphere::from_legacy_params(
+                    (0.0, 15.0, 1013.25, 1.0),
+                    crate::atmosphere::RelativeHumidity::DRY,
+                )
+                .unwrap(),
                 atmo_sock: None,
             };
             let solution = crate::fast_trajectory::fast_integrate(&inputs, &wind_sock, params);
@@ -11259,3 +11267,9 @@ mod station_air_tests {
         }
     }
 }
+
+// The humidity class guard: every solver family flies TrajectorySolver's humid air, at every
+// step (humidity-consistency train). A child module so it can drive the solver's own per-step
+// acceleration.
+#[cfg(test)]
+mod humidity_consistency_tests;

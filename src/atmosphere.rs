@@ -25,8 +25,11 @@ struct AtmosphereLayer {
 // ICAO reference quantities are defined using standard Earth gravity, independently of the
 // acceleration chosen for an internal simulation.
 const G_ACCEL_MPS2: f64 = crate::constants::G_ACCEL_MPS2;
-const R_AIR: f64 = 287.0531; // Specific gas constant for dry air (J/(kg·K))
-const GAMMA: f64 = 1.4; // Heat capacity ratio for air
+/// Specific gas constant for dry air, J/(kg·K). With [`GAMMA`] it is the engine's one dry-air
+/// sound-speed constant: `sqrt(GAMMA * R_AIR * T)`.
+pub(crate) const R_AIR: f64 = 287.0531;
+/// Heat-capacity ratio of dry air.
+pub(crate) const GAMMA: f64 = 1.4;
 const GEOPOTENTIAL_EARTH_RADIUS_M: f64 = 6_356_766.0;
 const MIN_GEOMETRIC_ALTITUDE_M: f64 = -5000.0;
 const MAX_GEOMETRIC_ALTITUDE_M: f64 = 84000.0;
@@ -1105,7 +1108,13 @@ pub(crate) fn shot_frame_altitude(
     base_altitude_m + downrange_m * shooting_angle_rad.sin() + shot_y_m * shooting_angle_rad.cos()
 }
 
-/// Enhanced local atmospheric calculation with variable lapse rates.
+/// Local DRY air: [`get_local_atmosphere_humid`] at 0 % relative humidity.
+///
+/// Dry by contract, which is why it is deprecated: a flight's air has a humidity, and
+/// [`air_at`] over a [`StationAir`] flies it. The density is the same as every other path's (the
+/// base ratio scaled by the lapse); the sound speed is the engine's one dry value,
+/// `sqrt(1.4 · 287.0531 · T)`, the shared composition at [`RelativeHumidity::DRY`]. Until 0.50.0
+/// this function used a second dry constant, `sqrt(401.874 · T)`, 4.2e-7 slower.
 ///
 /// # Arguments
 /// * `altitude_m` - Query geometric altitude above mean sea level in meters
@@ -1116,6 +1125,10 @@ pub(crate) fn shot_frame_altitude(
 ///
 /// # Returns
 /// Tuple of (air_density_kg_m3, speed_of_sound_mps)
+#[deprecated(
+    since = "0.50.0",
+    note = "dry air by contract; use air_at with a StationAir, which carries the humidity"
+)]
 pub fn get_local_atmosphere(
     altitude_m: f64,
     base_alt: f64,
@@ -1123,27 +1136,25 @@ pub fn get_local_atmosphere(
     base_press_hpa: f64,
     base_ratio: f64,
 ) -> (f64, f64) {
-    let (temp_k, _pressure_pa, density) = local_temp_pressure_density(
+    let air = compose_local_air(
         altitude_m,
         base_alt,
         base_temp_c,
         base_press_hpa,
         base_ratio,
+        RelativeHumidity::DRY.percent(),
+        Gravity::EARTH,
     );
-
-    // Dry speed of sound. 401.874 ~ gamma * R_air; kept exactly for back-compat with existing
-    // callers (get_local_atmosphere_humid uses the precise moist formula instead).
-    let speed_of_sound = (temp_k * 401.874).sqrt();
-
-    (density, speed_of_sound)
+    (air.density_kg_m3, air.speed_of_sound_mps)
 }
 
-/// Humidity-aware companion to [`get_local_atmosphere`]: identical local density, but the speed
-/// of sound is the moist-air value ([`moist_speed_of_sound`]) evaluated at the LOCAL temperature
-/// and pressure.
+/// The local air, unvalidated: the same composition as [`air_at`] (identical local density, and
+/// the moist-air speed of sound, [`moist_speed_of_sound`], at the LOCAL temperature and pressure
+/// and the base humidity), from a caller-held base tuple.
 ///
-/// [`get_local_atmosphere`] is intentionally left unchanged (dry speed of sound) for
-/// API/back-compat; call this variant only where a real relative humidity is available.
+/// A legacy entry point: it clamps an out-of-range humidity instead of refusing it, and it
+/// cannot know whether `base_ratio` was built at `humidity_percent`. In-crate code calls
+/// [`air_at`] with a [`KernelAtmosphere`] instead.
 ///
 /// # Arguments
 /// * `altitude_m` - Query geometric altitude above mean sea level in meters
@@ -1356,6 +1367,8 @@ pub enum AtmosphereErrorReason {
     UniformDensityOutOfRange,
     /// A uniform (direct-mode) speed of sound at or below 200 m/s.
     UniformSpeedOfSoundOutOfRange,
+    /// A downrange atmosphere zone whose `until_distance_m` is not above 0.
+    NonPositiveZoneThreshold,
 }
 
 impl fmt::Display for AtmosphereErrorReason {
@@ -1380,6 +1393,9 @@ impl fmt::Display for AtmosphereErrorReason {
                 "air density must be greater than 0 and less than 2 kg/m^3"
             }
             Self::UniformSpeedOfSoundOutOfRange => "speed of sound must be greater than 200 m/s",
+            Self::NonPositiveZoneThreshold => {
+                "an atmosphere zone's until_distance_m must be greater than 0"
+            }
         })
     }
 }
@@ -1829,6 +1845,16 @@ impl KernelAtmosphere {
         StationAir::with_density_ratio(first, second, third, density_ratio, humidity)
             .map(Self::Station)
     }
+
+    /// The altitude a kernel measures a point's height from: the station's own altitude, as
+    /// `TrajectorySolver` does, so a caller's inputs cannot fly a different station; or
+    /// `uniform_fallback` for uniform air, which does not vary with altitude.
+    pub(crate) fn reference_altitude_m(&self, uniform_fallback: f64) -> f64 {
+        match self {
+            Self::Station(station) => station.altitude_m,
+            Self::Uniform { .. } => uniform_fallback,
+        }
+    }
 }
 
 /// The air at one point of a flight: the ONE per-step air computation.
@@ -1909,7 +1935,7 @@ pub(crate) fn air_at_with_gravity(
     }
 }
 
-/// The composition behind [`air_at`] and the legacy `get_local_atmosphere_humid*` wrappers,
+/// The composition behind [`air_at`] and the legacy `get_local_atmosphere*` wrappers,
 /// unvalidated: the lapse, then the density from the base ratio, then the moist sound speed at
 /// the base humidity. The only place the aloft vapour model lives.
 #[inline]
@@ -1930,17 +1956,93 @@ fn compose_local_air(
         base_ratio,
         gravity,
     );
-    LocalAir {
+    let air = LocalAir {
         density_kg_m3,
         speed_of_sound_mps: moist_speed_of_sound(temperature_k, pressure_pa, humidity_percent),
         temperature_k,
         pressure_pa,
+    };
+    #[cfg(test)]
+    air_trace::record(air_trace::AirTraceEntry {
+        altitude_m,
+        base_alt_m: base_alt,
+        base_temp_c,
+        base_press_hpa,
+        base_ratio,
+        humidity_percent,
+        gravity_mps2: gravity.magnitude(),
+        air,
+    });
+    air
+}
+
+/// Test-only record of every per-step air composition, for the humidity class tests: which base
+/// (station or zone) a path composed from, the relative humidity it gave the sound speed, and the
+/// air it got. Compiled out of every non-test build.
+#[cfg(test)]
+pub(crate) mod air_trace {
+    use super::LocalAir;
+    use std::cell::RefCell;
+
+    /// One call of the composition behind [`super::air_at`]: its inputs and its result.
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) struct AirTraceEntry {
+        /// The point's geometric altitude, m.
+        pub altitude_m: f64,
+        /// Where the lapse started, m.
+        pub base_alt_m: f64,
+        /// The base temperature, °C: the station's, or the active zone's.
+        pub base_temp_c: f64,
+        /// The base pressure, hPa.
+        pub base_press_hpa: f64,
+        /// The base density ratio (density / 1.225).
+        pub base_ratio: f64,
+        /// The relative humidity, percent, the sound speed was given.
+        pub humidity_percent: f64,
+        /// The gravity the lapse used, m/s².
+        pub gravity_mps2: f64,
+        /// What the composition returned.
+        pub air: LocalAir,
+    }
+
+    thread_local! {
+        static TRACE: RefCell<Option<Vec<AirTraceEntry>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn record(entry: AirTraceEntry) {
+        TRACE.with(|trace| {
+            if let Some(entries) = trace.borrow_mut().as_mut() {
+                entries.push(entry);
+            }
+        });
+    }
+
+    /// Restores the trace that was active before [`traced`], even if the traced code panics.
+    struct Restore(Option<Vec<AirTraceEntry>>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            TRACE.with(|trace| *trace.borrow_mut() = previous);
+        }
+    }
+
+    /// Run `run` and return its result with every air composition it made on this thread, in
+    /// call order.
+    pub(crate) fn traced<R>(run: impl FnOnce() -> R) -> (R, Vec<AirTraceEntry>) {
+        let restore = Restore(TRACE.with(|trace| trace.borrow_mut().replace(Vec::new())));
+        let result = run();
+        let entries = TRACE
+            .with(|trace| trace.borrow_mut().take())
+            .unwrap_or_default();
+        drop(restore);
+        (result, entries)
     }
 }
 
-/// Shared local temperature / pressure / density computation for [`get_local_atmosphere`] and
-/// [`get_local_atmosphere_humid`]. Returns `(local_temp_k, local_pressure_pa, density_kg_m3)`.
-#[inline]
+/// The lapse and density of [`compose_local_air`] in Earth gravity, for the tests. Returns
+/// `(local_temp_k, local_pressure_pa, density_kg_m3)`.
+#[cfg(test)]
 fn local_temp_pressure_density(
     altitude_m: f64,
     base_alt: f64,
@@ -2176,9 +2278,48 @@ impl AtmoSock {
         AtmoSock { segments }
     }
 
-    /// True when this sock carries no zones (a lookup falls back to sea-level ISA).
+    /// True when this sock carries no zones. [`air_at`] treats an empty sock as no sock: the
+    /// station's own air.
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty()
+    }
+
+    /// Check every zone the way [`StationAir::new`] checks a station, plus its threshold.
+    ///
+    /// A zone needs a finite temperature above -273.15 °C, a finite pressure above 0, a
+    /// relative humidity that [`RelativeHumidity::try_percent`] accepts (finite, 0 to 100,
+    /// never clamped), air that can exist (the same impossible-air test), and an
+    /// `until_distance_m` above 0 (`+inf` is allowed, `NaN` is not). An empty sock is valid: it
+    /// means the station.
+    ///
+    /// [`AtmoSock::new`] stays infallible; the checked kernel entries
+    /// (`try_integrate_trajectory`, `fast_integrate*`) call this before integrating.
+    ///
+    /// # Errors
+    ///
+    /// The first bad zone's [`AtmosphereError`], its field named
+    /// `atmo_sock.zones[i].<field>` with `i` the zone's index in threshold order (the order
+    /// [`AtmoSock::new`] sorted them into).
+    pub fn validate(&self) -> Result<(), AtmosphereError> {
+        for (index, &(temperature_c, pressure_hpa, humidity_percent, until_m)) in
+            self.segments.iter().enumerate()
+        {
+            let at = |error: AtmosphereError| {
+                let field = format!("atmo_sock.zones[{index}].{}", error.field());
+                error.at_field(field)
+            };
+            check_station_state(0.0, temperature_c, pressure_hpa).map_err(at)?;
+            let humidity = RelativeHumidity::try_percent(humidity_percent).map_err(at)?;
+            refuse_impossible_air(temperature_c, pressure_hpa, humidity).map_err(at)?;
+            if until_m.is_nan() || until_m <= 0.0 {
+                return Err(at(AtmosphereError::new(
+                    "until_distance_m",
+                    until_m,
+                    AtmosphereErrorReason::NonPositiveZoneThreshold,
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Stateless downrange lookup of the active zone's `(temp_c, pressure_hpa, humidity_percent)`.
@@ -2187,13 +2328,16 @@ impl AtmoSock {
     /// whose `until_distance_m` STRICTLY exceeds `downrange_m` wins (thresholds are upper-exclusive).
     /// Unlike wind — which returns zero past the last threshold — the LAST zone is used for any
     /// distance at or beyond the final threshold (there is no "zero atmosphere"). An empty sock
-    /// returns the sea-level ISA reference `(15 C, 1013.25 hPa, 0% RH)`.
+    /// returns the sea-level ISA reference at the engine's default humidity,
+    /// `(15 C, 1013.25 hPa, DEFAULT_HUMIDITY_PERCENT)`; [`air_at`] never asks it, treating an
+    /// empty sock as the station.
     ///
     /// This is stateless and safe for numerical integration (the same X may be queried repeatedly
     /// or out of order across RK substeps).
     pub fn atmo_for_range(&self, downrange_m: f64) -> (f64, f64, f64) {
         if self.segments.is_empty() {
-            return (15.0, 1013.25, 0.0); // sea-level ISA fallback
+            // Sea-level ISA at the one default humidity.
+            return (15.0, 1013.25, DEFAULT_HUMIDITY_PERCENT);
         }
         // NaN X can't be ordered; use the first (nearest) zone deterministically.
         if downrange_m.is_nan() {
@@ -2333,7 +2477,13 @@ mod tests {
 
     /// rank 9: local-atmosphere reference values (base: 500 m, 10 C, 950 hPa, ratio 1.05).
     /// The 1500 m values include the geometric-to-geopotential height conversion.
+    ///
+    /// Re-baselined in 0.50.0 (humidity train, H11): the dry sound speed is the engine's one dry
+    /// constant, sqrt(1.4 * 287.0531 * T), the moist formula at 0 % RH, instead of a second
+    /// sqrt(401.874 * T). That moves c by +4.23e-7 relative (+1.43e-4 m/s here); the density and
+    /// the tolerance are unchanged.
     #[test]
+    #[allow(deprecated)] // the dry legacy lookup is what is under test
     fn test_mba1136_get_local_atmosphere_reference() {
         let (d0, c0) = get_local_atmosphere(500.0, 500.0, 10.0, 950.0, 1.05);
         assert!(
@@ -2341,7 +2491,7 @@ mod tests {
             "local density@500m drifted: {d0}"
         );
         assert!(
-            (c0 - 337.328657395129).abs() < 1e-9,
+            (c0 - 337.328800091246).abs() < 1e-9,
             "local sos@500m drifted: {c0}"
         );
         let (d1, c1) = get_local_atmosphere(1500.0, 500.0, 10.0, 950.0, 1.05);
@@ -2350,12 +2500,13 @@ mod tests {
             "local density@1500m drifted: {d1}"
         );
         assert!(
-            (c1 - 333.435546617978).abs() < 1e-9,
+            (c1 - 333.435687667240).abs() < 1e-9,
             "local sos@1500m drifted: {c1}"
         );
     }
 
     #[test]
+    #[allow(deprecated)] // the dry legacy lookup is what is under test
     fn fractional_station_altitude_is_not_quantized() {
         let station_altitude_m = 500.25;
         let station_temp_c = 10.0;
@@ -2371,22 +2522,26 @@ mod tests {
         );
 
         let expected_density = station_density_ratio * 1.225;
-        let expected_speed_of_sound = ((station_temp_c + 273.15) * 401.874).sqrt();
+        // The engine's one dry constant (0.50.0; was a second one, 401.874).
+        let expected_speed_of_sound = (GAMMA * R_AIR * (station_temp_c + 273.15)).sqrt();
         assert!((density - expected_density).abs() < 1e-12);
         assert!((speed_of_sound - expected_speed_of_sound).abs() < 1e-12);
     }
 
     /// rank 9: `get_local_atmosphere_humid` returns the SAME density as `get_local_atmosphere`,
-    /// and at 0% RH its speed of sound reduces to the dry value (within the 401.874-vs-gamma*R
-    /// constant rounding). At real humidity the speed of sound exceeds the dry value.
+    /// and at 0% RH its speed of sound IS the dry value, to the bit: since 0.50.0 there is one
+    /// dry constant (the old 401.874 differed from gamma*R by 4.2e-7, which this test used to
+    /// absorb with a 1e-3 tolerance). At real humidity the speed of sound exceeds the dry value.
     #[test]
+    #[allow(deprecated)] // the dry legacy lookup is what is under test
     fn test_mba1136_get_local_atmosphere_humid() {
         let (d_dry, c_dry) = get_local_atmosphere(1500.0, 500.0, 10.0, 950.0, 1.05);
         let (d_h0, c_h0) = get_local_atmosphere_humid(1500.0, 500.0, 10.0, 950.0, 1.05, 0.0);
         assert_eq!(d_dry, d_h0, "humid variant must not change density");
-        assert!(
-            (c_h0 - c_dry).abs() < 1e-3,
-            "0% RH humid sos {c_h0} should match dry sos {c_dry}"
+        assert_eq!(
+            c_h0.to_bits(),
+            c_dry.to_bits(),
+            "0% RH humid sos {c_h0} must be the dry sos {c_dry}"
         );
         let (_, c_h80) = get_local_atmosphere_humid(1500.0, 500.0, 10.0, 950.0, 1.05, 80.0);
         assert!(c_h80 > c_dry, "humid sos {c_h80} should exceed dry {c_dry}");
@@ -2453,6 +2608,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // the dry legacy lookup is one of the paths under test
     fn local_atmosphere_walks_icao_layers_continuously() {
         for altitude_m in [
             10999.0, 11000.0, 11001.0, 11050.0, 19999.0, 20000.0, 20001.0, 25000.0,
@@ -2959,9 +3115,17 @@ mod tests {
     fn test_atmo_sock_empty_falls_back_to_isa() {
         let sock = AtmoSock::new(vec![]);
         assert!(sock.is_empty());
-        // Empty sock returns the sea-level ISA reference regardless of distance.
-        assert_eq!(sock.atmo_for_range(0.0), (15.0, 1013.25, 0.0));
-        assert_eq!(sock.atmo_for_range(500.0), (15.0, 1013.25, 0.0));
+        // Empty sock returns the sea-level ISA reference regardless of distance, at the engine's
+        // one default humidity (50 %, not a 0 % of its own). air_at never asks: to it an empty
+        // sock is the station.
+        assert_eq!(
+            sock.atmo_for_range(0.0),
+            (15.0, 1013.25, DEFAULT_HUMIDITY_PERCENT)
+        );
+        assert_eq!(
+            sock.atmo_for_range(500.0),
+            (15.0, 1013.25, DEFAULT_HUMIDITY_PERCENT)
+        );
     }
 
     #[test]

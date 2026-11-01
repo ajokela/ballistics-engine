@@ -3,6 +3,16 @@ use ballistics_engine::{
     AtmosphericConditions, BallisticInputs, DragModel, TrajectorySolver, WindConditions,
 };
 
+/// A legacy `(alt, T, P, ratio)` / `(rho, c, 0, 0)` fixture, as the dry station (or direct air)
+/// this test was written for: the one-line migration onto the 0.50.0 `KernelAtmosphere`.
+fn legacy(params: (f64, f64, f64, f64)) -> ballistics_engine::KernelAtmosphere {
+    ballistics_engine::KernelAtmosphere::from_legacy_params(
+        params,
+        ballistics_engine::RelativeHumidity::DRY,
+    )
+    .expect("valid legacy atmosphere")
+}
+
 fn endpoint_m(enable_magnus: bool, enable_spin: bool) -> nalgebra::Vector3<f64> {
     let inputs = BallisticInputs {
         muzzle_velocity: 823.0,             // m/s (~2700 fps)
@@ -91,7 +101,7 @@ fn fast_endpoint_m(
             0.0,
         ],
         t_span: (0.0, 5.0),
-        atmo_params: (0.0, 15.0, 1013.25, 1.0),
+        atmosphere: legacy((0.0, 15.0, 1013.25, 1.0)),
         atmo_sock: None,
     };
     let solution = if with_segments {

@@ -4,6 +4,16 @@
 use ballistics_engine::{AtmosphericConditions, BallisticInputs, TrajectorySolver, WindConditions};
 use std::f64::consts::PI;
 
+/// A legacy `(alt, T, P, ratio)` / `(rho, c, 0, 0)` fixture, as the dry station (or direct air)
+/// this test was written for: the one-line migration onto the 0.50.0 `KernelAtmosphere`.
+fn legacy(params: (f64, f64, f64, f64)) -> ballistics_engine::KernelAtmosphere {
+    ballistics_engine::KernelAtmosphere::from_legacy_params(
+        params,
+        ballistics_engine::RelativeHumidity::DRY,
+    )
+    .expect("valid legacy atmosphere")
+}
+
 /// Build a solver for a representative .308-class load. `crosswind_mps` is applied
 /// as a pure lateral (McCoy Z) wind so it drives aerodynamic jump.
 fn solve(enable_aj: bool, crosswind_mps: f64) -> ballistics_engine::TrajectoryResult {
@@ -320,21 +330,28 @@ fn fast_path_launch_offset_sign_disabled_and_flips() {
     let atmo = (0.0, 15.0, 1013.25, 1.0);
 
     inputs.enable_aerodynamic_jump = false;
-    assert_eq!(aerodynamic_jump_launch_offset_rad(&inputs, atmo), 0.0);
+    assert_eq!(
+        aerodynamic_jump_launch_offset_rad(&inputs, &legacy(atmo)),
+        0.0
+    );
 
     inputs.enable_aerodynamic_jump = true;
-    let from_right = aerodynamic_jump_launch_offset_rad(&inputs, atmo);
+    let from_right = aerodynamic_jump_launch_offset_rad(&inputs, &legacy(atmo));
     assert!(
         from_right > 0.0,
         "right twist + wind from the right -> up (positive), got {from_right}"
     );
     // Reverse the wind side -> opposite sign, same magnitude.
     inputs.wind_angle = -PI / 2.0;
-    assert!((aerodynamic_jump_launch_offset_rad(&inputs, atmo) + from_right).abs() < 1e-12);
+    assert!(
+        (aerodynamic_jump_launch_offset_rad(&inputs, &legacy(atmo)) + from_right).abs() < 1e-12
+    );
     // Flip the twist hand -> opposite sign.
     inputs.wind_angle = PI / 2.0;
     inputs.is_twist_right = false;
-    assert!((aerodynamic_jump_launch_offset_rad(&inputs, atmo) + from_right).abs() < 1e-12);
+    assert!(
+        (aerodynamic_jump_launch_offset_rad(&inputs, &legacy(atmo)) + from_right).abs() < 1e-12
+    );
 }
 
 #[test]
@@ -354,9 +371,9 @@ fn fast_path_direct_atmosphere_uses_density_for_aerodynamic_jump() {
         ..BallisticInputs::default()
     };
 
-    let standard = aerodynamic_jump_launch_offset_rad(&inputs, (0.0, 15.0, 1013.25, 1.0));
+    let standard = aerodynamic_jump_launch_offset_rad(&inputs, &legacy((0.0, 15.0, 1013.25, 1.0)));
     let direct_standard_density =
-        aerodynamic_jump_launch_offset_rad(&inputs, (1.225, 340.0, 0.0, 0.0));
+        aerodynamic_jump_launch_offset_rad(&inputs, &legacy((1.225, 340.0, 0.0, 0.0)));
     assert!(standard > 0.0);
     assert!(
         (direct_standard_density - standard).abs() < 1e-12,
@@ -365,9 +382,10 @@ fn fast_path_direct_atmosphere_uses_density_for_aerodynamic_jump() {
 
     let thin_density = 0.9;
     let equivalent_pressure = 1013.25 * thin_density / 1.225;
-    let direct_thin = aerodynamic_jump_launch_offset_rad(&inputs, (thin_density, 340.0, 0.0, 0.0));
+    let direct_thin =
+        aerodynamic_jump_launch_offset_rad(&inputs, &legacy((thin_density, 340.0, 0.0, 0.0)));
     let standard_thin =
-        aerodynamic_jump_launch_offset_rad(&inputs, (0.0, 15.0, equivalent_pressure, 1.0));
+        aerodynamic_jump_launch_offset_rad(&inputs, &legacy((0.0, 15.0, equivalent_pressure, 1.0)));
     assert!(
         (direct_thin - standard_thin).abs() < 1e-12,
         "direct density correction must match equivalent standard atmosphere: direct={direct_thin}, standard={standard_thin}"
@@ -402,7 +420,7 @@ fn fast_paths_apply_aerodynamic_jump() {
             vert: 0.0,
             initial_state,
             t_span: (0.0, 3.0),
-            atmo_params,
+            atmosphere: legacy(atmo_params),
             atmo_sock: None,
         };
         let sol = if with_segments {
@@ -469,7 +487,7 @@ fn segmented_fast_path_records_the_same_aj_launch_state_as_plain_fast() {
         vert: 0.0,
         initial_state: raw_state,
         t_span: (0.0, 0.1),
-        atmo_params: (0.0, 15.0, 1013.25, 1.0),
+        atmosphere: legacy((0.0, 15.0, 1013.25, 1.0)),
         atmo_sock: None,
     };
 
@@ -549,7 +567,7 @@ fn fast_paths_use_muzzle_segment_wind_for_aerodynamic_jump() {
         vert: 0.0,
         initial_state: [0.0, 0.0, 0.0, inputs.muzzle_velocity, 0.0, 0.0],
         t_span: (0.0, 0.1),
-        atmo_params: (0.0, 15.0, 1013.25, 1.0),
+        atmosphere: legacy((0.0, 15.0, 1013.25, 1.0)),
         atmo_sock: None,
     };
     let sock = WindSock::new(segments.clone());
@@ -592,7 +610,7 @@ fn calm_muzzle_segment_suppresses_scalar_fast_path_jump() {
         vert: 0.0,
         initial_state: raw_state,
         t_span: (0.0, 0.1),
-        atmo_params: (0.0, 15.0, 1013.25, 1.0),
+        atmosphere: legacy((0.0, 15.0, 1013.25, 1.0)),
         atmo_sock: None,
     };
     let calm = vec![WindSegment::new(0.0, 90.0, 100.0)];

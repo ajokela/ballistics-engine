@@ -14,7 +14,7 @@
 //! one with a non-default value today. It is a stand-in for the class: if a future step is added
 //! to `normalize_for_solve` and one entry point stops calling it, these tests fail.
 
-use ballistics_engine::atmosphere::{calculate_atmosphere, resolve_station_conditions};
+use ballistics_engine::atmosphere::resolve_station_conditions;
 use ballistics_engine::fast_trajectory::{
     fast_integrate, fast_integrate_with_segments, FastIntegrationParams,
 };
@@ -23,6 +23,7 @@ use ballistics_engine::{
     AtmosphericConditions, BallisticInputs, BcReferenceStandard, DragModel, TrajectorySolver,
     WindConditions,
 };
+use ballistics_engine::{KernelAtmosphere, RelativeHumidity, StationAir};
 
 const TARGET_M: f64 = 457.2; // 500 yd
 
@@ -52,12 +53,15 @@ fn asm_inputs() -> BallisticInputs {
 fn fast_impact_velocity(i: &BallisticInputs, segmented: bool) -> f64 {
     let (resolved_temp_c, resolved_pressure_hpa) =
         resolve_station_conditions(i.temperature, i.pressure, i.altitude);
-    let (air_density, _) = calculate_atmosphere(
+    // The station at the inputs' own humidity (a FRACTION), as the lean Monte Carlo builds it:
+    // its density ratio AND its sound speed carry that humidity.
+    let station = StationAir::new(
         i.altitude,
-        Some(resolved_temp_c),
-        Some(resolved_pressure_hpa),
-        i.humidity_percent(),
-    );
+        resolved_temp_c,
+        resolved_pressure_hpa,
+        RelativeHumidity::try_fraction(i.humidity).expect("valid humidity"),
+    )
+    .expect("valid station");
     let v = i.muzzle_velocity;
     let a = i.muzzle_angle;
     let params = FastIntegrationParams {
@@ -65,12 +69,7 @@ fn fast_impact_velocity(i: &BallisticInputs, segmented: bool) -> f64 {
         t_span: (0.0, 30.0),
         horiz: TARGET_M,
         vert: i.muzzle_height + i.sight_height,
-        atmo_params: (
-            i.altitude,
-            resolved_temp_c,
-            resolved_pressure_hpa,
-            air_density / 1.225,
-        ),
+        atmosphere: KernelAtmosphere::Station(station),
         atmo_sock: None,
     };
     let sol = if segmented {

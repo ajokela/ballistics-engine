@@ -19,7 +19,7 @@
 
 use crate::atmosphere::{
     calculate_atmosphere, get_local_atmosphere_humid_with_gravity,
-    water_vapor_mole_fraction_uncapped,
+    water_vapor_mole_fraction_uncapped, KernelAtmosphere, RelativeHumidity,
 };
 use crate::derivatives::compute_derivatives_with_gravity;
 use crate::fast_trajectory::{fast_integrate_with_gravity, FastIntegrationParams};
@@ -198,13 +198,21 @@ fn wind_segments() -> Vec<WindSegment> {
     vec![WindSegment::new(14.4, 90.0, 2000.0)]
 }
 
+/// The pinned kernel atmospheres were written as legacy tuples; S3 moved the kernels onto
+/// `KernelAtmosphere`, and `from_legacy_params` at 0 % RH is the one-line migration (a dry
+/// station keeps its tuple's ratio verbatim; the direct sentinel becomes uniform air).
+fn kernel_atmosphere(atmos_params: (f64, f64, f64, f64)) -> KernelAtmosphere {
+    KernelAtmosphere::from_legacy_params(atmos_params, RelativeHumidity::DRY)
+        .expect("pinned atmospheres are valid")
+}
+
 fn trajectory_params(atmos_params: (f64, f64, f64, f64)) -> TrajectoryParams {
     TrajectoryParams {
         mass_kg: MASS_KG,
         bc: BC_G7,
         drag_model: DragModel::G7,
         wind_segments: wind_segments(),
-        atmos_params,
+        atmosphere: kernel_atmosphere(atmos_params),
         omega_vector: None,
         enable_spin_drift: false,
         enable_magnus: false,
@@ -258,7 +266,7 @@ fn kernels(
                 Vector3::new(700.0, 2.0, 0.5),
                 inputs,
                 Vector3::new(0.0, 0.0, -4.0),
-                atmos_params,
+                &kernel_atmosphere(atmos_params),
                 BC_G7,
                 None,
                 0.0,
@@ -303,7 +311,7 @@ fn kernels(
                 vert: 0.0,
                 initial_state: launch_state(),
                 t_span: (0.0, 30.0),
-                atmo_params: atmos_params,
+                atmosphere: kernel_atmosphere(atmos_params),
                 atmo_sock: None,
             },
             gravity,

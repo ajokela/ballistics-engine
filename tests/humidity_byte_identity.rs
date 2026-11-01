@@ -85,6 +85,7 @@ use ballistics_engine::{
     DragModel, MonteCarloParams, MonteCarloResults, TrajectoryResult, TrajectorySolver,
     WindConditions, DEFAULT_HIT_RADIUS_M,
 };
+use ballistics_engine::{KernelAtmosphere, RelativeHumidity};
 use nalgebra::Vector3;
 use serde_json::{json, Value};
 
@@ -1015,7 +1016,7 @@ fn probe_stability_spin_jump() -> Probe {
     ] {
         pins.f(
             format!("aerodynamic_jump_launch_offset_rad {label}"),
-            aerodynamic_jump_launch_offset_rad(&jump_inputs, atmo),
+            aerodynamic_jump_launch_offset_rad(&jump_inputs, &kernel_atmosphere(atmo)),
         );
     }
     cases.push(("fast-path-aerodynamic-jump".to_string(), pins));
@@ -1099,6 +1100,14 @@ fn crosswind_segments() -> Vec<WindSegment> {
     vec![WindSegment::new(CROSSWIND_MPS * 3.6, 90.0, 2000.0)]
 }
 
+/// The pinned kernel atmospheres were written as legacy tuples; S3 moved the kernels onto
+/// `KernelAtmosphere`, and `from_legacy_params` at 0 % RH is the one-line migration (a dry
+/// station keeps its tuple's ratio verbatim; the direct sentinel becomes uniform air).
+fn kernel_atmosphere(atmos_params: (f64, f64, f64, f64)) -> KernelAtmosphere {
+    KernelAtmosphere::from_legacy_params(atmos_params, RelativeHumidity::DRY)
+        .expect("pinned atmospheres are valid")
+}
+
 fn trajectory_params(
     atmos_params: (f64, f64, f64, f64),
     atmo_sock: Option<AtmoSock>,
@@ -1108,7 +1117,7 @@ fn trajectory_params(
         bc: BC_G7,
         drag_model: DragModel::G7,
         wind_segments: crosswind_segments(),
-        atmos_params,
+        atmosphere: kernel_atmosphere(atmos_params),
         omega_vector: None,
         enable_spin_drift: false,
         enable_magnus: false,
@@ -1142,7 +1151,7 @@ fn fast_params(
         vert: 0.0,
         initial_state: launch_state(),
         t_span: (0.0, 30.0),
-        atmo_params,
+        atmosphere: kernel_atmosphere(atmo_params),
         atmo_sock,
     }
 }
@@ -1210,7 +1219,7 @@ fn kernel_cases(
             Vector3::new(700.0, 2.0, 0.5),
             &inputs,
             Vector3::new(0.0, 0.0, -CROSSWIND_MPS),
-            atmos_params,
+            &kernel_atmosphere(atmos_params),
             BC_G7,
             None,
             0.0,
@@ -1252,7 +1261,7 @@ fn kernel_cases(
             BC_G7,
             DragModel::G7,
             crosswind_segments(),
-            atmos_params,
+            kernel_atmosphere(atmos_params),
             None,
             false,
             false,

@@ -1,7 +1,4 @@
-use crate::atmosphere::{
-    calculate_air_density_cimp, get_direct_atmosphere, get_local_atmosphere_humid_with_gravity,
-    AtmoSock,
-};
+use crate::atmosphere::{air_at_with_gravity, AtmoSock, KernelAtmosphere};
 use crate::bc_estimation::{velocity_segment_bc, BCSegmentEstimator};
 use crate::constants::*;
 use crate::drag::get_drag_coefficient_full;
@@ -54,14 +51,6 @@ const MAGNUS_SUPERSONIC_RANGE: f64 = 1.8; // Scaling range for supersonic recove
 // Note: These Magnus coefficients are calibrated against real-world spin drift measurements
 // from McCoy's "Modern Exterior Ballistics" and experimental data. The dimensionless
 // coefficients represent the Magnus moment per unit angle of attack.
-
-// Atmosphere detection thresholds
-const MAX_REALISTIC_DENSITY: f64 = 2.0; // kg/m³
-const MIN_REALISTIC_SPEED_OF_SOUND: f64 = 200.0; // m/s
-
-fn dry_air_temperature_c_from_sound_speed(speed_of_sound_mps: f64) -> f64 {
-    speed_of_sound_mps * speed_of_sound_mps / (1.4 * 287.05) - 273.15
-}
 
 /// Calculate Magnus moment coefficient C_Lα based on Mach number
 /// Based on McCoy's 'Modern Exterior Ballistics' and empirical data
@@ -144,22 +133,32 @@ pub(crate) fn yaw_of_repose_magnus_direction(
 ///
 /// `wind_vector` and `omega_vector` use level downrange/up/lateral axes and are projected into
 /// the inclined shot frame internally.
+///
+/// The air at `pos` is [`crate::atmosphere::air_at`]'s, the engine's one per-step air lookup:
+/// `atmosphere` is the station (its humidity included) or direct-mode uniform air, and
+/// `atmo_sock` the optional downrange zones, each with its own humidity. The point's altitude is
+/// the station's altitude plus its world-vertical height, and the lapse starts at the station:
+/// `atmosphere`'s station is authoritative over `inputs`' own altitude, temperature, pressure
+/// and humidity, which this function does not read.
+/// Build `atmosphere` with [`crate::StationAir::new`] (or [`KernelAtmosphere::uniform`]); a
+/// legacy `(alt, T, P, ratio)` or `(rho, c, 0, 0)` tuple converts with
+/// [`KernelAtmosphere::from_legacy_params`].
 #[allow(clippy::too_many_arguments)]
 pub fn compute_derivatives(
     pos: Vector3<f64>,
     vel: Vector3<f64>,
     inputs: &BallisticInputs,
     wind_vector: Vector3<f64>,
-    atmos_params: (f64, f64, f64, f64),
+    atmosphere: &KernelAtmosphere,
     bc_used: f64,
     omega_vector: Option<Vector3<f64>>,
     // MBA-1134: the in-integration spin-drift term that consumed `time` is deprecated (spin drift
     // is now a Litz post-process), so this is currently unused; kept in the signature for callers.
     _time: f64,
-    // MBA-1137: optional downrange-segmented atmosphere. When `Some`, the STANDARD-mode base
-    // (station-referenced) T/P/H is swapped for the zone selected by downrange distance (pos.x)
-    // before the altitude lapse; the direct-atmosphere sentinel path is left untouched. `None`
-    // (every existing caller) is byte-identical to the pre-feature behavior.
+    // MBA-1137: optional downrange-segmented atmosphere. When `Some` and non-empty, the zone
+    // selected by downrange distance (pos.x) replaces the station as the base (its T/P and its
+    // RH, for density AND sound speed) before the altitude lapse. `None` or an empty sock is the
+    // station. Uniform air ignores it.
     atmo_sock: Option<&AtmoSock>,
 ) -> [f64; 6] {
     compute_derivatives_with_gravity(
@@ -167,7 +166,7 @@ pub fn compute_derivatives(
         vel,
         inputs,
         wind_vector,
-        atmos_params,
+        atmosphere,
         bc_used,
         omega_vector,
         _time,
@@ -182,16 +181,13 @@ pub(crate) fn compute_derivatives_with_gravity(
     vel: Vector3<f64>,
     inputs: &BallisticInputs,
     wind_vector: Vector3<f64>,
-    atmos_params: (f64, f64, f64, f64),
+    atmosphere: &KernelAtmosphere,
     bc_used: f64,
     omega_vector: Option<Vector3<f64>>,
     // MBA-1134: the in-integration spin-drift term that consumed `time` is deprecated (spin drift
     // is now a Litz post-process), so this is currently unused; kept in the signature for callers.
     _time: f64,
-    // MBA-1137: optional downrange-segmented atmosphere. When `Some`, the STANDARD-mode base
-    // (station-referenced) T/P/H is swapped for the zone selected by downrange distance (pos.x)
-    // before the altitude lapse; the direct-atmosphere sentinel path is left untouched. `None`
-    // (every existing caller) is byte-identical to the pre-feature behavior.
+    // MBA-1137: optional downrange-segmented atmosphere; see compute_derivatives.
     atmo_sock: Option<&AtmoSock>,
     gravity: Gravity,
 ) -> [f64; 6] {
@@ -214,78 +210,28 @@ pub(crate) fn compute_derivatives_with_gravity(
     if speed_air > crate::constants::MIN_VELOCITY_THRESHOLD {
         let v_rel_fps = speed_air * MPS_TO_FPS;
 
-        // Get atmospheric conditions
+        // The point's world altitude, measured from the station the atmosphere carries (as
+        // TrajectorySolver measures it), so `inputs.altitude` cannot fly a different station.
         let altitude_at_pos = crate::atmosphere::shot_frame_altitude(
-            inputs.altitude,
+            atmosphere.reference_altitude_m(inputs.altitude),
             pos[0],
             pos[1],
             inputs.shooting_angle,
         );
 
-        // Check if we have direct atmosphere values
-        // Direct atmosphere is indicated by having only 2 parameters where:
-        // params[0] = air density, params[1] = speed of sound
-        // params[2] and params[3] would be 0.0
-        // BUT: we need to check if params[0] is a reasonable density value (< 2.0 kg/m³)
-        let (air_density, speed_of_sound, temperature_c) = if atmos_params.0 < MAX_REALISTIC_DENSITY
-            && atmos_params.1 > MIN_REALISTIC_SPEED_OF_SOUND
-            && atmos_params.2 == 0.0
-            && atmos_params.3 == 0.0
-        {
-            // Direct atmosphere values: atmos_params.1 is the SPEED OF SOUND here, NOT Celsius,
-            // so back-compute temperature from it (c = sqrt(1.4*287.05*T_k)) for the optional
-            // Reynolds-correction input below.
-            let (rho, sound) = get_direct_atmosphere(atmos_params.0, atmos_params.1);
-            (rho, sound, dry_air_temperature_c_from_sound_speed(sound))
-        } else {
-            // Calculate from base parameters. MBA-1136 (rank 9): route the local speed of sound
-            // through the moist-air formula. Humidity is NOT plumbed to this call site — on the
-            // sole production path (trajectory_integration::build_inputs) the `humidity` FIELD is
-            // overwritten with atmos_params.3 (the density RATIO), so `inputs.humidity` here is not
-            // a real RH. Pass 0.0 (dry) rather than fabricate humidity; density is unchanged and
-            // the dry speed of sound is numerically identical to the old get_local_atmosphere.
-            //
-            // MBA-1137: when a downrange-segmented atmosphere is present, swap the BASE
-            // (station-referenced) temp/pressure/ratio for the zone selected by downrange distance
-            // (pos[0]) BEFORE the altitude lapse. The zone base_ratio is recomputed via CIPM from
-            // the zone (temp, pressure, humidity); the swapped base then flows through the same
-            // altitude-lapse pipeline, so downrange-zone selection and the world-vertical lapse
-            // compose without double-counting.
-            // Only the base density changes — the local speed of sound is independent of base_ratio,
-            // so it still tracks the lapsed temperature/pressure. `None` -> byte-identical.
-            let (base_temp_c, base_press_hpa, base_ratio) = match atmo_sock {
-                Some(sock) => {
-                    let (zt, zp, zh) = sock.atmo_for_range(pos[0]);
-                    (zt, zp, calculate_air_density_cimp(zt, zp, zh) / 1.225)
-                }
-                None => {
-                    // A zero/nonpositive standard-mode ratio means "not supplied", not vacuum.
-                    // Match the plain fast path's sea-level fallback so sibling solvers cannot
-                    // interpret the same FastIntegrationParams tuple oppositely (MBA-1157).
-                    let base_ratio = if atmos_params.3 > 0.0 {
-                        atmos_params.3
-                    } else {
-                        1.0
-                    };
-                    (atmos_params.1, atmos_params.2, base_ratio)
-                }
-            };
-            let (rho, sound) = get_local_atmosphere_humid_with_gravity(
-                altitude_at_pos,
-                atmos_params.0, // base_alt
-                base_temp_c,    // base_temp_c (zone-swapped when AtmoSock present)
-                base_press_hpa, // base_press_hpa (zone-swapped when AtmoSock present)
-                base_ratio,     // base_ratio (zone-swapped when AtmoSock present)
-                0.0,            // humidity not available here (see note above)
-                gravity,
-            );
-            // LOCAL temperature at the projectile altitude, back-computed from the LOCAL speed of
-            // sound (get_local_atmosphere returns density/sound at altitude_at_pos but not temp;
-            // its sound = sqrt(1.4*287.05*T_k)). Using base_temp_c here would feed the optional
-            // Reynolds viscosity input a shooter-altitude temperature while density/sound are
-            // local if that correction is enabled later.
-            (rho, sound, dry_air_temperature_c_from_sound_speed(sound))
-        };
+        // The air here: air_at, the engine's ONE per-step air lookup, which TrajectorySolver
+        // flies too. The station (or the zone that covers pos.x) gives the base temperature,
+        // pressure, density ratio and relative humidity; the lapse carries them to this
+        // altitude; the sound speed is the moist value at the base RH. Uniform air is the
+        // caller's density and sound speed unchanged. The local temperature (for the optional,
+        // disabled Reynolds input) is the lapse's, not one inverted from the sound speed.
+        let local_air =
+            air_at_with_gravity(atmosphere, atmo_sock, pos[0], altitude_at_pos, gravity);
+        let (air_density, speed_of_sound, temperature_c) = (
+            local_air.density_kg_m3,
+            local_air.speed_of_sound_mps,
+            local_air.temperature_k - 273.15,
+        );
 
         // Calculate Mach number with safe division
         let mach = if speed_of_sound > 1e-9 {
@@ -704,6 +650,17 @@ pub(crate) fn estimate_bc_segments_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atmosphere::RelativeHumidity;
+
+    /// Direct-mode air: the caller's density and sound speed at every point.
+    fn direct(density_kg_m3: f64, speed_of_sound_mps: f64) -> KernelAtmosphere {
+        KernelAtmosphere::uniform(density_kg_m3, speed_of_sound_mps).unwrap()
+    }
+
+    /// A legacy `(alt, T, P, ratio)` fixture, as the dry station these tests were written for.
+    fn legacy(params: (f64, f64, f64, f64)) -> KernelAtmosphere {
+        KernelAtmosphere::from_legacy_params(params, RelativeHumidity::DRY).unwrap()
+    }
 
     fn expected_shot_frame_vector(level: Vector3<f64>, angle: f64) -> Vector3<f64> {
         let (sin_angle, cos_angle) = angle.sin_cos();
@@ -725,17 +682,32 @@ mod tests {
     }
 
     #[test]
-    fn dry_air_sound_speed_round_trips_to_local_celsius() {
+    fn direct_mode_local_temperature_round_trips_the_one_dry_constant() {
+        // Direct mode supplies a sound speed, not a temperature, so the local temperature fed
+        // to the (disabled) Reynolds input is the dry-air inversion of that sound speed, with
+        // the engine's ONE dry constant (1.4 * 287.0531, the moist formula at 0 % RH), not a
+        // 1.4 * 287.05 of its own. Station air takes its temperature from the lapse instead.
         for expected_temp_c in [-40.0_f64, 15.0, 40.0] {
-            let sound_speed = (1.4 * 287.05 * (expected_temp_c + 273.15)).sqrt();
-            let actual_temp_c = dry_air_temperature_c_from_sound_speed(sound_speed);
+            let sound_speed =
+                (crate::atmosphere::GAMMA * crate::atmosphere::R_AIR * (expected_temp_c + 273.15))
+                    .sqrt();
+            let air = crate::atmosphere::air_at(&direct(1.2, sound_speed), None, 0.0, 0.0);
+            let actual_temp_c = air.temperature_k - 273.15;
             assert!(
                 (actual_temp_c - expected_temp_c).abs() < 1e-10,
                 "sound speed {sound_speed} m/s recovered {actual_temp_c} C, expected {expected_temp_c} C"
             );
+            let moist_at_zero =
+                crate::atmosphere::moist_speed_of_sound(air.temperature_k, 101_325.0, 0.0);
+            assert!(
+                (moist_at_zero - sound_speed).abs() <= 1e-14 * sound_speed,
+                "the dry inversion must invert the moist formula at 0 % RH: {moist_at_zero} vs \
+                 {sound_speed}"
+            );
         }
 
-        let direct_mode_temp_c = dry_air_temperature_c_from_sound_speed(340.0);
+        let direct_mode_temp_c =
+            crate::atmosphere::air_at(&direct(1.225, 340.0), None, 0.0, 0.0).temperature_k - 273.15;
         assert!(
             direct_mode_temp_c > 10.0 && direct_mode_temp_c < 20.0,
             "direct-mode 340 m/s must be interpreted as sound speed, not 340 C"
@@ -756,7 +728,7 @@ mod tests {
                 Vector3::new(300.0, 0.0, 0.0),
                 inputs,
                 Vector3::zeros(),
-                (1.225, 340.0, 0.0, 0.0),
+                &direct(1.225, 340.0),
                 0.5,
                 None,
                 0.0,
@@ -831,7 +803,7 @@ mod tests {
                 Vector3::new(600.0, 0.0, 0.0),
                 &inputs,
                 Vector3::zeros(),
-                (1.225, 340.0, 0.0, 0.0),
+                &direct(1.225, 340.0),
                 inputs.bc_value,
                 None,
                 0.0,
@@ -862,14 +834,14 @@ mod tests {
         let velocity = Vector3::new(600.0, 0.0, 0.0);
         let along_slant = Vector3::new(1_000.0, 0.0, 0.0);
         let across_slant = Vector3::new(0.0, 500.0 / angle.cos(), 0.0);
-        let atmo = (inputs.altitude, 15.0, 1013.25, 1.0);
+        let atmo = legacy((inputs.altitude, 15.0, 1013.25, 1.0));
 
         let a = compute_derivatives(
             along_slant,
             velocity,
             &inputs,
             Vector3::zeros(),
-            atmo,
+            &atmo,
             inputs.bc_value,
             None,
             0.0,
@@ -880,7 +852,7 @@ mod tests {
             velocity,
             &inputs,
             Vector3::zeros(),
-            atmo,
+            &atmo,
             inputs.bc_value,
             None,
             0.0,
@@ -909,7 +881,7 @@ mod tests {
             velocity,
             &inputs,
             level_headwind,
-            (1.225, 340.0, 0.0, 0.0),
+            &direct(1.225, 340.0),
             inputs.bc_value,
             None,
             0.0,
@@ -940,7 +912,7 @@ mod tests {
                 velocity,
                 &inputs,
                 Vector3::zeros(),
-                (1.225, 340.0, 0.0, 0.0),
+                &direct(1.225, 340.0),
                 inputs.bc_value,
                 omega,
                 0.0,
@@ -1074,7 +1046,7 @@ mod tests {
         let inputs = create_test_inputs();
         let wind_vector = Vector3::zeros();
         // Use direct atmosphere values: (air_density, speed_of_sound, 0.0, 0.0)
-        let atmos_params = (1.225, 340.0, 0.0, 0.0); // Standard air density and speed of sound
+        let atmos_params = direct(1.225, 340.0); // Standard air density and speed of sound
         let bc_used = 0.5;
 
         let result = compute_derivatives(
@@ -1082,7 +1054,7 @@ mod tests {
             vel,
             &inputs,
             wind_vector,
-            atmos_params,
+            &atmos_params,
             bc_used,
             None,
             0.0,
@@ -1115,7 +1087,7 @@ mod tests {
                 vel,
                 &inputs,
                 Vector3::zeros(),
-                (inputs.altitude, 15.0, 1013.25, base_ratio),
+                &legacy((inputs.altitude, 15.0, 1013.25, base_ratio)),
                 inputs.bc_value,
                 None,
                 0.0,
@@ -1138,7 +1110,7 @@ mod tests {
         let vel = Vector3::new(800.0, 0.0, 0.0);
         let inputs = create_test_inputs();
         let wind_vector = Vector3::new(10.0, 0.0, 0.0); // Tailwind
-        let atmos_params = (1.225, 340.0, 0.0, 0.0); // Standard air density and speed of sound
+        let atmos_params = direct(1.225, 340.0); // Standard air density and speed of sound
         let bc_used = 0.5;
 
         let result = compute_derivatives(
@@ -1146,7 +1118,7 @@ mod tests {
             vel,
             &inputs,
             wind_vector,
-            atmos_params,
+            &atmos_params,
             bc_used,
             None,
             0.0,
@@ -1164,7 +1136,7 @@ mod tests {
         let vel = Vector3::new(800.0, 0.0, 0.0);
         let inputs = create_test_inputs();
         let wind_vector = Vector3::zeros();
-        let atmos_params = (1.225, 340.0, 0.0, 0.0); // Standard air density and speed of sound
+        let atmos_params = direct(1.225, 340.0); // Standard air density and speed of sound
         let bc_used = 0.5;
         let omega = Vector3::new(0.0, 0.0, 7.2921e-5); // Earth's rotation
 
@@ -1173,7 +1145,7 @@ mod tests {
             vel,
             &inputs,
             wind_vector,
-            atmos_params,
+            &atmos_params,
             bc_used,
             Some(omega),
             0.0,
@@ -1237,7 +1209,7 @@ mod tests {
                 Vector3::new(700.0, 0.0, 0.0),
                 inputs,
                 Vector3::zeros(),
-                (1.225, 340.0, 0.0, 0.0),
+                &direct(1.225, 340.0),
                 inputs.bc_value,
                 None,
                 0.0,
@@ -1269,7 +1241,7 @@ mod tests {
                 Vector3::new(700.0, 0.0, 0.0),
                 inputs,
                 Vector3::zeros(),
-                (1.225, 340.0, 0.0, 0.0),
+                &direct(1.225, 340.0),
                 inputs.bc_value,
                 None,
                 0.0,
@@ -1299,7 +1271,7 @@ mod tests {
                 Vector3::new(700.0, 0.0, 0.0),
                 inputs,
                 Vector3::zeros(),
-                (1.225, 340.0, 0.0, 0.0),
+                &direct(1.225, 340.0),
                 0.487,
                 None,
                 0.0,
@@ -1329,7 +1301,7 @@ mod tests {
         let pos = Vector3::new(0.0, 0.0, 0.0);
         let vel = Vector3::new(822.96, 0.0, 0.0); // 2700 fps
         let wind_vector = Vector3::zeros();
-        let atmos_params = (1.225, 340.0, 0.0, 0.0); // Standard air density and speed of sound
+        let atmos_params = direct(1.225, 340.0); // Standard air density and speed of sound
         let bc_used = 0.5;
         let acceleration = |enable_magnus, is_twist_right| {
             let mut inputs = create_test_inputs();
@@ -1342,7 +1314,7 @@ mod tests {
                 vel,
                 &inputs,
                 wind_vector,
-                atmos_params,
+                &atmos_params,
                 bc_used,
                 None,
                 0.0,
@@ -1397,7 +1369,7 @@ mod tests {
                 Vector3::new(muzzle_velocity, 0.0, 0.0),
                 inputs,
                 Vector3::zeros(),
-                (1.225, 340.0, 0.0, 0.0),
+                &direct(1.225, 340.0),
                 0.5,
                 None,
                 0.0,
@@ -1431,7 +1403,7 @@ mod tests {
                     Vector3::new(speed_mps, 0.0, 0.0),
                     &run_inputs,
                     Vector3::zeros(),
-                    (1.225, 340.0, 0.0, 0.0),
+                    &direct(1.225, 340.0),
                     0.5,
                     None,
                     0.0,
@@ -1461,7 +1433,7 @@ mod tests {
         pos: Vector3<f64>,
         vel: Vector3<f64>,
         inputs: &BallisticInputs,
-        atmos_params: (f64, f64, f64, f64),
+        atmosphere: &KernelAtmosphere,
         gravity: Gravity,
     ) -> Vector3<f64> {
         let result = compute_derivatives_with_gravity(
@@ -1469,7 +1441,7 @@ mod tests {
             vel,
             inputs,
             Vector3::zeros(),
-            atmos_params,
+            atmosphere,
             inputs.bc_value,
             None,
             0.0,
@@ -1482,11 +1454,11 @@ mod tests {
     #[test]
     fn local_atmosphere_uses_the_simulation_gravity() {
         let inputs = create_test_inputs(); // Magnus off
-        let atmo = (inputs.altitude, 15.0, 1013.25, 1.0);
+        let atmo = legacy((inputs.altitude, 15.0, 1013.25, 1.0));
         let velocity = Vector3::new(600.0, 0.0, 0.0);
         let low_gravity = Gravity::new(3.71).unwrap();
         let aerodynamic = |pos, gravity| {
-            aerodynamic_acceleration_with_gravity(pos, velocity, &inputs, atmo, gravity)
+            aerodynamic_acceleration_with_gravity(pos, velocity, &inputs, &atmo, gravity)
         };
 
         // Control: at the station there is no air column to integrate, so gravity cannot reach
@@ -1516,7 +1488,7 @@ mod tests {
     fn magnus_yaw_of_repose_uses_the_simulation_gravity() {
         let mut inputs = create_test_inputs();
         inputs.twist_rate = 10.0;
-        let atmo = (inputs.altitude, 15.0, 1013.25, 1.0);
+        let atmo = legacy((inputs.altitude, 15.0, 1013.25, 1.0));
         let velocity = Vector3::new(inputs.muzzle_velocity, 0.0, 0.0);
         let low_gravity = Gravity::new(3.71).unwrap();
         // At the station, so the density cannot depend on gravity.
@@ -1529,7 +1501,7 @@ mod tests {
                 Vector3::zeros(),
                 velocity,
                 &inputs,
-                atmo,
+                &atmo,
                 gravity,
             )
         };
@@ -1587,7 +1559,7 @@ mod tests {
             Vector3::new(700.0, 0.0, 0.0),
             &inputs,
             Vector3::zeros(),
-            (1.225, 340.0, 0.0, 0.0),
+            &direct(1.225, 340.0),
             inputs.bc_value,
             None,
             0.0,
@@ -1613,7 +1585,7 @@ mod tests {
             Vector3::new(700.0, 0.0, 0.0),
             &omitted,
             Vector3::zeros(),
-            (1.225, 340.0, 0.0, 0.0),
+            &direct(1.225, 340.0),
             omitted.bc_value,
             None,
             0.0,
@@ -1661,7 +1633,7 @@ mod tests {
                 Vector3::new(700.0, 0.0, 0.0),
                 &inputs,
                 Vector3::zeros(),
-                (1.225, 340.0, 0.0, 0.0),
+                &direct(1.225, 340.0),
                 inputs.bc_value,
                 None,
                 0.0,
@@ -1713,7 +1685,7 @@ mod tests {
                 Vector3::new(speed, 0.0, 0.0),
                 inputs,
                 Vector3::zeros(),
-                (1.225, 340.0, 0.0, 0.0),
+                &direct(1.225, 340.0),
                 inputs.bc_value,
                 None,
                 0.0,
