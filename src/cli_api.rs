@@ -1,5 +1,7 @@
 // CLI API module - provides simplified interfaces for command-line tool
-use crate::atmosphere::{PressureReferenceMode, StationAtmospherePresence};
+use crate::atmosphere::{
+    KernelAtmosphere, PressureReferenceMode, StationAir, StationAtmospherePresence,
+};
 use crate::cluster_bc::ClusterBCDegradation;
 use crate::gravity::Gravity;
 use crate::mc_stats::{wilson_interval, BernoulliConfidenceSequence, ConfidenceLevel, Welford};
@@ -2078,10 +2080,10 @@ impl TrajectorySolver {
     /// `(temp_c, pressure_hpa, humidity_percent, until_distance_m)`, defined at the shooter base
     /// altitude; the per-substep local-atmosphere recompute selects the active zone by downrange
     /// distance (first zone whose `until_distance_m` exceeds it; the last zone is held beyond the
-    /// final threshold). The zone's base conditions are composed with the vertical altitude lapse
-    /// via `get_local_atmosphere_humid`, so a steeply-arcing shot still sees the y-lapse on top of
-    /// the zone base. An empty list clears segmented atmosphere (reverts to the resolved
-    /// single-station conditions).
+    /// final threshold). The zone's base conditions, its humidity included, are composed with the
+    /// vertical altitude lapse by [`crate::atmosphere::air_at`], so a steeply-arcing shot still
+    /// sees the y-lapse on top of the zone base. An empty list clears segmented atmosphere
+    /// (reverts to the resolved single-station conditions).
     pub fn set_atmo_segments(&mut self, segments: Vec<crate::atmosphere::AtmoSegment>) {
         self.atmo_sock = if segments.is_empty() {
             None
@@ -2157,7 +2159,7 @@ impl TrajectorySolver {
         }
 
         // Engine's own gyroscopic (Miller) stability factor — same Sg shown elsewhere.
-        let (_, _, temp_c, pressure_hpa) = self.resolved_atmosphere();
+        let (temp_c, pressure_hpa) = self.resolved_station_conditions();
         let sg = crate::stability::compute_stability_coefficient(
             &self.inputs,
             (self.atmosphere.altitude, temp_c, pressure_hpa, 0.0),
@@ -2202,22 +2204,47 @@ impl TrajectorySolver {
         })
     }
 
-    fn resolved_atmosphere(&self) -> (f64, f64, f64, f64) {
+    /// Station temperature (°C) and absolute pressure (hPa) after presence resolution.
+    fn resolved_station_conditions(&self) -> (f64, f64) {
         // NEITHER is the old legacy-sentinel arm exactly, BOTH the old authoritative arm.
-        let (temp_c, pressure_hpa) = crate::atmosphere::resolve_station_conditions_with_presence(
+        crate::atmosphere::resolve_station_conditions_with_presence(
             self.atmosphere.temperature,
             self.atmosphere.pressure,
             self.atmosphere.altitude,
             PressureReferenceMode::Absolute,
             self.station_presence,
-        );
-        let (density, speed_of_sound) = crate::atmosphere::calculate_atmosphere(
+        )
+    }
+
+    /// The station air this solve flies: built once per solve, it seeds every per-step
+    /// [`crate::atmosphere::air_at_with_gravity`] lookup and is the reference for station Mach.
+    ///
+    /// Its density and sound speed are `calculate_atmosphere` at the resolved station, as they
+    /// always were. Until `validate_for_solve` refuses what `StationAir::new` refuses, it keeps
+    /// 0.49.0's handling of out-of-range input ([`StationAir::legacy_clamped`]): an RH outside
+    /// [0, 100] flies clamped and impossible air flies capped.
+    fn station_air(&self) -> Result<StationAir, BallisticsError> {
+        let (temp_c, pressure_hpa) = self.resolved_station_conditions();
+        StationAir::legacy_clamped(
             self.atmosphere.altitude,
-            Some(temp_c),
-            Some(pressure_hpa),
+            temp_c,
+            pressure_hpa,
             self.atmosphere.humidity,
-        );
-        (density, speed_of_sound, temp_c, pressure_hpa)
+        )
+        .map_err(|error| BallisticsError::from(error.at_field("atmosphere.humidity").to_string()))
+    }
+
+    /// `(density, speed_of_sound, temp_c, pressure_hpa)` of [`Self::station_air`], the shape the
+    /// tests were written against.
+    #[cfg(test)]
+    fn resolved_atmosphere(&self) -> (f64, f64, f64, f64) {
+        let station = self.station_air().expect("test atmospheres are valid");
+        (
+            station.density_kg_m3(),
+            station.speed_of_sound_mps(),
+            station.temperature_c(),
+            station.pressure_hpa(),
+        )
     }
 
     fn precession_nutation_params(
@@ -2493,7 +2520,7 @@ impl TrajectorySolver {
     /// the fast / Monte-Carlo path uses — both go through
     /// [`crate::spin_drift::effective_sg_from_inputs`] with the resolved muzzle atmosphere.
     fn effective_spin_drift_sg(&self) -> f64 {
-        let (_, _, temp_c, press_hpa) = self.resolved_atmosphere();
+        let (temp_c, press_hpa) = self.resolved_station_conditions();
         crate::spin_drift::effective_sg_from_inputs(&self.inputs, temp_c, press_hpa)
     }
 
@@ -2661,13 +2688,13 @@ impl TrajectorySolver {
         let mut max_precession_angle = 0.0;
 
         // Calculate air density
-        let (air_density, speed_of_sound, resolved_temp_c, resolved_press_hpa) =
-            self.resolved_atmosphere();
-        // MBA-1136 (rank 30): base density RATIO for the local-altitude atmosphere recompute done
-        // per-substep inside calculate_acceleration. The `air_density` / `speed_of_sound` above
-        // stay the frozen station values, still used for the Mach-transition, pitch-damping and
-        // precession/nutation diagnostics (which are intentionally referenced to station Mach).
-        let base_ratio = air_density / 1.225;
+        // The station air, resolved once per solve. It seeds the per-substep local-altitude
+        // air lookup inside calculate_acceleration (MBA-1136), and its frozen density and sound
+        // speed below are the station values the Mach-transition, pitch-damping and
+        // precession/nutation diagnostics are intentionally referenced to (station Mach).
+        let station = self.station_air()?;
+        let air_density = station.density_kg_m3();
+        let speed_of_sound = station.speed_of_sound_mps();
 
         // Wind vector (McCoy): X=downrange (head/tail wind), Y=0, Z=lateral (crosswind)
         // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
@@ -2781,12 +2808,8 @@ impl TrajectorySolver {
             // BC-retardation RK4/RK45 path), and also omitted the Magnus/Coriolis terms.
             // calculate_acceleration applies BC-retardation drag, gravity, Coriolis, Magnus, wind
             // shear, and the zero-relative-velocity gravity-only guard.
-            let acceleration = self.calculate_acceleration(
-                &position,
-                &velocity,
-                &wind_vector,
-                (resolved_temp_c, resolved_press_hpa, base_ratio),
-            );
+            let acceleration =
+                self.calculate_acceleration(&position, &velocity, &wind_vector, &station);
 
             // Update state
             velocity += acceleration * self.time_step;
@@ -2905,13 +2928,13 @@ impl TrajectorySolver {
         let mut max_precession_angle = 0.0;
 
         // Calculate air density
-        let (air_density, speed_of_sound, resolved_temp_c, resolved_press_hpa) =
-            self.resolved_atmosphere();
-        // MBA-1136 (rank 30): base density RATIO for the local-altitude atmosphere recompute done
-        // per-substep inside calculate_acceleration. The `air_density` / `speed_of_sound` above
-        // stay the frozen station values, still used for the Mach-transition, pitch-damping and
-        // precession/nutation diagnostics (which are intentionally referenced to station Mach).
-        let base_ratio = air_density / 1.225;
+        // The station air, resolved once per solve. It seeds the per-substep local-altitude
+        // air lookup inside calculate_acceleration (MBA-1136), and its frozen density and sound
+        // speed below are the station values the Mach-transition, pitch-damping and
+        // precession/nutation diagnostics are intentionally referenced to (station Mach).
+        let station = self.station_air()?;
+        let air_density = station.density_kg_m3();
+        let speed_of_sound = station.speed_of_sound_mps();
 
         // Wind vector (McCoy): X=downrange (head/tail wind), Y=0, Z=lateral (crosswind)
         // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
@@ -3022,42 +3045,22 @@ impl TrajectorySolver {
             let dt = self.time_step;
 
             // k1
-            let acc1 = self.calculate_acceleration(
-                &position,
-                &velocity,
-                &wind_vector,
-                (resolved_temp_c, resolved_press_hpa, base_ratio),
-            );
+            let acc1 = self.calculate_acceleration(&position, &velocity, &wind_vector, &station);
 
             // k2
             let pos2 = position + velocity * (dt * 0.5);
             let vel2 = velocity + acc1 * (dt * 0.5);
-            let acc2 = self.calculate_acceleration(
-                &pos2,
-                &vel2,
-                &wind_vector,
-                (resolved_temp_c, resolved_press_hpa, base_ratio),
-            );
+            let acc2 = self.calculate_acceleration(&pos2, &vel2, &wind_vector, &station);
 
             // k3
             let pos3 = position + vel2 * (dt * 0.5);
             let vel3 = velocity + acc2 * (dt * 0.5);
-            let acc3 = self.calculate_acceleration(
-                &pos3,
-                &vel3,
-                &wind_vector,
-                (resolved_temp_c, resolved_press_hpa, base_ratio),
-            );
+            let acc3 = self.calculate_acceleration(&pos3, &vel3, &wind_vector, &station);
 
             // k4
             let pos4 = position + vel3 * dt;
             let vel4 = velocity + acc3 * dt;
-            let acc4 = self.calculate_acceleration(
-                &pos4,
-                &vel4,
-                &wind_vector,
-                (resolved_temp_c, resolved_press_hpa, base_ratio),
-            );
+            let acc4 = self.calculate_acceleration(&pos4, &vel4, &wind_vector, &station);
 
             // Update position and velocity
             position += (velocity + vel2 * 2.0 + vel3 * 2.0 + vel4) * (dt / 6.0);
@@ -3154,13 +3157,13 @@ impl TrajectorySolver {
 
         // Air density and wind are constant for the whole solve (self.atmosphere / self.wind
         // are immutable); compute once instead of every iteration (mirrors solve_rk4).
-        let (air_density, speed_of_sound, resolved_temp_c, resolved_press_hpa) =
-            self.resolved_atmosphere();
-        // MBA-1136 (rank 30): base density RATIO for the local-altitude atmosphere recompute done
-        // per-substep inside calculate_acceleration. The `air_density` / `speed_of_sound` above
-        // stay the frozen station values, still used for the Mach-transition, pitch-damping and
-        // precession/nutation diagnostics (which are intentionally referenced to station Mach).
-        let base_ratio = air_density / 1.225;
+        // The station air, resolved once per solve. It seeds the per-substep local-altitude
+        // air lookup inside calculate_acceleration (MBA-1136), and its frozen density and sound
+        // speed below are the station values the Mach-transition, pitch-damping and
+        // precession/nutation diagnostics are intentionally referenced to (station Mach).
+        let station = self.station_air()?;
+        let air_density = station.density_kg_m3();
+        let speed_of_sound = station.speed_of_sound_mps();
         // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
         // WindSock); wind enters drag via velocity - wind. Used when no segmented wind.
         // MBA-728: no shear/no segments here, so vertical_speed passes straight through
@@ -3253,13 +3256,8 @@ impl TrajectorySolver {
 
             // Retry the same state until the embedded error estimate accepts the
             // candidate. No trajectory or angular state advances on rejection.
-            let accepted_step = self.adaptive_rk45_step(
-                &position,
-                &velocity,
-                dt,
-                &wind_vector,
-                (resolved_temp_c, resolved_press_hpa, base_ratio),
-            );
+            let accepted_step =
+                self.adaptive_rk45_step(&position, &velocity, dt, &wind_vector, &station);
             debug_assert!(
                 accepted_step.error <= RK45_TOLERANCE || accepted_step.used_dt <= RK45_MIN_DT
             );
@@ -3367,7 +3365,7 @@ impl TrajectorySolver {
         velocity: &Vector3<f64>,
         initial_dt: f64,
         wind_vector: &Vector3<f64>,
-        resolved_atmo: (f64, f64, f64),
+        station: &StationAir,
     ) -> Rk45AcceptedStep {
         let mut trial_dt = initial_dt;
 
@@ -3378,7 +3376,7 @@ impl TrajectorySolver {
                 trial_dt,
                 wind_vector,
                 RK45_TOLERANCE,
-                resolved_atmo,
+                station,
             );
             // A finite-but-extreme input or malformed optional curve can overflow an embedded
             // trial. Do not let a NaN suggested step poison `trial_dt` and retry forever: shrink
@@ -3411,7 +3409,7 @@ impl TrajectorySolver {
         dt: f64,
         wind_vector: &Vector3<f64>,
         tolerance: f64,
-        resolved_atmo: (f64, f64, f64), // (base_temp_c, base_press_hpa, base_ratio)
+        station: &StationAir,
     ) -> Rk45Trial {
         // Dormand-Prince coefficients
         const A21: f64 = 1.0 / 5.0;
@@ -3451,37 +3449,37 @@ impl TrajectorySolver {
         const B7_ERR: f64 = 1.0 / 40.0;
 
         // Compute RK45 stages
-        let k1_v = self.calculate_acceleration(position, velocity, wind_vector, resolved_atmo);
+        let k1_v = self.calculate_acceleration(position, velocity, wind_vector, station);
         let k1_p = *velocity;
 
         let p2 = position + dt * A21 * k1_p;
         let v2 = velocity + dt * A21 * k1_v;
-        let k2_v = self.calculate_acceleration(&p2, &v2, wind_vector, resolved_atmo);
+        let k2_v = self.calculate_acceleration(&p2, &v2, wind_vector, station);
         let k2_p = v2;
 
         let p3 = position + dt * (A31 * k1_p + A32 * k2_p);
         let v3 = velocity + dt * (A31 * k1_v + A32 * k2_v);
-        let k3_v = self.calculate_acceleration(&p3, &v3, wind_vector, resolved_atmo);
+        let k3_v = self.calculate_acceleration(&p3, &v3, wind_vector, station);
         let k3_p = v3;
 
         let p4 = position + dt * (A41 * k1_p + A42 * k2_p + A43 * k3_p);
         let v4 = velocity + dt * (A41 * k1_v + A42 * k2_v + A43 * k3_v);
-        let k4_v = self.calculate_acceleration(&p4, &v4, wind_vector, resolved_atmo);
+        let k4_v = self.calculate_acceleration(&p4, &v4, wind_vector, station);
         let k4_p = v4;
 
         let p5 = position + dt * (A51 * k1_p + A52 * k2_p + A53 * k3_p + A54 * k4_p);
         let v5 = velocity + dt * (A51 * k1_v + A52 * k2_v + A53 * k3_v + A54 * k4_v);
-        let k5_v = self.calculate_acceleration(&p5, &v5, wind_vector, resolved_atmo);
+        let k5_v = self.calculate_acceleration(&p5, &v5, wind_vector, station);
         let k5_p = v5;
 
         let p6 = position + dt * (A61 * k1_p + A62 * k2_p + A63 * k3_p + A64 * k4_p + A65 * k5_p);
         let v6 = velocity + dt * (A61 * k1_v + A62 * k2_v + A63 * k3_v + A64 * k4_v + A65 * k5_v);
-        let k6_v = self.calculate_acceleration(&p6, &v6, wind_vector, resolved_atmo);
+        let k6_v = self.calculate_acceleration(&p6, &v6, wind_vector, station);
         let k6_p = v6;
 
         let p7 = position + dt * (A71 * k1_p + A73 * k3_p + A74 * k4_p + A75 * k5_p + A76 * k6_p);
         let v7 = velocity + dt * (A71 * k1_v + A73 * k3_v + A74 * k4_v + A75 * k5_v + A76 * k6_v);
-        let k7_v = self.calculate_acceleration(&p7, &v7, wind_vector, resolved_atmo);
+        let k7_v = self.calculate_acceleration(&p7, &v7, wind_vector, station);
         let k7_p = v7;
 
         // 5th order solution
@@ -3541,7 +3539,7 @@ impl TrajectorySolver {
         position: &Vector3<f64>,
         velocity: &Vector3<f64>,
         wind_vector: &Vector3<f64>,
-        resolved_atmo: (f64, f64, f64), // (base_temp_c, base_press_hpa, base_ratio) hoisted per-solve
+        station: &StationAir,
     ) -> Vector3<f64> {
         // Resolve the wind at this point. Downrange-segmented wind (when supplied)
         // takes precedence and is sampled by downrange distance (position.x) per
@@ -3568,58 +3566,34 @@ impl TrajectorySolver {
             return self.gravity_acceleration();
         }
 
-        // MBA-1136 (rank 30): recompute the atmosphere at the LOCAL substep altitude instead of
-        // holding the frozen station scalars for the whole flight. This mirrors what
-        // derivatives.rs / fast_trajectory.rs already do, so all three solver families vary air
-        // density AND speed of sound with altitude (matters on elevated / long-range shots; a
-        // no-op at the shooter altitude, where the ratio-based density recovers the station value
-        // exactly). base_* were resolved once per solve via resolved_atmosphere().
+        // MBA-1136 (rank 30): the air at the LOCAL substep altitude, not the frozen station
+        // scalars, so density AND speed of sound vary with altitude (matters on elevated /
+        // long-range shots; a no-op at the shooter altitude, where the ratio-based density
+        // recovers the station value exactly). `station` was resolved once per solve by
+        // station_air().
         //
-        // `base_temp_c` / `base_press_hpa` are the STATION conditions that seed the local
-        // atmosphere calculation below. Magnus dynamic stability consumes the resulting local
+        // MBA-1137: with downrange-segmented atmosphere, the zone selected by downrange distance
+        // (position.x) replaces the station as the BASE (its T/P/RH, and a CIPM density ratio at
+        // its RH), and the world-vertical altitude lapse multiplies on top of it, so the two
+        // compose without double-counting. Magnus dynamic stability consumes the resulting local
         // density rather than freezing a launch-density correction.
-        let (base_temp_c, base_press_hpa, station_ratio) = resolved_atmo;
-
-        // MBA-1137: downrange-segmented atmosphere. When an AtmoSock is present, swap the BASE
-        // (station-referenced) T/P/H tuple for the active zone selected by downrange distance
-        // (position.x), recomputing the per-zone base density ratio via CIPM. That swapped base
-        // then flows through the SAME altitude-lapse pipeline, so downrange zone selection and the
-        // world-vertical altitude lapse compose — the zone sets the base density/humidity, and the
-        // lapse multiplies on top of it (no double-count). When None, this is the resolved
-        // single-station base.
-        let (drag_base_temp_c, drag_base_press_hpa, drag_base_ratio, drag_humidity_percent) =
-            if let Some(ref sock) = self.atmo_sock {
-                let (zone_temp_c, zone_press_hpa, zone_humidity) = sock.atmo_for_range(position.x);
-                let zone_base_ratio = crate::atmosphere::calculate_air_density_cimp(
-                    zone_temp_c,
-                    zone_press_hpa,
-                    zone_humidity,
-                ) / 1.225;
-                (zone_temp_c, zone_press_hpa, zone_base_ratio, zone_humidity)
-            } else {
-                (
-                    base_temp_c,
-                    base_press_hpa,
-                    station_ratio,
-                    self.atmosphere.humidity,
-                )
-            };
+        //
+        // air_at_with_gravity is the engine's ONE per-step air lookup; this is the reference
+        // composition the kernel families are moved onto.
         let local_alt = crate::atmosphere::shot_frame_altitude(
             self.atmosphere.altitude,
             position.x,
             position.y,
             self.inputs.shooting_angle,
         );
-        let (air_density, speed_of_sound) =
-            crate::atmosphere::get_local_atmosphere_humid_with_gravity(
-                local_alt,
-                self.atmosphere.altitude,
-                drag_base_temp_c,
-                drag_base_press_hpa,
-                drag_base_ratio,
-                drag_humidity_percent,
-                self.gravity,
-            );
+        let local_air = crate::atmosphere::air_at_with_gravity(
+            &KernelAtmosphere::Station(*station),
+            self.atmo_sock.as_ref(),
+            position.x,
+            local_alt,
+            self.gravity,
+        );
+        let (air_density, speed_of_sound) = (local_air.density_kg_m3, local_air.speed_of_sound_mps);
 
         // Resolve the Cd and the retardation denominator through the shared resolver. MBA-1423
         // reports a per-point Cd derived from these same two values, so the number a consumer
@@ -6001,13 +5975,9 @@ mod uniform_gravity_tests {
             StationAtmospherePresence::BOTH,
             gravity,
         );
-        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
-        solver.calculate_acceleration(
-            &position,
-            &velocity,
-            &Vector3::zeros(),
-            (temp_c, pressure_hpa, density / 1.225),
-        ) - solver.gravity_acceleration()
+        let station = solver.station_air().unwrap();
+        solver.calculate_acceleration(&position, &velocity, &Vector3::zeros(), &station)
+            - solver.gravity_acceleration()
     }
 
     #[test]
@@ -8016,13 +7986,8 @@ mod cluster_bc_reference_space_tests {
         );
         let position = Vector3::zeros();
         let velocity = Vector3::new(1100.0 / 3.28084, 0.0, 0.0);
-        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
-        solver.calculate_acceleration(
-            &position,
-            &velocity,
-            &Vector3::zeros(),
-            (temp_c, pressure_hpa, density / 1.225),
-        )
+        let station = solver.station_air().unwrap();
+        solver.calculate_acceleration(&position, &velocity, &Vector3::zeros(), &station)
     }
 
     #[test]
@@ -8128,12 +8093,12 @@ mod velocity_bc_flag_tests {
             WindConditions::default(),
             AtmosphericConditions::default(),
         );
-        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
+        let station = solver.station_air().unwrap();
         solver.calculate_acceleration(
             &Vector3::zeros(),
             &Vector3::new(600.0, 0.0, 0.0),
             &Vector3::zeros(),
-            (temp_c, pressure_hpa, density / 1.225),
+            &station,
         )
     }
 
@@ -8220,19 +8185,20 @@ mod mach_bc_segment_tests {
             segmented_solver.atmosphere.humidity,
         );
         let velocity = Vector3::new(1.5 * local_speed_of_sound, 0.0, 0.0);
-        let resolved_atmo = (temp_c, pressure_hpa, density / 1.225);
+        // Both solvers fly the same default atmosphere, so they share one station.
+        let station = segmented_solver.station_air().unwrap();
 
         let segmented_acceleration = segmented_solver.calculate_acceleration(
             &position,
             &velocity,
             &Vector3::zeros(),
-            resolved_atmo,
+            &station,
         );
         let expected_acceleration = expected_solver.calculate_acceleration(
             &position,
             &velocity,
             &Vector3::zeros(),
-            resolved_atmo,
+            &station,
         );
 
         assert!(
@@ -8841,11 +8807,23 @@ mod humid_local_mach_tests {
     }
 
     fn acceleration(solver: &TrajectorySolver, base_ratio: f64) -> Vector3<f64> {
+        // The solver's own 30 C / 1013.25 hPa station and humidity, with a density ratio the
+        // test holds fixed so that only the sound speed can respond to the humidity.
+        let humidity =
+            crate::atmosphere::RelativeHumidity::try_percent(solver.atmosphere.humidity).unwrap();
+        let station = StationAir::with_density_ratio(
+            solver.atmosphere.altitude,
+            30.0,
+            1013.25,
+            base_ratio,
+            humidity,
+        )
+        .unwrap();
         solver.calculate_acceleration(
             &Vector3::zeros(),
             &Vector3::new(350.0, 0.0, 0.0),
             &Vector3::zeros(),
-            (30.0, 1013.25, base_ratio),
+            &station,
         )
     }
 
@@ -8906,24 +8884,14 @@ mod inclined_atmosphere_frame_tests {
             ..AtmosphericConditions::default()
         };
         let solver = TrajectorySolver::new(inputs, WindConditions::default(), atmosphere);
-        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
-        let resolved_atmo = (temp_c, pressure_hpa, density / 1.225);
+        let station = solver.station_air().unwrap();
         let velocity = Vector3::new(600.0, 0.0, 0.0);
         let along_slant = Vector3::new(1_000.0, 0.0, 0.0);
         let across_slant = Vector3::new(0.0, 500.0 / angle.cos(), 0.0);
 
-        let a = solver.calculate_acceleration(
-            &along_slant,
-            &velocity,
-            &Vector3::zeros(),
-            resolved_atmo,
-        );
-        let b = solver.calculate_acceleration(
-            &across_slant,
-            &velocity,
-            &Vector3::zeros(),
-            resolved_atmo,
-        );
+        let a = solver.calculate_acceleration(&along_slant, &velocity, &Vector3::zeros(), &station);
+        let b =
+            solver.calculate_acceleration(&across_slant, &velocity, &Vector3::zeros(), &station);
 
         assert!(
             (a - b).norm() < 1e-10,
@@ -8945,13 +8913,9 @@ mod inclined_atmosphere_frame_tests {
         );
         let level_headwind = Vector3::new(-100.0, 0.0, 0.0);
         let velocity = expected_shot_frame_vector(level_headwind, angle);
-        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
-        let actual = solver.calculate_acceleration(
-            &Vector3::zeros(),
-            &velocity,
-            &level_headwind,
-            (temp_c, pressure_hpa, density / 1.225),
-        );
+        let station = solver.station_air().unwrap();
+        let actual =
+            solver.calculate_acceleration(&Vector3::zeros(), &velocity, &level_headwind, &station);
 
         assert!(
             (actual - solver.gravity_acceleration()).norm() < 1e-12,
@@ -8979,13 +8943,8 @@ mod inclined_atmosphere_frame_tests {
                 WindConditions::default(),
                 AtmosphericConditions::default(),
             );
-            let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
-            solver.calculate_acceleration(
-                &Vector3::zeros(),
-                &velocity,
-                &Vector3::zeros(),
-                (temp_c, pressure_hpa, density / 1.225),
-            )
+            let station = solver.station_air().unwrap();
+            solver.calculate_acceleration(&Vector3::zeros(), &velocity, &Vector3::zeros(), &station)
         };
 
         let omega_earth = 7.2921159e-5_f64;
@@ -9351,12 +9310,12 @@ mod form_factor_drag_tests {
             WindConditions::default(),
             AtmosphericConditions::default(),
         );
-        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
+        let station = solver.station_air().unwrap();
         solver.calculate_acceleration(
             &Vector3::zeros(),
             &Vector3::new(600.0, 0.0, 0.0),
             &Vector3::zeros(),
-            (temp_c, pressure_hpa, density / 1.225),
+            &station,
         )
     }
 
@@ -9420,8 +9379,7 @@ mod rk45_adaptivity_tests {
         let solver = discontinuous_wind_solver();
         let position = Vector3::new(0.0, solver.inputs.muzzle_height, 0.0);
         let velocity = Vector3::new(solver.inputs.muzzle_velocity, 0.0, 0.0);
-        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
-        let resolved_atmo = (temp_c, pressure_hpa, density / 1.225);
+        let station = solver.station_air().unwrap();
         let dt = 0.01;
 
         let rejected_trial = solver.rk45_step(
@@ -9430,7 +9388,7 @@ mod rk45_adaptivity_tests {
             dt,
             &Vector3::zeros(),
             RK45_TOLERANCE,
-            resolved_atmo,
+            &station,
         );
         assert!(
             rejected_trial.error > RK45_TOLERANCE,
@@ -9439,7 +9397,7 @@ mod rk45_adaptivity_tests {
         );
 
         let accepted =
-            solver.adaptive_rk45_step(&position, &velocity, dt, &Vector3::zeros(), resolved_atmo);
+            solver.adaptive_rk45_step(&position, &velocity, dt, &Vector3::zeros(), &station);
         assert!(accepted.used_dt < dt, "oversized trial was not retried");
         assert!(
             accepted.error <= RK45_TOLERANCE || accepted.used_dt <= RK45_MIN_DT,
@@ -9454,7 +9412,7 @@ mod rk45_adaptivity_tests {
             accepted.used_dt,
             &Vector3::zeros(),
             RK45_TOLERANCE,
-            resolved_atmo,
+            &station,
         );
         assert_eq!(accepted.position, accepted_trial.position);
         assert_eq!(accepted.velocity, accepted_trial.velocity);
@@ -9603,12 +9561,12 @@ mod magnus_stability_tests {
                 WindConditions::default(),
                 AtmosphericConditions::default(),
             );
-            let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
+            let station = solver.station_air().unwrap();
             solver.calculate_acceleration(
                 &Vector3::zeros(),
                 &Vector3::new(822.96, 0.0, 0.0),
                 &Vector3::zeros(),
-                (temp_c, pressure_hpa, density / 1.225),
+                &station,
             )
         };
 
@@ -9655,12 +9613,12 @@ mod magnus_stability_tests {
             "velocity-corrected Sg must be below the gate, got {canonical_sg}"
         );
 
-        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
+        let station = solver.station_air().unwrap();
         let acceleration = solver.calculate_acceleration(
             &Vector3::zeros(),
             &Vector3::new(muzzle_velocity, 0.0, 0.0),
             &Vector3::zeros(),
-            (temp_c, pressure_hpa, density / 1.225),
+            &station,
         );
         let mut baseline_inputs = inputs;
         baseline_inputs.enable_magnus = false;
@@ -9673,7 +9631,7 @@ mod magnus_stability_tests {
             &Vector3::zeros(),
             &Vector3::new(muzzle_velocity, 0.0, 0.0),
             &Vector3::zeros(),
-            (temp_c, pressure_hpa, density / 1.225),
+            &station,
         );
 
         assert_eq!(
@@ -9703,13 +9661,13 @@ mod magnus_stability_tests {
                     WindConditions::default(),
                     AtmosphericConditions::default(),
                 );
-                let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
+                let station = solver.station_air().unwrap();
                 solver
                     .calculate_acceleration(
                         &Vector3::zeros(),
                         &Vector3::new(speed_mps, 0.0, 0.0),
                         &Vector3::zeros(),
-                        (temp_c, pressure_hpa, density / 1.225),
+                        &station,
                     )
                     .y
             };
@@ -10987,16 +10945,15 @@ mod boundary_layer_shear_height_tests {
             wind.clone(),
             AtmosphericConditions::default(),
         );
-        let (density, _, temp_c, pressure_hpa) = sheared.resolved_atmosphere();
-        let resolved_atmo = (temp_c, pressure_hpa, density / 1.225);
+        let station = sheared.station_air().unwrap();
         let velocity = Vector3::new(700.0, 5.0, 0.0);
         let scaled_wind =
             crate::wind::wind_vector(wind.speed, wind.direction, 0.0) * expected_ratio;
 
         let with_shear =
-            sheared.calculate_acceleration(&position, &velocity, &Vector3::zeros(), resolved_atmo);
+            sheared.calculate_acceleration(&position, &velocity, &Vector3::zeros(), &station);
         let with_scaled_wind =
-            uniform.calculate_acceleration(&position, &velocity, &scaled_wind, resolved_atmo);
+            uniform.calculate_acceleration(&position, &velocity, &scaled_wind, &station);
         assert!(
             (with_shear - with_scaled_wind).norm() <= 1e-12,
             "{model}, muzzle_height {muzzle_height} m, shooting angle {shooting_angle} rad, \
@@ -11159,5 +11116,146 @@ mod boundary_layer_shear_height_tests {
         );
         // An unrecognized name keeps the historical power-law fallback.
         assert_eq!(with_model("typo").z.to_bits(), power_law.z.to_bits());
+    }
+}
+
+#[cfg(test)]
+mod station_air_tests {
+    //! TrajectorySolver's station air comes from `StationAir`, and its per-step air from
+    //! `atmosphere::air_at_with_gravity`. The end-to-end bits are pinned by the S1
+    //! byte-identity files; these check the station itself and the interim clamp.
+    use super::*;
+    use crate::atmosphere::{calculate_atmosphere, resolve_station_conditions_with_presence};
+
+    fn solver(
+        atmosphere: AtmosphericConditions,
+        presence: StationAtmospherePresence,
+    ) -> TrajectorySolver {
+        TrajectorySolver::new_with_station_presence(
+            BallisticInputs::default(),
+            WindConditions::default(),
+            atmosphere,
+            presence,
+        )
+    }
+
+    #[test]
+    fn station_air_is_calculate_atmosphere_at_the_resolved_station() {
+        let atmospheres = [
+            (0.0, 15.0, 1013.25, 0.0),
+            (0.0, 15.0, 1013.25, 50.0),
+            (1_500.0, 25.0, 830.0, 100.0),
+            // The legacy omission sentinels at altitude: NEITHER flies ICAO here, BOTH flies
+            // the typed values, and the station must follow whichever was resolved.
+            (1_500.0, 15.0, 1013.25, 37.5),
+            (2_000.0, 15.0, 1013.25, 50.0),
+        ];
+        for presence in [
+            StationAtmospherePresence::NEITHER,
+            StationAtmospherePresence::BOTH,
+        ] {
+            for (altitude, temperature, pressure, humidity) in atmospheres {
+                let solver = solver(
+                    AtmosphericConditions {
+                        temperature,
+                        pressure,
+                        humidity,
+                        altitude,
+                    },
+                    presence,
+                );
+                let station = solver.station_air().expect("valid station");
+                let (temp_c, pressure_hpa) = resolve_station_conditions_with_presence(
+                    temperature,
+                    pressure,
+                    altitude,
+                    PressureReferenceMode::Absolute,
+                    presence,
+                );
+                let (density, sound) =
+                    calculate_atmosphere(altitude, Some(temp_c), Some(pressure_hpa), humidity);
+                let got = [
+                    station.altitude_m(),
+                    station.temperature_c(),
+                    station.pressure_hpa(),
+                    station.humidity().percent(),
+                    station.density_kg_m3(),
+                    station.density_ratio(),
+                    station.speed_of_sound_mps(),
+                ];
+                let want = [
+                    altitude,
+                    temp_c,
+                    pressure_hpa,
+                    humidity,
+                    density,
+                    density / 1.225,
+                    sound,
+                ];
+                assert_eq!(
+                    got.map(f64::to_bits),
+                    want.map(f64::to_bits),
+                    "{presence:?} {altitude} m {temperature} C {pressure} hPa {humidity}%"
+                );
+                // The test-only tuple view reads the same station.
+                assert_eq!(
+                    [
+                        solver.resolved_atmosphere().0,
+                        solver.resolved_atmosphere().1,
+                        solver.resolved_atmosphere().2,
+                        solver.resolved_atmosphere().3,
+                    ]
+                    .map(f64::to_bits),
+                    [density, sound, temp_c, pressure_hpa].map(f64::to_bits)
+                );
+            }
+        }
+    }
+
+    /// Interim, 0.49.0 behaviour: an out-of-range station RH still flies clamped into
+    /// [0, 100], exactly as `calculate_atmosphere` and `moist_speed_of_sound` clamp it
+    /// internally. The humidity train's validation step replaces this with an error from
+    /// `validate_for_solve`; this test pins that the single-source refactor did not change it
+    /// early.
+    #[test]
+    fn out_of_range_station_humidity_still_flies_the_0_49_clamp() {
+        let solve = |humidity: f64| {
+            let mut solver = solver(
+                AtmosphericConditions {
+                    humidity,
+                    temperature: 30.0,
+                    ..AtmosphericConditions::default()
+                },
+                StationAtmospherePresence::BOTH,
+            );
+            solver.set_max_range(600.0);
+            assert_eq!(
+                solver
+                    .station_air()
+                    .expect("finite RH")
+                    .humidity()
+                    .percent()
+                    .to_bits(),
+                humidity.clamp(0.0, 100.0).to_bits()
+            );
+            solver.solve().expect("0.49.0 flies a clamped RH")
+        };
+        for (raw, clamped) in [(150.0, 100.0), (-5.0, 0.0)] {
+            let (a, b) = (solve(raw), solve(clamped));
+            assert_eq!(a.points.len(), b.points.len());
+            let last = |r: &TrajectoryResult| {
+                let p = r.points.last().unwrap();
+                [
+                    p.time,
+                    p.position.x,
+                    p.position.y,
+                    p.position.z,
+                    p.velocity_magnitude,
+                    r.station_speed_of_sound_mps,
+                ]
+                .map(f64::to_bits)
+            };
+            assert_eq!(last(&a), last(&b), "RH {raw} vs {clamped}");
+        }
     }
 }
