@@ -140,6 +140,10 @@ pub mod trajectory_observation;
 pub mod wasm;
 #[cfg(test)]
 mod wasm_tests;
+// Humidity-consistency train (0.50.0): byte-identity pins for the pub(crate) gravity-aware entry
+// points, beside the public-API pins in tests/humidity_byte_identity.rs.
+#[cfg(test)]
+mod humidity_byte_identity_tests;
 // MBA-154: Make constants public for ballistics_rust wrapping
 pub mod atmosphere;
 // `atmosphere.density_altitude`: describe an atmosphere the way a solve resolves it.
