@@ -75,6 +75,75 @@ fn click_value_to_profile_string(click: ClickValue) -> String {
         .to_string()
 }
 
+/// The `.a7p` file's zero-day air refused in the file's own field names, or `None` when it
+/// flies: `c_zero_air_humidity = 150: relative humidity must be a percent from 0 to 100 (...)`
+/// beyond the sensor band, `c_zero_air_humidity = 100 at 100 °C and 1013.2 hPa: no such air
+/// exists: ...` for air that cannot exist. The path names the file's field, prefixed `a7p:`
+/// (`a7p:c_zero_air_humidity`), since the file is binary and has no JSON path.
+///
+/// The air checked is exactly the air the imported profile stores and every flight of it flies
+/// (both readings supplied, at 0 m), so [`map_a7p_to_profile`] refuses with this, and an
+/// import never saves a profile no solve could fly.
+pub fn a7p_air_refusal(doc: &super::A7pDocument) -> Option<crate::atmosphere::AirRefusal> {
+    use crate::atmosphere::{reading_text, RelativeHumidity, StationAtmospherePresence};
+    let src = &doc.profile;
+    let fields = AirSpellingNames::A7P;
+    let pressure_hpa = src.air_pressure_hpa;
+    let spelling = crate::atmosphere::AirSpelling {
+        humidity: fields[0],
+        temperature: fields[1],
+        pressure: fields[2],
+        altitude: fields[3],
+        humidity_sent: src.air_humidity_pct,
+        temperature_text: reading_text(src.air_temperature_c, "°C"),
+        pressure_text: reading_text(pressure_hpa, "hPa"),
+        // A file carries its pressure as a station reading.
+        pressure_origin: crate::atmosphere::StationPressureOrigin::Reading,
+    };
+    let humidity = match RelativeHumidity::try_percent(src.air_humidity_pct) {
+        Ok(humidity) => humidity,
+        Err(error) => {
+            return Some(error.refusal_in(&spelling, 0.0, src.air_temperature_c, pressure_hpa))
+        }
+    };
+    crate::cli_api::AtmosphericConditions {
+        temperature: src.air_temperature_c,
+        pressure: pressure_hpa,
+        humidity: humidity.percent(),
+        altitude: 0.0,
+    }
+    .air_refusal(
+        StationAtmospherePresence::BOTH,
+        fields,
+        src.air_humidity_pct,
+        |celsius| reading_text(celsius, "°C"),
+        |hpa| reading_text(hpa, "hPa"),
+    )
+    // The humidity rules only: a file without a pressure field (0 hPa) imports as before.
+    .filter(crate::atmosphere::AirRefusal::is_humidity_rule)
+}
+
+/// The `.a7p` zero-day air fields, named as the format names them.
+struct AirSpellingNames;
+
+impl AirSpellingNames {
+    const A7P: [crate::atmosphere::AirField<'static>; 4] = [
+        crate::atmosphere::AirField {
+            name: "c_zero_air_humidity",
+            path: "a7p:c_zero_air_humidity",
+        },
+        crate::atmosphere::AirField {
+            name: "c_zero_air_temperature",
+            path: "a7p:c_zero_air_temperature",
+        },
+        crate::atmosphere::AirField {
+            name: "c_zero_air_pressure",
+            path: "a7p:c_zero_air_pressure",
+        },
+        crate::atmosphere::AirField::named("altitude"),
+    ];
+}
+
 pub fn map_a7p_to_profile(
     doc: &super::A7pDocument,
     name_override: Option<&str>,
@@ -291,6 +360,11 @@ pub fn map_a7p_to_profile(
     // from 0, and the format writes 0 % by omitting the field.
     // A reading within the sensor band (S5b, HUMIDITY_SENSOR_TOLERANCE_PERCENT: a meter's
     // 102 % in fog) is imported as the end it reads as, the value a `profile save` of it stores.
+    // R2: and air that cannot exist is refused too, by the rule every flight of the imported
+    // profile applies, in the file's own words (`a7p_air_refusal`).
+    if let Some(refusal) = a7p_air_refusal(doc) {
+        return Err(refusal.message().to_string());
+    }
     let humidity_percent = crate::atmosphere::RelativeHumidity::try_percent(src.air_humidity_pct)
         .map_err(|error| error.at_field("c_zero_air_humidity").to_string())?
         .percent();

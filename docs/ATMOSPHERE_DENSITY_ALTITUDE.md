@@ -176,12 +176,29 @@ exactly like `solve`'s:
 - **`invalid_request`** — there was no `request` at all.
 - **`command_failed`** — anything wrong with the request. `error.message` is a fixed summary;
   the reason is in `error.details`, which is the solve-json error envelope, locating the
-  offending field by path. Whenever `solve` would reject the same `atmosphere` object, this
-  command rejects it with identical `details`, so an app that already highlights fields from
-  `solve` errors needs no new code. This command also refuses some air `solve` still accepts
-  (see [Scope](#scope)) — in the same envelope, at the path of the field to blame, or at
-  `$.atmosphere` when only the combination of fields is out of range. Field-highlighting code
-  should fall back to the whole atmosphere for that path.
+  offending field by path. Whenever `solve` refuses the same `atmosphere` object for the air it
+  describes, this command refuses it with the same `details.error.code` and `path`, so an app
+  that already highlights fields from `solve` errors needs no new code. (The one `$.atmosphere`
+  refusal that is not about the air is `solve`'s own: it requires `latitude_rad` when its
+  Coriolis effect is on, and this command flies nothing.) Both commands resolve the atmosphere
+  with one function, and both ask one function whether its air can exist and which reading is
+  to blame when it cannot (since 0.50.0). That function blames in the order this command's own
+  range checks do:
+  1. the temperature, `$.atmosphere.temperature_k`, when it is outside 173.15–373.15 K;
+  2. when the station pressure's pressure altitude is outside the troposphere, the reading that
+     put it there: `$.atmosphere.pressure_pa` for a pressure sent as a station pressure, or as a
+     QNH that is itself outside the troposphere (hPa sent as pascals), and
+     `$.atmosphere.altitude_m` for one omitted or sent as a plausible QNH (feet sent as
+     meters). A QNH that leaves no station pressure at all at its altitude is refused the same
+     way, by both, with one message;
+  3. otherwise the humidity, `$.atmosphere.relative_humidity`.
+
+  The message is the same word for word too, except where one of this command's own range
+  checks (temperature, troposphere) refuses the air first: then the path is still `solve`'s,
+  and the message is this command's own, naming the same reading. This command also refuses
+  some air `solve` still accepts (see [Scope](#scope)) — in the same envelope, at the path of
+  the field to blame, or at `$.atmosphere` when only the combination of fields is out of range.
+  Field-highlighting code should fall back to the whole atmosphere for that path.
 
 Humidity sent as a percentage (`"relative_humidity": 50.0`) comes back as:
 
@@ -198,7 +215,7 @@ Humidity sent as a percentage (`"relative_humidity": 50.0`) comes back as:
       "status": "error",
       "error": {
         "code": "invalid_value",
-        "message": "value must be finite and in the inclusive range [0, 1]",
+        "message": "relative_humidity = 50: relative humidity must be a fraction from 0 to 1 (0.5 = 50 %; a sensor reading from -0.05 to 1.05 is read as 0 or 1)",
         "path": "$.atmosphere.relative_humidity",
         "line": null,
         "column": null
@@ -291,8 +308,12 @@ Feature-detect before calling: an engine built before this command answers `unkn
   defined), and a relative humidity that would need more water-vapor pressure than the air's
   total pressure. `solve` does not yet make the temperature check; here it is what stands
   between a unit mistake and a confident wrong number. Since 0.50.0 `solve` refuses the
-  impossible humidity itself, by the same rule (`StationAir::new`'s), and both messages state
-  that rule's reason word for word.
+  impossible humidity itself, before any flight, through the same function (`StationAir::new`'s
+  rule): `invalid_value` at the field to blame, with the air in the wire's own units, for
+  example `relative_humidity = 1 at 373.15 K and 100000 Pa: no such air exists: ...` at
+  `$.atmosphere.relative_humidity`. Air that cannot exist at a temperature outside
+  173.15–373.15 K is blamed on `temperature_k` by both commands, as this command's temperature
+  check blames it (see [Errors](#errors)).
 - Each refusal is located at the field to blame — `temperature_k`, `pressure_pa` (or
   `altitude_m`, when the pressure was defaulted or a plausible QNH was reduced at an impossible
   altitude), `relative_humidity` — except a density altitude out of range with every field

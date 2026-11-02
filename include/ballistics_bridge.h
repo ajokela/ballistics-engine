@@ -39,11 +39,28 @@
  *     document, "solve failed" when the solve service refused or could not
  *     finish it, and "atmosphere.density_altitude request rejected" for every
  *     refusal of that command.
+ *   - A refused humidity or station air, on every command that takes one
+ *     ("card.*", "true.fit", "true.dsf", "true.plan", "true.wind",
+ *     "profile.import_a7p", "profile.export_a7p"; since 0.50.0): the same
+ *     solve-json error envelope, with error.details.error.code "invalid_value"
+ *     at the path of the member to blame in that command's own request
+ *     ("$.humidity", "$.model.humidity_pct", "$.humidity_pct",
+ *     "a7p:c_zero_air_humidity", or the temperature, pressure or altitude
+ *     member when that is the reading to blame: the temperature outside
+ *     173.15-373.15 K, the pressure or altitude, whichever put the station
+ *     above the troposphere). A command whose details carry a flat
+ *     "reason" keeps it beside "error" ("invalid_input" for true.dsf,
+ *     "invalid_request" for true.plan, "field" for profile.export_a7p). The
+ *     outer "message" leads with the cause: "card.come_ups failed: humidity =
+ *     100 at 212 °F and 29.92 inHg: no such air exists: ...". "solve" and
+ *     "atmosphere.density_altitude" give the same refusal at their own
+ *     "$.atmosphere.relative_humidity" (or "temperature_k", "pressure_pa",
+ *     "altitude_m"), the same path from both for the same atmosphere.
  *   - "reticle.describe", "reticle.hold", "reticle.holds", "reticle.import",
  *     "true.dsf", "true.plan", "true.dial_plan" and "profile.export_a7p": a
  *     flat object with a machine-readable "reason", plus the offending values
  *     when the error has any.
- *   - Every other command: no "details"; the reason is in "message" alone.
+ *   - Every other failure: no "details"; the reason is in "message" alone.
  *
  * Messages are text for a person; branch on codes. Per command, with a Kotlin
  * unwrap: docs/ANDROID_JNI_BRIDGE.md, "Reading a failure".
@@ -58,8 +75,12 @@
  * or 0 %, so a sensor that reads 102 % in fog never fails a call. A value
  * farther out, or not finite, is refused, never clamped, and so is air that
  * cannot exist (a humidity needing more water-vapour pressure than the air's
- * total pressure), by one rule on every command. "if omitted" is what an
- * absent field means; "required" means its absence is refused.
+ * total pressure), by one rule on every command, profile.validate and the
+ * .a7p import and export included. A refusal states the band it enforces:
+ * "relative humidity must be a percent from 0 to 100 (a sensor reading from
+ * -5 to 105 is read as 0 or 100)", or in fraction units on the SI wire.
+ * "if omitted" is what an absent field means; "required" means its absence
+ * is refused.
  *
  *   command                      humidity field                unit      if omitted
  *   solve                        atmosphere.relative_humidity  fraction  0.5
@@ -70,7 +91,7 @@
  *   card.pdf                     humidity                      percent   50
  *   profile.validate             humidity                      percent   50
  *   profile.normalize            humidity                      percent   50
- *   profile.import_a7p           a7p:air_humidity_pct          percent   0
+ *   profile.import_a7p           a7p:c_zero_air_humidity       percent   0
  *   profile.export_a7p           humidity                      percent   50
  *   true.fit                     model.humidity_pct            percent   required
  *   true.dsf                     model.humidity_pct            percent   required
@@ -88,11 +109,14 @@
  *   bc5d.info                    -                             none      -
  *
  * The profile.* humidity is the stored profile's own "humidity" key.
- * profile.validate reports one outside the band as a warning (valid: false)
- * rather than an error; profile.normalize echoes it unchanged, since it
+ * profile.validate reports one outside the band, or stored air that cannot
+ * exist, as a warning (valid: false) rather than an error; profile.export_a7p
+ * refuses either; profile.normalize echoes it unchanged, since it
  * re-serializes the document and reads nothing. profile.import_a7p reads the
- * file's whole-percent air humidity field: an absent one is 0 %, the format's
- * own meaning, because the file writes 0 by omitting the field.
+ * file's whole-percent air humidity field (c_zero_air_humidity, as the
+ * import report's "mapped" rows name it): an absent one is 0 %, the format's
+ * own meaning, because the file writes 0 by omitting the field. A file whose
+ * air cannot exist is refused.
  *
  * Contract:
  *   - The calls NEVER return NULL and NEVER throw/abort; check "ok" in the JSON.

@@ -474,10 +474,20 @@ fn the_wire_refuses_impossible_air_for_the_one_shared_reason() {
             error.message
         );
 
+        let density_altitude_message = error.message.clone();
         let mut solve = solve_json(Some(1.0));
         solve["atmosphere"] = atmosphere;
         let request = decode_solve_request_v1(&solve.to_string()).unwrap();
         let error = refused(request);
+        // R2: one envelope, not only one reason. The solve refuses this air before any flight
+        // as `invalid_value` at the humidity's path, with density_altitude's message word for
+        // word (it was `solve_failed` with no path, in percent, from inside the zero search).
+        assert_eq!(error.code, SolveErrorCodeV1::InvalidValue);
+        assert_eq!(error.path(), Some(WIRE_PATH));
+        assert_eq!(
+            error.message, density_altitude_message,
+            "the solve and density_altitude refuse it in the same words"
+        );
         assert!(
             error.message.contains(&reason),
             "the solve states the shared reason: {}",

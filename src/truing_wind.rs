@@ -213,6 +213,19 @@ pub struct WindTruingRequest {
 }
 
 impl WindTruingRequest {
+    /// This request's station air refused in its own words, or `None` when it flies: the paths
+    /// are the request's own top-level members (`$.humidity_pct`, `$.temperature_f`, ...).
+    /// [`Self::validate`] makes this check before any crosswind is searched for.
+    pub fn air_refusal(&self) -> Option<crate::atmosphere::AirRefusal> {
+        crate::truing::truing_air_refusal(
+            self.temperature_f,
+            self.pressure_inhg,
+            self.humidity_pct,
+            self.altitude_ft,
+            "$",
+        )
+    }
+
     /// Validate the whole request before any (expensive) trajectory work begins.
     ///
     /// Mirrors [`crate::truing::TruingModelInputsV1::validate`] plus the observation-set
@@ -250,13 +263,15 @@ impl WindTruingRequest {
         if !self.temperature_f.value.is_finite() {
             return Err("temperature must be finite".to_string());
         }
-        // The engine's one humidity validator (plan C4): a percent in [0, 100], a sensor
-        // reading within 5 points of it flown as the end it reads as (S5b), anything farther
-        // out refused with its field named, never clamped.
-        crate::atmosphere::RelativeHumidity::try_percent(self.humidity_pct)
-            .map_err(|error| error.at_field("humidity_pct").to_string())?;
         if !self.altitude_ft.is_finite() {
             return Err("altitude must be finite".to_string());
+        }
+        // The station air (R2): the engine's one humidity validator (plan C4: a percent in
+        // [0, 100], a sensor reading within 5 points of it flown as the end it reads as (S5b),
+        // anything farther out refused with its field named, never clamped) and the solver's
+        // one impossible-air rule, before any crosswind is searched for.
+        if let Some(refusal) = self.air_refusal() {
+            return Err(refusal.message().to_string());
         }
         if let Some(earth) = self.earth {
             if !earth.latitude_deg.is_finite() || !(-90.0..=90.0).contains(&earth.latitude_deg) {
@@ -1232,9 +1247,13 @@ mod tests {
             let mut request = base_request(vec![observation]);
             request.humidity_pct = humidity;
             let error = request.validate().expect_err("an out-of-range humidity");
+            // R2: the range rule and the finiteness rule alike state the band they enforce.
             assert!(
-                error.contains("humidity_pct")
-                    && (error.contains("percent from 0 to 100") || error.contains("finite")),
+                error.starts_with("humidity_pct = ")
+                    && error.contains(
+                        "percent from 0 to 100 (a sensor reading from -5 to 105 is read as 0 \
+                         or 100)"
+                    ),
                 "RH {humidity}: {error}"
             );
         }

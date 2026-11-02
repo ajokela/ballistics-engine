@@ -1,7 +1,7 @@
 // CLI API module - provides simplified interfaces for command-line tool
 use crate::atmosphere::{
     AtmosphereError, KernelAtmosphere, PressureReferenceMode, RelativeHumidity, StationAir,
-    StationAtmospherePresence, DEFAULT_HUMIDITY_PERCENT,
+    StationAtmospherePresence, StationPressureOrigin, DEFAULT_HUMIDITY_PERCENT,
 };
 use crate::cluster_bc::ClusterBCDegradation;
 use crate::gravity::Gravity;
@@ -801,6 +801,152 @@ pub struct AtmosphericConditions {
     /// flies as the end it reads as; a value beyond that is refused by the solve.
     pub humidity: f64,
     pub altitude: f64, // meters
+}
+
+impl AtmosphericConditions {
+    /// The station temperature (°C) and absolute pressure (hPa) a solve of these conditions
+    /// flies, after the presence rule: a reading `presence` marks as supplied flies as given,
+    /// an omitted default at a real altitude flies the ICAO standard value there.
+    pub fn resolved_station(&self, presence: StationAtmospherePresence) -> (f64, f64) {
+        crate::atmosphere::resolve_station_conditions_with_presence(
+            self.temperature,
+            self.pressure,
+            self.altitude,
+            PressureReferenceMode::Absolute,
+            presence,
+        )
+    }
+
+    /// The station air a solve of these conditions flies, built exactly as
+    /// [`TrajectorySolver`] builds it: the humidity through [`RelativeHumidity::try_percent`],
+    /// the temperature and pressure through [`Self::resolved_station`], the air through
+    /// [`StationAir::new`].
+    ///
+    /// For a surface that refuses air up front, before any work, in its own words
+    /// ([`AtmosphereError::refusal_in`]): whatever this refuses, every solve of these
+    /// conditions refuses, and whatever it accepts, a solve flies.
+    pub fn station_air(
+        &self,
+        presence: StationAtmospherePresence,
+    ) -> Result<StationAir, AtmosphereError> {
+        let humidity = RelativeHumidity::try_percent(self.humidity)?;
+        let (temperature_c, pressure_hpa) = self.resolved_station(presence);
+        StationAir::new(self.altitude, temperature_c, pressure_hpa, humidity)
+    }
+
+    /// Where the station pressure a solve of these conditions flies comes from, by the
+    /// presence rule [`Self::resolved_station`] applies: the standard pressure at the altitude
+    /// when `presence` marks the pressure omitted and it is the sea-level default at a real
+    /// altitude, the reading otherwise ([`StationPressureOrigin::resolving`]).
+    pub fn pressure_origin(&self, presence: StationAtmospherePresence) -> StationPressureOrigin {
+        StationPressureOrigin::resolving(
+            self.pressure,
+            self.altitude,
+            PressureReferenceMode::Absolute,
+            presence,
+        )
+    }
+
+    /// [`Self::air_refusal`] by the humidity rules
+    /// ([`crate::atmosphere::AirRefusal::is_humidity_rule`]) for a terminal (the native CLI,
+    /// the browser terminal), which checks every other reading where it parses it: every
+    /// reading is named by its flag, which is also its path (`labels`: humidity, temperature,
+    /// pressure, altitude, e.g. `["--humidity", "--temperature", "--pressure", "--altitude"]`),
+    /// the humidity is the percent the command flies, and the station temperature and pressure
+    /// are stated in the run's `units` (°F and inHg, or °C and hPa):
+    /// `--humidity = 100 at 212 °F and 29.92 inHg: no such air exists: ...`.
+    pub fn air_refusal_named(
+        &self,
+        presence: StationAtmospherePresence,
+        units: UnitSystem,
+        labels: [&str; 4],
+    ) -> Option<crate::atmosphere::AirRefusal> {
+        self.air_refusal_named_from(presence, self.pressure_origin(presence), units, labels)
+    }
+
+    /// [`Self::air_refusal_named`] for a terminal that resolved the station itself (a QNH
+    /// reduced, a density altitude's derived triple) and so knows where its pressure came from
+    /// better than `presence` can say: `origin`, which decides whether a station pressure outside
+    /// the troposphere is blamed on the pressure or the altitude.
+    pub fn air_refusal_named_from(
+        &self,
+        presence: StationAtmospherePresence,
+        origin: StationPressureOrigin,
+        units: UnitSystem,
+        labels: [&str; 4],
+    ) -> Option<crate::atmosphere::AirRefusal> {
+        use crate::atmosphere::{reading_text, AirField};
+        self.air_refusal_from(
+            presence,
+            origin,
+            labels.map(AirField::named),
+            self.humidity,
+            |celsius| match units {
+                UnitSystem::Imperial => reading_text(celsius * 9.0 / 5.0 + 32.0, "°F"),
+                UnitSystem::Metric => reading_text(celsius, "°C"),
+            },
+            |hpa| match units {
+                UnitSystem::Imperial => reading_text(hpa / 33.8639, "inHg"),
+                UnitSystem::Metric => reading_text(hpa, "hPa"),
+            },
+        )
+        .filter(crate::atmosphere::AirRefusal::is_humidity_rule)
+    }
+
+    /// [`Self::station_air`] refused in a surface's words, or `None` when the air flies.
+    ///
+    /// `humidity`, `temperature`, `pressure` and `altitude` name the surface's readings;
+    /// `humidity_sent` is the humidity as it was given there; `temperature_text` and
+    /// `pressure_text` state the resolved station temperature (°C) and pressure (hPa) in the
+    /// surface's units. Where the pressure came from is [`Self::pressure_origin`].
+    pub fn air_refusal(
+        &self,
+        presence: StationAtmospherePresence,
+        fields: [crate::atmosphere::AirField<'_>; 4],
+        humidity_sent: f64,
+        temperature_text: impl Fn(f64) -> String,
+        pressure_text: impl Fn(f64) -> String,
+    ) -> Option<crate::atmosphere::AirRefusal> {
+        self.air_refusal_from(
+            presence,
+            self.pressure_origin(presence),
+            fields,
+            humidity_sent,
+            temperature_text,
+            pressure_text,
+        )
+    }
+
+    /// [`Self::air_refusal`] with the pressure's `origin` stated by a caller that resolved the
+    /// pressure itself (a stored QNH reduced before these conditions were built).
+    pub fn air_refusal_from(
+        &self,
+        presence: StationAtmospherePresence,
+        origin: StationPressureOrigin,
+        fields: [crate::atmosphere::AirField<'_>; 4],
+        humidity_sent: f64,
+        temperature_text: impl Fn(f64) -> String,
+        pressure_text: impl Fn(f64) -> String,
+    ) -> Option<crate::atmosphere::AirRefusal> {
+        let error = self.station_air(presence).err()?;
+        let (temperature_c, pressure_hpa) = self.resolved_station(presence);
+        let [humidity, temperature, pressure, altitude] = fields;
+        Some(error.refusal_in(
+            &crate::atmosphere::AirSpelling {
+                humidity,
+                temperature,
+                pressure,
+                altitude,
+                humidity_sent,
+                temperature_text: temperature_text(temperature_c),
+                pressure_text: pressure_text(pressure_hpa),
+                pressure_origin: origin,
+            },
+            self.altitude,
+            temperature_c,
+            pressure_hpa,
+        ))
+    }
 }
 
 impl Default for AtmosphericConditions {
@@ -2222,13 +2368,7 @@ impl TrajectorySolver {
     /// Station temperature (°C) and absolute pressure (hPa) after presence resolution.
     fn resolved_station_conditions(&self) -> (f64, f64) {
         // NEITHER is the old legacy-sentinel arm exactly, BOTH the old authoritative arm.
-        crate::atmosphere::resolve_station_conditions_with_presence(
-            self.atmosphere.temperature,
-            self.atmosphere.pressure,
-            self.atmosphere.altitude,
-            PressureReferenceMode::Absolute,
-            self.station_presence,
-        )
+        self.atmosphere.resolved_station(self.station_presence)
     }
 
     /// The station air this solve flies: built once per solve, it seeds every per-step
@@ -2238,23 +2378,32 @@ impl TrajectorySolver {
     /// always were, through [`StationAir::new`]: so an RH within
     /// [`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`] (5 points) of [0, 100] is a sensor reading
     /// that flies exactly as 100 or 0, an RH beyond that band (or not finite) is refused, never
-    /// clamped, and so is air that cannot exist or a resolved station pressure at or below 0. `validate_for_solve` runs this before any integration. Errors name the
-    /// `atmosphere.*` field; a temperature or pressure error quotes the RESOLVED station value.
+    /// clamped, and so is air that cannot exist or a resolved station pressure at or below 0.
+    /// `validate_for_solve` runs this before any integration. It is
+    /// [`AtmosphericConditions::station_air`] at this solver's presence, and its refusal is
+    /// stated in the `atmosphere.*` fields' words: air that cannot exist names the humidity
+    /// with the RESOLVED station temperature (°C) and pressure (hPa) it is impossible in.
     fn station_air(&self) -> Result<StationAir, BallisticsError> {
-        let at_atmosphere_field = |error: AtmosphereError| {
-            let field = match error.field() {
-                "temperature_c" => "atmosphere.temperature",
-                "pressure_hpa" => "atmosphere.pressure",
-                "altitude_m" => "atmosphere.altitude",
-                _ => "atmosphere.humidity",
-            };
-            BallisticsError::from(error.at_field(field).to_string())
-        };
-        let humidity =
-            RelativeHumidity::try_percent(self.atmosphere.humidity).map_err(at_atmosphere_field)?;
-        let (temp_c, pressure_hpa) = self.resolved_station_conditions();
-        StationAir::new(self.atmosphere.altitude, temp_c, pressure_hpa, humidity)
-            .map_err(at_atmosphere_field)
+        self.atmosphere
+            .station_air(self.station_presence)
+            .map_err(|_| {
+                let refusal = self
+                    .atmosphere
+                    .air_refusal(
+                        self.station_presence,
+                        [
+                            crate::atmosphere::AirField::named("atmosphere.humidity"),
+                            crate::atmosphere::AirField::named("atmosphere.temperature"),
+                            crate::atmosphere::AirField::named("atmosphere.pressure"),
+                            crate::atmosphere::AirField::named("atmosphere.altitude"),
+                        ],
+                        self.atmosphere.humidity,
+                        |c| crate::atmosphere::reading_text(c, "°C"),
+                        |hpa| crate::atmosphere::reading_text(hpa, "hPa"),
+                    )
+                    .expect("the station refused this air");
+                BallisticsError::from(refusal.message().to_string())
+            })
     }
 
     /// `(density, speed_of_sound, temp_c, pressure_hpa)` of [`Self::station_air`], the shape the

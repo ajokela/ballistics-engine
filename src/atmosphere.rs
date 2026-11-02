@@ -1533,15 +1533,17 @@ fn sensor_band(
     field: &'static str,
     out_of_band: AtmosphereErrorReason,
 ) -> Result<f64, AtmosphereError> {
+    let unit = match out_of_band {
+        AtmosphereErrorReason::HumidityFractionOutOfRange => HumidityUnit::Fraction,
+        _ => HumidityUnit::Percent,
+    };
     if !value.is_finite() {
-        return Err(AtmosphereError::new(
-            field,
-            value,
-            AtmosphereErrorReason::NotFinite,
-        ));
+        return Err(
+            AtmosphereError::new(field, value, AtmosphereErrorReason::NotFinite).of_humidity(unit),
+        );
     }
     if !(lowest..=highest).contains(&value) {
-        return Err(AtmosphereError::new(field, value, out_of_band));
+        return Err(AtmosphereError::new(field, value, out_of_band).of_humidity(unit));
     }
     Ok(if value <= 0.0 {
         0.0
@@ -1552,21 +1554,73 @@ fn sensor_band(
     })
 }
 
+/// The range of a relative humidity PERCENT as every refusal states it, built from
+/// [`HUMIDITY_SENSOR_TOLERANCE_PERCENT`] so the words cannot drift from the band the
+/// constructor enforces: `percent from 0 to 100 (a sensor reading from -5 to 105 is read as 0 or
+/// 100)`.
+fn humidity_percent_range() -> String {
+    format!(
+        "percent from 0 to 100 (a sensor reading from {} to {} is read as 0 or 100)",
+        HUMIDITY_PERCENT_BAND.0, HUMIDITY_PERCENT_BAND.1
+    )
+}
+
+/// The range of a relative humidity FRACTION (the SI wire's `relative_humidity`) as every
+/// refusal states it, from the same constant: `fraction from 0 to 1 (0.5 = 50 %; a sensor
+/// reading from -0.05 to 1.05 is read as 0 or 1)`.
+fn humidity_fraction_range() -> String {
+    format!(
+        "fraction from 0 to 1 (0.5 = 50 %; a sensor reading from {} to {} is read as 0 or 1)",
+        HUMIDITY_FRACTION_BAND.0, HUMIDITY_FRACTION_BAND.1
+    )
+}
+
+/// Parse a relative-humidity PERCENT typed as text (a terminal or CLI flag's value) through the
+/// one validator, [`RelativeHumidity::try_percent`].
+///
+/// The error is the reason alone, for a caller that names the flag and the value itself (clap
+/// does): `not a number; relative humidity is a percent from 0 to 100 (a sensor reading from -5
+/// to 105 is read as 0 or 100)` for text that is no number, and
+/// [`AtmosphereError::explanation`] for a number the band refuses.
+///
+/// ```
+/// use ballistics_engine::atmosphere::parse_humidity_percent_text;
+///
+/// assert_eq!(parse_humidity_percent_text("101.7").unwrap().percent(), 100.0);
+/// assert!(parse_humidity_percent_text("150")
+///     .unwrap_err()
+///     .starts_with("relative humidity must be a percent from 0 to 100 (a sensor reading"));
+/// assert!(parse_humidity_percent_text("wet").unwrap_err().starts_with("not a number; "));
+/// ```
+pub fn parse_humidity_percent_text(raw: &str) -> Result<RelativeHumidity, String> {
+    let value: f64 = raw.trim().parse().map_err(|_| {
+        format!(
+            "not a number; relative humidity is a {}",
+            humidity_percent_range()
+        )
+    })?;
+    RelativeHumidity::try_percent(value).map_err(|error| error.explanation())
+}
+
 /// Parse a terminal humidity flag's value (`--humidity 37.5`, `--zero-humidity 80`) through the
 /// one validator, [`RelativeHumidity::try_percent`]: a PERCENT, 0 to 100, and a sensor reading
 /// up to [`HUMIDITY_SENSOR_TOLERANCE_PERCENT`] outside it is the end it reads as (`101.7` gives
 /// `100.0`); anything farther out is refused, never clamped. The WASM terminal's hand-written
-/// parser calls it for every humidity flag (the native CLI's clap parser goes through the same
-/// constructor); its errors name the flag, for example
-/// `"--humidity = 150: relative humidity must be a percent from 0 to 100"`.
+/// parser calls it for every humidity flag (the native CLI's clap parser goes through
+/// [`parse_humidity_percent_text`]); its errors name the flag, for example
+/// `"--humidity = 150: relative humidity must be a percent from 0 to 100 (a sensor reading from
+/// -5 to 105 is read as 0 or 100)"`.
 #[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn parse_humidity_percent_arg(flag: &str, raw: &str) -> Result<f64, String> {
-    let value: f64 = raw.trim().parse().map_err(|_| {
-        format!("{flag} = {raw}: not a number; a relative humidity is a percent from 0 to 100")
-    })?;
-    RelativeHumidity::try_percent(value)
-        .map(RelativeHumidity::percent)
-        .map_err(|error| error.at_field(flag.to_string()).to_string())
+    match raw.trim().parse::<f64>() {
+        Ok(value) => RelativeHumidity::try_percent(value)
+            .map(RelativeHumidity::percent)
+            .map_err(|error| error.at_field(flag.to_string()).to_string()),
+        Err(_) => Err(format!(
+            "{flag} = {raw}: {}",
+            parse_humidity_percent_text(raw).expect_err("text that is no number")
+        )),
+    }
 }
 
 /// Why an atmosphere value was refused. Carried by [`AtmosphereError`].
@@ -1576,10 +1630,13 @@ pub enum AtmosphereErrorReason {
     /// The value is NaN or infinite.
     NotFinite,
     /// A relative humidity percent outside `[0, 100]` by more than the sensor band,
-    /// [`HUMIDITY_SENSOR_TOLERANCE_PERCENT`]: below -5 or above 105.
+    /// [`HUMIDITY_SENSOR_TOLERANCE_PERCENT`]: below -5 or above 105. It displays the band it
+    /// enforces: "relative humidity must be a percent from 0 to 100 (a sensor reading from -5 to
+    /// 105 is read as 0 or 100)".
     HumidityPercentOutOfRange,
     /// A relative humidity fraction outside `[0, 1]` by more than the sensor band: below -0.05
-    /// or above 1.05.
+    /// or above 1.05. It displays the band in fraction units: "relative humidity must be a
+    /// fraction from 0 to 1 (0.5 = 50 %; a sensor reading from -0.05 to 1.05 is read as 0 or 1)".
     HumidityFractionOutOfRange,
     /// A temperature at or below absolute zero, -273.15 °C.
     AtOrBelowAbsoluteZero,
@@ -1604,9 +1661,19 @@ impl fmt::Display for AtmosphereErrorReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::NotFinite => "must be finite",
-            Self::HumidityPercentOutOfRange => "relative humidity must be a percent from 0 to 100",
+            Self::HumidityPercentOutOfRange => {
+                return write!(
+                    f,
+                    "relative humidity must be a {}",
+                    humidity_percent_range()
+                )
+            }
             Self::HumidityFractionOutOfRange => {
-                "relative humidity must be a fraction from 0 to 1 (0.5 = 50%)"
+                return write!(
+                    f,
+                    "relative humidity must be a {}",
+                    humidity_fraction_range()
+                )
             }
             Self::AtOrBelowAbsoluteZero => "temperature must be above absolute zero (-273.15 C)",
             Self::NonPositivePressure => "pressure must be greater than 0",
@@ -1629,17 +1696,26 @@ impl fmt::Display for AtmosphereErrorReason {
     }
 }
 
+/// The unit a refused relative humidity was given in, so a refusal that names no range of its
+/// own (a NaN) can still state the one the value had to lie in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HumidityUnit {
+    Percent,
+    Fraction,
+}
+
 /// An atmosphere value refused at a boundary: which field, the value given, and why.
 ///
 /// The constructors name their own parameters (`humidity_percent`, `relative_humidity`,
 /// `temperature_c`, `pressure_hpa`, ...). A boundary that knows the caller's path, such as a
-/// JSON pointer, relabels the error with [`Self::at_field`]. It displays as
-/// `"<field> = <value>: <reason>"`.
+/// JSON pointer, relabels the error with [`Self::at_field`], or states the whole refusal in its
+/// own words with [`Self::refusal_in`]. It displays as `"<field> = <value>: <explanation>"`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AtmosphereError {
     field: Cow<'static, str>,
     value: f64,
     reason: AtmosphereErrorReason,
+    humidity_unit: Option<HumidityUnit>,
 }
 
 impl AtmosphereError {
@@ -1648,6 +1724,34 @@ impl AtmosphereError {
             field: Cow::Borrowed(field),
             value,
             reason,
+            humidity_unit: None,
+        }
+    }
+
+    /// The same error, about a relative humidity given in `unit`.
+    fn of_humidity(mut self, unit: HumidityUnit) -> Self {
+        self.humidity_unit = Some(unit);
+        self
+    }
+
+    /// Why the value was refused, in words: the reason's own text, naming the quantity and the
+    /// range it must lie in where the reason alone would not. A relative humidity that is not
+    /// finite is "relative humidity must be a finite percent from 0 to 100 (a sensor reading
+    /// from -5 to 105 is read as 0 or 100)", not a bare "must be finite"; every other refusal is
+    /// its [`AtmosphereErrorReason`]'s text.
+    ///
+    /// For a caller that names the field itself (a flag parser).
+    pub fn explanation(&self) -> String {
+        match (self.reason, self.humidity_unit) {
+            (AtmosphereErrorReason::NotFinite, Some(HumidityUnit::Percent)) => format!(
+                "relative humidity must be a finite {}",
+                humidity_percent_range()
+            ),
+            (AtmosphereErrorReason::NotFinite, Some(HumidityUnit::Fraction)) => format!(
+                "relative humidity must be a finite {}",
+                humidity_fraction_range()
+            ),
+            (reason, _) => reason.to_string(),
         }
     }
 
@@ -1676,11 +1780,317 @@ impl AtmosphereError {
 
 impl fmt::Display for AtmosphereError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} = {}: {}", self.field, self.value, self.reason)
+        write!(f, "{} = {}: {}", self.field, self.value, self.explanation())
     }
 }
 
 impl std::error::Error for AtmosphereError {}
+
+/// The lowest pressure altitude a station can plausibly sit at, m: the bottom of the ICAO table.
+pub(crate) const LOWEST_PRESSURE_ALTITUDE_M: f64 = -5_000.0;
+/// The top of the standard atmosphere's troposphere, m. A station pressure whose pressure
+/// altitude is outside [`LOWEST_PRESSURE_ALTITUDE_M`]..=this is not a reading of the air anyone
+/// shoots in but a unit mistake (hPa sent as pascals is 25 km up).
+pub(crate) const TROPOSPHERE_TOP_M: f64 = 11_000.0;
+
+/// The NWS pressure altitude of a station pressure, m, when it lies outside the troposphere.
+pub(crate) fn pressure_altitude_outside_troposphere_m(station_pressure_hpa: f64) -> Option<f64> {
+    let altitude_m = nws_pressure_altitude_ft(station_pressure_hpa) * 0.3048;
+    (!(LOWEST_PRESSURE_ALTITUDE_M..=TROPOSPHERE_TOP_M).contains(&altitude_m)).then_some(altitude_m)
+}
+
+/// °C to K.
+const KELVIN_OFFSET: f64 = 273.15;
+
+/// −100 °C. The engine's saturation-vapour-pressure and CIPM compressibility formulas clamp
+/// their temperature here, so below it a density would mix a clamped and an unclamped term.
+pub(crate) const HUMID_AIR_MODEL_MIN_K: f64 = 173.15;
+/// 100 °C. Above the boiling point the saturation-vapour-pressure formula stops describing a
+/// stable atmosphere, and above water's critical point (647 K) it is not defined at all.
+pub(crate) const HUMID_AIR_MODEL_MAX_K: f64 = 373.15;
+
+/// Whether a station temperature, K, lies outside [`HUMID_AIR_MODEL_MIN_K`] to
+/// [`HUMID_AIR_MODEL_MAX_K`] (both edges inside). `atmosphere.density_altitude` refuses such a
+/// temperature; every surface blames air that cannot exist at one on the temperature.
+pub(crate) fn outside_humid_air_model_range(temperature_k: f64) -> bool {
+    !(HUMID_AIR_MODEL_MIN_K..=HUMID_AIR_MODEL_MAX_K).contains(&temperature_k)
+}
+
+/// Where the station pressure a solve flies came from, so air that cannot exist at a station
+/// pressure outside the troposphere is blamed on the reading that put it there: the pressure
+/// when it was a station reading, the altitude when the pressure was the altitude's.
+///
+/// Every surface decides it one way, through [`Self::of`] (or [`Self::resolving`], from what a
+/// presence-aware resolution was handed), and `atmosphere.density_altitude` locates its own
+/// troposphere refusal by the same rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StationPressureOrigin {
+    /// A station pressure reading, or a QNH that is itself outside the troposphere (hPa sent as
+    /// pascals): the pressure is to blame.
+    #[default]
+    Reading,
+    /// No pressure was given: the station flies the ICAO standard pressure at its altitude, so
+    /// the altitude is to blame (feet sent as metres).
+    Standard,
+    /// A QNH that is itself a plausible sea-level pressure, reduced to the station altitude: the
+    /// altitude is to blame.
+    Qnh,
+}
+
+impl StationPressureOrigin {
+    /// The origin of a station pressure from what was given: `given_hpa` is the pressure as
+    /// given (a QNH before its reduction), or `None` when none was given and the station flies
+    /// the standard pressure at its altitude; `mode` says whether a given pressure is a QNH.
+    pub fn of(given_hpa: Option<f64>, mode: PressureReferenceMode) -> Self {
+        match (given_hpa, mode) {
+            (None, _) => Self::Standard,
+            (Some(qnh_hpa), PressureReferenceMode::Qnh)
+                if pressure_altitude_outside_troposphere_m(qnh_hpa).is_none() =>
+            {
+                Self::Qnh
+            }
+            (Some(_), _) => Self::Reading,
+        }
+    }
+
+    /// The origin of the pressure [`resolve_station_conditions_with_presence`] resolves from
+    /// these same inputs: a pressure the presence rule replaces with the ICAO standard at the
+    /// altitude (an omitted sea-level default at a real altitude) is the standard's; any other
+    /// is the given one, a QNH or a reading.
+    pub fn resolving(
+        pressure_hpa: f64,
+        altitude_m: f64,
+        mode: PressureReferenceMode,
+        presence: StationAtmospherePresence,
+    ) -> Self {
+        let given = presence.pressure_supplied
+            || resolve_station_pressure_with_mode(pressure_hpa, altitude_m, mode).is_some();
+        Self::of(given.then_some(pressure_hpa), mode)
+    }
+}
+
+/// One station reading as a surface names it: the `name` its messages use and the `path` its
+/// machine-readable refusal points at. A CLI uses the flag for both (`--humidity`); a JSON
+/// command uses the member's name and its path (`humidity`, `$.humidity`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AirField<'a> {
+    /// The reading's name in a message.
+    pub name: &'a str,
+    /// Where the reading sits in the surface's input: a JSON path, a flag, a file's field.
+    pub path: &'a str,
+}
+
+impl<'a> AirField<'a> {
+    /// A reading whose message name and path are the same text, as a CLI flag's are.
+    pub const fn named(name: &'a str) -> Self {
+        Self { name, path: name }
+    }
+}
+
+/// How one surface spells the station air it was given, so a refusal of that air reads in the
+/// surface's own words: its field names, the humidity in the unit it was sent in, and the
+/// temperature and pressure the solve resolved, in the surface's units with the unit named.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AirSpelling<'a> {
+    /// The relative humidity.
+    pub humidity: AirField<'a>,
+    /// The station temperature.
+    pub temperature: AirField<'a>,
+    /// The station pressure.
+    pub pressure: AirField<'a>,
+    /// The station altitude.
+    pub altitude: AirField<'a>,
+    /// The humidity as the surface was sent it, in its own unit (a percent, or the SI wire's
+    /// fraction).
+    pub humidity_sent: f64,
+    /// The station temperature the solve flies, with its unit: `"212 °F"`, `"373.15 K"`.
+    pub temperature_text: String,
+    /// The station pressure the solve flies, with its unit: `"29.92 inHg"`, `"100000 Pa"`.
+    pub pressure_text: String,
+    /// Where that pressure came from: a reading, the standard pressure at the altitude, or a
+    /// QNH reduced there. It decides whether a station pressure outside the troposphere is the
+    /// pressure's fault or the altitude's.
+    pub pressure_origin: StationPressureOrigin,
+}
+
+/// A reading in a refusal message: rounded to 2 decimals with the trailing zeros dropped (so a
+/// temperature converted to °C and back reads `212`, not `212.00000000000003`), then its unit.
+pub fn reading_text(value: f64, unit: &str) -> String {
+    let rounded = format!("{value:.2}");
+    let trimmed = if rounded.contains('.') {
+        rounded.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        rounded.as_str()
+    };
+    let trimmed = if trimmed == "-0" { "0" } else { trimmed };
+    format!("{trimmed} {unit}")
+}
+
+/// Station air refused in one surface's own words: the field to blame, as that surface locates
+/// it ([`Self::path`]), and the message ([`Self::message`]).
+///
+/// Every surface states a refusal of the same air one way. Air that cannot exist reads
+/// `"<humidity> = <h> at <temperature> and <pressure>: no such air exists: ..."`, naming the
+/// three readings that together are impossible; a humidity outside the sensor band reads
+/// `"<humidity> = <h>: relative humidity must be a percent from 0 to 100 (...)"`. Built by
+/// [`AtmosphereError::refusal_in`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AirRefusal {
+    path: String,
+    message: String,
+    reason: AtmosphereErrorReason,
+    humidity_rule: bool,
+}
+
+impl AirRefusal {
+    /// Why the air was refused.
+    pub fn reason(&self) -> AtmosphereErrorReason {
+        self.reason
+    }
+
+    /// Whether this is a refusal by one of the humidity rules: a humidity outside the sensor
+    /// band or not finite, or air that cannot exist. The surfaces that refuse air up front, in
+    /// their own words, refuse these; a station reading refused for another reason (a pressure
+    /// at or below 0, a temperature at or below absolute zero) is left to each surface's own
+    /// checks of that reading, which name it where it came from.
+    pub fn is_humidity_rule(&self) -> bool {
+        self.humidity_rule
+    }
+
+    /// Where the reading to blame sits in the surface's input, as the surface's
+    /// [`AirSpelling`] locates it.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// The refusal, in the surface's words.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for AirRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for AirRefusal {}
+
+impl AtmosphereError {
+    /// This refusal of a station's air, stated in a surface's own words.
+    ///
+    /// `spelling` names the surface's readings and carries their values in its units;
+    /// `station_altitude_m`, `station_temperature_c` and `station_pressure_hpa` are the station
+    /// the solve resolved. A refusal for any reason but air that cannot exist blames the reading
+    /// this error names. Air that cannot exist is blamed by one rule on every surface, in the
+    /// order `atmosphere.density_altitude`'s own range checks blame in, so that command and
+    /// `solve` locate the same air at the same path:
+    ///
+    /// 1. the temperature, when it is outside 173.15 K to 373.15 K (-100 °C to 100 °C, where
+    ///    the humid-air formulas hold; water's critical point, 647 K, is far beyond);
+    /// 2. when the station pressure's pressure altitude is outside the troposphere, the reading
+    ///    that put it there ([`AirSpelling::pressure_origin`]): the pressure when it was a
+    ///    reading, because a pressure in the wrong unit (hPa sent as pascals) is far likelier
+    ///    than a humidity of 50 % in air 25 km up, and the altitude when the pressure was the
+    ///    standard pressure there or a plausible QNH reduced there (feet sent as metres). The
+    ///    message says which unit to check;
+    /// 3. otherwise the humidity.
+    pub fn refusal_in(
+        &self,
+        spelling: &AirSpelling<'_>,
+        station_altitude_m: f64,
+        station_temperature_c: f64,
+        station_pressure_hpa: f64,
+    ) -> AirRefusal {
+        let (path, message) = self.refusal_parts(
+            spelling,
+            station_altitude_m,
+            station_temperature_c,
+            station_pressure_hpa,
+        );
+        AirRefusal {
+            path,
+            message,
+            reason: self.reason,
+            humidity_rule: self.humidity_unit.is_some()
+                || self.reason == AtmosphereErrorReason::ImpossibleAir,
+        }
+    }
+
+    fn refusal_parts(
+        &self,
+        spelling: &AirSpelling<'_>,
+        station_altitude_m: f64,
+        station_temperature_c: f64,
+        station_pressure_hpa: f64,
+    ) -> (String, String) {
+        let explanation = self.explanation();
+        if self.reason == AtmosphereErrorReason::ImpossibleAir {
+            let air = format!(
+                "{} = {} at {} and {}: {explanation}",
+                spelling.humidity.name,
+                spelling.humidity_sent,
+                spelling.temperature_text,
+                spelling.pressure_text
+            );
+            // In kelvin, as `atmosphere.density_altitude` compares it. A wire `temperature_k`
+            // between 136.6 K and 546.3 K loses nothing when 273.15 is subtracted (Sterbenz), so
+            // adding it back restores the very float that command compared; farther out no
+            // rounding comes near an edge. The two commands decide every edge alike.
+            if self.field == "temperature_c"
+                || outside_humid_air_model_range(station_temperature_c + KELVIN_OFFSET)
+            {
+                return (spelling.temperature.path.to_string(), air);
+            }
+            if let Some(altitude_m) = pressure_altitude_outside_troposphere_m(station_pressure_hpa)
+            {
+                let troposphere = format!(
+                    "a pressure altitude of {altitude_m:.0} m, outside the troposphere \
+                     ({LOWEST_PRESSURE_ALTITUDE_M} m to {TROPOSPHERE_TOP_M} m)"
+                );
+                return match spelling.pressure_origin {
+                    StationPressureOrigin::Reading => (
+                        spelling.pressure.path.to_string(),
+                        format!(
+                            "{air}; {} = {} is {troposphere}: check the pressure's unit",
+                            spelling.pressure.name, spelling.pressure_text
+                        ),
+                    ),
+                    StationPressureOrigin::Standard => (
+                        spelling.altitude.path.to_string(),
+                        format!(
+                            "{air}; no {} was given, and the standard pressure at the station \
+                             altitude of {station_altitude_m:.0} m is {troposphere}: check the \
+                             altitude's unit",
+                            spelling.pressure.name
+                        ),
+                    ),
+                    StationPressureOrigin::Qnh => (
+                        spelling.altitude.path.to_string(),
+                        format!(
+                            "{air}; {} is a QNH, and reduced to the station altitude of \
+                             {station_altitude_m:.0} m it is {troposphere}: check the altitude's \
+                             unit",
+                            spelling.pressure.name
+                        ),
+                    ),
+                };
+            }
+            return (spelling.humidity.path.to_string(), air);
+        }
+        let (field, value) = match &*self.field {
+            "temperature_c" => (spelling.temperature, spelling.temperature_text.clone()),
+            "pressure_hpa" => (spelling.pressure, spelling.pressure_text.clone()),
+            "altitude_m" => (spelling.altitude, self.value.to_string()),
+            _ => (spelling.humidity, self.value.to_string()),
+        };
+        (
+            field.path.to_string(),
+            format!("{} = {value}: {explanation}", field.name),
+        )
+    }
+}
 
 /// The air at the shooter: station altitude, temperature, pressure and relative humidity, with
 /// the density and speed of sound they give.

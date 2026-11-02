@@ -45,9 +45,12 @@
 //! 0.05 as a fraction) is the saturated or dry air it reads and is used exactly as 100 % or
 //! 0 %, so a sensor that reads 102 % in fog never fails a call. A value farther out, or not
 //! finite, is refused, never clamped, and so is air that cannot exist, by one rule
-//! ([`crate::StationAir::new`]'s) on every command. "if omitted" is what an absent field
-//! means; "required" means its absence is refused. `include/ballistics_bridge.h` carries the
-//! same table, and a test holds both to what each command actually parses.
+//! ([`crate::StationAir::new`]'s) on every command, `profile.validate` and the `.a7p` import
+//! and export included. A refusal states the band it enforces ("relative humidity must be a
+//! percent from 0 to 100 (a sensor reading from -5 to 105 is read as 0 or 100)", or in
+//! fraction units on the SI wire). "if omitted" is what an absent field means; "required"
+//! means its absence is refused. `include/ballistics_bridge.h` carries the same table, and a
+//! test holds both to what each command actually parses.
 //!
 //! | command | humidity field | unit | if omitted |
 //! | --- | --- | --- | --- |
@@ -59,7 +62,7 @@
 //! | `card.pdf` | `humidity` | percent | 50 |
 //! | `profile.validate` | `humidity` | percent | 50 |
 //! | `profile.normalize` | `humidity` | percent | 50 |
-//! | `profile.import_a7p` | `a7p:air_humidity_pct` | percent | 0 |
+//! | `profile.import_a7p` | `a7p:c_zero_air_humidity` | percent | 0 |
 //! | `profile.export_a7p` | `humidity` | percent | 50 |
 //! | `true.fit` | `model.humidity_pct` | percent | required |
 //! | `true.dsf` | `model.humidity_pct` | percent | required |
@@ -77,10 +80,34 @@
 //! | `bc5d.info` | - | none | - |
 //!
 //! The `profile.*` humidity is the stored profile's own `humidity` key. `profile.validate`
-//! reports one outside the band as a warning (`valid: false`) rather than an error;
+//! reports one outside the band, or stored air that cannot exist, as a warning
+//! (`valid: false`) rather than an error; `profile.export_a7p` refuses either;
 //! `profile.normalize` echoes it unchanged, since it re-serializes the document and reads
-//! nothing. `profile.import_a7p` reads the file's whole-percent air-humidity field: an absent
-//! one is 0 %, the format's own meaning, because the file writes 0 by omitting the field.
+//! nothing. `profile.import_a7p` reads the file's whole-percent air-humidity field
+//! (`c_zero_air_humidity`, as the import report's `mapped` rows name it): an absent one is
+//! 0 %, the format's own meaning, because the file writes 0 by omitting the field. A file
+//! whose air cannot exist is refused.
+//!
+//! ## A refused humidity or air: one envelope on every command
+//!
+//! Since 0.50.0 every command that takes a humidity refuses an out-of-band humidity, and air
+//! that cannot exist, with one machine-readable shape: `error.code` `command_failed` and, in
+//! `error.details`, the solve-json v1 error envelope, so `error.details.error.code` is
+//! `invalid_value` and `error.details.error.path` is the member to blame in that command's own
+//! request (`$.humidity` for `card.*` and `profile.export_a7p`, `$.model.humidity_pct` for
+//! `true.fit`, `true.dsf` and `true.plan`, `$.humidity_pct` for `true.wind`,
+//! `a7p:c_zero_air_humidity` for `profile.import_a7p`, or the temperature, pressure or altitude
+//! member when that is the reading to blame: the temperature outside 173.15-373.15 K, then the
+//! pressure or the altitude, whichever put the station above the troposphere). `solve` and
+//! `atmosphere.density_altitude` give it at `$.atmosphere.relative_humidity` (or
+//! `temperature_k`, `pressure_pa`, `altitude_m`), the same path from both for the same
+//! atmosphere, as they give every refusal. A command whose details carry a flat `reason` keeps
+//! it beside `error`
+//! (`invalid_input` for `true.dsf`, `invalid_request` for `true.plan`, `field` for
+//! `profile.export_a7p`), and the outer message leads with the cause:
+//! `card.come_ups failed: humidity = 100 at 212 °F and 29.92 inHg: no such air exists: ...`.
+//! The refusal is made before anything is solved, so impossible air is never reported as a
+//! failed zero solve, a forward-model failure or a shortage of reachable ranges.
 //!
 //! ## The `atmosphere.*` family
 //!
@@ -94,7 +121,8 @@
 //! refuse — a temperature outside −100..100 °C, a pressure or density altitude outside the
 //! troposphere — which is what °C sent as kelvin or hPa sent as pascals looks like. A humidity
 //! beyond the total pressure (air that cannot exist) is refused by both, by one rule
-//! (`StationAir::new`'s).
+//! (`StationAir::new`'s), at one path: the solve blames such air in the order these checks
+//! do.
 //!
 //! The result reports pressure altitude, the CIPM-2007 air density the solver uses, and
 //! density altitude under TWO names, never one: `faa_rule` (NWS pressure altitude plus the
@@ -199,7 +227,9 @@
 //!   service function). Its error also carries structured `error.details`, under the same
 //!   `reason` key as every other command in this family (`invalid_request`,
 //!   `insufficient_reachable_candidates`, `no_feasible_design`) plus the `rejected_candidates`
-//!   diagnostics the typed error itself carries.
+//!   diagnostics the typed error itself carries. A failure no range choice can fix (the
+//!   model's zero cannot be solved, say) is `invalid_request` with its cause first, never a
+//!   list of candidates rejected as `unreachable` (since 0.50.0).
 //! - `true.dial_plan` turns a TRUE angular correction into ranked dial/hold/hybrid
 //!   execution plans for an INLINE optic (`crate::truing_service::dial_plan_v1`, wrapping
 //!   `crate::optic::plan_corrections`). Unlike the CLI's `dial-plan --profile` mode, there
@@ -401,20 +431,26 @@ fn dispatch(request_json: &str) -> String {
         "meta.version" => success("meta.version", json!({ "engine_version": ENGINE_VERSION })),
         "solve" => run_solve(&request.request),
         "atmosphere.density_altitude" => run_atmosphere_density_altitude(&request.request),
-        "card.come_ups" => run_service(
+        "card.come_ups" => run_service_air(
             &request.request,
             "card.come_ups",
             crate::card_service::come_ups_v1,
+            |_| None,
+            crate::card_service::air_refusal,
         ),
-        "card.range_table" => run_service(
+        "card.range_table" => run_service_air(
             &request.request,
             "card.range_table",
             crate::card_service::range_table_v1,
+            |_| None,
+            crate::card_service::air_refusal,
         ),
-        "card.wind" => run_service(
+        "card.wind" => run_service_air(
             &request.request,
             "card.wind",
             crate::card_service::wind_card_v1,
+            |_| None,
+            crate::card_service::air_refusal,
         ),
         #[cfg(feature = "pdf")]
         "card.pdf" => run_card_pdf(&request.request),
@@ -429,32 +465,44 @@ fn dispatch(request_json: &str) -> String {
         "reticle.hold" => run_reticle_hold(&request.request),
         "reticle.holds" => run_reticle_holds(&request.request),
         "reticle.import" => run_reticle_import(&request.request),
-        "true.fit" => run_service(
+        "true.fit" => run_service_air(
             &request.request,
             "true.fit",
             crate::truing_uncertainty::run_uncertainty_truing_v1,
+            |_| None,
+            |request: &crate::truing_uncertainty::UncertaintyTruingRequestV1| {
+                request.model.air_refusal("$.model")
+            },
         ),
-        "true.wind" => run_service(
+        "true.wind" => run_service_air(
             &request.request,
             "true.wind",
             crate::truing_wind::solve_wind_truing,
+            |_| None,
+            crate::truing_wind::WindTruingRequest::air_refusal,
         ),
         "true.tall_target" => run_service(
             &request.request,
             "true.tall_target",
             crate::truing_service::tall_target_v1,
         ),
-        "true.dsf" => run_service_detailed(
+        "true.dsf" => run_service_air(
             &request.request,
             "true.dsf",
             crate::truing_service::derive_dsf_point_v1,
             crate::truing_service::DsfServiceErrorV1::failure_details,
+            |request: &crate::truing_service::DsfDeriveRequestV1| {
+                request.model.air_refusal("$.model")
+            },
         ),
-        "true.plan" => run_service_detailed(
+        "true.plan" => run_service_air(
             &request.request,
             "true.plan",
             crate::truing_plan::plan_truing_experiment_v1,
             crate::truing_plan::TruingPlanErrorV1::failure_details,
+            |request: &crate::truing_plan::TruingExperimentPlanRequestV1| {
+                request.model.air_refusal("$.model")
+            },
         ),
         "true.dial_plan" => run_service_detailed(
             &request.request,
@@ -555,38 +603,7 @@ where
     E: std::fmt::Display,
     F: FnOnce(&Req) -> Result<Resp, E>,
 {
-    if inner.is_null() {
-        return error(
-            BridgeErrorCode::InvalidRequest,
-            format!("'{command}' requires a request payload"),
-            None,
-        );
-    }
-    let request: Req = match serde_json::from_value(inner.clone()) {
-        Ok(request) => request,
-        Err(err) => {
-            return error(
-                BridgeErrorCode::InvalidRequest,
-                format!("{command} request rejected: {err}"),
-                None,
-            )
-        }
-    };
-    match service(&request) {
-        Ok(response) => match serde_json::to_value(&response) {
-            Ok(result) => success(command, result),
-            Err(err) => error(
-                BridgeErrorCode::InternalError,
-                format!("failed to serialize {command} result: {err}"),
-                None,
-            ),
-        },
-        Err(err) => error(
-            BridgeErrorCode::CommandFailed,
-            format!("{command} failed: {err}"),
-            None,
-        ),
-    }
+    run_service_air(inner, command, service, |_: &E| None, |_: &Req| None)
 }
 
 /// [`run_service`] for a service whose error carries a machine-readable reason.
@@ -595,8 +612,9 @@ where
 /// "out_of_range" instead of pattern-matching prose. `code` stays `command_failed`, so
 /// existing callers are unaffected.
 ///
-/// Callers: `true.dsf`, `true.plan`, and `true.dial_plan`, each of whose service error
-/// carries a machine-readable reason worth surfacing in `error.details`.
+/// Callers: `true.dial_plan`, whose service error carries a machine-readable reason worth
+/// surfacing in `error.details` (`true.dsf` and `true.plan` carry one too, through
+/// [`run_service_air`]).
 fn run_service_detailed<Req, Resp, E, F, D>(
     inner: &Value,
     command: &'static str,
@@ -609,6 +627,33 @@ where
     E: std::fmt::Display,
     F: FnOnce(&Req) -> Result<Resp, E>,
     D: FnOnce(&E) -> Option<Value>,
+{
+    run_service_air(inner, command, service, details, |_: &Req| None)
+}
+
+/// [`run_service_detailed`] for a command whose request carries station air: `air` states the
+/// request's air refused in its own words ([`crate::atmosphere::AirRefusal`]), or `None`.
+///
+/// When the service refused the request FOR that air (its error is that refusal), the failure
+/// carries the one machine-readable envelope every command gives an air refusal: the
+/// solve-json error envelope in `error.details`, code `invalid_value` at the path of the
+/// member to blame in this command's request (see [`air_refusal_details`]), with the
+/// command's own flat details (`reason`, ...) beside it, and a message that leads with the
+/// cause. The bridge never claims an air refusal the service did not make.
+fn run_service_air<Req, Resp, E, F, D, A>(
+    inner: &Value,
+    command: &'static str,
+    service: F,
+    details: D,
+    air: A,
+) -> String
+where
+    Req: serde::de::DeserializeOwned,
+    Resp: serde::Serialize,
+    E: std::fmt::Display,
+    F: FnOnce(&Req) -> Result<Resp, E>,
+    D: FnOnce(&E) -> Option<Value>,
+    A: FnOnce(&Req) -> Option<crate::atmosphere::AirRefusal>,
 {
     if inner.is_null() {
         return error(
@@ -637,14 +682,44 @@ where
             ),
         },
         Err(err) => {
-            let d = details(&err);
-            error(
-                BridgeErrorCode::CommandFailed,
-                format!("{command} failed: {err}"),
-                d,
-            )
+            let flat = details(&err);
+            match air(&request).filter(|refusal| err.to_string().contains(refusal.message())) {
+                Some(refusal) => error(
+                    BridgeErrorCode::CommandFailed,
+                    format!("{command} failed: {}", refusal.message()),
+                    Some(air_refusal_details(&refusal, flat)),
+                ),
+                None => error(
+                    BridgeErrorCode::CommandFailed,
+                    format!("{command} failed: {err}"),
+                    flat,
+                ),
+            }
         }
     }
+}
+
+/// The one machine-readable shape of a refused station air (a humidity beyond the sensor band,
+/// or air that cannot exist) on every command (R2): the solve-json v1 error envelope, so
+/// `error.details.error.code` is `invalid_value` and `error.details.error.path` is the member
+/// to blame in the command's own request (`$.humidity`, `$.model.humidity_pct`, ...), as
+/// `solve` and `atmosphere.density_altitude` already report it. A command whose details carry
+/// a flat `reason` (`true.dsf`, `true.plan`, `profile.export_a7p`) keeps its keys beside it.
+fn air_refusal_details(refusal: &crate::atmosphere::AirRefusal, flat: Option<Value>) -> Value {
+    let envelope = crate::solve_json::SolveErrorEnvelopeV1::new(
+        crate::solve_json::SolveErrorV1::new(
+            crate::solve_json::SolveErrorCodeV1::InvalidValue,
+            refusal.message(),
+        )
+        .at_path(refusal.path()),
+    );
+    let mut details = serde_json::to_value(envelope).unwrap_or_else(|_| json!({}));
+    if let (Some(object), Some(Value::Object(flat))) = (details.as_object_mut(), flat) {
+        for (key, value) in flat {
+            object.entry(key).or_insert(value);
+        }
+    }
+    details
 }
 
 /// Hard cap on the PDF `card.pdf` will hand back, measured on the RAW document (the
@@ -786,11 +861,21 @@ fn run_card_pdf(inner: &Value) -> String {
             )
         }
         Err(err) => {
+            // The air refusal every card command gives (R2), when that is what refused it.
+            if let Some(refusal) = crate::card_service::air_refusal(&request)
+                .filter(|refusal| err.to_string().contains(refusal.message()))
+            {
+                return error(
+                    BridgeErrorCode::CommandFailed,
+                    format!("card.pdf failed: {}", refusal.message()),
+                    Some(air_refusal_details(&refusal, None)),
+                );
+            }
             return error(
                 BridgeErrorCode::CommandFailed,
                 format!("card.pdf failed: {err}"),
                 None,
-            )
+            );
         }
     };
     let byte_length = card.pdf_bytes.len();
@@ -1142,7 +1227,14 @@ fn run_profile_import_a7p(inner: &Value) -> String {
 
     let outcome = match map_a7p_to_profile(&doc, None, zero_click) {
         Ok(outcome) => outcome,
-        Err(err) => return error(BridgeErrorCode::CommandFailed, err, None),
+        Err(err) => {
+            // The file's air refused by the rule every flight applies (R2): the one envelope,
+            // located at the file's own field (`a7p:c_zero_air_humidity`).
+            let details = crate::profile_import::a7p_air_refusal(&doc)
+                .filter(|refusal| err == refusal.message())
+                .map(|refusal| air_refusal_details(&refusal, None));
+            return error(BridgeErrorCode::CommandFailed, err, details);
+        }
     };
     let unknown_fields: Vec<Value> = doc
         .unknown_fields
@@ -1209,11 +1301,23 @@ fn run_profile_export_a7p(inner: &Value) -> String {
                     json!({ "reason": "field", "field": field })
                 }
             };
-            return error(
-                BridgeErrorCode::CommandFailed,
-                err.to_string(),
-                Some(details),
-            );
+            // The stored air refused by the rule every flight applies (R2): the one envelope at
+            // the stored document's member, beside this command's flat reason, and the refusal
+            // itself as the message, which names the field once (`err`'s Display would prefix
+            // it again: "humidity: profile 'p' field humidity = ...").
+            let (message, details) = match profile.air_refusal() {
+                Some(refusal)
+                    if matches!(&err, A7pExportError::Field { message, .. }
+                        if message == refusal.message()) =>
+                {
+                    (
+                        refusal.message().to_string(),
+                        air_refusal_details(&refusal, Some(details)),
+                    )
+                }
+                _ => (err.to_string(), details),
+            };
+            return error(BridgeErrorCode::CommandFailed, message, Some(details));
         }
     };
     let not_carried = match serde_json::to_value(&export.not_carried) {

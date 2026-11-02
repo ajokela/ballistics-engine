@@ -737,11 +737,26 @@ pub fn export_a7p(profile: &ProfileData) -> Result<A7pExport, A7pExportError> {
         )?,
         &mut body,
     );
+    // The stored air by the humidity rules every flight of this profile applies (R2): a
+    // humidity beyond the sensor band, or air that cannot exist, is refused in the engine's own
+    // words before the format's humidity bound is consulted (the temperature and pressure
+    // have passed the format's own bounds above). A file of air no solve could fly is no
+    // export.
+    if let Some(refusal) = profile.air_refusal() {
+        return Err(A7pExportError::Field {
+            field: match refusal.path() {
+                "$.temperature" => "temperature",
+                "$.pressure" => "pressure",
+                "$.altitude" => "altitude",
+                _ => "humidity",
+            },
+            message: refusal.message().to_string(),
+        });
+    }
     // A stored humidity within 5 points of 0-100 % (a sensor's reading in fog, or in very dry
     // air) is the saturated or dry air it reads: the engine flies it as that end and `.a7p`
     // import reads such a file as that end, so the file records that end too. A value beyond
-    // the band is no reading of real air, and the format's own bound below refuses it as
-    // before.
+    // the band is no reading of real air, and was refused just above.
     let humidity = match crate::atmosphere::RelativeHumidity::try_percent(profile.humidity) {
         Ok(reading) => reading.percent(),
         Err(_) => profile.humidity,

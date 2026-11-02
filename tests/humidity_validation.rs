@@ -80,10 +80,17 @@ fn assert_impossible_air_refusal(label: &str, message: &str) {
 }
 
 /// Whether `message` is `RelativeHumidity`'s own refusal: the range rule, or (for NaN and the
-/// infinities) the finiteness rule.
+/// infinities) the finiteness rule, each stating the sensor band it enforces (R2), derived here
+/// from the constant.
 fn names_the_humidity_rule(message: &str) -> bool {
-    message.contains("relative humidity must be a percent from 0 to 100")
-        || message.contains("must be finite")
+    let t = ballistics_engine::HUMIDITY_SENSOR_TOLERANCE_PERCENT;
+    let band = format!(
+        "percent from 0 to 100 (a sensor reading from {} to {} is read as 0 or 100)",
+        -t,
+        100.0 + t
+    );
+    message.contains(&format!("relative humidity must be a {band}"))
+        || message.contains(&format!("relative humidity must be a finite {band}"))
 }
 
 /// A .308 168 gr G7 load, short enough to keep the suite fast.
@@ -373,15 +380,16 @@ fn impossible_air_is_refused_identically_by_the_station_the_solve_solve_v1_and_d
             })
             .to_string(),
         )
-        .map_err(|e| format!("{e:?}"))
+        .map_err(|e| serde_json::to_value(&e).unwrap())
         .and_then(|request| {
-            ballistics_engine::solve_v1(request).map_err(|e| {
-                serde_json::to_string(&e).unwrap_or_else(|_| "unserializable".to_string())
-            })
+            ballistics_engine::solve_v1(request).map_err(|e| serde_json::to_value(&e).unwrap())
         });
         let solve_error = solve.expect_err("solve v1 must refuse impossible air");
         assert!(
-            solve_error.contains(IMPOSSIBLE_AIR_REASON),
+            solve_error["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(IMPOSSIBLE_AIR_REASON),
             "solve v1 refuses it for the shared reason: {solve_error}"
         );
 
@@ -389,14 +397,23 @@ fn impossible_air_is_refused_identically_by_the_station_the_solve_solve_v1_and_d
             ballistics_engine::atmosphere_service::decode_density_altitude_request_v1(
                 &serde_json::json!({"atmosphere": wire_atmosphere}),
             )
-            .map_err(|e| format!("{e:?}"))
             .and_then(|request| {
                 ballistics_engine::atmosphere_service::density_altitude_v1(&request)
-                    .map_err(|e| format!("{e:?}"))
-            });
-        assert!(
-            density_altitude.is_err(),
-            "density_altitude refuses it too: {density_altitude:?}"
+            })
+            .map_err(|e| serde_json::to_value(&e).unwrap());
+        let density_altitude_error = density_altitude.expect_err("density_altitude refuses it too");
+        // R2: refused identically, envelope and all: one code, one path, one message.
+        assert_eq!(
+            solve_error["error"]["code"], "invalid_value",
+            "{solve_error}"
+        );
+        assert_eq!(
+            solve_error["error"]["path"], "$.atmosphere.relative_humidity",
+            "{solve_error}"
+        );
+        assert_eq!(
+            solve_error["error"], density_altitude_error["error"],
+            "the solve and density_altitude refuse the same air the same way"
         );
     }
 }
@@ -748,8 +765,9 @@ fn bridge_true_commands_reject_through_the_shared_validator() {
         );
         assert_eq!(out["ok"], false, "true.dsf RH {humidity} must fail: {out}");
         let message = out["error"]["message"].as_str().unwrap_or_default();
+        // R2: the refusal states the band it enforces.
         assert!(
-            message.contains("humidity_pct") && message.contains("percent from 0 to 100"),
+            message.contains("humidity_pct = ") && names_the_humidity_rule(message),
             "true.dsf: the one validator's error: {message}"
         );
     }
@@ -1037,8 +1055,10 @@ mod a7p {
             let error = map_a7p_to_profile(&doc, None, None)
                 .err()
                 .unwrap_or_else(|| panic!("RH {humidity} must be refused at import"));
+            // R2: the refusal names the file's field and states the band it enforces.
             assert!(
-                error.contains("humidity") && error.contains("percent from 0 to 100"),
+                error.starts_with("c_zero_air_humidity = ")
+                    && super::names_the_humidity_rule(&error),
                 "RH {humidity}: the field-named error: {error}"
             );
         }

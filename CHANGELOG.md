@@ -71,6 +71,24 @@ exactly as before. The kernels' own change is listed under Numeric shifts.
   `trajectory_integration::KernelInputError` and `AtmoSock::validate` are new too.
   `perturbation::InputAxis` has a `RelativeHumidity` variant, so a glob import of both
   `ballistics_engine::*` and `InputAxis::*` makes `RelativeHumidity` ambiguous. Name one of them.
+- **`wind_scenarios::WindScenarioError` has a `ZeroFailed { message }` variant**, so an
+  exhaustive `match` needs an arm for it. A load whose zero cannot be solved was a `SolveFailed`
+  of a scenario named `<zero>`, a placeholder no scenario set contains.
+- **`wasm::Calculator::set_humidity` returns `Result<Calculator, JsValue>`** (wasm32 only). It
+  refuses a humidity beyond the sensor band itself; JavaScript chains as before and catches the
+  throw.
+- **New refusal API.** `AirField`, `AirSpelling` and `AirRefusal` are exported from the crate
+  root. `AtmosphereError::refusal_in` states a refused station air in a surface's own words and
+  locates the field to blame; `AtmosphereError::explanation` is the reason alone, and
+  `atmosphere::parse_humidity_percent_text` parses a typed percent through the one validator.
+  `AtmosphericConditions` gains `resolved_station`, `station_air`, `pressure_origin`,
+  `air_refusal`, `air_refusal_from`, `air_refusal_named` and `air_refusal_named_from`;
+  `ProfileData` gains `stored_station`, `air_refusal` and `air_refusal_in`;
+  `TruingModelInputsV1` and `WindTruingRequest` gain `air_refusal`;
+  `card_service::air_refusal` and `profile_import::a7p_air_refusal` are new.
+  `StationPressureOrigin` (exported from the crate root) says where a station pressure came
+  from (a reading, the standard pressure at the altitude, a QNH reduced there), so every
+  surface blames a station above the troposphere on the reading that put it there.
 
 ### Changed (physics): one vapour model aloft, on every surface
 - **What changed.** In 0.49.0 the air away from the station's height modelled its water vapour
@@ -148,6 +166,30 @@ at 0 % is byte-identical, and most table outputs round the change away.
   whose temperature is at or below -273.15 °C, is refused too. 0.49.0 capped such air, or flew
   NaN. It is the test `atmosphere.density_altitude` already applied, and both now state the same
   reason.
+  - Every surface refuses it before any work, with the cause first, naming the reading where it
+    was given and the air it cannot exist in. The CLI names the flag:
+    `--humidity = 100 at 101 °C and 1013.25 hPa: no such air exists: ...`. It names
+    `--zero-humidity` for `trajectory --auto-zero`'s zero day when the zero day has a humidity
+    of its own (an inherited one keeps the shot day's name), `--location CSV column HUMIDITY`,
+    or `profile 'NAME' field humidity` for a saved profile's air. `card.*` names `humidity` in
+    the card's units, `true.*` names `humidity_pct`, solve-json names
+    `relative_humidity = 1 at 373.15 K and 100000 Pa`, the browser terminal names its flag, and
+    the npm `Calculator` names its setter (`setHumidity = 100 at 212 °F and 29.92 inHg`).
+  - Such air at a station above the troposphere because no pressure was given, or because a
+    plausible QNH was reduced there, is blamed on the altitude on every surface: "...; no
+    --pressure was given, and the standard pressure at the station altitude of 20000 m is a
+    pressure altitude of ... m, outside the troposphere (-5000 m to 11000 m): check the
+    altitude's unit", never "check the pressure's unit" for a pressure nobody typed.
+  - A command that solves many rows or candidates exits 1 with the cause, never a table of
+    failed rows or a wrong suspect. `lead` printed every row as failed and exited 0.
+    `plan-truing` reported a shortage of reachable ranges, `optimal-zero` a "fitted zero" no
+    search found, `adaptive-card` blamed `--end`, `hold-corridor` a scenario named `<zero>`,
+    and `compare`, the cards and `true.fit` a failed zero solve or forward model.
+    `true-velocity`, `true-wind` and `plan-truing` no longer print a progress line first.
+  - The profile commands apply the same rule. `profile.validate` reports stored air that cannot
+    exist as a warning (`valid: false`). `profile.export_a7p`, `profile.import_a7p` and the CLI's
+    `profile save` and `profile import` refuse it, so no stored profile is one every solve
+    refuses.
 - **A reading inside the band flies exactly as its end.** A reading is stored as exactly 100 %
   or 0 %, so it flies exactly as 0.49.0's clamp flew it. Weather meters and phone sensors read a
   little above 100 % in fog.
@@ -168,10 +210,88 @@ at 0 % is byte-identical, and most table outputs round the change away.
   - The solve-json default notice reads "Relative humidity defaulted to 0.5 (50%).". Its path,
     `$.atmosphere.relative_humidity`, is unchanged.
   - `compare -o json` echoes the humidity it flew: 100 for a typed 102, where 0.49.0 echoed 102.
-  - A refused CLI humidity says "relative humidity must be a percent from 0 to 100", or "must be
-    finite". 0.49.0's message was clap's range message.
+  - A refused humidity states the band it enforces, in one wording per unit:
+    "relative humidity must be a percent from 0 to 100 (a sensor reading from -5 to 105 is read
+    as 0 or 100)", and on the SI wire "relative humidity must be a fraction from 0 to 1
+    (0.5 = 50 %; a sensor reading from -0.05 to 1.05 is read as 0 or 1)". A NaN or infinity
+    says "relative humidity must be a finite percent from 0 to 100 (...)", and text that is no
+    number "not a number; relative humidity is a percent from 0 to 100 (...)". 0.49.0's CLI
+    message was clap's range message, and solve-json's was "value must be finite and in the
+    inclusive range [0, 1]".
   - `include/ballistics_bridge.h` and the bridge module docs list each command's humidity field,
     its unit and its default.
+  - **Every CLI error prints its message.** `Error: ` and the message, exit status 1, where an
+    error that reached the top of the CLI printed as a Rust value:
+    `Error: BallisticsError { message: "..." }`, a quoted and escaped `Error: "..."`, or a
+    typed error with every field (`AtmosphereError { ... }`, `TruingPlanErrorV1 { ... }`).
+    Paths print as themselves (`Loaded location 'HOT' from loc.csv`, `Profile 'p' saved to
+    /path`). `explain`, `tolerance` and `error-budget` name a request file's error code by its
+    wire name: `invalid_value at $.atmosphere.relative_humidity: ...`, not `InvalidValue at`
+    or `SolveFailed:`.
+  - `profile show` and `profile zero-set list|add|remove` read a profile whose stored humidity a
+    flight would refuse, and print each check a flight would fail as a `warning:` on stderr
+    beside the stored values.
+  - `optimal-zero` whose every candidate zero fails says so after the cause, where it named
+    the midpoint of the search as a "fitted zero": "Cannot find zero angle: trajectory cannot
+    reach target distance at any angle; no zero distance from 30.0 to 2187.2 yd could be
+    solved". `hold-corridor` whose zero fails reads "...; the zero solve failed, so no scenario
+    was flown". `adaptive-card` names `--end` only for an error about `--end`.
+- **Wire changes.** The bridge and the browser terminal report a refused humidity or air one
+  way, within `api_version` 1. A caller that shows the bridge's message now shows the cause
+  first, in the request's own field and units, where it read
+  `zero solve failed: atmosphere.humidity = 100: ...`.
+  - `solve` (bridge, `solve-json`, the MCP `solve` tool, and the `explain`, `tolerance` and
+    `error-budget` request files) refuses air that cannot exist before any flight as
+    `invalid_value`. The path is `$.atmosphere.relative_humidity`, or `temperature_k` when the
+    temperature is outside 173.15-373.15 K. When the station pressure is outside the
+    troposphere it is the reading that put it there, with a hint to check that reading's unit:
+    `pressure_pa` for a pressure sent as a station pressure (hPa sent as pascals) or as a QNH
+    that is itself outside the troposphere, and `altitude_m` for one omitted or sent as a
+    plausible QNH ("no pressure_pa was given, and the standard pressure at the station
+    altitude of 20000 m is a pressure altitude of ... m, outside the troposphere (-5000 m to
+    11000 m): check the altitude's unit"). That is the order `atmosphere.density_altitude`'s own
+    range checks blame in, so the two commands give the same code and path for every
+    atmosphere `solve` refuses, and the same message wherever that command's own range checks
+    pass. `solve-json` exits 2 for it, as for any invalid value.
+  - A QNH that leaves no station pressure at its altitude (MBA-1605: its pressure altitude plus
+    the station height at or past 44,331 m, such as 500 hPa at 40 km) is refused by `solve` and
+    `atmosphere.density_altitude` alike, with one message: "a QNH of 50000 Pa leaves no station
+    pressure at 40000 m: ...". The path is `$.atmosphere.altitude_m` for a QNH that is itself a
+    pressure inside the troposphere, and `pressure_pa` otherwise. `solve` located every one at
+    `pressure_pa`, with the message "pressure conversion to hectopascals overflowed".
+  - `card.come_ups`, `card.range_table`, `card.wind`, `card.pdf`, `true.fit`, `true.dsf`,
+    `true.plan`, `true.wind`, `profile.import_a7p` and `profile.export_a7p` carry the
+    solve-json error envelope in `error.details` for a refused humidity or air:
+    `details.error.code` `invalid_value` at the member to blame in the command's own request
+    (`$.humidity`, `$.model.humidity_pct`, `$.humidity_pct`, `a7p:c_zero_air_humidity`). Air
+    that cannot exist is blamed by the rule `solve` blames by: the temperature member
+    (`$.temperature`, `$.model.temperature_f`) outside 173.15-373.15 K, the altitude member
+    (`$.altitude`, `$.model.altitude_ft`) for an omitted pressure that leaves the station above
+    the troposphere, the pressure member for a pressure reading that does. The first four had
+    no `details` for it, nor did `true.fit`, `true.wind` and `profile.import_a7p`. The outer
+    message leads with the cause; `profile.export_a7p`'s is the refusal itself
+    (`profile 'NAME' field humidity = 100 at 100 °C and 1013.25 hPa: no such air exists: ...`),
+    naming the field once.
+  - `card.pdf` with a `stored_card` (a reprint) refuses its request's air like every card
+    command, before it reads the stored card: a reprint whose request carries air that cannot
+    exist (212 °F at 100 %) is refused, where 0.49.0 reprinted it.
+  - The flat `reason` stays beside it. For impossible air, `true.dsf`'s moves from
+    `forward_model` to `invalid_input`, and `true.plan`'s from
+    `insufficient_reachable_candidates`, with every candidate `unreachable`, to
+    `invalid_request` with no rejected candidates.
+  - `true.plan` reports any failure of the whole candidate batch (a zero the model cannot
+    solve) as `invalid_request` with the cause first, never as every candidate `unreachable`.
+  - `profile.export_a7p` refuses a stored humidity beyond the band with the engine's own
+    message (`reason` `field`, `field` `humidity`), not the format's bound.
+  - `include/ballistics_bridge.h` names `profile.import_a7p`'s humidity field
+    `a7p:c_zero_air_humidity`, as the import report's `mapped` rows and the refusal do.
+  - The browser terminal's `trajectory` (with or without `--auto-zero`), `zero` and
+    `monte-carlo` throw a failed solve, as every other command does. They returned it as
+    `Error: ...` text, a success to a caller and not JSON under `-o json`.
+  - The npm `Calculator` refuses a humidity beyond the band in `setHumidity`, naming it. Its
+    `calculateTrajectory` and `getFullTrajectory` throw refused station air naming the setter
+    (`setTemperature`, `setPressure`, `setAltitude`), never a "JSON parse error" around the
+    terminal's text.
 
 ### Fixed
 - **A profile re-save no longer drops stored data.** In 0.49.0, a profile that failed to load
@@ -182,7 +302,8 @@ at 0 % is byte-identical, and most table outputs round the change away.
   - A stored CF outside its band is refused, with the file left as it was.
 - **`estimate-bc` and `optimal-zero` give the solver's reason.** Impossible air, or a humidity
   outside the band, used to come back from `estimate-bc` as "Unable to estimate BC" and from
-  `optimal-zero` as an unexplained failure. Both now end with the solver's reason.
+  `optimal-zero` as an unexplained failure. Both now refuse it before the search, with the
+  cause as the message.
 - **The lean Monte Carlo reports Mach against the sound speed it flew.**
   `monte_carlo::solve_trajectory_for_monte_carlo` flew a 0 % sound speed but divided its final
   Mach by the station's moist one. It now flies and reports one station sound speed.

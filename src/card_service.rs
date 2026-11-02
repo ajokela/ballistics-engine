@@ -93,7 +93,10 @@ use crate::adjustment::{
     adjustment_display, adjustment_unit_label, parse_click_value, windage_adjustment_display,
     AdjustmentUnit, ClickValue,
 };
-use crate::atmosphere::{RelativeHumidity, StationAtmospherePresence, DEFAULT_HUMIDITY_PERCENT};
+use crate::atmosphere::{
+    reading_text, AirField, AirRefusal, RelativeHumidity, StationAtmospherePresence,
+    DEFAULT_HUMIDITY_PERCENT,
+};
 use crate::hold_curve::{
     card_sample_max_range_m, range_not_sampled_message, run_sampled_flight_with_station_presence,
     sample_at_range, CardTruncation, SampledFlight, CARD_SAMPLE_INTERVAL_M,
@@ -1200,6 +1203,61 @@ fn resolve_axes_only(req: &CardRequestV1) -> Result<Resolved, CardServiceError> 
     resolve_inner(req, false)
 }
 
+/// The card request's station air refused in the card's own words, or `None` when it flies:
+/// `humidity = 106: relative humidity must be a percent from 0 to 100 (...)` for a humidity
+/// beyond the sensor band, `humidity = 100 at 212 °F and 29.92 inHg: no such air exists: ...`
+/// for air that cannot exist. The temperature and pressure are the station values every solve
+/// of the card flies, in the request's own units; the path is the member to blame in the
+/// request (`$.humidity`, `$.temperature`, `$.pressure`, `$.altitude`).
+///
+/// Every card command checks this before it solves anything, and the bridge reports it in
+/// `error.details` when it is the refusal the service made.
+pub fn air_refusal(req: &CardRequestV1) -> Option<AirRefusal> {
+    let u = Units::resolve(req);
+    let station_presence =
+        StationAtmospherePresence::new(req.temperature.is_some(), req.pressure.is_some());
+    let temperature = req.temperature.unwrap_or_else(|| u.default_temperature());
+    let pressure = req.pressure.unwrap_or_else(|| u.default_pressure());
+    AtmosphericConditions {
+        temperature: u.temperature_to_metric(temperature),
+        pressure: u.pressure_to_metric(pressure),
+        humidity: req.humidity,
+        altitude: u.altitude_to_metric(req.altitude),
+    }
+    .air_refusal(
+        station_presence,
+        [
+            AirField {
+                name: "humidity",
+                path: "$.humidity",
+            },
+            AirField {
+                name: "temperature",
+                path: "$.temperature",
+            },
+            AirField {
+                name: "pressure",
+                path: "$.pressure",
+            },
+            AirField {
+                name: "altitude",
+                path: "$.altitude",
+            },
+        ],
+        req.humidity,
+        |celsius| match u.temperature {
+            CardTemperatureUnit::Fahrenheit => reading_text(celsius * 9.0 / 5.0 + 32.0, "°F"),
+            CardTemperatureUnit::Celsius => reading_text(celsius, "°C"),
+        },
+        |hpa| match u.pressure {
+            CardPressureUnit::InHg => reading_text(hpa / 33.8639, "inHg"),
+            CardPressureUnit::HPa => reading_text(hpa, "hPa"),
+        },
+    )
+    // The humidity rules only: any other refusal of a reading is the solver's, as before.
+    .filter(AirRefusal::is_humidity_rule)
+}
+
 fn resolve_inner(
     req: &CardRequestV1,
     load_bc_schedule: bool,
@@ -1232,9 +1290,17 @@ fn resolve_inner(
             "tracking correction factors must lie in (0.5, 1.5)".into(),
         ));
     }
-    // The engine's one humidity validator (plan C4): a percent in [0, 100], a sensor reading
-    // within 5 points of it read as the end (S5b), anything farther out refused and never
-    // clamped. 0.49.0 flew 150 as 100 % here.
+    // The station air (R2): the engine's one humidity validator (plan C4: a percent in
+    // [0, 100], a sensor reading within 5 points of it read as the end (S5b), anything farther
+    // out refused and never clamped; 0.49.0 flew 150 as 100 % here) and the solver's one
+    // impossible-air rule, refused here in the card's words before any solve, so a card of air
+    // that cannot exist names that air rather than a failed zero solve. The bridge reports the
+    // same refusal in `error.details`.
+    if let Some(refusal) = air_refusal(req) {
+        return Err(CardServiceError::InvalidRequest(
+            refusal.message().to_string(),
+        ));
+    }
     let humidity = RelativeHumidity::try_percent(req.humidity).map_err(|error| {
         CardServiceError::InvalidRequest(error.at_field("humidity").to_string())
     })?;

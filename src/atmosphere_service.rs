@@ -24,7 +24,10 @@
 //! The solve's resolver only requires temperature and pressure to be positive, which admits air
 //! that cannot exist: 5 K, a pressure altitude of 30 km. (A humidity whose vapor pressure
 //! exceeds the air's total pressure the solve refuses too: both ask the one rule,
-//! `StationAir::new`, and state its reason.) Those are also exactly what the two likeliest
+//! `StationAir::new`, through `solve_v1::resolved_station_air`, which blames such air in the
+//! order of the checks below, so whatever the solve refuses this service refuses with the same
+//! code and path, and with the same message unless one of these checks refused it first.)
+//! Those are also exactly what the two likeliest
 //! unit mistakes produce — °C sent as `temperature_k`, hPa sent as `pressure_pa` — so a
 //! figure computed from them is a wrong answer delivered confidently. This service refuses
 //! them instead, with the same `invalid_value` envelope and the path of the input to blame:
@@ -65,7 +68,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::atmosphere::{AtmosphereError, RelativeHumidity, StationAir};
+use crate::atmosphere::RelativeHumidity;
 use crate::solve_json::{
     AtmosphereV1, PressureReferenceV1, ResolvedAtmosphereV1, SolveErrorCodeV1,
     SolveErrorEnvelopeV1, SolveErrorV1, SolveNoticeV1,
@@ -78,15 +81,17 @@ const RELATIVE_HUMIDITY_PATH: &str = "$.atmosphere.relative_humidity";
 
 /// −100 °C. The engine's saturation-vapor-pressure and CIPM compressibility formulas clamp
 /// their temperature here, so below it the density would mix a clamped and an unclamped term.
-const MIN_TEMPERATURE_K: f64 = 173.15;
+/// The one bound every surface's impossible-air refusal blames the temperature beyond.
+const MIN_TEMPERATURE_K: f64 = crate::atmosphere::HUMID_AIR_MODEL_MIN_K;
 /// 100 °C. Above the boiling point the saturation-vapor-pressure formula stops describing a
 /// stable atmosphere, and above water's critical point (647 K) it is not defined at all.
-const MAX_TEMPERATURE_K: f64 = 373.15;
+const MAX_TEMPERATURE_K: f64 = crate::atmosphere::HUMID_AIR_MODEL_MAX_K;
 /// The lowest altitude solve-json v1 accepts, and the bottom of the ICAO table.
-const LOWEST_ALTITUDE_M: f64 = -5_000.0;
+const LOWEST_ALTITUDE_M: f64 = crate::atmosphere::LOWEST_PRESSURE_ALTITUDE_M;
 /// The top of the standard atmosphere's troposphere: every closed-form altitude here is the
-/// troposphere formula, and it keeps answering, wrongly, above this.
-const TROPOSPHERE_TOP_M: f64 = 11_000.0;
+/// troposphere formula, and it keeps answering, wrongly, above this. The same band the shared
+/// impossible-air refusal blames a pressure outside of.
+const TROPOSPHERE_TOP_M: f64 = crate::atmosphere::TROPOSPHERE_TOP_M;
 
 /// `atmosphere.density_altitude` request.
 ///
@@ -187,7 +192,7 @@ pub fn density_altitude_v1(
     // Temperature first: above water's critical point the vapor formula is NaN, which the
     // vapor check below would otherwise read as "fine". A defaulted temperature is ICAO at an
     // altitude the solve accepts, always inside this range, so only a supplied one can fail.
-    if !(MIN_TEMPERATURE_K..=MAX_TEMPERATURE_K).contains(&atmosphere.temperature_k) {
+    if crate::atmosphere::outside_humid_air_model_range(atmosphere.temperature_k) {
         return Err(invalid_value(
             "$.atmosphere.temperature_k",
             format!(
@@ -208,7 +213,7 @@ pub fn density_altitude_v1(
     let temperature_f = temperature_c * 9.0 / 5.0 + 32.0;
     let station_pressure_hpa = atmosphere.pressure_pa / PASCALS_PER_HECTOPASCAL;
     let humidity = RelativeHumidity::try_fraction(atmosphere.relative_humidity)
-        .map_err(|error| invalid_value(RELATIVE_HUMIDITY_PATH, error.reason().to_string()))?;
+        .map_err(|error| invalid_value(RELATIVE_HUMIDITY_PATH, error.to_string()))?;
 
     // Pressure before vapor: hPa sent as Pa is the likelier mistake, and at 1013 Pa a warm
     // humid day would otherwise be blamed on the humidity.
@@ -223,16 +228,14 @@ pub fn density_altitude_v1(
     }
 
     // Whether this air can exist is the one rule's to decide, `StationAir::new`'s, which every
-    // solve applies to the same air: a humidity needing more water-vapour pressure than the
-    // air's total pressure is refused by both, for the same reason. The station it builds is
-    // the solver's muzzle air, so its density is the one reported below.
-    let station = StationAir::new(
-        atmosphere.altitude_m,
-        temperature_c,
-        station_pressure_hpa,
-        humidity,
-    )
-    .map_err(|error| station_refusal(&atmosphere, &error))?;
+    // solve applies to the same air through this same function: a humidity needing more
+    // water-vapour pressure than the air's total pressure is refused by both, with one code,
+    // path and message. Air the checks above refused first is refused by the solve too, at the
+    // same path: that function blames impossible air in their order (the temperature outside
+    // this range, then the reading that took the pressure out of the troposphere). The station
+    // it builds is the solver's muzzle air, so its density is the one reported below.
+    let station = crate::solve_v1::resolved_station_air(&request.atmosphere, &atmosphere)?;
+    debug_assert_eq!(station.humidity(), humidity);
 
     let faa_rule = AltitudeV1::from_ft(crate::atmosphere::faa_rule_density_altitude_ft(
         station_pressure_hpa,
@@ -306,37 +309,33 @@ fn pressure_outside_troposphere(
     );
     let station = echo(resolved.pressure_pa);
     let altitude = echo(resolved.altitude_m);
+    // The reading to blame is the one the solve's impossible-air refusal blames for the same
+    // station, by the one rule: a QNH that would itself be a troposphere pressure at sea level
+    // is a plausible reading, so the altitude it was reduced to is what took it out of range
+    // (feet sent as meters, say); an omitted pressure is the altitude's too.
+    let path = match crate::solve_v1::station_pressure_origin(sent) {
+        crate::atmosphere::StationPressureOrigin::Reading => "$.atmosphere.pressure_pa",
+        crate::atmosphere::StationPressureOrigin::Standard
+        | crate::atmosphere::StationPressureOrigin::Qnh => "$.atmosphere.altitude_m",
+    };
     match sent.pressure_pa {
-        Some(qnh) if sent.pressure_reference == Some(PressureReferenceV1::Qnh) => {
-            // A QNH that would itself be a troposphere pressure at sea level is a plausible
-            // reading, so the altitude it was reduced to is what took it out of range (feet
-            // sent as meters, say).
-            let qnh_alone_m =
-                crate::atmosphere::nws_pressure_altitude_ft(qnh / PASCALS_PER_HECTOPASCAL)
-                    * METERS_PER_FOOT;
-            let path = if within_troposphere(qnh_alone_m) {
-                "$.atmosphere.altitude_m"
-            } else {
-                "$.atmosphere.pressure_pa"
-            };
-            invalid_value(
-                path,
-                format!(
-                    "a QNH of {} Pa, reduced to a station pressure of {station} Pa at \
+        Some(qnh) if sent.pressure_reference == Some(PressureReferenceV1::Qnh) => invalid_value(
+            path,
+            format!(
+                "a QNH of {} Pa, reduced to a station pressure of {station} Pa at \
                      {altitude} m, {scope}. pressure_pa is pascals (hPa × 100) and altitude_m \
                      is meters",
-                    echo(qnh)
-                ),
-            )
-        }
+                echo(qnh)
+            ),
+        ),
         Some(_) => invalid_value(
-            "$.atmosphere.pressure_pa",
+            path,
             format!(
                 "a station pressure of {station} Pa {scope}. pressure_pa is pascals (hPa × 100)"
             ),
         ),
         None => invalid_value(
-            "$.atmosphere.altitude_m",
+            path,
             format!(
                 "the ICAO standard pressure at {altitude} m, {station} Pa, {scope}. altitude_m \
                  is meters"
@@ -345,40 +344,10 @@ fn pressure_outside_troposphere(
     }
 }
 
-/// `StationAir::new`'s refusal of the resolved air, at the wire field to blame and with the
-/// air in the wire's own units (the humidity as the fraction that was sent), followed by the
-/// shared reason word for word. Only impossible air reaches it: the solve's resolver and the
-/// checks above have already bounded every input on its own.
-fn station_refusal(
-    atmosphere: &ResolvedAtmosphereV1,
-    error: &AtmosphereError,
-) -> SolveErrorEnvelopeV1 {
-    let path = match error.field() {
-        "temperature_c" => "$.atmosphere.temperature_k",
-        "pressure_hpa" => "$.atmosphere.pressure_pa",
-        "altitude_m" => "$.atmosphere.altitude_m",
-        _ => RELATIVE_HUMIDITY_PATH,
-    };
-    invalid_value(
-        path,
-        format!(
-            "relative_humidity = {} at {} K and {} Pa: {}",
-            atmosphere.relative_humidity,
-            echo(atmosphere.temperature_k),
-            echo(atmosphere.pressure_pa),
-            error.reason()
-        ),
-    )
-}
-
 /// A caller's number as it should appear in a message: plain for ordinary magnitudes, and in
 /// exponent form for the absurd ones, which `{}` would otherwise print as 300 digits.
 fn echo(value: f64) -> String {
-    if value == 0.0 || (1e-3..1e7).contains(&value.abs()) {
-        format!("{value}")
-    } else {
-        format!("{value:e}")
-    }
+    crate::solve_v1::echo_si(value)
 }
 
 fn within_troposphere(altitude_m: f64) -> bool {
@@ -768,5 +737,214 @@ mod tests {
             assert_eq!(error.path(), Some(path), "{request}: {error:?}");
         }
         assert!(decode_density_altitude_request_v1(&json!({"atmosphere": {}})).is_ok());
+    }
+
+    /// The air outside this command's own model range that a solve refuses: the same field is
+    /// to blame in both (gate R2). Saturated air at 380 K, 400 K at 90 %, -103 °C at a pressure
+    /// of 0.0001 Pa, and a station above the troposphere because its pressure was omitted or
+    /// was a plausible QNH reduced 20 km up.
+    #[test]
+    fn a_solve_blames_impossible_air_on_the_reading_this_command_blames() {
+        let solve_path = |atmosphere: Value| {
+            let mut request = json!({
+                "schema_version": 1,
+                "projectile": {"mass_kg": 0.01134, "diameter_m": 0.00782, "drag_model": "G7",
+                               "ballistic_coefficient": 0.243},
+                "rifle": {"muzzle_velocity_mps": 823.0},
+                "shot": {"max_range_m": 300.0, "zero_distance_m": 100.0},
+                "wind": {"speed_mps": 0.0, "direction_from_rad": 0.0},
+                "solver": {"method": "rk45", "time_step_s": 0.001},
+                "effects": {"magnus": false, "coriolis": false, "enhanced_spin_drift": false},
+                "sampling": {"interval_m": 50.0}
+            });
+            request["atmosphere"] = atmosphere;
+            let request = crate::solve_json::decode_solve_request_v1(&request.to_string())
+                .expect("a well-formed solve request");
+            let error = crate::solve_v1::prepare_request(&request)
+                .expect_err("the solve refuses this air")
+                .error;
+            (error.code, error.path().map(str::to_string))
+        };
+        for (atmosphere, path) in [
+            (
+                json!({"temperature_k": 380.0, "pressure_pa": 101325.0, "relative_humidity": 1.0}),
+                "$.atmosphere.temperature_k",
+            ),
+            (
+                json!({"temperature_k": 400.0, "pressure_pa": 101325.0, "relative_humidity": 0.9}),
+                "$.atmosphere.temperature_k",
+            ),
+            (
+                json!({"temperature_k": 170.0, "pressure_pa": 0.0001, "relative_humidity": 1.0}),
+                "$.atmosphere.temperature_k",
+            ),
+            (
+                json!({"altitude_m": 20000.0, "temperature_k": 310.0, "relative_humidity": 1.0}),
+                "$.atmosphere.altitude_m",
+            ),
+            (
+                json!({"altitude_m": 20000.0, "temperature_k": 310.0, "pressure_pa": 101325.0,
+                       "pressure_reference": "qnh", "relative_humidity": 1.0}),
+                "$.atmosphere.altitude_m",
+            ),
+        ] {
+            let request = decode_density_altitude_request_v1(&json!({ "atmosphere": atmosphere }))
+                .expect("a well-formed atmosphere");
+            let here = density_altitude_v1(&request).expect_err("refused").error;
+            assert_eq!(here.path(), Some(path), "{atmosphere}: {here:?}");
+            assert_eq!(
+                solve_path(atmosphere.clone()),
+                (here.code, here.path().map(str::to_string)),
+                "{atmosphere}: the solve blames another field"
+            );
+        }
+    }
+
+    /// Whenever a solve refuses an `atmosphere` object, this command refuses the same object
+    /// with the same code and path (gate R2), across every way the object can be built: each
+    /// field sent or omitted, an absolute pressure or a QNH, temperatures and pressures from
+    /// absurd through ordinary to absurd again, and both edges of this command's own model
+    /// range to the bit. The message is the same word for word too, except where this
+    /// command's own range checks (the temperature range, the troposphere) refuse the air first.
+    #[test]
+    fn every_atmosphere_a_solve_refuses_is_refused_here_with_the_same_code_and_path() {
+        let up = |x: f64| f64::from_bits(x.to_bits() + 1);
+        let down = |x: f64| f64::from_bits(x.to_bits() - 1);
+        let temperatures = [
+            None,
+            Some(1e-300),
+            Some(5.0),
+            Some(100.0),
+            Some(down(MIN_TEMPERATURE_K)),
+            Some(MIN_TEMPERATURE_K),
+            Some(250.0),
+            Some(300.0),
+            Some(330.0),
+            Some(360.0),
+            Some(MAX_TEMPERATURE_K),
+            Some(up(MAX_TEMPERATURE_K)),
+            Some(380.0),
+            Some(400.0),
+            Some(500.0),
+            Some(647.0),
+            Some(700.0),
+            Some(1e300),
+        ];
+        let pressures = [
+            None,
+            Some(1e-300),
+            Some(1e-4),
+            Some(0.01),
+            Some(29.92),
+            Some(1013.25),
+            Some(5_000.0),
+            Some(20_000.0),
+            Some(50_000.0),
+            Some(101_325.0),
+            Some(250_000.0),
+            Some(1e300),
+        ];
+        let altitudes = [
+            None,
+            Some(0.0),
+            Some(1500.0),
+            Some(12_000.0),
+            Some(20_000.0),
+            Some(40_000.0),
+        ];
+        let humidities = [None, Some(0.0), Some(0.5), Some(0.9), Some(1.0), Some(1.06)];
+        let references = [None, Some("absolute"), Some("qnh")];
+
+        let base = json!({
+            "schema_version": 1,
+            "projectile": {"mass_kg": 0.01134, "diameter_m": 0.00782, "drag_model": "G7",
+                           "ballistic_coefficient": 0.243},
+            "rifle": {"muzzle_velocity_mps": 823.0},
+            "shot": {"max_range_m": 300.0, "zero_distance_m": 100.0},
+            "wind": {"speed_mps": 0.0, "direction_from_rad": 0.0},
+            "solver": {"method": "rk45", "time_step_s": 0.001},
+            "effects": {"magnus": false, "coriolis": false, "enhanced_spin_drift": false},
+            "sampling": {"interval_m": 50.0}
+        });
+        let mut compared = 0usize;
+        let mut blamed = std::collections::BTreeMap::<String, usize>::new();
+        for temperature in temperatures {
+            for pressure in pressures {
+                for altitude in altitudes {
+                    for humidity in humidities {
+                        for reference in references {
+                            let mut atmosphere = serde_json::Map::new();
+                            for (name, value) in [
+                                ("temperature_k", temperature),
+                                ("pressure_pa", pressure),
+                                ("altitude_m", altitude),
+                                ("relative_humidity", humidity),
+                            ] {
+                                if let Some(value) = value {
+                                    atmosphere.insert(name.to_string(), json!(value));
+                                }
+                            }
+                            if let Some(reference) = reference {
+                                atmosphere
+                                    .insert("pressure_reference".to_string(), json!(reference));
+                            }
+                            let atmosphere = Value::Object(atmosphere);
+                            let mut solve = base.clone();
+                            solve["atmosphere"] = atmosphere.clone();
+                            let solve =
+                                crate::solve_json::decode_solve_request_v1(&solve.to_string())
+                                    .and_then(|request| crate::solve_v1::prepare_request(&request));
+                            let Err(solve) = solve else { continue };
+                            let solve = solve.error;
+                            let here = decode_density_altitude_request_v1(
+                                &json!({ "atmosphere": atmosphere }),
+                            )
+                            .and_then(|request| density_altitude_v1(&request))
+                            .expect_err("a solve refuses this atmosphere, so this command must")
+                            .error;
+                            assert_eq!(
+                                (here.code, here.path()),
+                                (solve.code, solve.path()),
+                                "{atmosphere}\n  solve: {}\n  here:  {}",
+                                solve.message,
+                                here.message
+                            );
+                            if here.message != solve.message {
+                                assert!(
+                                    here.message.contains("the range the humid-air model")
+                                        || here
+                                            .message
+                                            .contains("density altitude is computed only between"),
+                                    "{atmosphere}: the messages differ, but not because this \
+                                     command's own range check refused first\n  solve: {}\n  \
+                                     here:  {}",
+                                    solve.message,
+                                    here.message
+                                );
+                            }
+                            compared += 1;
+                            if solve.message.contains("no such air exists") {
+                                *blamed
+                                    .entry(solve.path().unwrap_or_default().to_string())
+                                    .or_default() += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // The grid reaches every blame the impossible-air rule makes.
+        for path in [
+            "$.atmosphere.relative_humidity",
+            "$.atmosphere.temperature_k",
+            "$.atmosphere.pressure_pa",
+            "$.atmosphere.altitude_m",
+        ] {
+            assert!(
+                blamed.get(path).copied().unwrap_or(0) > 0,
+                "no impossible air blamed at {path}: {blamed:?}"
+            );
+        }
+        assert!(compared > 1000, "{compared} refusals compared");
     }
 }

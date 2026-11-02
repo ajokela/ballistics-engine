@@ -3610,6 +3610,10 @@ Impact Velocity: 2510 fps\n";
     /// invalid `--bc` rejected by `validate_for_solve`) still computed the coercion warning
     /// up front, but the `Err` arm was dropping it on the floor instead of carrying it like
     /// the `Ok` arm does. Table-only, same as every warning in this formatter.
+    ///
+    /// R2: the failed solve is THROWN (it was returned as `Ok` text, a success to a caller and
+    /// no JSON under `-o json`), and the thrown message carries the warning exactly as the
+    /// returned text did.
     #[wasm_bindgen_test]
     fn bc5d_coercion_warning_survives_a_failed_solve() {
         let wasm = WasmBallistics::new();
@@ -3619,7 +3623,9 @@ Impact Velocity: 2510 fps\n";
                 "trajectory -v 2700 -b -1 -m 168 -d 0.308 --drag-model g5 --use-bc-segments \
                  --max-range 300",
             )
-            .unwrap();
+            .unwrap_err()
+            .as_string()
+            .unwrap_or_default();
         assert!(
             table.contains("BC5D correction tables support G1/G7 only"),
             "{table}"
@@ -3631,7 +3637,9 @@ Impact Velocity: 2510 fps\n";
                 "trajectory -v 2700 -b -1 -m 168 -d 0.308 --drag-model g5 --use-bc-segments \
                  --max-range 300 -o json",
             )
-            .unwrap();
+            .unwrap_err()
+            .as_string()
+            .unwrap_or_default();
         assert!(!json.contains("BC5D correction tables"), "{json}");
         assert!(json.contains("Error:"), "{json}");
     }
@@ -4359,10 +4367,14 @@ Impact Velocity: 2510 fps\n";
                     .run_command(&format!("{base} {flag} {bad}"))
                     .expect_err(&format!("`{base} {flag} {bad}` must be refused"));
                 let message = err.as_string().unwrap_or_default();
+                // R2: the refusal states the band it enforces, NaN and infinities included.
+                let band = "percent from 0 to 100 (a sensor reading from -5 to 105 is read as 0 \
+                            or 100)";
                 assert!(
                     message.contains(flag)
-                        && (message.contains("percent from 0 to 100")
-                            || message.contains("must be finite")),
+                        && (message.contains(&format!("relative humidity must be a {band}"))
+                            || message
+                                .contains(&format!("relative humidity must be a finite {band}"))),
                     "`{flag} {bad}`: the one validator's error: {message}"
                 );
             }
@@ -4404,10 +4416,11 @@ Impact Velocity: 2510 fps\n";
     /// Every command that takes a station temperature refuses air that cannot exist (212 °F,
     /// 29.92 inHg, 100 %: saturated air at the boiling point) with the solver's one rule, the
     /// way the native CLI does, and flies the same air at 50 %. `monte-carlo` has no
-    /// `--temperature`, so it always flies 15 °C, where every humidity exists. A refusal is
-    /// either an `Err` or, for `trajectory`, whose solve errors the terminal prints, an
-    /// `Error...` line in place of the output (`Error: ...`, or `Error calculating zero: ...`
-    /// for `--auto-zero`).
+    /// `--temperature`, so it always flies 15 °C, where every humidity exists. R2: the refusal
+    /// is THROWN on every command (`trajectory` used to return it as an `Error...` line in place
+    /// of the output, a success to a caller and no JSON under `-o json`), up front, naming the
+    /// flag and the air: `--humidity = 100 at 212 °F and 29.92 inHg: no such air exists`, the
+    /// zero day under its own `--zero-humidity`.
     #[wasm_bindgen_test]
     fn every_command_with_a_temperature_refuses_impossible_air() {
         let wasm = WasmBallistics::new();
@@ -4453,14 +4466,15 @@ Impact Velocity: 2510 fps\n";
             let message =
                 match wasm.run_command(&format!("{base} {temperature} 212 {humidity} 100")) {
                     Err(err) => err.as_string().unwrap_or_default(),
-                    Ok(text) if text.trim_start().starts_with("Error") => text,
                     Ok(text) => {
-                        panic!("`{base}` at 212 F / 100 % must be refused, but it ran:\n{text}")
+                        panic!("`{base}` at 212 F / 100 % must be refused by a throw:\n{text}")
                     }
                 };
             assert!(
-                message.contains("no such air exists"),
-                "`{base}`: refused with StationAir's own reason: {message}"
+                message.starts_with(&format!(
+                    "{humidity} = 100 at 212 °F and 29.92 inHg: no such air exists"
+                )),
+                "`{base}`: refused up front with StationAir's own reason: {message}"
             );
             let flown = wasm
                 .run_command(&format!("{base} {temperature} 212 {humidity} 50"))
@@ -4470,6 +4484,66 @@ Impact Velocity: 2510 fps\n";
                 "`{base}` at 212 F / 50 % exists, and flies: {flown}"
             );
         }
+    }
+
+    /// A station above the troposphere because no pressure was given is the altitude's fault,
+    /// as on the native CLI (gate R2): the refusal says to check the altitude's unit, never the
+    /// unit of a `--pressure` nobody typed. 65617 ft is 20 km, about 55 hPa of standard
+    /// atmosphere, which saturated air at 104 °F exceeds. The zero day names each reading where
+    /// it came from: its own flag when one was given, the shot day's when it is inherited.
+    #[wasm_bindgen_test]
+    fn every_command_blames_an_omitted_pressure_above_the_troposphere_on_the_altitude() {
+        let wasm = WasmBallistics::new();
+        let thrown = |command: &str| match wasm.run_command(command) {
+            Err(err) => err.as_string().unwrap_or_default(),
+            Ok(text) => panic!("`{command}` must be refused by a throw:\n{text}"),
+        };
+        for base in [
+            "trajectory -v 2700 -b 0.475 -m 168 -d 0.308",
+            "zero -v 2700 -b 0.475 -m 168 -d 0.308 --target-distance 300",
+            "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 400",
+            "true-velocity --measured-drop 30 --range 500 -b 0.243 -m 175 -d 0.308 --offline",
+            "true-wind --miss 600:12 --twist-rate 10 -v 2700 -b 0.243 --drag-model g7 -m 175 \
+             -d 0.308",
+            "estimate-bc -v 2700 -m 168 -d 0.308 --data \"100,2.5;200,10.2;300,23.5\"",
+        ] {
+            let message = thrown(&format!(
+                "{base} --altitude 65617 --temperature 104 --humidity 100"
+            ));
+            assert!(
+                message.starts_with("--humidity = 100 at 104 °F and ")
+                    && message.contains("no --pressure was given")
+                    && message.contains("check the altitude's unit")
+                    && !message.contains("check the pressure's unit"),
+                "`{base}`: {message}"
+            );
+        }
+        let base = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --auto-zero 100";
+        let message = thrown(&format!(
+            "{base} --zero-altitude 65617 --zero-temperature 104 --zero-humidity 100"
+        ));
+        assert!(
+            message.starts_with("--zero-humidity = 100 at 104 °F and ")
+                && message.contains("no --pressure was given")
+                && message.contains("check the altitude's unit"),
+            "{message}"
+        );
+        let message = thrown(&format!(
+            "{base} --pressure 29.92 --pressure-type qnh --altitude 65617 --temperature 104 \
+             --humidity 100"
+        ));
+        assert!(
+            message.starts_with("--humidity = 100 at 104 °F and ")
+                && message.contains("--pressure is a QNH")
+                && message.contains("check the altitude's unit"),
+            "{message}"
+        );
+        // A humidity the zero day inherits is named by the flag it came from.
+        let message = thrown(&format!("{base} --zero-temperature 212 --humidity 100"));
+        assert!(
+            message.starts_with("--humidity = 100 at 212 °F and 29.92 inHg: no such air exists"),
+            "{message}"
+        );
     }
 
     #[wasm_bindgen_test]
@@ -4517,6 +4591,113 @@ mod minimal_surface_tests {
             .expect("field present")
             .as_f64()
             .expect("field is a number")
+    }
+
+    /// R2: the `Calculator` refuses air that cannot exist with the engine's own message, named
+    /// by its setters, thrown from `calculateTrajectory` and `getFullTrajectory` alike (it was a
+    /// "JSON parse error" wrapping a returned `Error: ...` string), and `setHumidity` refuses a
+    /// humidity beyond the sensor band itself, naming itself rather than a terminal flag.
+    #[wasm_bindgen_test]
+    fn calculator_refusals_name_the_api_and_carry_the_engines_message() {
+        let boiling = || {
+            Calculator::new()
+                .set_temperature(212.0)
+                .set_humidity(100.0)
+                .expect("100 % is a humidity")
+        };
+        let cause = "setHumidity = 100 at 212 °F and 29.92 inHg: no such air exists";
+        for (label, message) in [
+            (
+                "calculateTrajectory",
+                boiling().calculate_trajectory(500.0).err(),
+            ),
+            (
+                "calculateTrajectory with a zero",
+                boiling()
+                    .set_zero_range(100.0)
+                    .calculate_trajectory(500.0)
+                    .err(),
+            ),
+            ("getFullTrajectory", boiling().get_full_trajectory().err()),
+        ] {
+            let message = message
+                .and_then(|error| error.as_string())
+                .unwrap_or_else(|| panic!("{label}: refused"));
+            assert!(message.starts_with(cause), "{label}: {message}");
+            assert!(!message.contains("JSON parse error"), "{label}: {message}");
+        }
+        let half = Calculator::new()
+            .set_temperature(212.0)
+            .set_humidity(50.0)
+            .expect("50 % is a humidity");
+        half.calculate_trajectory(500.0)
+            .expect("212 °F at 50 % exists, and flies");
+
+        let band = "percent from 0 to 100 (a sensor reading from -5 to 105 is read as 0 or 100)";
+        for (bad, reason) in [
+            ("150", format!("relative humidity must be a {band}")),
+            ("NaN", format!("relative humidity must be a finite {band}")),
+        ] {
+            let message = Calculator::new()
+                .set_humidity(bad.parse().unwrap())
+                .err()
+                .and_then(|error| error.as_string())
+                .unwrap_or_else(|| panic!("setHumidity({bad}) is refused"));
+            assert_eq!(message, format!("setHumidity = {bad}: {reason}"));
+        }
+        // A sensor reading in the band is the end it reads as.
+        Calculator::new()
+            .set_humidity(103.0)
+            .expect("103 % is a reading of saturated air")
+            .calculate_trajectory(300.0)
+            .expect("and flies");
+
+        // Every other station reading the solve refuses is named by its setter too, never by
+        // the solver's field (`atmosphere.temperature`) behind a "JSON parse error".
+        for (label, calculator, cause) in [
+            (
+                "setTemperature(NaN)",
+                Calculator::new().set_temperature(f64::NAN),
+                "setTemperature = NaN °F: must be finite",
+            ),
+            (
+                "setPressure(-1)",
+                Calculator::new().set_pressure(-1.0),
+                "setPressure = -1 inHg: pressure must be greater than 0",
+            ),
+            (
+                "setAltitude(NaN)",
+                Calculator::new().set_altitude(f64::NAN),
+                "setAltitude = NaN: must be finite",
+            ),
+        ] {
+            let message = calculator
+                .calculate_trajectory(300.0)
+                .err()
+                .and_then(|error| error.as_string())
+                .unwrap_or_else(|| panic!("{label}: refused"));
+            assert_eq!(message, cause, "{label}");
+        }
+    }
+
+    /// R2: the terminal's `trajectory -o json` either answers with JSON or throws; a solve
+    /// failure is never a returned `Error: ...` string a JSON reader cannot parse.
+    #[wasm_bindgen_test]
+    fn trajectory_json_failures_are_thrown_never_returned_as_text() {
+        let wasm = WasmBallistics::new();
+        for command in [
+            "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --temperature 212 --humidity 100 -o json",
+            "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --auto-zero 99999 -o json",
+        ] {
+            match wasm.run_command(command) {
+                Err(_) => {}
+                Ok(text) => {
+                    serde_json::from_str::<serde_json::Value>(&text).unwrap_or_else(|e| {
+                        panic!("`{command}` answered with text that is not JSON ({e}): {text}")
+                    });
+                }
+            }
+        }
     }
 
     /// The `Calculator` fluent API resolves a trajectory without any `wasm-*` command

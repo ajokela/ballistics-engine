@@ -231,9 +231,13 @@ fn monte_carlo_refuses_an_out_of_range_humidity() {
                 &run(&with(base, &[flag.as_str()])),
                 &format!("monte-carlo {flag}"),
             );
-            // The parser's own range refusal, not an unknown-flag error.
+            // The parser's own range refusal, not an unknown-flag error, stating the band.
             assert!(
-                text.contains("humidity") && text.contains("percent from 0 to 100"),
+                text.contains("humidity")
+                    && text.contains(
+                        "percent from 0 to 100 (a sensor reading from -5 to 105 is read as 0 or \
+                         100)"
+                    ),
                 "{text}"
             );
         }
@@ -356,11 +360,11 @@ const MARK_TO_RANGE: &[&str] = &[
 ];
 
 /// 212 F at 29.92 inHg and 100 % is saturated air at the boiling point, which cannot exist; every
-/// command refuses it with the solver's one rule (`StationAir::new`), naming the field, and flies
-/// it at 50 %. The searches (`estimate-bc`, `optimal-zero`) used to drop every failed trial and
-/// blame the data or the fitted zero instead. `monte-carlo` has no `--temperature`, so it always
-/// flies 15 C, where every humidity exists. (`lead` reports a failed solve per row, by design,
-/// and names the same refusal in each row.)
+/// command refuses it with the solver's one rule (`StationAir::new`), up front, naming the flag
+/// and the air it is impossible in, and flies it at 50 %. The searches (`estimate-bc`,
+/// `optimal-zero`) used to drop every failed trial and blame the data or the fitted zero
+/// instead. `monte-carlo` has no `--temperature`, so it always flies 15 C, where every humidity
+/// exists. (Every other command, `lead` included, is in `tests/humidity_refusals.rs`.)
 #[test]
 fn every_command_with_a_temperature_refuses_impossible_air() {
     for (label, base) in [
@@ -378,9 +382,14 @@ fn every_command_with_a_temperature_refuses_impossible_air() {
             &run(&with(base, &["--temperature", "212", "--humidity", "100"])),
             &format!("{label} at 212 F / 100 %"),
         );
+        // R2: the flag, not the solver's internal `atmosphere.humidity`, with the air it was
+        // refused in, as the first thing the user reads.
         assert!(
-            text.contains("atmosphere.humidity = 100: no such air exists"),
-            "{label}: refused with StationAir's own reason, naming the field: {text}"
+            text.contains(
+                "Error: --humidity = 100 at 212 °F and 29.92 inHg: no such air exists: at this \
+                 temperature and pressure"
+            ),
+            "{label}: refused with StationAir's own reason, naming the flag: {text}"
         );
         stdout_of(
             &run(&with(base, &["--temperature", "212", "--humidity", "50"])),
@@ -669,10 +678,11 @@ fn a_refused_stored_humidity_says_to_edit_the_profile_file_it_names() {
         "a stored humidity of 150",
     );
     let path = humid_profile_path(home.path());
+    // R2: the rule states the band it enforces, once, and the fix names the file.
     let advice = format!(
-        "profile 'humid' field humidity = 150: relative humidity must be a percent from 0 to 100; \
-         edit the humidity stored in the profile to a percent from 0 to 100 (the profile is \
-         stored at {})",
+        "profile 'humid' field humidity = 150: relative humidity must be a percent from 0 to 100 \
+         (a sensor reading from -5 to 105 is read as 0 or 100); edit the humidity stored in the \
+         profile (the profile is stored at {})",
         path.display()
     );
     assert!(

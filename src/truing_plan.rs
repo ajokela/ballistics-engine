@@ -830,16 +830,14 @@ pub fn plan_truing_experiment_v1(
                 }
             }
         }
+        // A failure of the whole batch is not about any one range (a zero the model cannot
+        // reach, a model the solver refuses): it is the request's, so it is the request's
+        // error, with its cause first, never a list of candidates "unreachable" for it, which
+        // would point a caller at range selection for a problem no range choice can fix.
         Err(error) => {
-            let detail = error.to_string();
-            for (input_index, range_yd) in valid_inputs {
-                rejected.push(RejectedTruingCandidateV1 {
-                    input_index,
-                    range_yd,
-                    reason: TruingCandidateRejectionReasonV1::Unreachable,
-                    detail: detail.clone(),
-                });
-            }
+            return Err(TruingPlanErrorV1::invalid(format!(
+                "{error}; no candidate range could be evaluated"
+            )));
         }
     }
     rejected.sort_by_key(|candidate| candidate.input_index);

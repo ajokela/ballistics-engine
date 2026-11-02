@@ -15,4 +15,6 @@ pub use a7p::{
     parse_a7p, wrap_payload, A7pBcType, A7pDocument, A7pError, A7pProfile, EnvelopeStatus,
     UnknownField,
 };
-pub use map::{map_a7p_to_profile, sanitize_profile_name, A7pImportOutcome, ImportReport};
+pub use map::{
+    a7p_air_refusal, map_a7p_to_profile, sanitize_profile_name, A7pImportOutcome, ImportReport,
+};

@@ -403,7 +403,7 @@ over the bridge and through the C ABI (0.50.0 made this one rule everywhere).
 | `trajectory --auto-zero` | `--zero-humidity` | percent | the shot day's |
 | `--location` CSV | `HUMIDITY` column | percent | a saved profile's, then 50 (a typed `--humidity` beats the CSV) |
 | Saved profile (`--saved-profile`, `--profile`) | `humidity` | percent | 50 |
-| `.a7p` import | the file's air-humidity field | whole percent | 0 (the format cannot tell an absent field from 0) |
+| `.a7p` import | the file's air-humidity field, `c_zero_air_humidity` | whole percent | 0 (the format cannot tell an absent field from 0) |
 | `solve-json`, the `explain` / `error-budget` / `tolerance` request files, the MCP `solve` tool | `atmosphere.relative_humidity` | **fraction**, 0 to 1 (0.5 = 50 %) | 0.5 |
 | Bridge commands | per command; see the table in `include/ballistics_bridge.h` | | |
 
@@ -417,21 +417,49 @@ over the bridge and through the C ABI (0.50.0 made this one rule everywhere).
   105 %, is the dry or saturated air it measures and flies exactly as 0 % or 100 %. Weather
   meters and phone sensors are good to about ±2-3 % and read above 100 % in fog, where free air
   is supersaturated by under 1 %. In a request file the band is -0.05 to 1.05.
-- Anything farther out, NaN or infinite, is refused with an error that names the flag or field.
-  It is never clamped:
+- Anything farther out, NaN or infinite, is refused with an error that names the flag or field
+  and states the band it enforces. It is never clamped:
 
   ```
   $ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 600 --auto-zero 100 --humidity 106
-  error: invalid value '106' for '--humidity <HUMIDITY>': relative humidity must be a percent from 0 to 100
+  error: invalid value '106' for '--humidity <HUMIDITY>': relative humidity must be a percent from 0 to 100 (a sensor reading from -5 to 105 is read as 0 or 100)
   ```
+
+  A NaN says "relative humidity must be a finite percent from 0 to 100 (...)", and text that is
+  no number says "not a number; relative humidity is a percent from 0 to 100 (...)". A request
+  file states the same band in its own unit: `relative_humidity = 1.06: relative humidity must
+  be a fraction from 0 to 1 (0.5 = 50 %; a sensor reading from -0.05 to 1.05 is read as 0 or 1)`.
 - Air that cannot exist is refused as well: a humidity that needs more water-vapour pressure
   than the air has in total, for example saturated air at 101 °C and 1013.25 hPa. This is the
-  same test the bridge's `atmosphere.density_altitude` makes:
+  same test the bridge's `atmosphere.density_altitude` makes. Every command refuses it before it
+  does any work, so the first line is the cause, and it names the reading the way you gave it:
+  the flag (`--humidity`, or `--zero-humidity` when `trajectory --auto-zero`'s zero day has a
+  humidity of its own; one it inherits keeps the shot day's name), the `--location` CSV
+  column, or the saved profile's field, with the station temperature and pressure the run
+  would have flown:
 
   ```
   $ ballistics trajectory -u metric -v 823 -b 0.475 -m 10.9 -d 7.82 --max-range 300 --temperature 101 --humidity 100
-  Error: BallisticsError { message: "atmosphere.humidity = 100: no such air exists: at this temperature and pressure the humidity needs a water-vapour mole fraction of 1 or more (more vapour pressure than the air's total pressure), or the temperature is above water's critical point" }
+  Error: --humidity = 100 at 101 °C and 1013.25 hPa: no such air exists: at this temperature and pressure the humidity needs a water-vapour mole fraction of 1 or more (more vapour pressure than the air's total pressure), or the temperature is above water's critical point
   ```
+
+  A command that solves many rows or candidates (`lead`, `plan-truing`, `optimal-zero`,
+  `adaptive-card`, `hold-corridor`, `compare`, `estimate-bc`, ...) exits 1 with this line rather
+  than printing a table of failed rows or blaming a range, a flag or a fitted zero. `profile
+  save` and `profile import` refuse to store such air, and `profile show` still displays a
+  profile whose stored humidity a flight would refuse, with the refusal printed as a `warning:`.
+- When no `--pressure` was given (or a plausible `--pressure-type qnh` setting was reduced to
+  the station), air that cannot exist at a station so high that its pressure is outside the
+  troposphere is blamed on the altitude, with the unit to check:
+  `no --pressure was given, and the standard pressure at the station altitude of 20000 m is a
+  pressure altitude of ... m, outside the troposphere (-5000 m to 11000 m): check the
+  altitude's unit`. The bridge and the browser terminal blame the same reading.
+
+Every error a command reports on stderr is its message, after `Error: `, with exit status 1.
+Before 0.50.0 an error that reached the top of the CLI printed as a Rust value instead, such as
+`Error: BallisticsError { message: "..." }` or a quoted and escaped `Error: "..."`. A flag that
+fails to parse is clap's own `error: invalid value ...`, with exit status 2. `solve-json` and
+the `mcp` server answer with their JSON error envelopes, as before.
 
 Before 0.50.0 the commands disagreed. Most refused anything outside 0 to 100 at the flag, so a
 reading of 101.7 failed. `wind-card`, `compare` and a `--location` CSV flew any value clamped
@@ -2262,7 +2290,7 @@ Statistical analysis with parameter variations:
   --angle-std 0.5      # Angle std dev
   --bc-std 0.01        # BC std dev
   --wind-std 2         # Wind std dev
-  --humidity 80        # Relative humidity, percent 0-100 (default 50)
+  --humidity 80        # Relative humidity, percent 0-100, a reading up to 5 outside read as 0 or 100 (default 50)
   --target-distance 600 # For hit probability
 ```
 

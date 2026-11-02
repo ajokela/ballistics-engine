@@ -1107,7 +1107,69 @@ pub(crate) fn deserialize_truing_pressure_inhg<'de, D: serde::Deserializer<'de>>
     )
 }
 
+/// A truing request's station air refused in its own words, or `None` when it flies: the
+/// imperial model every `true.*` command shares (`temperature_f`, `pressure_inhg`,
+/// `humidity_pct`, `altitude_ft`, each at `at` + `.` + its name in the caller's request),
+/// resolved exactly as the truing forward model resolves it.
+///
+/// `humidity_pct = 150: relative humidity must be a percent from 0 to 100 (...)` beyond the
+/// sensor band; `humidity_pct = 100 at 212 °F and 29.92 inHg: no such air exists: ...` for air
+/// that cannot exist.
+pub(crate) fn truing_air_refusal(
+    temperature_f: StationReading,
+    pressure_inhg: StationReading,
+    humidity_pct: f64,
+    altitude_ft: f64,
+    at: &str,
+) -> Option<crate::atmosphere::AirRefusal> {
+    use crate::atmosphere::{reading_text, AirField};
+    let paths = [
+        "humidity_pct",
+        "temperature_f",
+        "pressure_inhg",
+        "altitude_ft",
+    ]
+    .map(|name| (name, format!("{at}.{name}")));
+    let [humidity, temperature, pressure, altitude] = [0, 1, 2, 3].map(|i| AirField {
+        name: paths[i].0,
+        path: &paths[i].1,
+    });
+    // The forward model's own conversions (`solve_trajectory_sample`).
+    AtmosphericConditions {
+        temperature: (temperature_f.value - 32.0) * 5.0 / 9.0,
+        pressure: pressure_inhg.value * 33.8639,
+        humidity: humidity_pct,
+        altitude: altitude_ft * 0.3048,
+    }
+    .air_refusal(
+        StationAtmospherePresence::from_readings(temperature_f, pressure_inhg),
+        [humidity, temperature, pressure, altitude],
+        humidity_pct,
+        |celsius| reading_text(celsius * 9.0 / 5.0 + 32.0, "°F"),
+        |hpa| reading_text(hpa / 33.8639, "inHg"),
+    )
+    // The humidity rules only: every other reading is range-checked by the request's own
+    // validation, which names it.
+    .filter(crate::atmosphere::AirRefusal::is_humidity_rule)
+}
+
 impl TruingModelInputsV1 {
+    /// This model's station air refused in its own words, or `None` when it flies. `at` is
+    /// where the model sits in the caller's request (`"$.model"` on the bridge), so the
+    /// refusal's path names the member to blame there: `$.model.humidity_pct`.
+    ///
+    /// [`Self::validate`] makes this check, so every `true.*` command that reads a model refuses
+    /// such air before it solves anything.
+    pub fn air_refusal(&self, at: &str) -> Option<crate::atmosphere::AirRefusal> {
+        truing_air_refusal(
+            self.temperature_f,
+            self.pressure_inhg,
+            self.humidity_pct,
+            self.altitude_ft,
+            at,
+        )
+    }
+
     /// Validate the scalar-BC model before an expensive design or uncertainty
     /// calculation.  These bounds mirror the existing truing solver where
     /// applicable, while rejecting NaN/infinity at the library boundary.
@@ -1140,13 +1202,17 @@ impl TruingModelInputsV1 {
         if !self.temperature_f.value.is_finite() {
             return Err("temperature must be finite".to_string());
         }
-        // The engine's one humidity validator (plan C4): a percent in [0, 100], a sensor
-        // reading within 5 points of it flown as the end it reads as (S5b), anything farther
-        // out refused with its field named, never clamped.
-        crate::atmosphere::RelativeHumidity::try_percent(self.humidity_pct)
-            .map_err(|error| error.at_field("humidity_pct").to_string())?;
         if !self.altitude_ft.is_finite() {
             return Err("altitude must be finite".to_string());
+        }
+        // The station air (R2): the engine's one humidity validator (plan C4: a percent in
+        // [0, 100], a sensor reading within 5 points of it flown as the end it reads as (S5b),
+        // anything farther out refused with its field named, never clamped) and the solver's
+        // one impossible-air rule, so air that cannot exist is refused as bad input, named,
+        // before any forward model runs, never reported as a forward-model failure or a
+        // shortage of reachable ranges.
+        if let Some(refusal) = self.air_refusal("$") {
+            return Err(refusal.message().to_string());
         }
         Ok(())
     }

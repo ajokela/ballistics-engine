@@ -1449,7 +1449,7 @@ fn atmo_sock_validate_refuses_each_bad_zone_field_by_name_without_clamping() {
     assert_eq!(
         error.to_string(),
         "atmo_sock.zones[1].humidity_percent = 150: relative humidity must be a percent from 0 \
-         to 100"
+         to 100 (a sensor reading from -5 to 105 is read as 0 or 100)"
     );
 }
 
@@ -1506,13 +1506,16 @@ fn a_terminal_humidity_flag_parses_through_the_one_validator() {
             .to_bits(),
         0.0f64.to_bits()
     );
+    // R2: the refusal states the band it enforces, not a bare 0-100 a 103 contradicts.
     assert_eq!(
         parse_humidity_percent_arg("--humidity", "150").unwrap_err(),
-        "--humidity = 150: relative humidity must be a percent from 0 to 100"
+        "--humidity = 150: relative humidity must be a percent from 0 to 100 (a sensor reading \
+         from -5 to 105 is read as 0 or 100)"
     );
     assert_eq!(
         parse_humidity_percent_arg("--zero-humidity", "-5.0000001").unwrap_err(),
-        "--zero-humidity = -5.0000001: relative humidity must be a percent from 0 to 100"
+        "--zero-humidity = -5.0000001: relative humidity must be a percent from 0 to 100 (a \
+         sensor reading from -5 to 105 is read as 0 or 100)"
     );
     // A sensor reading within 5 points of the range is the end it reads as, to the bit.
     for (raw, end) in [
@@ -1531,20 +1534,129 @@ fn a_terminal_humidity_flag_parses_through_the_one_validator() {
             "{raw}"
         );
     }
+    const BAND: &str =
+        "percent from 0 to 100 (a sensor reading from -5 to 105 is read as 0 or 100)";
     for raw in ["105.0000001", "-5.0000001", "1e3"] {
         let error = parse_humidity_percent_arg("--humidity", raw).unwrap_err();
         assert!(
-            error.starts_with("--humidity = ") && error.contains("percent from 0 to 100"),
+            error.starts_with("--humidity = ")
+                && error.ends_with(&format!("relative humidity must be a {BAND}")),
             "{raw}: {error}"
         );
     }
+    // R2: a NaN or an infinity is told what it had to be, not a bare "must be finite".
     for raw in ["nan", "inf", "-inf"] {
         let error = parse_humidity_percent_arg("--humidity", raw).unwrap_err();
-        assert!(error.ends_with("must be finite"), "{raw}: {error}");
+        assert!(
+            error.ends_with(&format!("relative humidity must be a finite {BAND}")),
+            "{raw}: {error}"
+        );
     }
     let error = parse_humidity_percent_arg("--humidity", "fifty").unwrap_err();
+    assert_eq!(
+        error,
+        format!("--humidity = fifty: not a number; relative humidity is a {BAND}")
+    );
+}
+
+// =================================================================================================
+// Which reading impossible air is blamed on (gate R2)
+// =================================================================================================
+
+/// Where a station pressure came from, from what a presence-aware resolution is handed: a
+/// supplied reading, a sea-level default kept at a station within a metre of sea level, and
+/// a non-default value under the legacy rule are readings; a default the rule replaces with the
+/// standard pressure at the altitude is the standard's; a QNH is a QNH when it is itself a
+/// troposphere pressure and a reading (hPa sent as pascals) when not.
+#[test]
+fn a_station_pressure_origin_names_the_reading_that_set_it() {
+    use StationPressureOrigin::{Qnh, Reading, Standard};
+    let absolute = PressureReferenceMode::Absolute;
+    let qnh = PressureReferenceMode::Qnh;
+    let both = StationAtmospherePresence::BOTH;
+    let neither = StationAtmospherePresence::NEITHER;
+    for (pressure_hpa, altitude_m, mode, presence, origin) in [
+        (1013.25, 3000.0, absolute, both, Reading),
+        (1013.25, 3000.0, absolute, neither, Standard),
+        (1013.25, 0.5, absolute, neither, Reading),
+        (850.0, 3000.0, absolute, neither, Reading),
+        (1013.25, 20_000.0, qnh, both, Qnh),
+        (1013.25, 20_000.0, qnh, neither, Qnh),
+        (10.1325, 1500.0, qnh, both, Reading),
+    ] {
+        assert_eq!(
+            StationPressureOrigin::resolving(pressure_hpa, altitude_m, mode, presence),
+            origin,
+            "{pressure_hpa} hPa at {altitude_m} m, {mode:?}, {presence:?}"
+        );
+    }
+    assert_eq!(StationPressureOrigin::of(None, absolute), Standard);
+    assert_eq!(StationPressureOrigin::of(None, qnh), Standard);
+}
+
+/// The one blame order for air that cannot exist, the order `atmosphere.density_altitude`'s
+/// checks run in: the temperature outside 173.15-373.15 K (in kelvin, to the bit, edges
+/// inside), then the reading that took the pressure out of the troposphere, then the humidity.
+#[test]
+fn impossible_air_is_blamed_on_one_reading_in_one_order() {
+    let blamed = |temperature_c: f64, pressure_hpa: f64, origin: StationPressureOrigin| {
+        let humidity = RelativeHumidity::try_percent(100.0).unwrap();
+        let error = StationAir::new(0.0, temperature_c, pressure_hpa, humidity)
+            .expect_err("this air cannot exist");
+        let spelling = AirSpelling {
+            humidity: AirField::named("h"),
+            temperature: AirField::named("t"),
+            pressure: AirField::named("p"),
+            altitude: AirField::named("a"),
+            humidity_sent: 100.0,
+            temperature_text: format!("{temperature_c} °C"),
+            pressure_text: format!("{pressure_hpa} hPa"),
+            pressure_origin: origin,
+        };
+        let refusal = error.refusal_in(&spelling, 0.0, temperature_c, pressure_hpa);
+        (refusal.path().to_string(), refusal.message().to_string())
+    };
+    let reading = StationPressureOrigin::Reading;
+    // 100 °C is 373.15 K exactly: inside, so saturated air under 1000 hPa is the humidity's.
+    assert_eq!(blamed(100.0, 1000.0, reading).0, "h");
+    // One float above it in kelvin (the edge is compared in kelvin, where a float is coarser
+    // than in °C), and far above, the temperature's.
+    let above = f64::from_bits(373.15_f64.to_bits() + 1) - 273.15;
+    assert_eq!(blamed(above, 1000.0, reading).0, "t");
+    assert_eq!(blamed(107.0, 1013.25, reading).0, "t");
+    assert_eq!(blamed(400.0, 1013.25, reading).0, "t");
+    // Below -100 °C only a near-vacuum is impossible: still the temperature's first.
+    assert_eq!(blamed(-103.15, 1e-6, reading).0, "t");
+    // In range, above the troposphere: the pressure's when it was a reading...
+    let (path, message) = blamed(40.0, 10.0, reading);
+    assert_eq!(path, "p");
     assert!(
-        error.contains("--humidity = fifty: not a number"),
-        "{error}"
+        message.contains("; p = 10 hPa is a pressure altitude of "),
+        "{message}"
+    );
+    assert!(
+        message.ends_with(": check the pressure's unit"),
+        "{message}"
+    );
+    // ...and the altitude's when it was the standard pressure there or a QNH reduced there.
+    let (path, message) = blamed(40.0, 10.0, StationPressureOrigin::Standard);
+    assert_eq!(path, "a");
+    assert!(
+        message.contains("; no p was given, and the standard pressure at the station altitude"),
+        "{message}"
+    );
+    assert!(
+        message.ends_with(": check the altitude's unit"),
+        "{message}"
+    );
+    let (path, message) = blamed(40.0, 10.0, StationPressureOrigin::Qnh);
+    assert_eq!(path, "a");
+    assert!(
+        message.contains("; p is a QNH, and reduced to the station altitude"),
+        "{message}"
+    );
+    assert!(
+        message.ends_with(": check the altitude's unit"),
+        "{message}"
     );
 }

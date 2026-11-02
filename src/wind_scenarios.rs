@@ -177,7 +177,7 @@ pub struct RobustHoldRequest {
 }
 
 /// Why a robust-hold run was rejected. Typed, and every variant is raised BEFORE any
-/// trajectory is solved except [`Self::SolveFailed`].
+/// trajectory is solved except [`Self::ZeroFailed`] and [`Self::SolveFailed`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum WindScenarioError {
     /// The set declared a version this build does not implement.
@@ -223,6 +223,10 @@ pub enum WindScenarioError {
     InvalidHumidity(crate::atmosphere::AtmosphereError),
     /// The scenario set could not be decoded at all.
     MalformedDocument { message: String },
+    /// The load's zero could not be solved, so no scenario was flown. Before 0.50.0 this was a
+    /// [`Self::SolveFailed`] of a scenario named `<zero>`, a placeholder no scenario set
+    /// contains.
+    ZeroFailed { message: String },
     /// A scenario's trajectory could not be solved, or did not reach a requested range.
     SolveFailed { scenario: String, message: String },
 }
@@ -283,6 +287,12 @@ impl fmt::Display for WindScenarioError {
             WindScenarioError::InvalidHumidity(error) => write!(f, "{error}"),
             WindScenarioError::MalformedDocument { message } => {
                 write!(f, "malformed wind scenario set: {message}")
+            }
+            WindScenarioError::ZeroFailed { message } => {
+                write!(
+                    f,
+                    "{message}; the zero solve failed, so no scenario was flown"
+                )
             }
             WindScenarioError::SolveFailed { scenario, message } => {
                 write!(f, "scenario '{scenario}' could not be solved: {message}")
@@ -671,8 +681,7 @@ pub fn solve_robust_hold(
         atmosphere.clone(),
         load.station_presence,
     )
-    .map_err(|e| WindScenarioError::SolveFailed {
-        scenario: "<zero>".to_string(),
+    .map_err(|e| WindScenarioError::ZeroFailed {
         message: e.to_string(),
     })?;
 

@@ -1615,6 +1615,26 @@ pub enum SolveErrorCodeV1 {
     InternalError,
 }
 
+/// The code by its wire name (`invalid_value`, `solve_failed`, ...), the name a solve-json
+/// reader branches on, so a message that quotes a code quotes that name and never the Rust
+/// variant (`InvalidValue`).
+impl fmt::Display for SolveErrorCodeV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::InvalidJson => "invalid_json",
+            Self::UnsupportedSchemaVersion => "unsupported_schema_version",
+            Self::UnknownField => "unknown_field",
+            Self::MissingField => "missing_field",
+            Self::InvalidValue => "invalid_value",
+            Self::ConflictingFields => "conflicting_fields",
+            Self::ResourceLimit => "resource_limit",
+            Self::SolveFailed => "solve_failed",
+            Self::IoError => "io_error",
+            Self::InternalError => "internal_error",
+        })
+    }
+}
+
 /// Decode and structurally validate one solve-json v1 request.
 ///
 /// In addition to Serde's `deny_unknown_fields` enforcement, this entry point attaches exact
