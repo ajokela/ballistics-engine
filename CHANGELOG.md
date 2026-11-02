@@ -503,6 +503,29 @@ against the 0.49.0 build. Use it to re-baseline a stored kernel result, not for 
 
   The in-flight yaw of repose already uses the local humid density.
 
+### Performance (output-identical)
+- **A flight computes its air's water-vapour mole fraction once, not at every step.** That mole
+  fraction, which the air aloft holds at every height, and a downrange zone's CIPM-2007 density
+  ratio are fixed for the whole flight. `StationAir` and `AtmoSock::new` now compute them when
+  they are built, and `air_at` only reads them, so a step evaluates no saturation pressure at
+  any humidity, 0 % included. Every result is bit for bit what computing them at each step
+  gives.
+- **The kernels are faster than 0.49.0, at every humidity.** These are measured on one machine
+  (Apple M3 Max, release build) for a 1000 m flat shot, with 0.50.0 and 0.49.0 linked into one
+  binary and timed in alternating blocks. Each figure is the median of three runs, and is the
+  same at 0 % and 50 %:
+  - `fast_integrate`: 49 % less time;
+  - the lean Monte Carlo trial: 49 % less;
+  - `TrajectorySolver` RK4: 48 % less;
+  - `TrajectorySolver` RK45: 46 % less;
+  - `TrajectorySolver` Euler: 37 % less.
+- **`benches/humidity_air_bench.rs`** times `fast_integrate`, the lean Monte Carlo trial and
+  `TrajectorySolver` RK4 and RK45 at 0 % and 50 % side by side: `cargo bench --bench
+  humidity_air_bench`.
+- **Build a `StationAir` or an `AtmoSock` once per flight**, as every kernel does. Building one
+  now also computes its mole fraction, and each zone's density ratio, so a caller that rebuilt
+  a sock for every lookup would pay for that at every lookup.
+
 ### Docs
 - CLI_USAGE.md gains a "Humidity: units, defaults and validation" section, with a table for
   every command and surface. It also corrects the model description: the saturation vapour

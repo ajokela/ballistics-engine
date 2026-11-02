@@ -1145,6 +1145,12 @@ Optimized Rust implementation provides:
 - BC estimation: ~50ms
 - Zero calculation: ~10ms
 
+A humid flight costs what a dry one does. The air's water-vapour mole fraction, and a downrange
+zone's density ratio, are computed once when the `StationAir` or `AtmoSock` is built, never per
+step. `cargo bench --bench humidity_air_bench` times `fast_integrate`, a lean Monte Carlo trial
+and `TrajectorySolver` RK4 and RK45 at 0 % and 50 % relative humidity, side by side;
+`benches/trajectory_bench.rs` holds the trajectory and zero benchmarks.
+
 ## Common Ballistic Coefficients
 
 | Caliber | Weight | BC (G1) | BC (G7) | Description |

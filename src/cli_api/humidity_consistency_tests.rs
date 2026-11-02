@@ -19,6 +19,9 @@
 //!   exactly as `TrajectorySolver`'s do, to 1e-12 relative: the Mach every site uses is the
 //!   reference's.
 //! - **Lean Monte Carlo.** Its reported Mach divides by the sound speed it flew.
+//! - **Per-flight air.** No family's per-step lookup evaluates a saturation pressure: the
+//!   governing air's vapour mole fraction and a zone's density ratio are computed once, when
+//!   the station or the zones are built (R4, review HR-2).
 //! - **Aerodynamic jump.** The fast path's launch offset is `TrajectorySolver`'s, from the same
 //!   station air, at every RH. It is humidity-free by design: the published Miller T/P density
 //!   correction is dry.
@@ -765,6 +768,82 @@ fn every_family_gives_the_sound_speed_the_station_or_zone_humidity() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The humidities the per-step cost is held at: dry, the default and saturated.
+const EVERY_HUMIDITY: [f64; 3] = [0.0, 50.0, 100.0];
+
+#[test]
+fn every_family_looks_up_its_air_without_evaluating_a_saturation_pressure() {
+    // R4 (review HR-2): the governing air's water-vapour mole fraction, and a zone's CIPM density
+    // ratio, are fixed for the whole flight. Each is computed once per base air, when the
+    // station or the zones are built, and never inside the per-step lookup: every point of
+    // every family's flight evaluates no Wagner-Pruss saturation pressure, at every humidity,
+    // dry included, with and without zones. (Before R4 a step evaluated one for the station's
+    // x_v, and two for a zone's, which made fast_integrate, the lean Monte Carlo and the RK4
+    // and RK45 solver 4-10 % slower than 0.49.0.)
+    //
+    // The whole run is held to a per-flight budget too, so humid-air work cannot move out of
+    // the lookup into some other per-step site. A flight's evaluations are its station's and
+    // zones' own, made when they are built: 4 to 20 per flight, and a zero flies a flight per
+    // iteration. Every run that flies (hundreds to thousands of steps) must therefore make at
+    // most one evaluation per STEPS_PER_EVALUATION steps; the closest run today makes one per
+    // 46. A per-step evaluation anywhere gives at least one per step. compute_derivatives' four
+    // isolated states are not a flight (the harness builds a station for each call), so it
+    // is held to the per-lookup check alone.
+    const STEPS_PER_EVALUATION: u64 = 20;
+    const A_FLIGHT: usize = 100;
+    let mut failures = Vec::new();
+    for &family in SolverFamily::ALL {
+        let mut ran = 0;
+        for scenario in scenarios(&EVERY_HUMIDITY) {
+            let before = crate::atmosphere::air_trace::saturation_pressures();
+            let Some(entries) = run_family(family, &scenario) else {
+                continue;
+            };
+            let in_flight = crate::atmosphere::air_trace::saturation_pressures() - before;
+            ran += 1;
+            let per_step: Vec<_> = entries
+                .iter()
+                .filter(|entry| entry.lookup_saturation_pressures != Some(0))
+                .collect();
+            let zones = if scenario.zones.is_some() {
+                "with zones"
+            } else {
+                "no zones"
+            };
+            if entries.is_empty() || !per_step.is_empty() {
+                failures.push(format!(
+                    "{family:?} at {:?} {zones}: {} of {} steps evaluated a saturation pressure \
+                     or composed outside air_at (first: {:?})",
+                    scenario.station,
+                    per_step.len(),
+                    entries.len(),
+                    per_step
+                        .first()
+                        .map(|entry| entry.lookup_saturation_pressures)
+                ));
+            }
+            let steps = entries.len() as u64;
+            if family != SolverFamily::ComputeDerivatives
+                && (entries.len() < A_FLIGHT || in_flight * STEPS_PER_EVALUATION > steps)
+            {
+                failures.push(format!(
+                    "{family:?} at {:?} {zones}: {in_flight} saturation pressures in a run of \
+                     {steps} steps; a run that flies at least {A_FLIGHT} steps must make at \
+                     most one per {STEPS_PER_EVALUATION}",
+                    scenario.station,
+                ));
+            }
+        }
+        assert!(ran > 0, "{family:?} ran in no scenario");
+    }
+    assert!(
+        failures.is_empty(),
+        "{} family/scenario runs recompute fixed air every step:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
 
 #[test]

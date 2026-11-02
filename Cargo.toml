@@ -188,6 +188,10 @@ required-features = ["cli"]
 name = "trajectory_bench"
 harness = false
 
+[[bench]]
+name = "humidity_air_bench"
+harness = false
+
 [lib]
 name = "ballistics_engine"
 crate-type = ["rlib", "staticlib", "cdylib"]

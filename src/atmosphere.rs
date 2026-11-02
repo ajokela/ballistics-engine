@@ -1056,6 +1056,10 @@ fn moist_molar_mass_ratio(mole_fraction_vapor: f64) -> f64 {
 /// `x_v` ([`calculate_atmosphere`]'s kelvin and pascal conversions, then the one
 /// [`vapor_mole_fraction`], capped at 1), so the air at the governing air's height is that air
 /// to the bit. Exactly 0 at 0 %.
+///
+/// The one place this `x_v` is formed. It is evaluated once per base air, when a
+/// [`StationAir`] or an [`AtmoSock`] is built (see [`GoverningAir`]), and per call only by the
+/// legacy `get_local_atmosphere*` wrappers, whose base is a caller's raw tuple.
 #[inline(always)]
 fn governing_vapor_mole_fraction(temp_c: f64, pressure_hpa: f64, humidity_percent: f64) -> f64 {
     capped_vapor_mole_fraction(moist_air_vapor_mole_fraction(
@@ -1201,6 +1205,9 @@ pub(crate) fn vapor_mole_fraction(p_sv_hpa: f64, f: f64, humidity_percent: f64, 
 /// formulation's region-4 saturation equation is a different formula.)
 #[inline(always)]
 fn enhanced_saturation_vapor_pressure(t_k: f64) -> f64 {
+    #[cfg(test)]
+    air_trace::count_saturation_pressure();
+
     // Wagner-Pruss coefficients a1..a6.
     const A: [f64; 6] = [
         -7.85951783,
@@ -1309,10 +1316,12 @@ pub fn get_local_atmosphere(
     let air = compose_local_air(
         altitude_m,
         base_alt,
-        base_temp_c,
-        base_press_hpa,
-        base_ratio,
-        RelativeHumidity::DRY.percent(),
+        &GoverningAir::new(
+            base_temp_c,
+            base_press_hpa,
+            base_ratio,
+            RelativeHumidity::DRY.percent(),
+        ),
         Gravity::EARTH,
     );
     (air.density_kg_m3, air.speed_of_sound_mps)
@@ -1368,14 +1377,12 @@ pub(crate) fn get_local_atmosphere_humid_with_gravity(
 ) -> (f64, f64) {
     // The same composition `air_at` uses, without its validation: this legacy entry keeps its
     // internal clamp of an out-of-range humidity (a NaN gives NaN air), and can never diverge
-    // from `air_at`.
+    // from `air_at`. Its base is the caller's raw tuple, so it computes the base air's vapour
+    // mole fraction on every call, through the same one formula.
     let air = compose_local_air(
         altitude_m,
         base_alt,
-        base_temp_c,
-        base_press_hpa,
-        base_ratio,
-        humidity_percent,
+        &GoverningAir::new(base_temp_c, base_press_hpa, base_ratio, humidity_percent),
         gravity,
     );
     (air.density_kg_m3, air.speed_of_sound_mps)
@@ -2161,7 +2168,7 @@ impl AtmosphereError {
 /// let saturated = RelativeHumidity::try_percent(100.0).unwrap();
 /// assert!(StationAir::new(0.0, 100.0, 1013.25, saturated).is_err());
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct StationAir {
     altitude_m: f64,
     temperature_c: f64,
@@ -2170,6 +2177,26 @@ pub struct StationAir {
     density_ratio: f64,
     density_kg_m3: f64,
     speed_of_sound_mps: f64,
+    /// The station's water-vapour mole fraction, which [`air_at`] holds at every height:
+    /// [`governing_vapor_mole_fraction`] at the fields above, computed once here rather than at
+    /// every step of every flight (R4, review HR-2). A cache of the other fields, not state of
+    /// its own, so `Debug` leaves it out.
+    vapor_mole_fraction: f64,
+}
+
+// The derive's output before R4, field for field: the held vapour mole fraction is a cache.
+impl fmt::Debug for StationAir {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StationAir")
+            .field("altitude_m", &self.altitude_m)
+            .field("temperature_c", &self.temperature_c)
+            .field("pressure_hpa", &self.pressure_hpa)
+            .field("humidity", &self.humidity)
+            .field("density_ratio", &self.density_ratio)
+            .field("density_kg_m3", &self.density_kg_m3)
+            .field("speed_of_sound_mps", &self.speed_of_sound_mps)
+            .finish()
+    }
 }
 
 impl StationAir {
@@ -2254,6 +2281,11 @@ impl StationAir {
                 pressure_hpa * 100.0,
                 humidity.percent(),
             ),
+            vapor_mole_fraction: governing_vapor_mole_fraction(
+                temperature_c,
+                pressure_hpa,
+                humidity.percent(),
+            ),
         })
     }
 
@@ -2277,6 +2309,24 @@ impl StationAir {
             density_ratio: density_kg_m3 / 1.225,
             density_kg_m3,
             speed_of_sound_mps,
+            vapor_mole_fraction: governing_vapor_mole_fraction(
+                temperature_c,
+                pressure_hpa,
+                humidity.percent(),
+            ),
+        }
+    }
+
+    /// The station as the governing air of a point no downrange zone covers.
+    #[inline(always)]
+    fn governing_air(&self) -> GoverningAir {
+        GoverningAir {
+            temperature_c: self.temperature_c,
+            pressure_hpa: self.pressure_hpa,
+            density_ratio: self.density_ratio,
+            vapor_mole_fraction: self.vapor_mole_fraction,
+            #[cfg(test)]
+            humidity_percent: self.humidity.percent(),
         }
     }
 
@@ -2537,6 +2587,68 @@ impl KernelAtmosphere {
     }
 }
 
+/// The governing (base) air a point of a flight lapses from: the station's, or the active
+/// downrange [`AtmoSock`] zone's. Everything in it is fixed for the whole flight, its
+/// water-vapour mole fraction and density ratio included, so it is computed once, when the
+/// station ([`StationAir`]) or the zones ([`AtmoSock::new`]) are built, and the per-step lookup
+/// only reads it (R4, review HR-2: recomputing the vapour mole fraction, and a zone's CIPM
+/// density, at every step made `fast_integrate`, the lean Monte Carlo and `TrajectorySolver`'s
+/// RK4 and RK45 4-10 % slower than 0.49.0, for no change in any bit).
+#[derive(Debug, Clone, Copy)]
+struct GoverningAir {
+    /// Base temperature, °C.
+    temperature_c: f64,
+    /// Base absolute pressure, hPa.
+    pressure_hpa: f64,
+    /// Base density over 1.225 kg/m³.
+    density_ratio: f64,
+    /// [`governing_vapor_mole_fraction`] at the base temperature, pressure and humidity: the
+    /// `x_v` held at every height.
+    vapor_mole_fraction: f64,
+    /// The relative humidity, percent, that `vapor_mole_fraction` came from, for the test-only
+    /// [`air_trace`]; the composition itself reads only the mole fraction.
+    #[cfg(test)]
+    humidity_percent: f64,
+}
+
+impl GoverningAir {
+    /// Base air at `temperature_c`, `pressure_hpa` and `humidity_percent` (raw: clamped into
+    /// 0-100 by the one vapour formula, a NaN kept), with the caller's `density_ratio`. Its
+    /// vapour mole fraction goes through [`governing_vapor_mole_fraction`], the one place that
+    /// formula lives.
+    #[inline]
+    fn new(
+        temperature_c: f64,
+        pressure_hpa: f64,
+        density_ratio: f64,
+        humidity_percent: f64,
+    ) -> Self {
+        Self {
+            temperature_c,
+            pressure_hpa,
+            density_ratio,
+            vapor_mole_fraction: governing_vapor_mole_fraction(
+                temperature_c,
+                pressure_hpa,
+                humidity_percent,
+            ),
+            #[cfg(test)]
+            humidity_percent,
+        }
+    }
+
+    /// A downrange zone's air: its own temperature, pressure and humidity, with the CIPM-2007
+    /// density ratio at that humidity. Unvalidated, like the zone (see [`AtmoSock::validate`]).
+    fn zone(&(temperature_c, pressure_hpa, humidity_percent, _): &AtmoSegment) -> Self {
+        Self::new(
+            temperature_c,
+            pressure_hpa,
+            calculate_air_density_cimp(temperature_c, pressure_hpa, humidity_percent) / 1.225,
+            humidity_percent,
+        )
+    }
+}
+
 /// The air at one point of a flight: the ONE per-step air computation.
 ///
 /// `downrange_m` selects a zone of `zones`; `altitude_m` is the point's geometric altitude above
@@ -2562,6 +2674,11 @@ impl KernelAtmosphere {
 ///   height this is that air exactly (the sound speed is [`StationAir::speed_of_sound_mps`] to
 ///   the bit); at 0 % every step is the dry one, `sqrt(1.4 · 287.0531 · T)` for the sound
 ///   speed.
+///
+///   The base `x_v`, and a zone's density ratio, are fixed for the flight, so they are computed
+///   once, when the station ([`StationAir::new`]) or the zones ([`AtmoSock::new`]) are built.
+///   This lookup evaluates no saturation pressure; build the station and the zones once per
+///   flight, not per step.
 ///
 /// `zones` must already have passed [`AtmoSock::validate`], as every validated kernel entry
 /// checks them once ([`crate::trajectory_integration::try_integrate_trajectory`],
@@ -2595,32 +2712,19 @@ pub(crate) fn air_at_with_gravity(
             pressure_pa: 0.0,
         },
         KernelAtmosphere::Station(station) => {
-            let (base_temp_c, base_press_hpa, base_ratio, base_humidity_percent) =
-                match zones.filter(|sock| !sock.is_empty()) {
-                    Some(sock) => {
-                        let (zone_temp_c, zone_press_hpa, zone_humidity) =
-                            sock.atmo_for_range(downrange_m);
-                        let zone_ratio =
-                            calculate_air_density_cimp(zone_temp_c, zone_press_hpa, zone_humidity)
-                                / 1.225;
-                        (zone_temp_c, zone_press_hpa, zone_ratio, zone_humidity)
-                    }
-                    None => (
-                        station.temperature_c,
-                        station.pressure_hpa,
-                        station.density_ratio,
-                        station.humidity.percent(),
-                    ),
-                };
-            compose_local_air(
-                altitude_m,
-                station.altitude_m,
-                base_temp_c,
-                base_press_hpa,
-                base_ratio,
-                base_humidity_percent,
-                gravity,
-            )
+            #[cfg(test)]
+            let saturation_pressures_before = air_trace::saturation_pressures();
+            // The zone that covers this point, else the station: either way air computed when
+            // it was built, so this step evaluates no vapour formula. An empty sock covers
+            // nothing.
+            let base = match zones.and_then(|sock| sock.governing_air_for_range(downrange_m)) {
+                Some(zone) => *zone,
+                None => station.governing_air(),
+            };
+            let air = compose_local_air(altitude_m, station.altitude_m, &base, gravity);
+            #[cfg(test)]
+            air_trace::attribute_lookup_saturation_pressures(saturation_pressures_before);
+            air
         }
     }
 }
@@ -2636,31 +2740,31 @@ pub(crate) fn air_at_with_gravity(
 /// - the sound speed: [`moist_sound_speed_at_mole_fraction`] at the local temperature and that
 ///   same `x_v`.
 ///
-/// At 0 % `x_v` is 0 and every term is the dry one to the bit.
+/// `base` carries that `x_v`, computed once per base air (see [`GoverningAir`]), so the
+/// composition evaluates no saturation pressure. At 0 % `x_v` is 0 and every term is the dry
+/// one to the bit.
 #[inline]
 fn compose_local_air(
     altitude_m: f64,
     base_alt: f64,
-    base_temp_c: f64,
-    base_press_hpa: f64,
-    base_ratio: f64,
-    humidity_percent: f64,
+    base: &GoverningAir,
     gravity: Gravity,
 ) -> LocalAir {
-    let vapor_mole_fraction =
-        governing_vapor_mole_fraction(base_temp_c, base_press_hpa, humidity_percent);
     let (temperature_k, pressure_pa, density_kg_m3) = local_temp_pressure_density_with_gravity(
         altitude_m,
         base_alt,
-        base_temp_c,
-        base_press_hpa,
-        base_ratio,
-        vapor_mole_fraction,
+        base.temperature_c,
+        base.pressure_hpa,
+        base.density_ratio,
+        base.vapor_mole_fraction,
         gravity,
     );
     let air = LocalAir {
         density_kg_m3,
-        speed_of_sound_mps: moist_sound_speed_at_mole_fraction(temperature_k, vapor_mole_fraction),
+        speed_of_sound_mps: moist_sound_speed_at_mole_fraction(
+            temperature_k,
+            base.vapor_mole_fraction,
+        ),
         temperature_k,
         pressure_pa,
     };
@@ -2668,12 +2772,13 @@ fn compose_local_air(
     air_trace::record(air_trace::AirTraceEntry {
         altitude_m,
         base_alt_m: base_alt,
-        base_temp_c,
-        base_press_hpa,
-        base_ratio,
-        humidity_percent,
+        base_temp_c: base.temperature_c,
+        base_press_hpa: base.pressure_hpa,
+        base_ratio: base.density_ratio,
+        humidity_percent: base.humidity_percent,
         gravity_mps2: gravity.magnitude(),
         air,
+        lookup_saturation_pressures: None,
     });
     air
 }
@@ -2684,7 +2789,7 @@ fn compose_local_air(
 #[cfg(test)]
 pub(crate) mod air_trace {
     use super::LocalAir;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     /// One call of the composition behind [`super::air_at`]: its inputs and its result.
     #[derive(Debug, Clone, Copy)]
@@ -2706,10 +2811,43 @@ pub(crate) mod air_trace {
         pub gravity_mps2: f64,
         /// What the composition returned.
         pub air: LocalAir,
+        /// How many Wagner-Pruss saturation pressures the per-step lookup ([`super::air_at`])
+        /// evaluated for this point, from choosing its base to returning its air: every
+        /// humid-air formula (a vapour mole fraction, a CIPM density) goes through one. `None`
+        /// for a composition made outside that lookup (the legacy `get_local_atmosphere*`
+        /// wrappers, which compose from a caller's raw base once per call).
+        pub lookup_saturation_pressures: Option<u64>,
     }
 
     thread_local! {
         static TRACE: RefCell<Option<Vec<AirTraceEntry>>> = const { RefCell::new(None) };
+        static SATURATION_PRESSURES: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// Count one Wagner-Pruss saturation-pressure evaluation on this thread.
+    #[inline(always)]
+    pub(super) fn count_saturation_pressure() {
+        SATURATION_PRESSURES.with(|count| count.set(count.get() + 1));
+    }
+
+    /// The Wagner-Pruss saturation pressures evaluated on this thread so far, traced or not.
+    pub(crate) fn saturation_pressures() -> u64 {
+        SATURATION_PRESSURES.with(Cell::get)
+    }
+
+    /// Credit the per-step lookup that started when the count stood at `before` with what it
+    /// evaluated, on the composition it just recorded (the trace's last entry), if tracing.
+    pub(super) fn attribute_lookup_saturation_pressures(before: u64) {
+        let evaluated = saturation_pressures() - before;
+        TRACE.with(|trace| {
+            if let Some(last) = trace
+                .borrow_mut()
+                .as_mut()
+                .and_then(|entries| entries.last_mut())
+            {
+                last.lookup_saturation_pressures = Some(evaluated);
+            }
+        });
     }
 
     pub(super) fn record(entry: AirTraceEntry) {
@@ -2988,17 +3126,31 @@ pub type AtmoSegment = (f64, f64, f64, f64);
 /// solver swaps them into the same local-atmosphere altitude-lapse pipeline that a single-station
 /// solve uses, so the downrange (X) zone and the vertical (Y) altitude lapse compose orthogonally
 /// without double-counting (the zone sets the base tuple, the lapse multiplies on top of it).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AtmoSock {
     /// Zones sorted ascending by `until_distance_m` (segment slot 3).
     segments: Vec<AtmoSegment>,
+    /// Each zone's governing air (its density ratio and water-vapour mole fraction), in
+    /// `segments`' order, computed once in [`Self::new`] rather than at every step (R4, review
+    /// HR-2). A cache of `segments`, so `Debug` leaves it out.
+    governing: Vec<GoverningAir>,
+}
+
+// The derive's output before R4: the zones' governing air is a cache of the zones.
+impl fmt::Debug for AtmoSock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AtmoSock")
+            .field("segments", &self.segments)
+            .finish()
+    }
 }
 
 impl AtmoSock {
     /// Create a new `AtmoSock` from station-referenced atmosphere zones.
     ///
     /// Each segment is `(temp_c, pressure_hpa, humidity_percent, until_distance_m)`. Segments are
-    /// sorted by `until_distance_m`, with NaN thresholds ordered last.
+    /// sorted by `until_distance_m`, with NaN thresholds ordered last. Each zone's density ratio
+    /// and water-vapour mole fraction, fixed for any flight, are computed here once.
     pub fn new(mut segments: Vec<AtmoSegment>) -> Self {
         segments.sort_by(|a, b| match (a.3.is_nan(), b.3.is_nan()) {
             (true, true) => Ordering::Equal,
@@ -3006,7 +3158,11 @@ impl AtmoSock {
             (false, true) => Ordering::Less,
             (false, false) => a.3.partial_cmp(&b.3).unwrap(),
         });
-        AtmoSock { segments }
+        let governing = segments.iter().map(GoverningAir::zone).collect();
+        AtmoSock {
+            segments,
+            governing,
+        }
     }
 
     /// True when this sock carries no zones. [`air_at`] treats an empty sock as no sock: the
@@ -3067,23 +3223,41 @@ impl AtmoSock {
     /// This is stateless and safe for numerical integration (the same X may be queried repeatedly
     /// or out of order across RK substeps).
     pub fn atmo_for_range(&self, downrange_m: f64) -> (f64, f64, f64) {
-        if self.segments.is_empty() {
-            // Sea-level ISA at the one default humidity.
-            return (15.0, 1013.25, DEFAULT_HUMIDITY_PERCENT);
-        }
-        // NaN X can't be ordered; use the first (nearest) zone deterministically.
-        if downrange_m.is_nan() {
-            let s = self.segments[0];
-            return (s.0, s.1, s.2);
-        }
-        for seg in &self.segments {
-            if downrange_m < seg.3 {
-                return (seg.0, seg.1, seg.2);
+        match self.zone_index(downrange_m) {
+            Some(index) => {
+                let (temp_c, pressure_hpa, humidity_percent, _) = self.segments[index];
+                (temp_c, pressure_hpa, humidity_percent)
             }
+            // Sea-level ISA at the one default humidity.
+            None => (15.0, 1013.25, DEFAULT_HUMIDITY_PERCENT),
         }
-        // Beyond the final threshold: hold the last zone (no zeroing).
-        let last = self.segments[self.segments.len() - 1];
-        (last.0, last.1, last.2)
+    }
+
+    /// The governing air of the zone [`Self::atmo_for_range`] selects at `downrange_m`, as
+    /// [`Self::new`] computed it; `None` for an empty sock, which [`air_at`] reads as the
+    /// station.
+    #[inline]
+    fn governing_air_for_range(&self, downrange_m: f64) -> Option<&GoverningAir> {
+        self.zone_index(downrange_m)
+            .map(|index| &self.governing[index])
+    }
+
+    /// The one zone selection behind [`Self::atmo_for_range`] and the per-step lookup: the first
+    /// zone whose `until_distance_m` STRICTLY exceeds `downrange_m`, the last zone at or beyond
+    /// the final threshold (there is no zeroing), and the first (nearest) zone for a NaN
+    /// distance, which cannot be ordered. `None` for an empty sock.
+    #[inline]
+    fn zone_index(&self, downrange_m: f64) -> Option<usize> {
+        let last = self.segments.len().checked_sub(1)?;
+        if downrange_m.is_nan() {
+            return Some(0);
+        }
+        Some(
+            self.segments
+                .iter()
+                .position(|segment| downrange_m < segment.3)
+                .unwrap_or(last),
+        )
     }
 }
 
@@ -3095,6 +3269,9 @@ mod aloft_vapour_tests;
 
 #[cfg(test)]
 mod nan_humidity_tests;
+
+#[cfg(test)]
+mod held_vapour_tests;
 
 #[cfg(test)]
 mod tests {
