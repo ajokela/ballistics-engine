@@ -13930,9 +13930,10 @@ fn run_trajectory(config: &TrajectoryConfig) -> Result<(), Box<dyn Error>> {
     // MBA-1420: WHICH OF THE TWO IS AUTHORITATIVE. From here on `atmosphere` holds the resolved
     // station values, while `inputs.temperature`/`inputs.pressure` still hold the RAW figures the
     // user typed -- pre-QNH-reduction. Only `atmosphere` reaches the trajectory: it is handed to
-    // `new_with_resolved_station_atmosphere` below, and `fast_integrate` overwrites the inputs'
-    // copies from its own kernel atmosphere. Every reader of `inputs.pressure` on this path was
-    // traced and none is reachable from the solve, so the stale copies are inert today.
+    // `new_with_resolved_station_atmosphere` below, whose constructor also copies its humidity
+    // into `inputs.humidity_percent` (so only the temperature and pressure copies can be stale).
+    // Every reader of `inputs.pressure` on this path was traced and none is reachable from the
+    // solve, so the stale copies are inert today.
     //
     // They are still a trap for the next reader, and they are inconsistent with the
     // density-altitude path above, where those same input fields ARE the resolved values (which

@@ -71,8 +71,10 @@ pub fn litz_drift_meters(sg: f64, t_s: f64, is_twist_right: bool) -> f64 {
 ///
 /// Delegates to [`crate::stability::compute_stability_coefficient`], the single source of truth
 /// for Miller Sg. That INCLUDES the `(v/2800)^(1/3)` muzzle-velocity term (matching the reported
-/// SG and the aerodynamic-jump Sg) and the linear Miller density correction `(T/T0)*(P0/P)`.
-/// `temp_c` / `press_hpa` are the resolved muzzle atmosphere.
+/// SG and the aerodynamic-jump Sg) and the linear Miller density correction `(T/T0)*(P0/P)`,
+/// which is dry by design and takes no humidity (see the humidity note on
+/// [`crate::stability::compute_stability_coefficient`]). `temp_c` / `press_hpa` are the
+/// resolved muzzle atmosphere.
 ///
 /// `compute_stability_coefficient` returns 0.0 when `bullet_length` is unset, so this first
 /// substitutes a length estimate. MBA-1135: use the mass-based [`crate::stability::estimate_bullet_length_m`]

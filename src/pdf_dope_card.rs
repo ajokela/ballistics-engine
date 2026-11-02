@@ -244,10 +244,11 @@ const INHG_TO_HPA: f64 = 33.863_886_666_667;
 /// `density_altitude_round_trips_through_the_dope_card_formula*` tests are what pin the pair
 /// together; a change to the maths here must keep them passing.
 ///
-/// The TRAJECTORY is unaffected by this: the solver's air density comes from
-/// [`crate::atmosphere::calculate_air_density_cimp`] (CIPM-2007) and its speed of
-/// sound from [`crate::atmosphere::moist_speed_of_sound`], both of which do take
-/// humidity. This function feeds a READOUT, never the integrator.
+/// The TRAJECTORY is unaffected by this: every solver takes its air from
+/// [`crate::atmosphere::air_at`], whose station density is CIPM-2007
+/// ([`crate::atmosphere::calculate_air_density_cimp`]) and whose speed of sound is
+/// [`crate::atmosphere::moist_speed_of_sound`], both at the run's humidity. This function
+/// feeds a READOUT, never the integrator.
 ///
 /// # Why it disagrees with some other tools
 ///

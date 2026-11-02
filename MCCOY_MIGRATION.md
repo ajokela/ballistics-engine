@@ -130,5 +130,80 @@ remain and must be kept in sync.
   `base_ratio` was set from humidity, scrambling base density to ~417 kg/m³
   (~340× drag) — the Monte Carlo bullet previously collapsed at ~33 m. Now
   `solve_trajectory_for_monte_carlo` agrees with the cli_api solver within ~0.3%.
+  (`atmo_params` itself is gone since 0.50.0; see the next section.)
 - **Reynolds correction** (subsonic tail, mach<1 & <200 m/s): diameter was passed
   in inches where meters were expected.
+
+---
+
+# Humidity Consistency (0.50.0) — Downstream Notes (bindings, ballistics_rust, rockets-engine)
+
+0.50.0 flies every solver family on the same humid air, through one per-step lookup,
+`atmosphere::air_at`. The kernels used to take a bare `(f64, f64, f64, f64)` atmosphere tuple
+with no humidity in it and flew a 0 % sound speed whatever the station's humidity. Their
+atmosphere is now a `KernelAtmosphere`, which carries the humidity, so the density and the
+sound speed cannot disagree about it.
+
+## Breaking changes (Rust source)
+
+| 0.49.0 | 0.50.0 |
+|---|---|
+| `TrajectoryParams.atmos_params: (alt, T, P, ratio)` | `TrajectoryParams.atmosphere: KernelAtmosphere` |
+| `FastIntegrationParams.atmo_params: (alt, T, P, ratio)` | `FastIntegrationParams.atmosphere: KernelAtmosphere` |
+| `compute_derivatives(.., atmos_params: (f64, f64, f64, f64), ..)` | `compute_derivatives(.., atmosphere: &KernelAtmosphere, ..)` |
+| `try_solve_trajectory_rust` / `solve_trajectory_rust` atmosphere tuple | `atmosphere: KernelAtmosphere` |
+| `aerodynamic_jump_launch_offset_rad(inputs, (f64, f64, f64, f64))` | `aerodynamic_jump_launch_offset_rad(inputs, &KernelAtmosphere)` |
+| `try_integrate_trajectory` -> `Result<_, WindSegmentError>` | `Result<_, KernelInputError>` (a wind segment or an atmosphere zone) |
+| `BallisticInputs.humidity`, a 0-1 FRACTION, and `humidity_percent()` | `BallisticInputs.humidity_percent`, a PERCENT (default 50); the method is gone |
+| `atmosphere::get_local_atmosphere` | deprecated (dry by contract); use `air_at` |
+
+`compute_derivatives` and `fast_integrate*` now measure a point's height from the
+`KernelAtmosphere` station's altitude, not from `inputs.altitude`.
+
+## What to change
+
+```rust
+use ballistics_engine::{KernelAtmosphere, RelativeHumidity, StationAir};
+
+// 0.49.0
+//   atmos_params: (altitude_m, temperature_c, pressure_hpa, density_ratio),
+// 0.50.0: the station itself, with its humidity (density and sound speed both follow it).
+let humidity = RelativeHumidity::try_percent(humidity_percent)?;
+let atmosphere = KernelAtmosphere::Station(StationAir::new(
+    altitude_m,
+    temperature_c,
+    pressure_hpa,
+    humidity,
+)?);
+// A caller that must keep its own density ratio (a legacy 4-vector) converts the tuple, at
+// the humidity the ratio was built at; direct mode's (density, sound speed, 0, 0) becomes
+// KernelAtmosphere::uniform(density, sound_speed) the same way.
+let legacy = KernelAtmosphere::from_legacy_params(
+    (altitude_m, temperature_c, pressure_hpa, density_ratio),
+    humidity,
+)?;
+```
+
+- `BallisticInputs.humidity = rh / 100.0` becomes `humidity_percent = rh`: delete the `/ 100`.
+  A fraction from a wire converts with `RelativeHumidity::try_fraction(f)?.percent()`.
+- Every constructor validates: a humidity more than 5 points outside 0-100 %
+  (`HUMIDITY_SENSOR_TOLERANCE_PERCENT`), NaN, or air that cannot exist is an
+  `AtmosphereError`; a reading inside the band is stored as exactly 100 or 0.
+- The crate root now exports `RelativeHumidity` (with `StationAir`, `KernelAtmosphere`,
+  `LocalAir`, `air_at`, `AtmosphereError`, `AtmosphereErrorReason`, `DEFAULT_HUMIDITY_PERCENT`
+  and `HUMIDITY_SENSOR_TOLERANCE_PERCENT`). `InputAxis` has a `RelativeHumidity` variant, so
+  glob-importing both `ballistics_engine::*` and `InputAxis::*` makes the name ambiguous; name
+  one of them explicitly.
+
+## Numeric effect
+
+Only kernel runs at a humidity above 0 move: their sound speed rises to the station's own
+moist value (+0.133 % at 15 °C / 50 %, +0.787 % at 35 °C / 90 %), so Mach falls and the drag
+coefficient moves along the drag curve. Density is unchanged. At 0 % the kernels are
+bit-identical to 0.49.0. CHANGELOG.md's 0.50.0 section has the measured trajectory shifts.
+
+To reproduce a 0.49.0 kernel result exactly (for re-baselining, not for new work), pass the
+same humid ratio at `RelativeHumidity::DRY`:
+`KernelAtmosphere::from_legacy_params((alt, t, p, ratio), RelativeHumidity::DRY)` flies
+0.49.0's half-humid air (the humid density with a dry sound speed); it was checked bit for bit
+against the 0.49.0 build on `try_integrate_trajectory` and `fast_integrate`.

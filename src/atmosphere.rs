@@ -2,6 +2,68 @@
 //!
 //! This module provides Rust-accelerated implementations of atmospheric calculations
 //! with full ICAO Standard Atmosphere support for improved accuracy at all altitudes.
+//!
+//! # Humid air: one model, one lookup (0.50.0)
+//!
+//! Every solver family flies the same humid air. [`TrajectorySolver`](crate::TrajectorySolver),
+//! the kernels (`compute_derivatives`, `try_integrate_trajectory`, `try_solve_trajectory_rust`,
+//! `fast_integrate*`) and the lean Monte Carlo all take their per-step air from [`air_at`], over
+//! a [`KernelAtmosphere`] that carries the station's relative humidity, so a station's density
+//! and its sound speed cannot disagree about the humidity.
+//!
+//! - **At the station.** [`StationAir::new`] calls [`calculate_atmosphere`]: the CIPM-2007
+//!   moist-air density ([`calculate_air_density_cimp`]: the virial compressibility `Z` and the
+//!   enhancement factor `f`) and the moist speed of sound ([`moist_speed_of_sound`]). Both use
+//!   one water-vapour mole fraction, `x_v = (RH/100) f p_sv / p`, with `p_sv` from the
+//!   Wagner-Pruss saturation-pressure equation over liquid water. The sound speed is first order
+//!   in `x_v`: `gamma = 1.4 (1 - 0.062 x_v)`, `R = 287.0531 (1 + 0.378 x_v)`,
+//!   `c = sqrt(gamma R T)`. At 0 % it is the engine's one dry value, `sqrt(1.4 · 287.0531 · T)`,
+//!   340.294 m/s at 15 °C.
+//! - **Aloft.** Temperature and pressure start from the station's own values and follow the
+//!   ICAO layers' lapse rates in geopotential height, with the dry gas constant; the density
+//!   scales the station's by `(T_0 · P) / (P_0 · T)`, which holds the station's vapour mole
+//!   fraction; the sound speed holds the station's relative humidity at the local temperature
+//!   and pressure. Downrange [`AtmoSock`] zones replace the station as the base, each with its
+//!   own humidity.
+//! - **Units.** [`RelativeHumidity`] stores a percent. Every Rust field and function takes a
+//!   percent (`AtmosphericConditions::humidity`, `BallisticInputs::humidity_percent`, an
+//!   [`AtmoSegment`]'s slot 2); only the SI JSON wire (`relative_humidity`) carries a fraction,
+//!   and it converts through [`RelativeHumidity::try_fraction`].
+//! - **Default.** An omitted humidity is [`DEFAULT_HUMIDITY_PERCENT`], 50 %, on every surface.
+//! - **Validation.** One rule, [`RelativeHumidity::try_percent`] / [`RelativeHumidity::try_fraction`]:
+//!   a reading up to [`HUMIDITY_SENSOR_TOLERANCE_PERCENT`] (5 points) outside 0-100 % is the
+//!   saturated or dry air it measures and flies exactly as 100 % or 0 %; anything farther out,
+//!   NaN or infinite is refused. Air that cannot exist (an uncapped `x_v` of 1 or more) is
+//!   refused by [`StationAir::new`] and [`AtmoSock::validate`], the same test the
+//!   `atmosphere.density_altitude` service applies.
+//!
+//! Two gas constants appear here, one from each standard, each used the same way on every
+//! path: the CIPM-2007 density's `R / M_a = 8.314472 / 0.02896546 = 287.0478` J/(kg·K), inside
+//! its own formula, and the US Standard Atmosphere 1976 dry-air constant `R_AIR = 287.0531`,
+//! for the hydrostatic lapse and the sound speed.
+//!
+//! One deliberate exception: the muzzle Miller stability factor
+//! ([`crate::stability::compute_stability_coefficient`]) keeps Miller's published dry
+//! temperature and pressure correction, so it does not move with humidity.
+//!
+//! A kernel caller builds its atmosphere the way `TrajectorySolver` does (README.md shows the
+//! same code):
+//!
+//! ```
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! use ballistics_engine::{air_at, KernelAtmosphere, RelativeHumidity, StationAir};
+//!
+//! // 15 C, 1013.25 hPa, 50 % at sea level: the same air TrajectorySolver flies.
+//! let station = StationAir::new(0.0, 15.0, 1013.25, RelativeHumidity::try_percent(50.0)?)?;
+//! let atmosphere = KernelAtmosphere::Station(station);
+//! // For TrajectoryParams::atmosphere / FastIntegrationParams::atmosphere. The air 300 m up:
+//! let aloft = air_at(&atmosphere, None, 0.0, 300.0);
+//! println!("{:.3} kg/m3, {:.3} m/s", aloft.density_kg_m3, aloft.speed_of_sound_mps);
+//! assert!(aloft.density_kg_m3 < station.density_kg_m3());
+//! assert_eq!(air_at(&atmosphere, None, 0.0, 0.0).speed_of_sound_mps, station.speed_of_sound_mps());
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::gravity::Gravity;
 use std::borrow::Cow;
@@ -25,8 +87,10 @@ struct AtmosphereLayer {
 // ICAO reference quantities are defined using standard Earth gravity, independently of the
 // acceleration chosen for an internal simulation.
 const G_ACCEL_MPS2: f64 = crate::constants::G_ACCEL_MPS2;
-/// Specific gas constant for dry air, J/(kg·K). With [`GAMMA`] it is the engine's one dry-air
-/// sound-speed constant: `sqrt(GAMMA * R_AIR * T)`.
+/// Specific gas constant for dry air, J/(kg·K), the US Standard Atmosphere 1976 value. With
+/// [`GAMMA`] it is the engine's one dry-air sound-speed constant: `sqrt(GAMMA * R_AIR * T)`. It
+/// also drives the hydrostatic lapse. The CIPM-2007 density uses its own `R / M_A` (287.0478)
+/// inside its own formula; each constant is used the same way on every path.
 pub(crate) const R_AIR: f64 = 287.0531;
 /// Heat-capacity ratio of dry air.
 pub(crate) const GAMMA: f64 = 1.4;
@@ -36,7 +100,9 @@ const MAX_GEOMETRIC_ALTITUDE_M: f64 = 84000.0;
 const MIN_STANDARD_GEOPOTENTIAL_HEIGHT_M: f64 = -5000.0;
 const MAX_STANDARD_GEOPOTENTIAL_HEIGHT_M: f64 = 84000.0;
 
-/// CIPM constants for precise air density calculation
+/// CIPM-2007 constants for the moist-air density, used only inside
+/// [`calculate_air_density_cimp`]. Their ratio `R / M_A` is 287.0478 J/(kg·K), CIPM's dry-air
+/// gas constant; the sound speed and the lapse use the US-1976 [`R_AIR`] instead.
 const R: f64 = 8.314472; // Universal gas constant
 const M_A: f64 = 28.96546e-3; // Molar mass of dry air (kg/mol)
 const M_V: f64 = 18.01528e-3; // Molar mass of water vapor (kg/mol)
@@ -874,20 +940,23 @@ pub fn calculate_atmosphere(
         (final_temp_k, final_pressure_pa)
     };
 
-    // Humidity clamp shared by the CIPM density and the moist speed of sound.
+    // Humidity clamp shared by the CIPM density and the moist speed of sound: a total-function
+    // guard for this unvalidated public function. Validated callers (StationAir::new) pass a
+    // RelativeHumidity, already in range, so it never moves their value.
     let humidity_clamped = humidity_percent.clamp(0.0, 100.0);
     let temp_c = temp_k - 273.15;
 
-    // Density: CIPM-2007 is the single canonical humid-air density model. Every solver
-    // (cli_api / monte_carlo / ffi / fast_trajectory) reaches this one formula through
-    // calculate_atmosphere, so there is no second (Arden-Buck ideal-gas) density path to drift.
+    // Density: CIPM-2007 is the engine's one humid-air density model. Every solver's station
+    // density comes from this call, through StationAir::new; a downrange zone's base density
+    // calls calculate_air_density_cimp directly in air_at. There is no second density formula.
     let density = calculate_air_density_cimp(temp_c, pressure_pa / 100.0, humidity_clamped);
 
     // Speed of sound uses an ideal-gas moist-air mixture approximation, first order in the
-    // water-vapor mole fraction. Extracted into `moist_speed_of_sound` so the integrators can
-    // share it; its vapor pressure comes from the SAME IAPWS saturation formula
-    // (`enhanced_saturation_vapor_pressure`) + CIPM enhancement factor that the density above
-    // uses. Only the vapor fraction is shared; the acoustic relation remains ideal-gas.
+    // water-vapor mole fraction. Extracted into `moist_speed_of_sound`, which air_at also calls
+    // at every step; its vapor pressure comes from the SAME Wagner-Pruss saturation-pressure
+    // equation (`enhanced_saturation_vapor_pressure`) and CIPM enhancement factor that the
+    // density above uses. Only the vapor fraction is shared; the acoustic relation remains
+    // ideal-gas.
     let speed_of_sound = moist_speed_of_sound(temp_k, pressure_pa, humidity_clamped);
 
     (density, speed_of_sound)
@@ -896,18 +965,24 @@ pub fn calculate_atmosphere(
 /// Speed of sound using an ideal-gas moist-air mixture approximation, first order in the
 /// water-vapor mole fraction.
 ///
-/// The water-vapor mole fraction is derived from the SAME IAPWS saturation vapor pressure
-/// (`enhanced_saturation_vapor_pressure`) and CIPM-2007 enhancement factor used by
+/// The water-vapor mole fraction is derived from the SAME Wagner-Pruss saturation vapor
+/// pressure (`enhanced_saturation_vapor_pressure`) and CIPM-2007 enhancement factor used by
 /// [`calculate_air_density_cimp`], so a single vapor formula feeds both density and c. Only the
 /// vapor fraction is shared with the CIPM path; the acoustic relation itself remains ideal-gas.
 /// The mixture applies first-order humidity corrections to the dry-air heat-capacity ratio and
-/// gas constant, then evaluates `sqrt(gamma * R * T)`. It is not Cramer's full real-gas
-/// polynomial and does not include Cramer's pressure or carbon-dioxide terms.
+/// gas constant, `gamma = 1.4 (1 - 0.062 x_v)` and `R = 287.0531 (1 + 0.378 x_v)`, then
+/// evaluates `sqrt(gamma * R * T)`; at 0 % that is the dry `sqrt(1.4 · 287.0531 · T)`. It is
+/// not Cramer's full real-gas polynomial and does not include Cramer's pressure or
+/// carbon-dioxide terms.
+///
+/// [`air_at`] calls it at every step of every solver family, at the local temperature and
+/// pressure and the station's (or zone's) relative humidity.
 ///
 /// # Arguments
 /// * `temp_k` - Temperature in Kelvin
 /// * `pressure_pa` - Total (station) pressure in Pa
-/// * `humidity_percent` - Relative humidity percentage (0-100)
+/// * `humidity_percent` - Relative humidity percentage (0-100); a value outside is clamped, a
+///   total-function guard for this unvalidated function (validate with [`RelativeHumidity`])
 ///
 /// # Returns
 /// Speed of sound in m/s
@@ -1027,11 +1102,17 @@ pub(crate) fn vapor_mole_fraction(p_sv_hpa: f64, f: f64, humidity_percent: f64, 
     p_v_pa / p_pa
 }
 
-/// Enhanced saturation vapor pressure calculation.
-/// Uses the IAPWS-IF97 formulation for high precision.
+/// Saturation vapor pressure of water, hPa, over LIQUID water at every temperature (the WMO
+/// convention for relative humidity, also below 0 °C; there is no ice branch).
+///
+/// The Wagner-Pruss saturation-pressure equation, the form of the IAPWS supplementary release
+/// on the saturation properties of ordinary water substance:
+/// `ln(p_sv / p_c) = (T_c / T) (a1 τ + a2 τ^1.5 + a3 τ^3 + a4 τ^3.5 + a5 τ^4 + a6 τ^7.5)` with
+/// `τ = 1 - T / T_c`, `T_c = 647.096 K` and `p_c = 22.064 MPa`. (The industrial IF97
+/// formulation's region-4 saturation equation is a different formula.)
 #[inline(always)]
 fn enhanced_saturation_vapor_pressure(t_k: f64) -> f64 {
-    // IAPWS-IF97 coefficients for better accuracy
+    // Wagner-Pruss coefficients a1..a6.
     const A: [f64; 6] = [
         -7.85951783,
         1.84408259,

@@ -3601,8 +3601,8 @@ impl TrajectorySolver {
         // compose without double-counting. Magnus dynamic stability consumes the resulting local
         // density rather than freezing a launch-density correction.
         //
-        // air_at_with_gravity is the engine's ONE per-step air lookup; this is the reference
-        // composition the kernel families are moved onto.
+        // air_at_with_gravity is the engine's ONE per-step air lookup; every kernel family
+        // (compute_derivatives, fast_integrate, the lean Monte Carlo) calls it too.
         let local_alt = crate::atmosphere::shot_frame_altitude(
             self.atmosphere.altitude,
             position.x,
@@ -3618,9 +3618,10 @@ impl TrajectorySolver {
         );
         let (air_density, speed_of_sound) = (local_air.density_kg_m3, local_air.speed_of_sound_mps);
 
-        // Resolve the Cd and the retardation denominator through the shared resolver. MBA-1423
-        // reports a per-point Cd derived from these same two values, so the number a consumer
-        // charts cannot drift from the number actually flown here.
+        // Resolve the Cd and the retardation denominator through the shared resolver. MBA-1423's
+        // per-point Cd goes through this same resolver (annotate_drag_coefficients), so the two
+        // cannot drift apart; it is evaluated at the station speed of sound the result reports
+        // Mach against, not at this step's local sound speed.
         let (cd, retard_denom) = self.drag_terms(velocity_magnitude, speed_of_sound);
 
         // Convert velocity to fps (still used below outside the BC lookup).

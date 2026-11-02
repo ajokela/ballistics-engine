@@ -391,6 +391,75 @@ warning: station pressure 29.92 inHg is 1.202 times the ICAO standard pressure a
 - **`stability`** keeps its own rule: an omitted pressure there is the sea-level value itself,
   as before.
 
+#### Humidity: units, defaults and validation
+
+Every `--humidity` and `--zero-humidity` is a relative humidity in **percent**, 0 to 100. Leave
+it out and the run flies **50 %**, the same default on every command, in the browser terminal,
+over the bridge and through the C ABI (0.50.0 made this one rule everywhere).
+
+| Where | Field | Unit | Omitted |
+|---|---|---|---|
+| `trajectory`, `zero`, `come-ups`, `range-table`, `wind-card`, `compare`, `mpbr`, `lead`, `hold-corridor`, `mark-to-range`, `bdc-match`, `optimal-zero`, `adaptive-card`, `estimate-bc`, `true-velocity`, `true-wind`, `plan-truing`, `reticle hold`, `profile save`, and `monte-carlo` (since 0.50.0) | `--humidity` | percent | 50 |
+| `trajectory --auto-zero` | `--zero-humidity` | percent | the shot day's |
+| `--location` CSV | `HUMIDITY` column | percent | a saved profile's, then 50 (a typed `--humidity` beats the CSV) |
+| Saved profile (`--saved-profile`, `--profile`) | `humidity` | percent | 50 |
+| `.a7p` import | the file's air-humidity field | whole percent | 0 (the format cannot tell an absent field from 0) |
+| `solve-json`, the `explain` / `error-budget` / `tolerance` request files, the MCP `solve` tool | `atmosphere.relative_humidity` | **fraction**, 0 to 1 (0.5 = 50 %) | 0.5 |
+| Bridge commands | per command; see the table in `include/ballistics_bridge.h` | | |
+
+`stability` takes no humidity: its Miller factor is dry by design (see below).
+
+**One validation rule.** Every surface reads a humidity through the same check
+(`RelativeHumidity` in the library):
+
+- 0 to 100 % flies as given.
+- A reading up to 5 points outside the range (`HUMIDITY_SENSOR_TOLERANCE_PERCENT`), so -5 to
+  105 %, is the dry or saturated air it measures and flies exactly as 0 % or 100 %. Weather
+  meters and phone sensors are good to about ±2-3 % and read above 100 % in fog, where free air
+  is supersaturated by under 1 %. In a request file the band is -0.05 to 1.05.
+- Anything farther out, NaN or infinite, is refused with an error that names the flag or field.
+  It is never clamped:
+
+  ```
+  $ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 600 --auto-zero 100 --humidity 106
+  error: invalid value '106' for '--humidity <HUMIDITY>': relative humidity must be a percent from 0 to 100
+  ```
+- Air that cannot exist is refused as well: a humidity that needs more water-vapour pressure
+  than the air has in total, for example saturated air at 101 °C and 1013.25 hPa. This is the
+  same test the bridge's `atmosphere.density_altitude` makes:
+
+  ```
+  $ ballistics trajectory -u metric -v 823 -b 0.475 -m 10.9 -d 7.82 --max-range 300 --temperature 101 --humidity 100
+  Error: BallisticsError { message: "atmosphere.humidity = 100: no such air exists: at this temperature and pressure the humidity needs a water-vapour mole fraction of 1 or more (more vapour pressure than the air's total pressure), or the temperature is above water's critical point" }
+  ```
+
+Before 0.50.0 the commands disagreed. Most refused anything outside 0 to 100 at the flag, so a
+reading of 101.7 failed. `wind-card`, `compare` and a `--location` CSV flew any value clamped
+into 0 to 100, so 150 flew as 100. `monte-carlo` had no `--humidity` and always flew 50 %. A
+value from 0 to 100 flies exactly as it did in 0.49.0 on every command.
+
+**The humid-air model**, the same on every solver path:
+
+- **Density:** the CIPM-2007 moist-air density, with its virial compressibility and enhancement
+  factor. The saturation vapour pressure is the Wagner-Pruss equation over liquid water.
+- **Speed of sound:** an ideal-gas moist-air mixture, first order in the water-vapour mole
+  fraction `x_v`: `gamma = 1.4 (1 - 0.062 x_v)`, `R = 287.0531 (1 + 0.378 x_v)` J/(kg·K),
+  `c = sqrt(gamma R T)`. At 15 °C and 1013.25 hPa that is 340.294 m/s dry and 340.748 m/s at 50 %.
+- **Aloft:** temperature and pressure start from the station's own values and follow the ICAO
+  lapse rates (dry hydrostatics). The density keeps the station's vapour mole fraction, and the
+  sound speed keeps the station's relative humidity at the local temperature and pressure.
+
+Humid air is lighter than dry air, so it gives less drag. It also carries sound faster, which
+lowers the Mach number at a given speed and so moves the drag coefficient along the drag curve.
+
+**One deliberate exception: the Miller stability factor.** `stability`, the reported Sg, the Litz
+spin drift and the Litz aerodynamic jump all use Miller's published dry correction,
+(T / 288.15 K) · (1013.25 hPa / P), with no humidity term. That keeps them on the numbers Miller's
+rule, Litz's spin-drift fit and the published Miller calculators give. A humid correction would
+multiply Sg by 1.0032 at 15 °C / 50 %, 1.0080 at 30 °C / 50 % and 1.0192 at 35 °C / 90 %. For a
+.308 175 gr at 2600 fps (1:10 twist), spin drift at 1000 yd would move from 13.04 to 13.07 in at
+15 °C / 50 %, and from 12.83 to 13.00 in at 35 °C / 90 %.
+
 #### Pressure Reference: Absolute vs. QNH (`--pressure-type`)
 
 A barometric pressure reading can mean two different physical quantities, and mixing them up is a classic source of vertical error: **station pressure** (the actual air pressure at the shooter's altitude) versus **QNH** (a sea-level-corrected altimeter setting — the kind of "barometer" value read off a weather report or METAR, which has been artificially inflated to what the pressure WOULD be at sea level). Kestrel, AB Mobile, Shooter, JBM, and Hornady 4DOF all let the user declare which one they are entering; this engine's `--pressure` previously only supported station pressure, so a QNH value entered at a real altitude silently over-stated air density and under-stated drop.
@@ -4882,10 +4951,16 @@ back to another curve:
 ### Atmospheric Modeling
 - **Temperature Effects**: Affects air density and speed of sound
 - **Pressure Effects**: Direct impact on air density (drag)
-- **Humidity Effects**: 
-  - Humid air is less dense (reduces drag)
-  - Increases speed of sound slightly
-  - Uses Arden Buck equations for vapor pressure
+- **Humidity Effects** (one model on every solver path; see
+  [Humidity: units, defaults and validation](#humidity-units-defaults-and-validation)):
+  - Humid air is less dense (reduces drag): the CIPM-2007 moist-air density
+  - Increases speed of sound slightly: an ideal-gas moist mixture, first order in the vapour
+    mole fraction (coefficients 0.062 and 0.378), 340.294 m/s dry and 340.748 m/s at 50 % at
+    15 °C
+  - Saturation vapour pressure from the Wagner-Pruss equation over liquid water
+  - Percent 0-100 on every flag, default 50; a reading up to 5 points outside flies as 0 or
+    100, and anything farther out is refused
+  - The Miller stability factor stays dry by design
 - **Altitude Effects**: Automatic pressure/density reduction with elevation
 - **ICAO Standard Atmosphere**: Full implementation up to 84km
 - **CIPM Formula**: Precise air density calculations with humidity
