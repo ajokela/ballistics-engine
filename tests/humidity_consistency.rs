@@ -11,7 +11,10 @@
 //!   `R_F = endpoint_F(RH) - endpoint_F(0)` in height and in speed, must be at least half the
 //!   reference's (the sensitivity floor) and within 2 % of it (integrator truncation cancels in
 //!   the response). A companion shows the response is far above the families' integrator
-//!   differences, so neither check is vacuous.
+//!   differences, so neither check is vacuous. `TrajectorySolver` Monte Carlo, whose trial
+//!   outcome is a deviation from its baseline rather than a point at the target, is held to the
+//!   solver itself instead: a zero-spread trial is the solver's flight bit for bit, dry and
+//!   humid.
 //! - **Zones.** One zone equal to the station, and an empty zone set, are bitwise the station;
 //!   a humid zone over a dry station moves every zoned family as it moves the reference.
 
@@ -26,8 +29,9 @@ use ballistics_engine::trajectory_integration::{
 };
 use ballistics_engine::wind::WindSock;
 use ballistics_engine::{
-    AtmosphericConditions, BallisticInputs, DragModel, KernelAtmosphere, RelativeHumidity,
-    StationAir, StationAtmospherePresence, TrajectoryResult, TrajectorySolver, WindConditions,
+    run_monte_carlo_with_station_presence, AtmosphericConditions, BallisticInputs, DragModel,
+    KernelAtmosphere, MonteCarloParams, RelativeHumidity, StationAir, StationAtmospherePresence,
+    TrajectoryResult, TrajectorySolver, WindConditions,
 };
 use nalgebra::Vector3;
 
@@ -520,6 +524,83 @@ fn the_humidity_response_dwarfs_the_families_integrator_differences() {
                     );
                 }
             }
+        }
+    }
+}
+
+/// `TrajectorySolver` Monte Carlo flies each trial through `TrajectorySolver` in the station's
+/// air, humidity included. Its trial outcome is not a point at the target (that is a deviation
+/// from the baseline, 0 with every spread zero), so instead of the endpoint above it is held to
+/// the solver itself: one trial with every spread zero records exactly the range and impact
+/// speed `TrajectorySolver` gives the same inputs, bit for bit, at RH 0 and humid, so its RH
+/// response is the reference's. A Monte Carlo-only air (a per-batch cache, a trial built
+/// without the humidity) fails here.
+#[test]
+fn trajectory_solver_monte_carlo_responds_to_humidity_as_its_solver_does() {
+    for target_m in TARGETS_M {
+        for (station, humidity) in HUMID_CASES {
+            let mut responses = Vec::new();
+            for rh in [0.0, humidity] {
+                let inputs = BallisticInputs {
+                    use_rk4: true,
+                    ..load(station, FLAT_ANGLE_RAD, rh)
+                };
+                let params = MonteCarloParams {
+                    num_simulations: 1,
+                    velocity_std_dev: 0.0,
+                    angle_std_dev: 0.0,
+                    bc_std_dev: 0.0,
+                    wind_speed_std_dev: 0.0,
+                    target_distance: Some(target_m),
+                    base_wind_speed: 0.0,
+                    base_wind_direction: 0.0,
+                    azimuth_std_dev: 0.0,
+                };
+                let monte_carlo = run_monte_carlo_with_station_presence(
+                    inputs.clone(),
+                    WindConditions::default(),
+                    params,
+                    0.0,
+                    Some(0x5EED),
+                    StationAtmospherePresence::BOTH,
+                )
+                .expect("Monte Carlo");
+                // The sampler's own solve: the inputs' air, to twice the larger of the target
+                // and 1000 m.
+                let mut reference = TrajectorySolver::new_with_station_presence(
+                    inputs,
+                    WindConditions::default(),
+                    station.conditions(rh),
+                    StationAtmospherePresence::BOTH,
+                );
+                reference.set_max_range(target_m.max(1000.0) * 2.0);
+                let reference = reference.solve().expect("reference solve");
+                let what = format!("{target_m} m {station:?} RH {rh}");
+                assert_eq!(monte_carlo.ranges.len(), 1, "{what}: the one trial flew");
+                assert_eq!(
+                    [
+                        monte_carlo.ranges[0].to_bits(),
+                        monte_carlo.impact_velocities[0].to_bits()
+                    ],
+                    [
+                        reference.max_range.to_bits(),
+                        reference.impact_velocity.to_bits()
+                    ],
+                    "{what}: Monte Carlo trial (range {}, speed {}) vs TrajectorySolver (range \
+                     {}, speed {})",
+                    monte_carlo.ranges[0],
+                    monte_carlo.impact_velocities[0],
+                    reference.max_range,
+                    reference.impact_velocity
+                );
+                responses.push(monte_carlo.impact_velocities[0]);
+            }
+            assert!(
+                (responses[1] - responses[0]).abs() > 0.05,
+                "{target_m} m {station:?} RH {humidity}: the humidity moved the trial's impact \
+                 speed by only {:+.6} m/s",
+                responses[1] - responses[0]
+            );
         }
     }
 }

@@ -1,16 +1,17 @@
 #![no_main]
 use arbitrary::Unstructured;
-use ballistics_engine::{AtmosphericConditions, BallisticInputs, TrajectorySolver, WindConditions};
-use ballistics_engine_fuzz::domain::valid_inputs;
+use ballistics_engine::{BallisticInputs, TrajectorySolver, WindConditions};
+use ballistics_engine_fuzz::domain::{station_air, valid_inputs};
 use libfuzzer_sys::fuzz_target;
 
 /// Vertical position (y, McCoy: negative = drop) interpolated at downrange x=`range`.
 /// None if the trajectory never reaches `range` (short shot) or the solve errors.
 fn drop_at(inputs: &BallisticInputs, range: f64) -> Option<f64> {
+    // The drawn air, humidity included, not a default atmosphere that would discard it.
     let solver = TrajectorySolver::new(
         inputs.clone(),
         WindConditions::default(),
-        AtmosphericConditions::default(),
+        station_air(inputs),
     );
     let r = solver.solve().ok()?;
     let pts = &r.points;

@@ -1,12 +1,13 @@
 #![no_main]
 use arbitrary::Unstructured;
-use ballistics_engine::{AtmosphericConditions, BallisticInputs, TrajectorySolver, WindConditions};
-use ballistics_engine_fuzz::domain::{ranged, valid_inputs};
+use ballistics_engine::{BallisticInputs, TrajectorySolver, WindConditions};
+use ballistics_engine_fuzz::domain::{ranged, station_air, valid_inputs};
 use libfuzzer_sys::fuzz_target;
 
 /// Lateral (z) position of the last trajectory point, i.e. total windage at impact.
 fn lateral_at_impact(inputs: &BallisticInputs, wind: WindConditions) -> Option<f64> {
-    let solver = TrajectorySolver::new(inputs.clone(), wind, AtmosphericConditions::default());
+    // The drawn air, humidity included, not a default atmosphere that would discard it.
+    let solver = TrajectorySolver::new(inputs.clone(), wind, station_air(inputs));
     let r = solver.solve().ok()?;
     r.points.last().map(|p| p.position.z)
 }

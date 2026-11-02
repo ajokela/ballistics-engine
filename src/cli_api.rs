@@ -3766,6 +3766,14 @@ impl TrajectorySolver {
             self.gravity,
         );
         let (air_density, speed_of_sound) = (local_air.density_kg_m3, local_air.speed_of_sound_mps);
+        // The Mach `drag_terms` looks the Cd up at (`calculate_drag_coefficient`'s
+        // `velocity / speed_of_sound`), from the values passed to it below.
+        #[cfg(test)]
+        crate::atmosphere::air_trace::record_consumed(
+            air_density,
+            velocity_magnitude,
+            velocity_magnitude / speed_of_sound,
+        );
 
         // Resolve the Cd and the retardation denominator through the shared resolver. MBA-1423's
         // per-point Cd goes through this same resolver (annotate_drag_coefficients), so the two
@@ -10243,12 +10251,14 @@ mod coriolis_direction_tests {
             assert_eq!(
                 result.mach_1_2_distance_m,
                 Some(expected_1_2),
-                "{solver_name}: mach_1_2_distance_m must match the pinned pre-change flat-Vec value"
+                "{solver_name}: mach_1_2_distance_m must match its pin (the pre-change flat-Vec \
+                 capture, re-captured in 0.50.0's S8)"
             );
             assert_eq!(
                 result.mach_1_0_distance_m,
                 Some(expected_1_0),
-                "{solver_name}: mach_1_0_distance_m must match the pinned pre-change flat-Vec value"
+                "{solver_name}: mach_1_0_distance_m must match its pin (the pre-change flat-Vec \
+                 capture, re-captured in 0.50.0's S8)"
             );
 
             let mach_1_2 = result.mach_1_2_distance_m.expect("crosses 1.2");

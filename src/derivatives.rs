@@ -241,6 +241,8 @@ pub(crate) fn compute_derivatives_with_gravity(
         } else {
             0.0 // No meaningful Mach number at zero speed of sound
         };
+        #[cfg(test)]
+        crate::atmosphere::air_trace::record_consumed(air_density, speed_air, mach);
 
         // Get the base drag coefficient; optional corrections are applied or controlled below.
         let drag_factor = get_drag_coefficient_full(

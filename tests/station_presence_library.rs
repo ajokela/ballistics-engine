@@ -549,8 +549,9 @@ fn multi_observation_truing_twin() {
     // captured at ab4eb0c
     // re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
     // water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
-    // fitted MV 2707.275133552508 -> 2707.2750095544293 fps (-4.6e-8), RMS
-    // 0.00011234263666888538 -> 0.00011259351836390552 (a near-zero residual, +2.5e-7)
+    // fitted MV 2707.275133552508 -> 2707.2750095544293 fps (-4.6e-8 relative), RMS
+    // 0.00011234263666888538 -> 0.00011259351836390552 (+2.23e-3 relative: a near-zero
+    // residual, so +2.5e-7 absolute)
     assert_eq!(legacy.fitted_mv_fps.to_bits(), 0x40a5268cce0d64b9);
     assert_eq!(legacy.rms.to_bits(), 0x3f1d8405ea9d0127);
     assert_eq!(

@@ -10,8 +10,9 @@ use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
-    // Keep half the cases physically valid so hostile step-size values reliably reach the FFI
-    // preflight; use hostile physics in the other half to retain conversion/validation coverage.
+    // Keep half the cases physically valid (their air included) so hostile step-size values
+    // reliably reach the FFI preflight; use hostile physics and air in the other half to retain
+    // conversion/validation coverage.
     let Ok(use_valid_physics) = u.arbitrary::<bool>() else {
         return;
     };
@@ -104,11 +105,13 @@ fuzz_target!(|data: &[u8]| {
             direction: 0.0,
             vertical_speed: 0.0,
         };
+        // The drawn air: plausible (the sensor band included) in the valid half, wild in the
+        // hostile half, so the C ABI's humidity and station-air checks see what was fuzzed.
         let atmo = FFIAtmosphericConditions {
-            temperature: 15.0,
-            pressure: 1013.25,
-            humidity: 50.0,
-            altitude: 0.0,
+            temperature: vi.temperature,
+            pressure: vi.pressure,
+            humidity: vi.humidity_percent,
+            altitude: vi.altitude,
         };
         let res = ballistics_calculate_trajectory(&ffi_in, &wind, &atmo, max_range, step);
         let invalid_step = !step.is_finite() || step < MIN_FFI_STEP_SIZE_MS;

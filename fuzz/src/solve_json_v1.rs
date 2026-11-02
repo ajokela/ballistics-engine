@@ -291,6 +291,16 @@ fn maybe_ranged(u: &mut Unstructured<'_>, lo: f64, hi: f64) -> Result<Option<f64
     }
 }
 
+/// A relative humidity as the SI wire's fraction, or omitted: anywhere in the sensor band
+/// (-0.05..=1.05, read as 0 or 1 outside 0-1), with the band's edges, 0 and 1 drawn on purpose.
+/// Every value is one a solve accepts.
+fn maybe_band_fraction(u: &mut Unstructured<'_>) -> Result<Option<f64>> {
+    if !u.arbitrary()? {
+        return Ok(None);
+    }
+    Ok(Some(crate::domain::band_humidity_percent(u)? / 100.0))
+}
+
 fn maybe_wild(u: &mut Unstructured<'_>) -> Result<Option<f64>> {
     if u.arbitrary()? {
         Ok(Some(wild(u)?))
@@ -450,7 +460,7 @@ pub fn valid_request(u: &mut Unstructured<'_>) -> Result<SolveRequestV1> {
             altitude_m: maybe_ranged(u, -500.0, 5_000.0)?,
             temperature_k: maybe_ranged(u, 220.0, 330.0)?,
             pressure_pa: maybe_ranged(u, 50_000.0, 110_000.0)?,
-            relative_humidity: maybe_ranged(u, 0.0, 1.0)?,
+            relative_humidity: maybe_band_fraction(u)?,
             latitude_rad: if coriolis || u.arbitrary()? {
                 Some(ranged(
                     u,

@@ -25,20 +25,51 @@
 //!     (`ZERO_HUMID` did not: its trial heights kept their signs), and each re-pinned group
 //!     carries a note with its count of moved values and, for every moved case, its largest
 //!     shift, old -> new. No RH-0 value and no value at the station's own height moved, and
-//!     every `IMMUTABLE` group passed S8 unchanged. The re-pinned bits were captured on macOS
-//!     (aarch64) and then checked in Linux glibc containers on aarch64 and x86_64, where all but
-//!     seven matched; glibc's bits for those seven are recorded in `LIBM_ALTERNATES` and
-//!     accepted on glibc only.
+//!     every `IMMUTABLE` group passed S8 unchanged.
 //! - Kernel outputs at RH > 0 (`compute_derivatives`, `try_integrate_trajectory`,
 //!   `try_solve_trajectory_rust`, `fast_integrate*`, the lean Monte Carlo) are deliberately NOT
-//!   pinned: today they fly the dry speed of sound at any RH, and S3 fixes that.
-//! - Kernel STANDARD mode at RH 0 is pinned to a relative 1e-15, not bits: the plan allows
-//!   last-ulp movement there (fast_integrate loses a `ratio * 1.225 / 1.225` round trip). For
-//!   scale, a one-ulp change in the base density ratio was measured to move these kernels by
-//!   at most 5.4e-16 relative, so the tolerance absorbs about two such ulps and no more.
+//!   pinned: they flew the dry speed of sound at any RH until S3 fixed that.
+//! - Kernel STANDARD mode at RH 0 is pinned bit for bit like everything else. The plan allowed
+//!   it a relative 1e-15 (S3 moved the kernels onto `air_at`, and fast_integrate lost a
+//!   `ratio * 1.225 / 1.225` round trip), but the bits held through every step on every
+//!   platform measured, so the tolerance went in 0.50.0's R5.
 //!
 //! In-crate pins for the `pub(crate)` gravity-aware entry points live in
 //! `src/humidity_byte_identity_tests.rs` under the same rules.
+//!
+//! # How each group is checked, and on which platforms
+//!
+//! A libm may round a `pow`, `exp` or `log` a last bit apart from another, and one such bit can
+//! reach a pinned value. Bits captured on one machine are therefore not bits on every machine:
+//! the BSDs' libms moved some of these pins even where 0.50.0 computes exactly what 0.49.0 does
+//! (FreeBSD's even on the unchanged 0.49.0 code), and musl's moved two S8 groups. So each group
+//! is held in one of two ways (`Check`):
+//!
+//! - **`Check::Released049`: against the released 0.49.0, on every platform.** A group whose
+//!   promise is "0.50.0 equals 0.49.0", and whose computation 0.49.0 exposes publicly, runs
+//!   twice: on this crate, and on the released 0.49.0 crate from crates.io (the
+//!   `ballistics_engine_049` dev-dependency, `ffi` off so the two C ABIs cannot collide). Both
+//!   runs use the same probe source, `humidity_byte_identity/probes.rs`, `include!`d once per
+//!   engine. They must agree bit for bit in every value, digests included, on whatever platform
+//!   runs the test, so these groups need no table of libm alternates. On an exact-bit platform
+//!   (below) they must also match their literal pins bit for bit.
+//! - **`Check::Pinned`: against the literal pins only.** These are the groups S8 moved (no
+//!   engine computes their new values but this one), plus `ZERO_HUMID`, which S8 was allowed to
+//!   move, and the IMMUTABLE groups 0.49.0 has no public entry for: `FFI_TRAJECTORY_DRY` (0.49.0's
+//!   C ABI cannot be linked beside this crate's). On an exact-bit platform every value must
+//!   match its pin bit for bit, or, on glibc, the glibc bits recorded in `LIBM_ALTERNATES`. On
+//!   any other platform each float must lie within `UNVERIFIED_LIBM_ULPS` of its pin, every
+//!   count, flag and text hash must match exactly, and digests are not compared (a digest
+//!   cannot be compared within a tolerance; its trajectory's explicit indices still are).
+//!
+//! The exact-bit platforms are the ones the literal pins were captured or checked on (`Libm`):
+//! macOS aarch64 (Apple's libm, where they were captured) and Linux glibc on aarch64 and x86_64
+//! (the CI platform). Every other platform is unverified, macOS x86_64 included: Apple's x86_64
+//! libm rounds some values apart from its aarch64 one. The bound there, `UNVERIFIED_LIBM_ULPS`,
+//! is 2 ulps: the largest distance any `Check::Pinned` float showed when 0.50.0's R5 ran these
+//! pins on FreeBSD 14.3, NetBSD 10.1 and OpenBSD 7.8 (amd64), Alpine Linux musl (aarch64 and
+//! x86_64), macOS x86_64 (Rosetta 2) and Windows 11 (x86_64 MSVC, the UCRT's own x64 code). No
+//! count, flag or text hash moved on any of them. Its doc has the details.
 //!
 //! # How the pinned values were generated
 //!
@@ -50,7 +81,8 @@
 //! ```
 //!
 //! They were captured on macOS (aarch64), and the identical file then passed in Linux glibc
-//! containers on aarch64 and x86_64 (the CI platform).
+//! containers on aarch64 and x86_64 (the CI platform). S8 re-pinned its groups the same way, and
+//! glibc's bits for the seven values where it differed are in `LIBM_ALTERNATES`.
 //!
 //! Each value is the IEEE-754 bit pattern of an `f64` (`f64::to_bits`), or an exact count.
 //! A `*.is_some` entry is 1 or 0. A `text` entry is the FNV-1a hash of a string such as a
@@ -69,50 +101,26 @@
 //! all three platforms, and the FFI case leaves Litz drift off (a per-point `powf` added to
 //! the lateral position); `TS_EFFECTS_*` and `STABILITY_SPIN_JUMP` pin the drift instead.
 
-use ballistics_engine::atmosphere::{
-    calculate_air_density_cimp, calculate_atmosphere, density_matched_altitude_m,
-    faa_rule_density_altitude_ft, get_local_atmosphere_humid, moist_speed_of_sound,
-    nws_pressure_altitude_ft, resolve_atmosphere_for_density_altitude, AtmoSock,
-    StationAtmospherePresence,
-};
-use ballistics_engine::derivatives::compute_derivatives;
-use ballistics_engine::fast_trajectory::{
-    aerodynamic_jump_launch_offset_rad, fast_integrate, fast_integrate_with_segments,
-    FastIntegrationParams, FastSolution,
-};
-use ballistics_engine::monte_carlo::solve_trajectory_for_monte_carlo_with_station_presence;
-use ballistics_engine::spin_drift::{effective_sg_from_inputs, litz_drift_meters};
-use ballistics_engine::stability::compute_stability_coefficient;
-use ballistics_engine::trajectory_integration::{
-    try_integrate_trajectory, try_solve_trajectory_rust, TrajectoryParams,
-};
-use ballistics_engine::wind::{WindSegment, WindSock};
-use ballistics_engine::{
-    calculate_zero_angle_with_station_presence, run_monte_carlo_with_station_presence,
-    run_monte_carlo_with_wind_and_direction_std_dev_seeded, AtmosphericConditions, BallisticInputs,
-    DragModel, MonteCarloParams, MonteCarloResults, TrajectoryResult, TrajectorySolver,
-    WindConditions, DEFAULT_HIT_RADIUS_M,
-};
-use ballistics_engine::{KernelAtmosphere, RelativeHumidity};
-use nalgebra::Vector3;
-use serde_json::{json, Value};
-
 // =================================================================================================
 // Pin machinery
 // =================================================================================================
 
-/// One pinned quantity: the bits of an `f64`, or an exact integer (a count, a flag, a digest).
+/// One pinned quantity: the bits of an `f64`, an exact integer (a count, a flag, a text hash), or
+/// a digest over a whole trajectory.
 #[derive(Clone, Copy)]
 enum Pin {
     F(f64),
     N(u64),
+    /// A digest: compared bit for bit wherever bits are compared, and not at all where floats
+    /// are compared within ulps (one ulp anywhere changes every bit of it).
+    D(u64),
 }
 
 impl Pin {
     fn bits(self) -> u64 {
         match self {
             Pin::F(value) => value.to_bits(),
-            Pin::N(value) => value,
+            Pin::N(value) | Pin::D(value) => value,
         }
     }
 }
@@ -162,7 +170,8 @@ impl Pins {
     }
 
     fn digest(&mut self, label: &str, values: impl IntoIterator<Item = f64>) {
-        self.n(format!("{label} digest"), digest_f64s(values));
+        self.entries
+            .push((format!("{label} digest"), Pin::D(digest_f64s(values))));
     }
 
     fn bits(&self) -> Vec<u64> {
@@ -178,7 +187,7 @@ type Pinned = &'static [(&'static str, &'static [u64])];
 fn describe(pin: Pin) -> String {
     match pin {
         Pin::F(value) => format!("{value:?}"),
-        Pin::N(value) => format!("{value}"),
+        Pin::N(value) | Pin::D(value) => format!("{value}"),
     }
 }
 
@@ -200,24 +209,58 @@ fn case_shape_or_panic(group: &str, actual: &Probe, expected: Pinned) {
     }
 }
 
-/// A libm that rounds some pinned value's last bit differently from the macOS libm the pins
-/// were captured with.
+/// A libm the literal pins are enforced against bit for bit: one they were captured or checked
+/// on, on the architectures they were checked on. Each is named by the platform measured, not by
+/// a `target_env` alone: a glibc on another architecture, or a `target_env = "gnu"` that is not
+/// Linux (MinGW), is unverified and falls under [`UNVERIFIED_LIBM_ULPS`].
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Libm {
-    /// glibc (Linux, `target_env = "gnu"`), on aarch64 and x86_64 alike: the CI platform.
+    /// Apple's libm on macOS aarch64, where the pins were captured. Not macOS x86_64: Apple's
+    /// x86_64 libm (measured under Rosetta 2) rounds some values apart from its aarch64 one,
+    /// up to 1137 ulps through `density_matched_altitude_m`'s bisection, so it is unverified.
+    Apple,
+    /// glibc, Linux aarch64 and x86_64 (the CI platform): every value matched except the seven
+    /// in [`LIBM_ALTERNATES`].
     Glibc,
 }
 
 impl Libm {
-    /// The libm this build links, when it is one with alternates.
+    /// The exact-bit libm this build links, if it is one.
     fn of_this_build() -> Option<Libm> {
-        if cfg!(all(target_os = "linux", target_env = "gnu")) {
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            Some(Libm::Apple)
+        } else if cfg!(all(
+            target_os = "linux",
+            target_env = "gnu",
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        )) {
             Some(Libm::Glibc)
         } else {
             None
         }
     }
 }
+
+/// The widest distance, in units in the last place, a float of a `Check::Pinned` group may lie
+/// from its pin on a platform that is not an exact-bit one ([`Libm`]).
+///
+/// Measured, not chosen. In 0.50.0's R5 this file's pins (then all compared bit for bit) were run
+/// with the 0.50.0 engine on FreeBSD 14.3, NetBSD 10.1 and OpenBSD 7.8 (amd64, rustc 1.93 and
+/// 1.90), Alpine Linux musl on aarch64 and x86_64, macOS x86_64 (under Rosetta 2) and Windows 11
+/// (x86_64 MSVC with the UCRT linked statically, so its own x64 math code ran, under x86_64
+/// emulation on an ARM64 machine). On every one of them the farthest any float of a
+/// `Check::Pinned` group landed from its pin was 2 ulps: a Litz spin drift
+/// (`summary.spin_drift_m`, a `powf`), lateral and vertical positions late in the RK4 and RK45
+/// lob, an impact energy, and densities at +12 km and +25 km. Every count, flag and text hash
+/// matched; the other differences were digests. The rewritten file then passed on all of them,
+/// and on Windows with the UCRT linked dynamically too. The `Check::Released049` groups' literal
+/// pins moved farther on some (11 ulps on the BSDs and 1137 ulps on macOS x86_64, both through
+/// `density_matched_altitude_m`'s bisection, which amplifies a last-bit difference), which is
+/// why those groups are compared to 0.49.0 there instead; 0.49.0 matched this engine bit for bit
+/// on every platform. Following be60e2b, the bound sits far below a physics change: every float
+/// S8 re-pinned moved by 327 ulps or more, and its only smaller changes were
+/// two trajectory point counts, which every platform compares exactly.
+const UNVERIFIED_LIBM_ULPS: u64 = 2;
 
 /// The bit patterns another libm gives a few pinned values: `(group, case, label, libm, bits)`.
 ///
@@ -226,10 +269,11 @@ impl Libm {
 /// seven: glibc's `pow` rounds the virtual-temperature lapse a last bit apart from Apple's at some
 /// state of the RK4 30-degree lob at 50 %, and that ulp reaches the lob's final point (its speed,
 /// energy, Cd and height, one ulp each, and so the position digest) and one Monte Carlo trial's
-/// range (the ranges digest). Each value stays pinned bit for bit on every platform: an alternate
-/// is accepted only on the libm that produced it, and every other platform must match the
-/// primary pin. [`every_libm_alternate_names_a_pinned_value_it_differs_from`] keeps the table
-/// honest.
+/// range (the ranges digest). Each value stays pinned bit for bit on every exact-bit platform: an
+/// alternate is accepted only on the libm it was measured on, and every other exact-bit platform
+/// must match the primary pin. (musl happens to give these seven bits too, among others; it is
+/// not an exact-bit platform, so it is held to [`UNVERIFIED_LIBM_ULPS`] instead.)
+/// [`every_libm_alternate_names_a_pinned_value_it_differs_from`] keeps the table honest.
 const LIBM_ALTERNATES: &[(&str, &str, &str, Libm, u64)] = &[
     (
         "MONTE_CARLO_DEFAULT_HUMIDITY",
@@ -305,7 +349,7 @@ fn assert_bits(group: &str, actual: &Probe, expected: Pinned) {
             if pin.bits() != want && libm_alternate(group, name, label) != Some(pin.bits()) {
                 let pinned = match pin {
                     Pin::F(_) => format!("{:?}", f64::from_bits(want)),
-                    Pin::N(_) => format!("{want}"),
+                    Pin::N(_) | Pin::D(_) => format!("{want}"),
                 };
                 moved.push(format!(
                     "  {name} :: {label}: pinned {want:#018x} ({pinned}), now {:#018x} ({})",
@@ -323,39 +367,104 @@ fn assert_bits(group: &str, actual: &Probe, expected: Pinned) {
     );
 }
 
-/// Counts must match exactly; each float must match within `rel_tol` of its pin's magnitude
-/// (a pinned 0.0 must stay exactly 0.0).
-fn assert_relative(group: &str, actual: &Probe, expected: Pinned, rel_tol: f64) {
+/// The distance between two finite `f64`s in units in the last place: how many representable
+/// values lie between them (0 for equal values, 0.0 and -0.0 included).
+fn ulps_apart(a: f64, b: f64) -> u64 {
+    // Map each bit pattern onto a line where adjacent floats are adjacent integers.
+    let line = |x: f64| -> i128 {
+        let bits = x.to_bits() as i64;
+        i128::from(if bits < 0 { i64::MIN - bits } else { bits })
+    };
+    (line(a) - line(b)).unsigned_abs() as u64
+}
+
+/// On a platform whose libm the pins were not captured or checked on: each float within `ulps`
+/// of its pin (a NaN pin must stay that NaN), each count, flag and text hash exactly. Digests are
+/// skipped: one ulp anywhere in a trajectory changes every bit of its digest, so a digest can
+/// only be compared bit for bit.
+fn assert_within_ulps(group: &str, actual: &Probe, expected: Pinned, ulps: u64) {
     case_shape_or_panic(group, actual, expected);
     let mut moved = Vec::new();
     let mut total = 0;
     for ((name, pins), (_, bits)) in actual.iter().zip(expected) {
         for ((label, pin), &want) in pins.entries.iter().zip(bits.iter()) {
             total += 1;
-            match *pin {
-                Pin::N(value) => {
-                    if value != want {
-                        moved.push(format!("  {name} :: {label}: pinned {want}, now {value}"));
-                    }
-                }
+            let ok = match *pin {
+                Pin::D(_) => true,
+                Pin::N(value) => value == want,
                 Pin::F(value) => {
                     let pinned = f64::from_bits(want);
-                    let ok =
-                        value.to_bits() == want || (value - pinned).abs() <= rel_tol * pinned.abs();
-                    if !ok {
-                        moved.push(format!(
-                            "  {name} :: {label}: pinned {pinned:?}, now {value:?} \
-                             (relative {:e}, allowed {rel_tol:e})",
-                            ((value - pinned) / pinned).abs()
-                        ));
+                    if pinned.is_nan() || value.is_nan() {
+                        value.to_bits() == want
+                    } else {
+                        ulps_apart(value, pinned) <= ulps
                     }
                 }
+            };
+            if !ok {
+                let detail = match *pin {
+                    Pin::F(value) => format!(
+                        "pinned {:?}, now {value:?} ({} ulps apart, allowed {ulps})",
+                        f64::from_bits(want),
+                        ulps_apart(value, f64::from_bits(want))
+                    ),
+                    _ => format!("pinned {want}, now {}", describe(*pin)),
+                };
+                moved.push(format!("  {name} :: {label}: {detail}"));
             }
         }
     }
     assert!(
         moved.is_empty(),
-        "{group}: {} of {total} pins moved beyond {rel_tol:e} relative:\n{}",
+        "{group}: {} of {total} pins moved beyond {ulps} ulps (counts exactly) on a libm the \
+         pins were not captured on:\n{}",
+        moved.len(),
+        moved.join("\n")
+    );
+}
+
+/// This crate and the released 0.49.0 crate, asked the same questions on this platform, must
+/// give the same answers bit for bit: every case, every label, every value, digests included.
+#[cfg(not(target_arch = "wasm32"))]
+fn assert_same_as_released(group: &str, current: &Probe, released: &Probe) {
+    let names =
+        |probe: &Probe| -> Vec<String> { probe.iter().map(|(name, _)| name.clone()).collect() };
+    assert_eq!(
+        names(current),
+        names(released),
+        "{group}: this engine's and 0.49.0's probes name different cases"
+    );
+    let mut moved = Vec::new();
+    let mut total = 0;
+    for ((name, now), (_, then)) in current.iter().zip(released) {
+        let labels = |pins: &Pins| -> Vec<String> {
+            pins.entries
+                .iter()
+                .map(|(label, _)| label.clone())
+                .collect()
+        };
+        assert_eq!(
+            labels(now),
+            labels(then),
+            "{group}/{name}: this engine's and 0.49.0's probes record different quantities"
+        );
+        for ((label, pin), (_, was)) in now.entries.iter().zip(&then.entries) {
+            total += 1;
+            if pin.bits() != was.bits() {
+                moved.push(format!(
+                    "  {name} :: {label}: 0.49.0 {:#018x} ({}), this engine {:#018x} ({})",
+                    was.bits(),
+                    describe(*was),
+                    pin.bits(),
+                    describe(*pin)
+                ));
+            }
+        }
+    }
+    assert!(
+        moved.is_empty(),
+        "{group}: {} of {total} values differ from the released 0.49.0 engine run beside this \
+         one on this platform:\n{}",
         moved.len(),
         moved.join("\n")
     );
@@ -379,15 +488,17 @@ fn print_probe(const_name: &str, probe: &Probe) {
     println!();
 }
 
-/// How a group's floats are compared to their pins.
+/// How a group is held to its pins (see the module docs).
 #[derive(Clone, Copy)]
-enum Compare {
-    Bits,
-    /// Relative tolerance for kernel standard mode at RH 0.
-    Relative,
+enum Check {
+    /// To the released 0.49.0 crate run beside this one, bit for bit on every platform (`None`
+    /// on wasm32, where the old crate is not built and these tests do not run), and to the
+    /// literal pins bit for bit on an exact-bit platform.
+    Released049(Option<fn() -> Probe>),
+    /// To the literal pins: bit for bit on an exact-bit platform, within
+    /// [`UNVERIFIED_LIBM_ULPS`] (digests skipped) on any other.
+    Pinned,
 }
-
-const KERNEL_STANDARD_RH0_REL_TOL: f64 = 1e-15;
 
 // =================================================================================================
 // Shared fixture: a .308 175 gr-class load (G7 0.243, 823 m/s, 1:10")
@@ -445,16 +556,6 @@ struct Station {
     /// constructor; `false`: the same with `NEITHER`, which is exactly what the presence-blind
     /// `TrajectorySolver::new` calls.
     presence_aware: bool,
-}
-
-impl Station {
-    fn presence(self) -> StationAtmospherePresence {
-        if self.presence_aware {
-            StationAtmospherePresence::BOTH
-        } else {
-            StationAtmospherePresence::NEITHER
-        }
-    }
 }
 
 /// ICAO standard sea level through the presence-blind constructor.
@@ -537,1300 +638,426 @@ impl Shot {
     }
 }
 
-fn load(method: Method, station: Station, shot: Shot) -> BallisticInputs {
-    let (use_rk4, use_adaptive_rk45) = method.flags();
-    BallisticInputs {
-        bc_value: BC_G7,
-        bc_type: DragModel::G7,
-        bullet_mass: MASS_KG,
-        muzzle_velocity: MUZZLE_VELOCITY_MPS,
-        bullet_diameter: DIAMETER_M,
-        bullet_length: LENGTH_M,
-        twist_rate: TWIST_IN,
-        muzzle_angle: match shot {
-            Shot::Flat => FLAT_MUZZLE_ANGLE_RAD,
-            Shot::Lob => LOB_MUZZLE_ANGLE_RAD,
-        },
-        sight_height: 0.05,
-        altitude: station.altitude_m,
-        temperature: station.temperature_c,
-        pressure: station.pressure_hpa,
-        use_rk4,
-        use_adaptive_rk45,
-        enable_trajectory_sampling: shot == Shot::Flat,
-        sample_interval: 50.0,
-        ..BallisticInputs::default()
-    }
-}
+// =================================================================================================
+// The two engines: this crate, and the released 0.49.0 beside it
+// =================================================================================================
 
-fn crosswind() -> WindConditions {
-    WindConditions {
-        speed: CROSSWIND_MPS,
-        direction: CROSSWIND_FROM_RAD,
-        vertical_speed: 0.0,
-    }
-}
+/// The probes on this crate, plus the FFI probe, which only this crate can link.
+mod current {
+    #![allow(dead_code)]
+    use super::*;
+    use ballistics_engine as engine;
 
-fn atmosphere(station: Station, humidity_percent: f64) -> AtmosphericConditions {
-    AtmosphericConditions {
-        temperature: station.temperature_c,
-        pressure: station.pressure_hpa,
-        humidity: humidity_percent,
-        altitude: station.altitude_m,
-    }
-}
+    /// The calls whose signatures 0.50.0 changed, in 0.50.0's form.
+    mod shim {
+        use super::*;
+        use engine::fast_trajectory::FastIntegrationParams;
+        use engine::trajectory_integration::TrajectoryParams;
+        use engine::{KernelAtmosphere, RelativeHumidity};
+        use std::collections::HashMap;
 
-fn solver(
-    inputs: BallisticInputs,
-    station: Station,
-    humidity_percent: f64,
-    zones: Zones,
-    shot: Shot,
-) -> TrajectorySolver {
-    let mut solver = TrajectorySolver::new_with_station_presence(
-        inputs,
-        crosswind(),
-        atmosphere(station, humidity_percent),
-        station.presence(),
-    );
-    solver.set_max_range(match shot {
-        Shot::Flat => 1000.0,
-        Shot::Lob => 30_000.0,
-    });
-    if let Some(segments) = zones.segments(station) {
-        solver.set_atmo_segments(segments);
-    }
-    solver
-}
-
-/// Record a `TrajectoryResult`: summary fields, five point indices, and digests over every
-/// point's time and position and every sample's distance, drop, drift and time.
-fn record_result(pins: &mut Pins, result: &TrajectoryResult) {
-    pins.f("max_range", result.max_range);
-    pins.f("max_height", result.max_height);
-    pins.f("time_of_flight", result.time_of_flight);
-    pins.f("impact_velocity", result.impact_velocity);
-    pins.f("impact_energy", result.impact_energy);
-    pins.f(
-        "station_speed_of_sound_mps",
-        result.station_speed_of_sound_mps,
-    );
-    pins.opt("mach_1_2_distance_m", result.mach_1_2_distance_m);
-    pins.opt("mach_1_0_distance_m", result.mach_1_0_distance_m);
-    pins.opt("mach_0_9_distance_m", result.mach_0_9_distance_m);
-    pins.opt("transonic_mach", result.transonic_mach);
-    pins.text("termination", &format!("{:?}", result.termination));
-
-    let n = result.points.len();
-    pins.n("points.len", n as u64);
-    for index in [1, n / 4, n / 2, (3 * n) / 4, n - 1] {
-        let point = &result.points[index];
-        pins.f(format!("points[{index}].time"), point.time);
-        pins.f(format!("points[{index}].x"), point.position.x);
-        pins.f(format!("points[{index}].y"), point.position.y);
-        pins.f(format!("points[{index}].z"), point.position.z);
-        pins.f(format!("points[{index}].speed"), point.velocity_magnitude);
-        pins.opt(
-            &format!("points[{index}].drag_coefficient"),
-            point.drag_coefficient,
-        );
-    }
-    // The digest covers time and position only; see the module docs on libm.
-    pins.digest(
-        "points (time, x, y, z)",
-        result.points.iter().flat_map(|point| {
-            [
-                point.time,
-                point.position.x,
-                point.position.y,
-                point.position.z,
-            ]
-        }),
-    );
-    match &result.sampled_points {
-        Some(samples) => {
-            pins.n("sampled_points.len", samples.len() as u64);
-            pins.digest(
-                "sampled_points (distance, drop, drift, time, flag count)",
-                samples.iter().flat_map(|sample| {
-                    [
-                        sample.distance_m,
-                        sample.drop_m,
-                        sample.wind_drift_m,
-                        sample.time_s,
-                        sample.flags.len() as f64,
-                    ]
-                }),
-            );
+        /// The pinned kernel atmospheres were written as legacy tuples; S3 moved the kernels
+        /// onto `KernelAtmosphere`, and `from_legacy_params` at 0 % RH is the one-line migration
+        /// (a dry station keeps its tuple's ratio verbatim; the direct sentinel becomes uniform
+        /// air).
+        fn kernel_atmosphere(atmos_params: (f64, f64, f64, f64)) -> KernelAtmosphere {
+            KernelAtmosphere::from_legacy_params(atmos_params, RelativeHumidity::DRY)
+                .expect("pinned atmospheres are valid")
         }
-        None => pins.n("sampled_points.len (none)", u64::MAX),
-    }
-}
 
-fn ts_case(method: Method, station: Station, rh: f64, zones: Zones, shot: Shot) -> (String, Pins) {
-    let name = format!(
-        "{}/{}/{}/rh{rh}/{}",
-        shot.name(),
-        method.name(),
-        station.name,
-        zones.name()
-    );
-    let result = solver(load(method, station, shot), station, rh, zones, shot)
-        .solve()
-        .unwrap_or_else(|error| panic!("{name}: solve failed: {error}"));
-    let mut pins = Pins::default();
-    record_result(&mut pins, &result);
-    (name, pins)
-}
+        pub(super) fn trajectory_params(
+            atmos_params: (f64, f64, f64, f64),
+            atmo_sock: Option<AtmoSock>,
+        ) -> TrajectoryParams {
+            TrajectoryParams {
+                mass_kg: MASS_KG,
+                bc: BC_G7,
+                drag_model: DragModel::G7,
+                wind_segments: crosswind_segments(),
+                atmosphere: kernel_atmosphere(atmos_params),
+                omega_vector: None,
+                enable_spin_drift: false,
+                enable_magnus: false,
+                enable_coriolis: false,
+                target_distance_m: 800.0,
+                enable_wind_shear: false,
+                wind_shear_model: "none".to_string(),
+                shooter_altitude_m: 0.0,
+                is_twist_right: true,
+                shooting_angle: 0.0,
+                bullet_diameter: DIAMETER_M,
+                bullet_length: LENGTH_M,
+                twist_rate: TWIST_IN,
+                custom_drag_table: None,
+                cd_scale: 1.0,
+                custom_drag_reference: false,
+                bc_segments: None,
+                use_bc_segments: false,
+                bc_segments_data: None,
+                ground_threshold: -1000.0,
+                atmo_sock,
+            }
+        }
 
-/// The `TrajectorySolver::solve` grid for one shot, split by whether any RH involved is above
-/// zero.
-fn ts_grid(shot: Shot, humid: bool) -> Probe {
-    let mut cases = Vec::new();
-    for method in Method::ALL {
-        for station in STATIONS {
-            let combos: &[(f64, Zones)] = match (shot, humid) {
-                (Shot::Flat, false) => &[(0.0, Zones::None), (0.0, Zones::Dry)],
-                (Shot::Flat, true) => &[
-                    (0.0, Zones::Humid),
-                    (50.0, Zones::None),
-                    (50.0, Zones::Humid),
-                    (100.0, Zones::None),
-                    (100.0, Zones::Humid),
-                ],
-                (Shot::Lob, false) => &[(0.0, Zones::None)],
-                (Shot::Lob, true) => &[
-                    (50.0, Zones::None),
-                    (100.0, Zones::None),
-                    (50.0, Zones::Humid),
-                ],
-            };
-            for &(rh, zones) in combos {
-                cases.push(ts_case(method, station, rh, zones, shot));
+        pub(super) fn fast_params(
+            atmos_params: (f64, f64, f64, f64),
+            atmo_sock: Option<AtmoSock>,
+        ) -> FastIntegrationParams {
+            FastIntegrationParams {
+                horiz: 800.0,
+                vert: 0.0,
+                initial_state: launch_state(),
+                t_span: (0.0, 30.0),
+                atmosphere: kernel_atmosphere(atmos_params),
+                atmo_sock,
+            }
+        }
+
+        pub(super) fn compute_derivatives(
+            position: Vector3<f64>,
+            velocity: Vector3<f64>,
+            inputs: &BallisticInputs,
+            wind: Vector3<f64>,
+            atmos_params: (f64, f64, f64, f64),
+            bc: f64,
+            atmo_sock: Option<&AtmoSock>,
+        ) -> [f64; 6] {
+            engine::derivatives::compute_derivatives(
+                position,
+                velocity,
+                inputs,
+                wind,
+                &kernel_atmosphere(atmos_params),
+                bc,
+                None,
+                0.0,
+                atmo_sock,
+            )
+        }
+
+        /// The legacy binding entry, RK45 to 3 s (it takes no zones).
+        pub(super) fn try_solve_trajectory_rust(
+            initial_state: [f64; 6],
+            wind_segments: Vec<WindSegment>,
+            atmos_params: (f64, f64, f64, f64),
+        ) -> Result<Vec<HashMap<String, f64>>, engine::wind::WindSegmentError> {
+            engine::trajectory_integration::try_solve_trajectory_rust(
+                initial_state,
+                (0.0, 3.0),
+                MASS_KG,
+                BC_G7,
+                DragModel::G7,
+                wind_segments,
+                kernel_atmosphere(atmos_params),
+                None,
+                false,
+                false,
+                false,
+                "RK45".to_string(),
+                1e-6,
+                0.01,
+                800.0,
+            )
+        }
+
+        pub(super) fn aerodynamic_jump_launch_offset_rad(
+            inputs: &BallisticInputs,
+            atmos_params: (f64, f64, f64, f64),
+        ) -> f64 {
+            engine::fast_trajectory::aerodynamic_jump_launch_offset_rad(
+                inputs,
+                &kernel_atmosphere(atmos_params),
+            )
+        }
+
+        /// The inputs at 0 % humidity (0.50.0's field is a percent).
+        pub(super) fn dry(inputs: BallisticInputs) -> BallisticInputs {
+            BallisticInputs {
+                humidity_percent: 0.0,
+                ..inputs
             }
         }
     }
-    cases
-}
 
-fn probe_ts_flat_dry() -> Probe {
-    ts_grid(Shot::Flat, false)
-}
+    include!("humidity_byte_identity/probes.rs");
 
-fn probe_ts_flat_humid() -> Probe {
-    ts_grid(Shot::Flat, true)
-}
+    #[cfg(feature = "ffi")]
+    fn front_end_ffi(humid: bool) -> Probe {
+        use engine::ffi::{
+            ballistics_calculate_trajectory, ballistics_free_trajectory_result,
+            FFIAtmosphericConditions, FFIBallisticInputs, FFIWindConditions,
+        };
 
-fn probe_ts_lob_dry() -> Probe {
-    ts_grid(Shot::Lob, false)
-}
-
-fn probe_ts_lob_humid() -> Probe {
-    ts_grid(Shot::Lob, true)
-}
-
-/// Spin drift, aerodynamic jump and Magnus through `TrajectorySolver` (RK4).
-fn ts_effects(humid: bool) -> Probe {
-    let mut cases = Vec::new();
-    let rhs: &[f64] = if humid { &[50.0, 100.0] } else { &[0.0] };
-    for station in STATIONS {
-        for &rh in rhs {
-            for (effect, configure) in [
-                (
-                    "spin-drift+aerodynamic-jump",
-                    (|inputs: &mut BallisticInputs| {
-                        inputs.use_enhanced_spin_drift = true;
-                        inputs.enable_aerodynamic_jump = true;
-                    }) as fn(&mut BallisticInputs),
-                ),
-                ("magnus", |inputs: &mut BallisticInputs| {
-                    inputs.enable_magnus = true;
-                }),
-            ] {
-                let mut inputs = load(Method::Rk4, station, Shot::Flat);
-                configure(&mut inputs);
-                let name = format!("{effect}/rk4/{}/rh{rh}", station.name);
-                let result = solver(inputs, station, rh, Zones::None, Shot::Flat)
-                    .solve()
-                    .unwrap_or_else(|error| panic!("{name}: solve failed: {error}"));
-                let mut pins = Pins::default();
-                record_result(&mut pins, &result);
-                cases.push((name, pins));
-            }
-        }
-    }
-    cases
-}
-
-fn probe_ts_effects_dry() -> Probe {
-    ts_effects(false)
-}
-
-fn probe_ts_effects_humid() -> Probe {
-    ts_effects(true)
-}
-
-/// Zero solves: every zero trial flies `calculate_acceleration`.
-fn zero_grid(humid: bool) -> Probe {
-    let mut cases = Vec::new();
-    let rhs: &[f64] = if humid { &[50.0, 100.0] } else { &[0.0] };
-    for method in Method::ALL {
+        let mut cases = Vec::new();
+        let rhs: &[f64] = if humid { &[50.0, 100.0] } else { &[0.0] };
         for station in STATIONS {
             for &rh in rhs {
-                let name = format!("zero-300m/{}/{}/rh{rh}", method.name(), station.name);
-                let angle = calculate_zero_angle_with_station_presence(
-                    load(method, station, Shot::Flat),
-                    300.0,
-                    0.05,
-                    crosswind(),
-                    atmosphere(station, rh),
-                    station.presence(),
-                )
-                .unwrap_or_else(|error| panic!("{name}: zero failed: {error}"));
+                let inputs = FFIBallisticInputs {
+                    muzzle_velocity: MUZZLE_VELOCITY_MPS,
+                    muzzle_angle: FLAT_MUZZLE_ANGLE_RAD,
+                    bc_value: BC_G7,
+                    bullet_mass: MASS_KG,
+                    bullet_diameter: DIAMETER_M,
+                    bc_type: 1, // G7
+                    sight_height: 0.05,
+                    target_distance: 600.0,
+                    temperature: station.temperature_c,
+                    twist_rate: TWIST_IN,
+                    is_twist_right: 1,
+                    shooting_angle: 0.0,
+                    altitude: station.altitude_m,
+                    latitude: f64::NAN,
+                    azimuth_angle: 0.0,
+                    use_rk4: 1,
+                    use_adaptive_rk45: 0,
+                    enable_wind_shear: 0,
+                    enable_trajectory_sampling: 1,
+                    sample_interval: 50.0,
+                    enable_pitch_damping: 0,
+                    enable_precession_nutation: 0,
+                    // Off: Litz drift is a per-point powf, whose last bit differs between libms
+                    // (see the module docs). TS_EFFECTS_* and STABILITY_SPIN_JUMP pin it.
+                    enable_spin_drift: 0,
+                    enable_magnus: 0,
+                    enable_coriolis: 0,
+                    shot_azimuth: 0.0,
+                    cant_angle: 0.0,
+                    zero_poi_vertical: 0.0,
+                    zero_poi_horizontal: 0.0,
+                    sight_offset_lateral: 0.0,
+                };
+                let wind = FFIWindConditions {
+                    speed: CROSSWIND_MPS,
+                    direction: CROSSWIND_FROM_RAD,
+                    vertical_speed: 0.0,
+                };
+                let atmosphere = FFIAtmosphericConditions {
+                    temperature: station.temperature_c,
+                    pressure: station.pressure_hpa,
+                    humidity: rh,
+                    altitude: station.altitude_m,
+                };
+                let name = format!("ffi-trajectory/rk4/{}/rh{rh}", station.name);
                 let mut pins = Pins::default();
-                pins.f("zero_angle_rad", angle);
+                // SAFETY: every pointer is to a live local, and the result is freed exactly once.
+                unsafe {
+                    let result =
+                        ballistics_calculate_trajectory(&inputs, &wind, &atmosphere, 600.0, 1.0);
+                    assert!(!result.is_null(), "{name}: FFI solve returned null");
+                    let r = &*result;
+                    pins.f("max_range", r.max_range);
+                    pins.f("max_height", r.max_height);
+                    pins.f("time_of_flight", r.time_of_flight);
+                    pins.f("impact_velocity", r.impact_velocity);
+                    pins.f("impact_energy", r.impact_energy);
+                    pins.f("transonic_mach (NaN when absent)", r.transonic_mach);
+                    let points = std::slice::from_raw_parts(r.points, r.point_count as usize);
+                    let samples = std::slice::from_raw_parts(
+                        r.sampled_points,
+                        r.sampled_point_count as usize,
+                    );
+                    pins.n("point_count", points.len() as u64);
+                    let last = points.last().expect("points");
+                    pins.f("points[last].time", last.time);
+                    pins.f("points[last].position_x", last.position_x);
+                    pins.f("points[last].position_y", last.position_y);
+                    pins.f("points[last].position_z", last.position_z);
+                    pins.f("points[last].velocity_magnitude", last.velocity_magnitude);
+                    pins.digest(
+                        "points (time, x, y, z)",
+                        points.iter().flat_map(|point| {
+                            [
+                                point.time,
+                                point.position_x,
+                                point.position_y,
+                                point.position_z,
+                            ]
+                        }),
+                    );
+                    pins.n("sampled_point_count", samples.len() as u64);
+                    pins.digest(
+                        "sampled_points (distance, time, drop, windage)",
+                        samples.iter().flat_map(|sample| {
+                            [
+                                sample.distance,
+                                sample.time,
+                                sample.drop_meters,
+                                sample.windage_meters,
+                            ]
+                        }),
+                    );
+                    let middle = &samples[samples.len() / 2];
+                    pins.f("sampled_points[mid].velocity_mps", middle.velocity_mps);
+                    pins.f("sampled_points[mid].mach", middle.mach);
+                    ballistics_free_trajectory_result(result);
+                }
                 cases.push((name, pins));
             }
         }
+        cases
     }
-    cases
-}
 
-fn probe_zero_dry() -> Probe {
-    zero_grid(false)
-}
+    #[cfg(feature = "ffi")]
+    pub(super) fn probe_ffi_trajectory_dry() -> Probe {
+        front_end_ffi(false)
+    }
 
-fn probe_zero_humid() -> Probe {
-    zero_grid(true)
-}
-
-// =================================================================================================
-// Monte Carlo (TrajectorySolver sampler), seeded, at the default humidity
-// =================================================================================================
-
-fn record_mc(pins: &mut Pins, results: &MonteCarloResults) {
-    pins.n("ranges.len", results.ranges.len() as u64);
-    pins.f("ranges[0]", results.ranges[0]);
-    pins.f("impact_velocities[0]", results.impact_velocities[0]);
-    pins.f("impact_positions[0].y", results.impact_positions[0].y);
-    pins.f("impact_positions[0].z", results.impact_positions[0].z);
-    pins.f(
-        "hit_probability(DEFAULT_HIT_RADIUS_M)",
-        results.hit_probability(DEFAULT_HIT_RADIUS_M),
-    );
-    pins.digest("ranges", results.ranges.iter().copied());
-    pins.digest(
-        "impact_velocities",
-        results.impact_velocities.iter().copied(),
-    );
-    pins.digest(
-        "impact_positions",
-        results
-            .impact_positions
-            .iter()
-            .flat_map(|position| [position.x, position.y, position.z]),
-    );
-}
-
-/// The inputs a CLI `monte-carlo` run builds when no humidity is given: the
-/// `BallisticInputs` default (50 %), never named here so the pin survives the field's rename.
-fn mc_inputs(station: Station) -> BallisticInputs {
-    BallisticInputs {
-        muzzle_height: 1.5,
-        ground_threshold: 0.0,
-        ..load(Method::Rk45, station, Shot::Flat)
+    #[cfg(feature = "ffi")]
+    pub(super) fn probe_ffi_trajectory_humid() -> Probe {
+        front_end_ffi(true)
     }
 }
 
-fn mc_params() -> MonteCarloParams {
-    MonteCarloParams {
-        num_simulations: 40,
-        target_distance: Some(500.0),
-        base_wind_speed: CROSSWIND_MPS,
-        base_wind_direction: CROSSWIND_FROM_RAD,
-        ..MonteCarloParams::default()
-    }
-}
+/// The same probes on the released 0.49.0 crate. Its kernels still take the legacy atmosphere
+/// tuple and its inputs a humidity fraction, so its shim passes them through unchanged: exactly
+/// the calls the S1 probes made when these pins were generated on 0.49.0.
+#[cfg(not(target_arch = "wasm32"))]
+mod released_0_49_0 {
+    #![allow(dead_code)]
+    use super::*;
+    use ballistics_engine_049 as engine;
 
-fn probe_monte_carlo_default_humidity() -> Probe {
-    let mut cases = Vec::new();
+    /// The calls whose signatures 0.50.0 changed, in 0.49.0's form.
+    mod shim {
+        use super::*;
+        use engine::fast_trajectory::FastIntegrationParams;
+        use engine::trajectory_integration::TrajectoryParams;
+        use std::collections::HashMap;
 
-    // The CLI's seeded path (presence-blind).
-    let results = run_monte_carlo_with_wind_and_direction_std_dev_seeded(
-        mc_inputs(SEA_LEVEL),
-        crosswind(),
-        mc_params(),
-        0.01,
-        0x5EED_0050,
-    )
-    .expect("seeded sea-level Monte Carlo");
-    let mut pins = Pins::default();
-    record_mc(&mut pins, &results);
-    cases.push(("seeded/icao-sea-level/default-rh".to_string(), pins));
-
-    // The presence-aware twin (the FFI's core), at 1500 m.
-    let results = run_monte_carlo_with_station_presence(
-        mc_inputs(HIGH_STATION),
-        crosswind(),
-        mc_params(),
-        0.01,
-        Some(0x5EED_1500),
-        StationAtmospherePresence::BOTH,
-    )
-    .expect("seeded 1500 m Monte Carlo");
-    let mut pins = Pins::default();
-    record_mc(&mut pins, &results);
-    cases.push(("seeded/1500m-25C-830hPa/default-rh".to_string(), pins));
-
-    cases
-}
-
-// =================================================================================================
-// Station air, local air, density altitude, stability
-// =================================================================================================
-
-const RH_GRID: [f64; 4] = [0.0, 37.5, 50.0, 100.0];
-
-fn probe_station_air() -> Probe {
-    let mut cases = Vec::new();
-    let overrides: [(Option<f64>, Option<f64>); 8] = [
-        (None, None),
-        (Some(-10.0), Some(1013.25)),
-        (Some(15.0), Some(1013.25)),
-        (Some(35.0), Some(1013.25)),
-        (Some(25.0), Some(830.0)),
-        (Some(35.0), Some(850.0)),
-        (Some(30.0), None),
-        (None, Some(900.0)),
-    ];
-    for altitude_m in [0.0, 1500.0, 3000.0] {
-        for (temperature_c, pressure_hpa) in overrides {
-            let name =
-                format!("calculate_atmosphere/{altitude_m}m/{temperature_c:?}/{pressure_hpa:?}");
-            let mut pins = Pins::default();
-            for rh in RH_GRID {
-                let (density, speed_of_sound) =
-                    calculate_atmosphere(altitude_m, temperature_c, pressure_hpa, rh);
-                pins.f(format!("rh{rh}.density"), density);
-                pins.f(format!("rh{rh}.speed_of_sound"), speed_of_sound);
-            }
-            cases.push((name, pins));
-        }
-    }
-    // The two humid-air primitives the station values are built from.
-    for (temperature_c, pressure_hpa) in [(-10.0, 1013.25), (15.0, 1013.25), (35.0, 850.0)] {
-        let name = format!("primitives/{temperature_c}C/{pressure_hpa}hPa");
-        let mut pins = Pins::default();
-        for rh in RH_GRID {
-            pins.f(
-                format!("rh{rh}.calculate_air_density_cimp"),
-                calculate_air_density_cimp(temperature_c, pressure_hpa, rh),
-            );
-            pins.f(
-                format!("rh{rh}.moist_speed_of_sound"),
-                moist_speed_of_sound(temperature_c + 273.15, pressure_hpa * 100.0, rh),
-            );
-        }
-        cases.push((name, pins));
-    }
-    cases
-}
-
-/// `get_local_atmosphere_humid` over heights from 200 m below the station to above the
-/// tropopause, for each station base. The base ratio is the station's own CIPM ratio at that
-/// RH, exactly what `TrajectorySolver` feeds it.
-fn local_air(humid: bool) -> Probe {
-    let mut cases = Vec::new();
-    let bases = [
-        (0.0, 15.0, 1013.25),
-        (0.0, 35.0, 1013.25),
-        (1500.0, 25.0, 830.0),
-    ];
-    let rhs: &[f64] = if humid { &[37.5, 50.0, 100.0] } else { &[0.0] };
-    for (base_alt, base_t, base_p) in bases {
-        for &rh in rhs {
-            let (station_density, _) =
-                calculate_atmosphere(base_alt, Some(base_t), Some(base_p), rh);
-            let base_ratio = station_density / 1.225;
-            let name =
-                format!("get_local_atmosphere_humid/{base_alt}m/{base_t}C/{base_p}hPa/rh{rh}");
-            let mut pins = Pins::default();
-            pins.f("base_ratio", base_ratio);
-            for offset in [-200.0, 0.0, 10.0, 500.0, 3000.0, 12_000.0, 25_000.0] {
-                let (density, speed_of_sound) = get_local_atmosphere_humid(
-                    base_alt + offset,
-                    base_alt,
-                    base_t,
-                    base_p,
-                    base_ratio,
-                    rh,
-                );
-                pins.f(format!("{offset:+}m.density"), density);
-                pins.f(format!("{offset:+}m.speed_of_sound"), speed_of_sound);
-            }
-            cases.push((name, pins));
-        }
-    }
-    cases
-}
-
-fn probe_local_air_dry() -> Probe {
-    local_air(false)
-}
-
-fn probe_local_air_humid() -> Probe {
-    local_air(true)
-}
-
-fn probe_density_altitude() -> Probe {
-    let mut cases = Vec::new();
-
-    let mut pins = Pins::default();
-    for pressure_hpa in [700.0, 830.0, 900.0, 1013.25, 1050.0] {
-        pins.f(
-            format!("nws_pressure_altitude_ft({pressure_hpa})"),
-            nws_pressure_altitude_ft(pressure_hpa),
-        );
-        for temperature_f in [14.0, 59.0, 95.0] {
-            pins.f(
-                format!("faa_rule_density_altitude_ft({pressure_hpa}, {temperature_f})"),
-                faa_rule_density_altitude_ft(pressure_hpa, temperature_f),
-            );
-        }
-    }
-    cases.push(("nws+faa_rule".to_string(), pins));
-
-    let mut pins = Pins::default();
-    for (temperature_c, pressure_hpa) in [(15.0, 1013.25), (30.0, 1013.25), (25.0, 830.0)] {
-        for rh in RH_GRID {
-            pins.f(
-                format!("density_matched_altitude_m({temperature_c}, {pressure_hpa}, {rh})"),
-                density_matched_altitude_m(temperature_c, pressure_hpa, rh),
-            );
-        }
-    }
-    cases.push(("density_matched".to_string(), pins));
-
-    let mut pins = Pins::default();
-    for density_altitude_m in [-500.0, 0.0, 1500.0, 3000.0] {
-        for temperature_c in [None, Some(30.0)] {
-            let (altitude_m, resolved_t, resolved_p) =
-                resolve_atmosphere_for_density_altitude(density_altitude_m, temperature_c);
-            let label = format!("resolve({density_altitude_m}, {temperature_c:?})");
-            pins.f(format!("{label}.altitude_m"), altitude_m);
-            pins.f(format!("{label}.temperature_c"), resolved_t);
-            pins.f(format!("{label}.pressure_hpa"), resolved_p);
-        }
-    }
-    cases.push(("resolve_atmosphere_for_density_altitude".to_string(), pins));
-
-    // The service behind the `atmosphere.density_altitude` bridge command.
-    for (name, atmosphere) in [
-        (
-            "service/icao-sea-level/rh0.5",
-            json!({"altitude_m": 0.0, "temperature_k": 288.15, "pressure_pa": 101325.0,
-                   "relative_humidity": 0.5}),
-        ),
-        (
-            "service/1500m/rh0",
-            json!({"altitude_m": 1500.0, "temperature_k": 298.15, "pressure_pa": 83000.0,
-                   "relative_humidity": 0.0}),
-        ),
-        (
-            "service/1500m/rh0.9",
-            json!({"altitude_m": 1500.0, "temperature_k": 298.15, "pressure_pa": 83000.0,
-                   "relative_humidity": 0.9}),
-        ),
-    ] {
-        let request = ballistics_engine::atmosphere_service::decode_density_altitude_request_v1(
-            &json!({ "atmosphere": atmosphere }),
-        )
-        .expect("decode density-altitude request");
-        let response = ballistics_engine::atmosphere_service::density_altitude_v1(&request)
-            .expect("density altitude");
-        let mut pins = Pins::default();
-        pins.f("pressure_altitude.m", response.pressure_altitude.m);
-        pins.f("pressure_altitude.ft", response.pressure_altitude.ft);
-        pins.f("faa_rule.m", response.density_altitude.faa_rule.m);
-        pins.f("faa_rule.ft", response.density_altitude.faa_rule.ft);
-        pins.f(
-            "density_matched.m",
-            response.density_altitude.density_matched.m,
-        );
-        pins.f(
-            "density_matched.ft",
-            response.density_altitude.density_matched.ft,
-        );
-        pins.f("air_density_kg_m3", response.air_density_kg_m3);
-        cases.push((name.to_string(), pins));
-    }
-    cases
-}
-
-/// Muzzle Miller Sg (deliberately dry: the published Miller T/P correction), Litz spin drift
-/// and aerodynamic jump.
-fn probe_stability_spin_jump() -> Probe {
-    let mut cases = Vec::new();
-    let inputs = load(Method::Rk4, SEA_LEVEL, Shot::Flat);
-
-    let mut pins = Pins::default();
-    for (temperature_c, pressure_hpa) in [(15.0, 1013.25), (35.0, 1013.25), (25.0, 830.0)] {
-        let sg = compute_stability_coefficient(&inputs, (0.0, temperature_c, pressure_hpa, 0.0));
-        pins.f(
-            format!("compute_stability_coefficient({temperature_c}, {pressure_hpa})"),
-            sg,
-        );
-        let sg_eff = effective_sg_from_inputs(&inputs, temperature_c, pressure_hpa);
-        pins.f(
-            format!("effective_sg_from_inputs({temperature_c}, {pressure_hpa})"),
-            sg_eff,
-        );
-        for time_s in [0.5, 1.0, 2.0] {
-            pins.f(
-                format!("litz_drift_meters(sg_eff, {time_s})"),
-                litz_drift_meters(sg_eff, time_s, true),
-            );
-        }
-    }
-    // The estimated-length fallback inside effective_sg_from_inputs.
-    let no_length = BallisticInputs {
-        bullet_length: 0.0,
-        ..inputs.clone()
-    };
-    pins.f(
-        "effective_sg_from_inputs(no length, 15, 1013.25)",
-        effective_sg_from_inputs(&no_length, 15.0, 1013.25),
-    );
-    cases.push(("miller-sg+litz".to_string(), pins));
-
-    // fast_integrate's aerodynamic-jump launch offset, standard and direct atmosphere.
-    let jump_inputs = BallisticInputs {
-        enable_aerodynamic_jump: true,
-        wind_speed: CROSSWIND_MPS,
-        wind_angle: CROSSWIND_FROM_RAD,
-        ..inputs.clone()
-    };
-    let mut pins = Pins::default();
-    for (label, atmo) in [
-        ("standard(0, 15, 1013.25, 1.0)", (0.0, 15.0, 1013.25, 1.0)),
-        ("standard(1500, 25, 830, 0.79)", (1500.0, 25.0, 830.0, 0.79)),
-        ("direct(1.1, 335, 0, 0)", (1.1, 335.0, 0.0, 0.0)),
-    ] {
-        pins.f(
-            format!("aerodynamic_jump_launch_offset_rad {label}"),
-            aerodynamic_jump_launch_offset_rad(&jump_inputs, &kernel_atmosphere(atmo)),
-        );
-    }
-    cases.push(("fast-path-aerodynamic-jump".to_string(), pins));
-
-    // TrajectorySolver's aerodynamic-jump components. They depend on the station T/P only,
-    // never on RH or the flight, so every RH is pinned here as IMMUTABLE.
-    for station in STATIONS {
-        for rh in [0.0, 50.0, 100.0] {
-            let mut jump_load = load(Method::Rk45, station, Shot::Flat);
-            jump_load.enable_aerodynamic_jump = true;
-            let result = solver(jump_load, station, rh, Zones::None, Shot::Flat)
-                .solve()
-                .expect("aerodynamic-jump solve");
-            let jump = result.aerodynamic_jump.expect("jump components");
-            let mut pins = Pins::default();
-            pins.f("vertical_jump_moa", jump.vertical_jump_moa);
-            pins.f("horizontal_jump_moa", jump.horizontal_jump_moa);
-            pins.f("jump_angle_rad", jump.jump_angle_rad);
-            pins.f("magnus_component_moa", jump.magnus_component_moa);
-            pins.f("yaw_component_moa", jump.yaw_component_moa);
-            pins.f("stabilization_factor", jump.stabilization_factor);
-            cases.push((
-                format!("trajectory-solver-jump/{}/rh{rh}", station.name),
-                pins,
-            ));
-        }
-    }
-    cases
-}
-
-// =================================================================================================
-// Kernels: direct ("uniform") mode -- bits -- and standard mode at RH 0 -- relative 1e-15
-// =================================================================================================
-
-/// The kernel's legacy direct-mode tuple: `(density, speed_of_sound, 0, 0)`.
-const DIRECT: (f64, f64, f64, f64) = (1.1, 335.0, 0.0, 0.0);
-
-/// A kernel station: the legacy standard-mode tuple `(alt, T, P, ratio)` with the ratio taken
-/// from `calculate_atmosphere` at RH 0, which is exactly what a dry station built from the
-/// same alt/T/P yields.
-fn dry_standard_tuple(station: Station) -> (f64, f64, f64, f64) {
-    let (density, _) = calculate_atmosphere(
-        station.altitude_m,
-        Some(station.temperature_c),
-        Some(station.pressure_hpa),
-        0.0,
-    );
-    (
-        station.altitude_m,
-        station.temperature_c,
-        station.pressure_hpa,
-        density / 1.225,
-    )
-}
-
-fn kernel_inputs(station: Station) -> BallisticInputs {
-    BallisticInputs {
-        altitude: station.altitude_m,
-        temperature: station.temperature_c,
-        pressure: station.pressure_hpa,
-        muzzle_angle: FLAT_MUZZLE_ANGLE_RAD,
-        wind_speed: CROSSWIND_MPS,
-        wind_angle: CROSSWIND_FROM_RAD,
-        enable_trajectory_sampling: false,
-        ..load(Method::Rk45, station, Shot::Flat)
-    }
-}
-
-fn launch_state() -> [f64; 6] {
-    [
-        0.0,
-        0.0,
-        0.0,
-        MUZZLE_VELOCITY_MPS * FLAT_MUZZLE_ANGLE_RAD.cos(),
-        MUZZLE_VELOCITY_MPS * FLAT_MUZZLE_ANGLE_RAD.sin(),
-        0.0,
-    ]
-}
-
-fn crosswind_segments() -> Vec<WindSegment> {
-    vec![WindSegment::new(CROSSWIND_MPS * 3.6, 90.0, 2000.0)]
-}
-
-/// The pinned kernel atmospheres were written as legacy tuples; S3 moved the kernels onto
-/// `KernelAtmosphere`, and `from_legacy_params` at 0 % RH is the one-line migration (a dry
-/// station keeps its tuple's ratio verbatim; the direct sentinel becomes uniform air).
-fn kernel_atmosphere(atmos_params: (f64, f64, f64, f64)) -> KernelAtmosphere {
-    KernelAtmosphere::from_legacy_params(atmos_params, RelativeHumidity::DRY)
-        .expect("pinned atmospheres are valid")
-}
-
-fn trajectory_params(
-    atmos_params: (f64, f64, f64, f64),
-    atmo_sock: Option<AtmoSock>,
-) -> TrajectoryParams {
-    TrajectoryParams {
-        mass_kg: MASS_KG,
-        bc: BC_G7,
-        drag_model: DragModel::G7,
-        wind_segments: crosswind_segments(),
-        atmosphere: kernel_atmosphere(atmos_params),
-        omega_vector: None,
-        enable_spin_drift: false,
-        enable_magnus: false,
-        enable_coriolis: false,
-        target_distance_m: 800.0,
-        enable_wind_shear: false,
-        wind_shear_model: "none".to_string(),
-        shooter_altitude_m: 0.0,
-        is_twist_right: true,
-        shooting_angle: 0.0,
-        bullet_diameter: DIAMETER_M,
-        bullet_length: LENGTH_M,
-        twist_rate: TWIST_IN,
-        custom_drag_table: None,
-        cd_scale: 1.0,
-        custom_drag_reference: false,
-        bc_segments: None,
-        use_bc_segments: false,
-        bc_segments_data: None,
-        ground_threshold: -1000.0,
-        atmo_sock,
-    }
-}
-
-fn fast_params(
-    atmo_params: (f64, f64, f64, f64),
-    atmo_sock: Option<AtmoSock>,
-) -> FastIntegrationParams {
-    FastIntegrationParams {
-        horiz: 800.0,
-        vert: 0.0,
-        initial_state: launch_state(),
-        t_span: (0.0, 30.0),
-        atmosphere: kernel_atmosphere(atmo_params),
-        atmo_sock,
-    }
-}
-
-/// Indices pinned explicitly for a kernel trajectory of `n` points.
-fn kernel_indices(n: usize) -> [usize; 6] {
-    [1, n / 8, n / 4, n / 2, (3 * n) / 4, n - 1]
-}
-
-fn record_states(pins: &mut Pins, label: &str, times: &[f64], states: &[[f64; 6]], digest: bool) {
-    let n = times.len();
-    pins.n(format!("{label}.len"), n as u64);
-    for index in kernel_indices(n) {
-        pins.f(format!("{label}[{index}].t"), times[index]);
-        for (component, value) in ["x", "y", "z", "vx", "vy", "vz"].iter().zip(states[index]) {
-            pins.f(format!("{label}[{index}].{component}"), value);
-        }
-    }
-    if digest {
-        pins.digest(
-            label,
-            times
-                .iter()
-                .zip(states)
-                .flat_map(|(t, state)| std::iter::once(*t).chain(state.iter().copied())),
-        );
-    }
-}
-
-fn record_fast_solution(pins: &mut Pins, solution: &FastSolution, digest: bool) {
-    pins.n("success", u64::from(solution.success));
-    let states: Vec<[f64; 6]> = (0..solution.t.len())
-        .map(|i| std::array::from_fn(|component| solution.y[component][i]))
-        .collect();
-    record_states(pins, "fast", &solution.t, &states, digest);
-    for (slot, events) in solution.t_events.iter().enumerate() {
-        pins.n(format!("t_events[{slot}].len"), events.len() as u64);
-        for (index, time) in events.iter().enumerate() {
-            pins.f(format!("t_events[{slot}][{index}]"), *time);
-        }
-    }
-}
-
-/// Run every kernel family once for an atmosphere and record it.
-fn kernel_cases(
-    prefix: &str,
-    station: Station,
-    atmos_params: (f64, f64, f64, f64),
-    zones: Zones,
-    digest: bool,
-) -> Probe {
-    let mut cases = Vec::new();
-    let sock = || zones.segments(station).map(AtmoSock::new);
-    let inputs = kernel_inputs(station);
-
-    // compute_derivatives, at the station and 300 m above it.
-    let mut pins = Pins::default();
-    for (label, position) in [
-        ("muzzle", Vector3::new(0.0, 0.0, 0.0)),
-        ("500m-downrange", Vector3::new(500.0, -1.0, 0.2)),
-        ("300m-above", Vector3::new(600.0, 300.0, 0.0)),
-    ] {
-        let derivative = compute_derivatives(
-            position,
-            Vector3::new(700.0, 2.0, 0.5),
-            &inputs,
-            Vector3::new(0.0, 0.0, -CROSSWIND_MPS),
-            &kernel_atmosphere(atmos_params),
-            BC_G7,
-            None,
-            0.0,
-            sock().as_ref(),
-        );
-        for (component, value) in ["vx", "vy", "vz", "ax", "ay", "az"].iter().zip(derivative) {
-            pins.f(format!("{label}.{component}"), value);
-        }
-    }
-    cases.push((format!("{prefix}/compute_derivatives"), pins));
-
-    // try_integrate_trajectory, RK4 and RK45.
-    for (method, tolerance, max_step) in [("RK4", 1e-6, 0.001), ("RK45", 1e-6, 0.01)] {
-        let trajectory = try_integrate_trajectory(
-            launch_state(),
-            (0.0, 3.0),
-            trajectory_params(atmos_params, sock()),
-            method,
-            tolerance,
-            max_step,
-        )
-        .expect("valid wind segments");
-        let times: Vec<f64> = trajectory.iter().map(|(t, _)| *t).collect();
-        let states: Vec<[f64; 6]> = trajectory
-            .iter()
-            .map(|(_, state)| std::array::from_fn(|component| state[component]))
-            .collect();
-        let mut pins = Pins::default();
-        record_states(&mut pins, "trajectory", &times, &states, digest);
-        cases.push((format!("{prefix}/try_integrate_trajectory/{method}"), pins));
-    }
-
-    // try_solve_trajectory_rust (the legacy binding entry; it takes no zones).
-    if zones == Zones::None {
-        let points = try_solve_trajectory_rust(
-            launch_state(),
-            (0.0, 3.0),
-            MASS_KG,
-            BC_G7,
-            DragModel::G7,
-            crosswind_segments(),
-            kernel_atmosphere(atmos_params),
-            None,
-            false,
-            false,
-            false,
-            "RK45".to_string(),
-            1e-6,
-            0.01,
-            800.0,
-        )
-        .expect("valid wind segments");
-        let times: Vec<f64> = points.iter().map(|point| point["t"]).collect();
-        let states: Vec<[f64; 6]> = points
-            .iter()
-            .map(|point| ["x", "y", "z", "vx", "vy", "vz"].map(|component| point[component]))
-            .collect();
-        let mut pins = Pins::default();
-        record_states(&mut pins, "points", &times, &states, digest);
-        cases.push((format!("{prefix}/try_solve_trajectory_rust/RK45"), pins));
-    }
-
-    // fast_integrate (fixed step) and fast_integrate_with_segments (RK45).
-    let wind_sock = WindSock::new(crosswind_segments());
-    let mut pins = Pins::default();
-    record_fast_solution(
-        &mut pins,
-        &fast_integrate(&inputs, &wind_sock, fast_params(atmos_params, sock())),
-        digest,
-    );
-    cases.push((format!("{prefix}/fast_integrate"), pins));
-
-    let mut pins = Pins::default();
-    record_fast_solution(
-        &mut pins,
-        &fast_integrate_with_segments(
-            &inputs,
-            crosswind_segments(),
-            fast_params(atmos_params, sock()),
-        ),
-        digest,
-    );
-    cases.push((format!("{prefix}/fast_integrate_with_segments"), pins));
-
-    cases
-}
-
-/// Direct mode: no station, no humidity, so every family is IMMUTABLE bit for bit.
-fn probe_kernel_direct() -> Probe {
-    kernel_cases("direct(1.1,335)", SEA_LEVEL, DIRECT, Zones::None, true)
-}
-
-/// Standard mode at RH 0 (station and zones dry), plus the lean Monte Carlo at RH 0.
-fn probe_kernel_standard_rh0() -> Probe {
-    let mut cases = Vec::new();
-    for station in STATIONS {
-        for zones in [Zones::None, Zones::Dry] {
-            cases.extend(kernel_cases(
-                &format!("standard/{}/rh0/{}", station.name, zones.name()),
-                station,
-                dry_standard_tuple(station),
-                zones,
-                false,
-            ));
-        }
-
-        // The lean Monte Carlo kernel (fast_integrate behind one BallisticInputs) at RH 0.
-        let inputs = BallisticInputs {
-            humidity_percent: 0.0,
-            target_distance: 800.0,
-            ..kernel_inputs(station)
-        };
-        let output =
-            solve_trajectory_for_monte_carlo_with_station_presence(&inputs, station.presence())
-                .expect("lean Monte Carlo solve");
-        let mut pins = Pins::default();
-        pins.f("drop", output.drop);
-        pins.f("wind_drift", output.wind_drift);
-        pins.f("time", output.time);
-        pins.f("velocity", output.velocity);
-        pins.f("energy", output.energy);
-        pins.f("mach", output.mach);
-        pins.f("spin_drift", output.spin_drift);
-        pins.f("distance", output.distance);
-        cases.push((
-            format!(
-                "standard/{}/rh0/solve_trajectory_for_monte_carlo",
-                station.name
-            ),
-            pins,
-        ));
-    }
-    cases
-}
-
-// =================================================================================================
-// Front ends: solve_json -> solve_v1, the bridge `solve`, the FFI single solve, card_service
-// =================================================================================================
-
-fn solve_request(
-    method: &str,
-    altitude_m: f64,
-    temperature_k: f64,
-    pressure_pa: f64,
-    rh: f64,
-) -> Value {
-    json!({
-        "schema_version": 1,
-        "projectile": {
-            "mass_kg": MASS_KG,
-            "diameter_m": DIAMETER_M,
-            "length_m": LENGTH_M,
-            "drag_model": "G7",
-            "ballistic_coefficient": BC_G7
-        },
-        "rifle": {
-            "muzzle_velocity_mps": MUZZLE_VELOCITY_MPS,
-            "sight_height_m": 0.05,
-            "muzzle_height_m": 1.2,
-            "twist_rate_m_per_turn": 0.254,
-            "twist_direction": "right"
-        },
-        "shot": {
-            "max_range_m": 600.0,
-            "zero_distance_m": 100.0,
-            "shooting_angle_rad": 0.0,
-            "cant_angle_rad": 0.0,
-            "ground_threshold_m": -100.0
-        },
-        "atmosphere": {
-            "altitude_m": altitude_m,
-            "temperature_k": temperature_k,
-            "pressure_pa": pressure_pa,
-            "relative_humidity": rh
-        },
-        "wind": {
-            "speed_mps": CROSSWIND_MPS,
-            "direction_from_rad": CROSSWIND_FROM_RAD
-        },
-        "solver": { "method": method, "time_step_s": 0.001 },
-        "effects": {
-            "magnus": false,
-            "coriolis": false,
-            "enhanced_spin_drift": true,
-            "aerodynamic_jump": true
-        },
-        "sampling": { "interval_m": 50.0 }
-    })
-}
-
-/// The solve-json requests pinned on every JSON front end.
-fn solve_requests(humid: bool) -> Vec<(&'static str, Value)> {
-    if humid {
-        vec![
-            (
-                "rk4/icao-sea-level/rh0.5",
-                solve_request("rk4", 0.0, 288.15, 101_325.0, 0.5),
-            ),
-            (
-                "rk45/1500m-25C-830hPa/rh0.9",
-                solve_request("rk45", 1500.0, 298.15, 83_000.0, 0.9),
-            ),
-        ]
-    } else {
-        vec![
-            (
-                "euler/icao-sea-level/rh0",
-                solve_request("euler", 0.0, 288.15, 101_325.0, 0.0),
-            ),
-            (
-                "rk45/1500m-25C-830hPa/rh0",
-                solve_request("rk45", 1500.0, 298.15, 83_000.0, 0.0),
-            ),
-        ]
-    }
-}
-
-fn number(value: &Value, path: &str) -> f64 {
-    value
-        .pointer(path)
-        .and_then(Value::as_f64)
-        .unwrap_or_else(|| panic!("missing number at {path}"))
-}
-
-/// Pin a solve-json v1 success document (as JSON): the summary and every sample.
-fn record_solve_json(pins: &mut Pins, success: &Value) {
-    for field in [
-        "actual_range_m",
-        "maximum_height_m",
-        "time_of_flight_s",
-        "terminal_speed_mps",
-        "terminal_energy_j",
-        "stability_factor",
-        "spin_drift_m",
-        "aerodynamic_jump_moa",
-    ] {
-        pins.f(
-            format!("summary.{field}"),
-            number(success, &format!("/summary/{field}")),
-        );
-    }
-    pins.f(
-        "resolved_request.shot.muzzle_angle_rad",
-        number(success, "/resolved_request/shot/muzzle_angle_rad"),
-    );
-    let samples = success["samples"].as_array().expect("samples array");
-    pins.n("samples.len", samples.len() as u64);
-    for index in [1, samples.len() / 2, samples.len() - 1] {
-        for field in [
-            "distance_m",
-            "time_s",
-            "speed_mps",
-            "drop_m",
-            "windage_m",
-            "mach",
-        ] {
-            pins.f(
-                format!("samples[{index}].{field}"),
-                number(&samples[index], &format!("/{field}")),
-            );
-        }
-    }
-    pins.digest(
-        "samples (distance, time, drop, windage)",
-        samples.iter().flat_map(|sample| {
-            ["distance_m", "time_s", "drop_m", "windage_m"]
-                .map(|field| number(sample, &format!("/{field}")))
-        }),
-    );
-}
-
-fn front_end_solve_json(humid: bool) -> Probe {
-    let mut cases = Vec::new();
-    for (name, request) in solve_requests(humid) {
-        let decoded = ballistics_engine::decode_solve_request_v1(&request.to_string())
-            .expect("valid solve-json request");
-        let success = ballistics_engine::solve_v1(decoded).expect("solve_v1 succeeds");
-        let success = serde_json::to_value(&success).expect("serialize success");
-        let mut pins = Pins::default();
-        record_solve_json(&mut pins, &success);
-        cases.push((format!("solve_v1/{name}"), pins));
-    }
-    cases
-}
-
-#[cfg(feature = "bridge")]
-fn front_end_bridge(humid: bool) -> Probe {
-    let mut cases = Vec::new();
-    for (name, request) in solve_requests(humid) {
-        let envelope = json!({"api_version": 1, "command": "solve", "request": request});
-        let raw = ballistics_engine::bridge::bridge_call(&envelope.to_string());
-        let out: Value = serde_json::from_str(&raw).expect("bridge output parses");
-        assert_eq!(out["ok"], true, "bridge solve failed: {out}");
-        let mut pins = Pins::default();
-        record_solve_json(&mut pins, &out["result"]);
-        cases.push((format!("bridge-solve/{name}"), pins));
-    }
-    cases
-}
-
-#[cfg(feature = "ffi")]
-fn front_end_ffi(humid: bool) -> Probe {
-    use ballistics_engine::ffi::{
-        ballistics_calculate_trajectory, ballistics_free_trajectory_result,
-        FFIAtmosphericConditions, FFIBallisticInputs, FFIWindConditions,
-    };
-
-    let mut cases = Vec::new();
-    let rhs: &[f64] = if humid { &[50.0, 100.0] } else { &[0.0] };
-    for station in STATIONS {
-        for &rh in rhs {
-            let inputs = FFIBallisticInputs {
-                muzzle_velocity: MUZZLE_VELOCITY_MPS,
-                muzzle_angle: FLAT_MUZZLE_ANGLE_RAD,
-                bc_value: BC_G7,
-                bullet_mass: MASS_KG,
-                bullet_diameter: DIAMETER_M,
-                bc_type: 1, // G7
-                sight_height: 0.05,
-                target_distance: 600.0,
-                temperature: station.temperature_c,
-                twist_rate: TWIST_IN,
-                is_twist_right: 1,
+        pub(super) fn trajectory_params(
+            atmos_params: (f64, f64, f64, f64),
+            atmo_sock: Option<AtmoSock>,
+        ) -> TrajectoryParams {
+            TrajectoryParams {
+                mass_kg: MASS_KG,
+                bc: BC_G7,
+                drag_model: DragModel::G7,
+                wind_segments: crosswind_segments(),
+                atmos_params,
+                omega_vector: None,
+                enable_spin_drift: false,
+                enable_magnus: false,
+                enable_coriolis: false,
+                target_distance_m: 800.0,
+                enable_wind_shear: false,
+                wind_shear_model: "none".to_string(),
+                shooter_altitude_m: 0.0,
+                is_twist_right: true,
                 shooting_angle: 0.0,
-                altitude: station.altitude_m,
-                latitude: f64::NAN,
-                azimuth_angle: 0.0,
-                use_rk4: 1,
-                use_adaptive_rk45: 0,
-                enable_wind_shear: 0,
-                enable_trajectory_sampling: 1,
-                sample_interval: 50.0,
-                enable_pitch_damping: 0,
-                enable_precession_nutation: 0,
-                // Off: Litz drift is a per-point powf, whose last bit differs between libms
-                // (see the module docs). TS_EFFECTS_* and STABILITY_SPIN_JUMP pin it.
-                enable_spin_drift: 0,
-                enable_magnus: 0,
-                enable_coriolis: 0,
-                shot_azimuth: 0.0,
-                cant_angle: 0.0,
-                zero_poi_vertical: 0.0,
-                zero_poi_horizontal: 0.0,
-                sight_offset_lateral: 0.0,
-            };
-            let wind = FFIWindConditions {
-                speed: CROSSWIND_MPS,
-                direction: CROSSWIND_FROM_RAD,
-                vertical_speed: 0.0,
-            };
-            let atmosphere = FFIAtmosphericConditions {
-                temperature: station.temperature_c,
-                pressure: station.pressure_hpa,
-                humidity: rh,
-                altitude: station.altitude_m,
-            };
-            let name = format!("ffi-trajectory/rk4/{}/rh{rh}", station.name);
-            let mut pins = Pins::default();
-            // SAFETY: every pointer is to a live local, and the result is freed exactly once.
-            unsafe {
-                let result =
-                    ballistics_calculate_trajectory(&inputs, &wind, &atmosphere, 600.0, 1.0);
-                assert!(!result.is_null(), "{name}: FFI solve returned null");
-                let r = &*result;
-                pins.f("max_range", r.max_range);
-                pins.f("max_height", r.max_height);
-                pins.f("time_of_flight", r.time_of_flight);
-                pins.f("impact_velocity", r.impact_velocity);
-                pins.f("impact_energy", r.impact_energy);
-                pins.f("transonic_mach (NaN when absent)", r.transonic_mach);
-                let points = std::slice::from_raw_parts(r.points, r.point_count as usize);
-                let samples =
-                    std::slice::from_raw_parts(r.sampled_points, r.sampled_point_count as usize);
-                pins.n("point_count", points.len() as u64);
-                let last = points.last().expect("points");
-                pins.f("points[last].time", last.time);
-                pins.f("points[last].position_x", last.position_x);
-                pins.f("points[last].position_y", last.position_y);
-                pins.f("points[last].position_z", last.position_z);
-                pins.f("points[last].velocity_magnitude", last.velocity_magnitude);
-                pins.digest(
-                    "points (time, x, y, z)",
-                    points.iter().flat_map(|point| {
-                        [
-                            point.time,
-                            point.position_x,
-                            point.position_y,
-                            point.position_z,
-                        ]
-                    }),
-                );
-                pins.n("sampled_point_count", samples.len() as u64);
-                pins.digest(
-                    "sampled_points (distance, time, drop, windage)",
-                    samples.iter().flat_map(|sample| {
-                        [
-                            sample.distance,
-                            sample.time,
-                            sample.drop_meters,
-                            sample.windage_meters,
-                        ]
-                    }),
-                );
-                let middle = &samples[samples.len() / 2];
-                pins.f("sampled_points[mid].velocity_mps", middle.velocity_mps);
-                pins.f("sampled_points[mid].mach", middle.mach);
-                ballistics_free_trajectory_result(result);
+                bullet_diameter: DIAMETER_M,
+                bullet_length: LENGTH_M,
+                twist_rate: TWIST_IN,
+                custom_drag_table: None,
+                cd_scale: 1.0,
+                custom_drag_reference: false,
+                bc_segments: None,
+                use_bc_segments: false,
+                bc_segments_data: None,
+                ground_threshold: -1000.0,
+                atmo_sock,
             }
-            cases.push((name, pins));
+        }
+
+        pub(super) fn fast_params(
+            atmo_params: (f64, f64, f64, f64),
+            atmo_sock: Option<AtmoSock>,
+        ) -> FastIntegrationParams {
+            FastIntegrationParams {
+                horiz: 800.0,
+                vert: 0.0,
+                initial_state: launch_state(),
+                t_span: (0.0, 30.0),
+                atmo_params,
+                atmo_sock,
+            }
+        }
+
+        pub(super) fn compute_derivatives(
+            position: Vector3<f64>,
+            velocity: Vector3<f64>,
+            inputs: &BallisticInputs,
+            wind: Vector3<f64>,
+            atmos_params: (f64, f64, f64, f64),
+            bc: f64,
+            atmo_sock: Option<&AtmoSock>,
+        ) -> [f64; 6] {
+            engine::derivatives::compute_derivatives(
+                position,
+                velocity,
+                inputs,
+                wind,
+                atmos_params,
+                bc,
+                None,
+                0.0,
+                atmo_sock,
+            )
+        }
+
+        /// The legacy binding entry, RK45 to 3 s (it takes no zones).
+        pub(super) fn try_solve_trajectory_rust(
+            initial_state: [f64; 6],
+            wind_segments: Vec<WindSegment>,
+            atmos_params: (f64, f64, f64, f64),
+        ) -> Result<Vec<HashMap<String, f64>>, engine::wind::WindSegmentError> {
+            engine::trajectory_integration::try_solve_trajectory_rust(
+                initial_state,
+                (0.0, 3.0),
+                MASS_KG,
+                BC_G7,
+                DragModel::G7,
+                wind_segments,
+                atmos_params,
+                None,
+                false,
+                false,
+                false,
+                "RK45".to_string(),
+                1e-6,
+                0.01,
+                800.0,
+            )
+        }
+
+        pub(super) fn aerodynamic_jump_launch_offset_rad(
+            inputs: &BallisticInputs,
+            atmos_params: (f64, f64, f64, f64),
+        ) -> f64 {
+            engine::fast_trajectory::aerodynamic_jump_launch_offset_rad(inputs, atmos_params)
+        }
+
+        /// The inputs at 0 % humidity (0.49.0's field is a fraction).
+        pub(super) fn dry(inputs: BallisticInputs) -> BallisticInputs {
+            BallisticInputs {
+                humidity: 0.0,
+                ..inputs
+            }
         }
     }
-    cases
+
+    include!("humidity_byte_identity/probes.rs");
 }
 
-fn front_end_card(humid: bool) -> Probe {
-    let mut cases = Vec::new();
-    let rhs: &[f64] = if humid { &[50.0, 100.0] } else { &[0.0] };
-    for (station, altitude_m, temperature_f, pressure_inhg) in [
-        ("icao-sea-level", 0.0, 59.0, 29.92),
-        ("1500m-77F-24.51inHg", 1500.0, 77.0, 24.51),
-    ] {
-        for &rh in rhs {
-            let request: ballistics_engine::card_service::CardRequestV1 =
-                serde_json::from_value(json!({
-                    "units": "imperial",
-                    "muzzle_velocity": 2700.0,
-                    "ballistic_coefficient": BC_G7,
-                    "mass": 175.0,
-                    "diameter": 0.308,
-                    "drag_model": "g7",
-                    "sight_height": 1.5,
-                    "zero_distance": 100.0,
-                    "temperature": temperature_f,
-                    "pressure": pressure_inhg,
-                    "humidity": rh,
-                    "altitude": altitude_m,
-                    "wind_speed": 10.0,
-                    "wind_direction_deg": 90.0,
-                    "start": 100.0,
-                    "end": 800.0,
-                    "step": 100.0,
-                    "adjustment_unit": "mil"
-                }))
-                .expect("card request");
-            let response =
-                ballistics_engine::card_service::come_ups_v1(&request).expect("come-ups card");
-            let response = serde_json::to_value(&response).expect("serialize card");
-            let rows = response["rows"].as_array().expect("rows");
-            let mut pins = Pins::default();
-            pins.n("rows.len", rows.len() as u64);
-            let fields = [
-                "range",
-                "drop_linear",
-                "drop_adj",
-                "come_up",
-                "wind_linear",
-                "wind_adj",
-                "velocity",
-                "energy",
-                "time",
-            ];
-            for (index, row) in rows.iter().enumerate() {
-                for field in fields {
-                    pins.opt(&format!("rows[{index}].{field}"), row[field].as_f64());
-                }
-            }
-            cases.push((format!("card.come_ups/{station}/rh{rh}"), pins));
-        }
-    }
-    cases
+/// `Check::Released049` with this group's 0.49.0 probe (none on wasm32, where the 0.49.0 crate is
+/// not a dependency and these tests do not run).
+#[cfg(not(target_arch = "wasm32"))]
+macro_rules! released {
+    ($probe:ident) => {
+        Check::Released049(Some(released_0_49_0::$probe))
+    };
 }
-
-fn probe_front_ends_dry() -> Probe {
-    let mut cases = front_end_solve_json(false);
-    cases.extend(front_end_card(false));
-    cases
-}
-
-fn probe_front_ends_humid() -> Probe {
-    let mut cases = front_end_solve_json(true);
-    cases.extend(front_end_card(true));
-    cases
-}
-
-#[cfg(feature = "bridge")]
-fn probe_bridge_solve_dry() -> Probe {
-    front_end_bridge(false)
-}
-
-#[cfg(feature = "bridge")]
-fn probe_bridge_solve_humid() -> Probe {
-    front_end_bridge(true)
-}
-
-#[cfg(feature = "ffi")]
-fn probe_ffi_trajectory_dry() -> Probe {
-    front_end_ffi(false)
-}
-
-#[cfg(feature = "ffi")]
-fn probe_ffi_trajectory_humid() -> Probe {
-    front_end_ffi(true)
+#[cfg(target_arch = "wasm32")]
+macro_rules! released {
+    ($probe:ident) => {
+        Check::Released049(None)
+    };
 }
 
 // =================================================================================================
 // The groups, their pins, and the tests
 // =================================================================================================
 
-/// One pinned group, as the generator prints it.
+/// One pinned group, as the generator prints it and the tests check it.
 struct Group {
     /// The constant the group is pinned in.
     name: &'static str,
@@ -1838,7 +1065,8 @@ struct Group {
     /// change it.
     header: &'static str,
     probe: fn() -> Probe,
-    compare: Compare,
+    pinned: Pinned,
+    check: Check,
     /// The cargo feature the group needs, if any.
     feature: Option<&'static str>,
 }
@@ -1849,11 +1077,12 @@ const S8_ONLY: &str = "MAY CHANGE ONLY IN S8 (the unified aloft vapour model, pl
 
 /// Every pinned group, in file order.
 fn groups() -> Vec<Group> {
-    let group = |name, header, probe, compare| Group {
+    let group = |name, header, probe, pinned, check| Group {
         name,
         header,
         probe,
-        compare,
+        pinned,
+        check,
         feature: None,
     };
     #[allow(unused_mut)]
@@ -1863,43 +1092,49 @@ fn groups() -> Vec<Group> {
             "`TrajectorySolver::solve`, flat fire to 1000 m with sampling: Euler, RK4 and RK45 \
              at ICAO sea level (presence-blind) and at 1500 m, 25 C, 830 hPa (presence-aware), \
              without zones and with two dry zones. RH 0 throughout.",
-            probe_ts_flat_dry,
-            Compare::Bits,
+            current::probe_ts_flat_dry,
+            TS_FLAT_DRY,
+            released!(probe_ts_flat_dry),
         ),
         group(
             "TS_FLAT_HUMID",
             "`TrajectorySolver::solve`, flat fire, the same methods and stations: station RH 0 \
              under humid zones (RH 20 then 80), and station RH 50 and 100 with and without \
              those zones.",
-            probe_ts_flat_humid,
-            Compare::Bits,
+            current::probe_ts_flat_humid,
+            TS_FLAT_HUMID,
+            Check::Pinned,
         ),
         group(
             "TS_LOB_DRY",
             "`TrajectorySolver::solve`, the 30-degree lob to ground impact, Euler, RK4 and RK45 \
              at both stations, RH 0, no zones.",
-            probe_ts_lob_dry,
-            Compare::Bits,
+            current::probe_ts_lob_dry,
+            TS_LOB_DRY,
+            released!(probe_ts_lob_dry),
         ),
         group(
             "TS_LOB_HUMID",
             "`TrajectorySolver::solve`, the 30-degree lob: RH 50 and 100 without zones, and RH 50 \
              under humid zones.",
-            probe_ts_lob_humid,
-            Compare::Bits,
+            current::probe_ts_lob_humid,
+            TS_LOB_HUMID,
+            Check::Pinned,
         ),
         group(
             "TS_EFFECTS_DRY",
             "`TrajectorySolver::solve` (RK4, flat) with Litz spin drift plus aerodynamic jump, \
              and with Magnus, at both stations, RH 0.",
-            probe_ts_effects_dry,
-            Compare::Bits,
+            current::probe_ts_effects_dry,
+            TS_EFFECTS_DRY,
+            released!(probe_ts_effects_dry),
         ),
         group(
             "TS_EFFECTS_HUMID",
             "As `TS_EFFECTS_DRY`, at RH 50 and 100.",
-            probe_ts_effects_humid,
-            Compare::Bits,
+            current::probe_ts_effects_humid,
+            TS_EFFECTS_HUMID,
+            Check::Pinned,
         ),
         group(
             "ZERO_DRY",
@@ -1907,51 +1142,58 @@ fn groups() -> Vec<Group> {
              `calculate_acceleration`), Euler, RK4 and RK45 at both stations, RH 0. The \
              bisection stops at 1e-7 rad, so a zero pin moves only when a trial height changes \
              sign; the flight groups are the sensitive ones.",
-            probe_zero_dry,
-            Compare::Bits,
+            current::probe_zero_dry,
+            ZERO_DRY,
+            released!(probe_zero_dry),
         ),
         group(
             "ZERO_HUMID",
             "As `ZERO_DRY`, at RH 50 and 100.",
-            probe_zero_humid,
-            Compare::Bits,
+            current::probe_zero_humid,
+            ZERO_HUMID,
+            Check::Pinned,
         ),
         group(
             "MONTE_CARLO_DEFAULT_HUMIDITY",
             "Seeded `TrajectorySolver` Monte Carlo at the `BallisticInputs` default humidity \
              (50 %): the CLI's seeded entry at ICAO sea level, and the presence-aware entry the \
              FFI Monte Carlo runs on, at 1500 m.",
-            probe_monte_carlo_default_humidity,
-            Compare::Bits,
+            current::probe_monte_carlo_default_humidity,
+            MONTE_CARLO_DEFAULT_HUMIDITY,
+            Check::Pinned,
         ),
         group(
             "STATION_AIR",
             "Station density and sound speed: `calculate_atmosphere` over altitude, T/P override \
              and RH, plus `calculate_air_density_cimp` and `moist_speed_of_sound`. Station air \
              is not part of the aloft model, so this holds through S8 at every RH.",
-            probe_station_air,
-            Compare::Bits,
+            current::probe_station_air,
+            STATION_AIR,
+            released!(probe_station_air),
         ),
         group(
             "LOCAL_AIR_DRY",
             "`get_local_atmosphere_humid` from 200 m below each station base to 25 km above it, \
              RH 0.",
-            probe_local_air_dry,
-            Compare::Bits,
+            current::probe_local_air_dry,
+            LOCAL_AIR_DRY,
+            released!(probe_local_air_dry),
         ),
         group(
             "LOCAL_AIR_HUMID",
             "As `LOCAL_AIR_DRY`, at RH 37.5, 50 and 100. The legacy wrapper shares `air_at`'s \
              composition, so the aloft model reaches it.",
-            probe_local_air_humid,
-            Compare::Bits,
+            current::probe_local_air_humid,
+            LOCAL_AIR_HUMID,
+            Check::Pinned,
         ),
         group(
             "DENSITY_ALTITUDE",
             "NWS pressure altitude, the FAA-rule and density-matched density altitudes, the \
              density-altitude entry inverse, and the `atmosphere.density_altitude` service.",
-            probe_density_altitude,
-            Compare::Bits,
+            current::probe_density_altitude,
+            DENSITY_ALTITUDE,
+            released!(probe_density_altitude),
         ),
         group(
             "STABILITY_SPIN_JUMP",
@@ -1959,8 +1201,9 @@ fn groups() -> Vec<Group> {
              rejected), Litz spin drift, the fast path's aerodynamic-jump offset, and \
              `TrajectorySolver`'s aerodynamic-jump components, which depend on station T/P only \
              and so are pinned at every RH.",
-            probe_stability_spin_jump,
-            Compare::Bits,
+            current::probe_stability_spin_jump,
+            STABILITY_SPIN_JUMP,
+            released!(probe_stability_spin_jump),
         ),
         group(
             "KERNEL_DIRECT",
@@ -1968,31 +1211,34 @@ fn groups() -> Vec<Group> {
              `compute_derivatives`, `try_integrate_trajectory` RK4 and RK45, \
              `try_solve_trajectory_rust`, `fast_integrate` and `fast_integrate_with_segments`. \
              S3 migrates the tuple to the uniform `KernelAtmosphere`; the values do not move.",
-            probe_kernel_direct,
-            Compare::Bits,
+            current::probe_kernel_direct,
+            KERNEL_DIRECT,
+            released!(probe_kernel_direct),
         ),
         group(
             "KERNEL_STANDARD_RH0",
             "Kernel standard mode at RH 0, station and zones dry, the same families plus the lean \
-             Monte Carlo, at both stations. Compared to a relative 1e-15, not bits: the plan \
-             allows last-ulp movement here when S3 moves the kernels onto `air_at`.",
-            probe_kernel_standard_rh0,
-            Compare::Relative,
+             Monte Carlo, at both stations.",
+            current::probe_kernel_standard_rh0,
+            KERNEL_STANDARD_RH0,
+            released!(probe_kernel_standard_rh0),
         ),
         group(
             "FRONT_ENDS_DRY",
             "One in-process call through each JSON front end, RH 0: solve-json decoded and run \
              by `solve_v1` (Euler at sea level, RK45 at 1500 m), and `card_service::come_ups_v1` \
              at both stations.",
-            probe_front_ends_dry,
-            Compare::Bits,
+            current::probe_front_ends_dry,
+            FRONT_ENDS_DRY,
+            released!(probe_front_ends_dry),
         ),
         group(
             "FRONT_ENDS_HUMID",
             "As `FRONT_ENDS_DRY` with humidity: solve-json at RH 0.5 (RK4, sea level) and 0.9 \
              (RK45, 1500 m), and the come-ups card at 50 and 100 %.",
-            probe_front_ends_humid,
-            Compare::Bits,
+            current::probe_front_ends_humid,
+            FRONT_ENDS_HUMID,
+            Check::Pinned,
         ),
     ];
     #[cfg(feature = "bridge")]
@@ -2002,8 +1248,9 @@ fn groups() -> Vec<Group> {
             ..group(
                 "BRIDGE_SOLVE_DRY",
                 "The bridge `solve` command (`bridge_call`) on the `FRONT_ENDS_DRY` requests.",
-                probe_bridge_solve_dry,
-                Compare::Bits,
+                current::probe_bridge_solve_dry,
+                BRIDGE_SOLVE_DRY,
+                released!(probe_bridge_solve_dry),
             )
         },
         Group {
@@ -2011,8 +1258,9 @@ fn groups() -> Vec<Group> {
             ..group(
                 "BRIDGE_SOLVE_HUMID",
                 "The bridge `solve` command on the `FRONT_ENDS_HUMID` requests.",
-                probe_bridge_solve_humid,
-                Compare::Bits,
+                current::probe_bridge_solve_humid,
+                BRIDGE_SOLVE_HUMID,
+                Check::Pinned,
             )
         },
     ]);
@@ -2024,8 +1272,11 @@ fn groups() -> Vec<Group> {
                 "FFI_TRAJECTORY_DRY",
                 "The FFI single solve `ballistics_calculate_trajectory` (RK4, sampling and spin \
                  drift on) at both stations, RH 0.",
-                probe_ffi_trajectory_dry,
-                Compare::Bits,
+                current::probe_ffi_trajectory_dry,
+                FFI_TRAJECTORY_DRY,
+                // 0.49.0's C ABI exports the same #[no_mangle] symbols as this crate's, so the
+                // two cannot be linked into one test binary: no runtime oracle.
+                Check::Pinned,
             )
         },
         Group {
@@ -2033,8 +1284,9 @@ fn groups() -> Vec<Group> {
             ..group(
                 "FFI_TRAJECTORY_HUMID",
                 "As `FFI_TRAJECTORY_DRY`, at RH 50 and 100.",
-                probe_ffi_trajectory_humid,
-                Compare::Bits,
+                current::probe_ffi_trajectory_humid,
+                FFI_TRAJECTORY_HUMID,
+                Check::Pinned,
             )
         },
     ]);
@@ -2045,6 +1297,42 @@ fn groups() -> Vec<Group> {
 /// zero, at the station or in a zone, except the station-air and stability groups.
 fn s8_may_change(name: &str) -> bool {
     name.ends_with("_HUMID") || name == "MONTE_CARLO_DEFAULT_HUMIDITY"
+}
+
+fn group_named(name: &str) -> Group {
+    groups()
+        .into_iter()
+        .find(|group| group.name == name)
+        .unwrap_or_else(|| panic!("no group {name}"))
+}
+
+/// Hold one group to its pins the way its [`Check`] says, on this platform.
+fn check_group(name: &str) {
+    let group = group_named(name);
+    let probe = (group.probe)();
+    let exact_bit_platform = Libm::of_this_build().is_some();
+    match group.check {
+        Check::Released049(released) => {
+            #[cfg(not(target_arch = "wasm32"))]
+            assert_same_as_released(
+                name,
+                &probe,
+                &released.expect("the 0.49.0 probe exists off wasm32")(),
+            );
+            #[cfg(target_arch = "wasm32")]
+            let _ = released;
+            if exact_bit_platform {
+                assert_bits(name, &probe, group.pinned);
+            }
+        }
+        Check::Pinned => {
+            if exact_bit_platform {
+                assert_bits(name, &probe, group.pinned);
+            } else {
+                assert_within_ulps(name, &probe, group.pinned, UNVERIFIED_LIBM_ULPS);
+            }
+        }
+    }
 }
 
 /// Wrap a header at 96 columns as `///` lines.
@@ -2079,12 +1367,6 @@ fn print_current_pin_values() {
         } else {
             IMMUTABLE
         });
-        if let Compare::Relative = group.compare {
-            println!("///");
-            print_doc(&format!(
-                "Floats compared to a relative {KERNEL_STANDARD_RH0_REL_TOL:e}; counts exactly."
-            ));
-        }
         if let Some(feature) = group.feature {
             println!("#[cfg(feature = {feature:?})]");
         }
@@ -2095,155 +1377,166 @@ fn print_current_pin_values() {
 }
 
 macro_rules! pin_test {
-    ($test:ident, $probe:ident, $pinned:ident) => {
+    ($test:ident, $group:ident) => {
         #[test]
         fn $test() {
-            assert_bits(stringify!($pinned), &$probe(), $pinned);
-        }
-    };
-    ($test:ident, $probe:ident, $pinned:ident, relative) => {
-        #[test]
-        fn $test() {
-            assert_relative(
-                stringify!($pinned),
-                &$probe(),
-                $pinned,
-                KERNEL_STANDARD_RH0_REL_TOL,
-            );
+            check_group(stringify!($group));
         }
     };
 }
 
-pin_test!(
-    trajectory_solver_flat_dry_is_byte_identical,
-    probe_ts_flat_dry,
-    TS_FLAT_DRY
-);
+pin_test!(trajectory_solver_flat_dry_is_byte_identical, TS_FLAT_DRY);
 pin_test!(
     trajectory_solver_flat_humid_is_byte_identical,
-    probe_ts_flat_humid,
     TS_FLAT_HUMID
 );
-pin_test!(
-    trajectory_solver_lob_dry_is_byte_identical,
-    probe_ts_lob_dry,
-    TS_LOB_DRY
-);
-pin_test!(
-    trajectory_solver_lob_humid_is_byte_identical,
-    probe_ts_lob_humid,
-    TS_LOB_HUMID
-);
+pin_test!(trajectory_solver_lob_dry_is_byte_identical, TS_LOB_DRY);
+pin_test!(trajectory_solver_lob_humid_is_byte_identical, TS_LOB_HUMID);
 pin_test!(
     trajectory_solver_effects_dry_are_byte_identical,
-    probe_ts_effects_dry,
     TS_EFFECTS_DRY
 );
 pin_test!(
     trajectory_solver_effects_humid_are_byte_identical,
-    probe_ts_effects_humid,
     TS_EFFECTS_HUMID
 );
-pin_test!(zero_angles_dry_are_byte_identical, probe_zero_dry, ZERO_DRY);
-pin_test!(
-    zero_angles_humid_are_byte_identical,
-    probe_zero_humid,
-    ZERO_HUMID
-);
+pin_test!(zero_angles_dry_are_byte_identical, ZERO_DRY);
+pin_test!(zero_angles_humid_are_byte_identical, ZERO_HUMID);
 pin_test!(
     seeded_monte_carlo_at_default_humidity_is_byte_identical,
-    probe_monte_carlo_default_humidity,
     MONTE_CARLO_DEFAULT_HUMIDITY
 );
-pin_test!(
-    station_air_is_byte_identical,
-    probe_station_air,
-    STATION_AIR
-);
-pin_test!(
-    local_air_dry_is_byte_identical,
-    probe_local_air_dry,
-    LOCAL_AIR_DRY
-);
-pin_test!(
-    local_air_humid_is_byte_identical,
-    probe_local_air_humid,
-    LOCAL_AIR_HUMID
-);
-pin_test!(
-    density_altitude_is_byte_identical,
-    probe_density_altitude,
-    DENSITY_ALTITUDE
-);
+pin_test!(station_air_is_byte_identical, STATION_AIR);
+pin_test!(local_air_dry_is_byte_identical, LOCAL_AIR_DRY);
+pin_test!(local_air_humid_is_byte_identical, LOCAL_AIR_HUMID);
+pin_test!(density_altitude_is_byte_identical, DENSITY_ALTITUDE);
 pin_test!(
     stability_spin_drift_and_jump_are_byte_identical,
-    probe_stability_spin_jump,
     STABILITY_SPIN_JUMP
 );
+pin_test!(kernel_direct_mode_is_byte_identical, KERNEL_DIRECT);
 pin_test!(
-    kernel_direct_mode_is_byte_identical,
-    probe_kernel_direct,
-    KERNEL_DIRECT
+    kernel_standard_mode_at_rh0_is_byte_identical,
+    KERNEL_STANDARD_RH0
 );
-pin_test!(
-    kernel_standard_mode_at_rh0_holds_to_1e15,
-    probe_kernel_standard_rh0,
-    KERNEL_STANDARD_RH0,
-    relative
-);
-pin_test!(
-    front_ends_dry_are_byte_identical,
-    probe_front_ends_dry,
-    FRONT_ENDS_DRY
-);
-pin_test!(
-    front_ends_humid_are_byte_identical,
-    probe_front_ends_humid,
-    FRONT_ENDS_HUMID
-);
+pin_test!(front_ends_dry_are_byte_identical, FRONT_ENDS_DRY);
+pin_test!(front_ends_humid_are_byte_identical, FRONT_ENDS_HUMID);
 #[cfg(feature = "bridge")]
-pin_test!(
-    bridge_solve_dry_is_byte_identical,
-    probe_bridge_solve_dry,
-    BRIDGE_SOLVE_DRY
-);
+pin_test!(bridge_solve_dry_is_byte_identical, BRIDGE_SOLVE_DRY);
 #[cfg(feature = "bridge")]
-pin_test!(
-    bridge_solve_humid_is_byte_identical,
-    probe_bridge_solve_humid,
-    BRIDGE_SOLVE_HUMID
-);
+pin_test!(bridge_solve_humid_is_byte_identical, BRIDGE_SOLVE_HUMID);
 #[cfg(feature = "ffi")]
-pin_test!(
-    ffi_trajectory_dry_is_byte_identical,
-    probe_ffi_trajectory_dry,
-    FFI_TRAJECTORY_DRY
-);
+pin_test!(ffi_trajectory_dry_is_byte_identical, FFI_TRAJECTORY_DRY);
 #[cfg(feature = "ffi")]
-pin_test!(
-    ffi_trajectory_humid_is_byte_identical,
-    probe_ffi_trajectory_humid,
-    FFI_TRAJECTORY_HUMID
-);
+pin_test!(ffi_trajectory_humid_is_byte_identical, FFI_TRAJECTORY_HUMID);
+
+/// Every group is checked by exactly one test: a group added to `groups()` without a
+/// `pin_test!` would be generated and never compared.
+#[test]
+fn every_group_has_a_test() {
+    let source = include_str!("humidity_byte_identity.rs");
+    for group in groups() {
+        let needle = format!(", {});", group.name);
+        let tests = source.matches(&needle).count()
+            + source.matches(&format!("    {}\n);", group.name)).count();
+        assert_eq!(tests, 1, "{}: {tests} pin_test! entries", group.name);
+    }
+}
+
+/// The groups held to 0.49.0 are exactly the ones whose promise is "0.50.0 equals 0.49.0": never
+/// a group S8 may change (0.49.0 is not its oracle), and every IMMUTABLE group except the one
+/// 0.49.0 cannot be linked for (its C ABI).
+#[test]
+fn every_immutable_group_with_a_0_49_0_entry_is_held_to_0_49_0() {
+    for group in groups() {
+        let held_to_released = matches!(group.check, Check::Released049(_));
+        if s8_may_change(group.name) {
+            assert!(!held_to_released, "{}: S8 may change it", group.name);
+        } else if group.name != "FFI_TRAJECTORY_DRY" {
+            assert!(
+                held_to_released,
+                "{}: IMMUTABLE, and 0.49.0 has it",
+                group.name
+            );
+        }
+    }
+}
+
+/// The released crate really is another engine: where S8 moved the physics, it disagrees with
+/// this one. (Were the dev-dependency ever resolved to this crate itself, every
+/// `Check::Released049` comparison would pass vacuously.)
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn the_released_engine_is_0_49_0_and_not_this_one() {
+    let now = current::probe_local_air_humid();
+    let then = released_0_49_0::probe_local_air_humid();
+    let differing = now
+        .iter()
+        .zip(&then)
+        .flat_map(|((_, a), (_, b))| a.entries.iter().zip(&b.entries))
+        .filter(|((_, a), (_, b))| a.bits() != b.bits())
+        .count();
+    assert!(
+        differing > 0,
+        "0.49.0's aloft air equals this engine's: the oracle is not 0.49.0"
+    );
+    // And it agrees exactly with 0.49.0's own pins where those were captured.
+    if Libm::of_this_build().is_some() {
+        assert_bits(
+            "LOCAL_AIR_DRY",
+            &released_0_49_0::probe_local_air_dry(),
+            LOCAL_AIR_DRY,
+        );
+    }
+}
+
+/// The released 0.49.0 engine is in Cargo.lock as a second `ballistics-engine` package, and the
+/// release bump moves only this crate. At the 0.49.0 -> 0.50.0 bump both copies are 0.49.0, so a
+/// root `cargo update -p ballistics-engine@0.49.0` (bump.sh's old line, and its fallback without
+/// the version) is ambiguous and would stop `scripts/release/bump.sh`; `--workspace` is not.
+#[test]
+fn the_release_bump_moves_only_this_crate_and_never_the_0_49_0_oracle() {
+    // Compiled in, so the test needs no checkout where it runs (a cross-built test binary).
+    let lock = include_str!("../Cargo.lock");
+    let engines: Vec<&str> = lock
+        .split("[[package]]")
+        .filter(|package| package.contains("\nname = \"ballistics-engine\"\n"))
+        .collect();
+    assert_eq!(
+        engines.len(),
+        2,
+        "Cargo.lock: this crate and the 0.49.0 oracle"
+    );
+    assert_eq!(
+        engines
+            .iter()
+            .filter(|package| package.contains("\nversion = \"0.49.0\"\n")
+                && package.contains("\nsource = \"registry+"))
+            .count(),
+        1,
+        "Cargo.lock: the oracle is the released 0.49.0 from crates.io"
+    );
+    let bump = include_str!("../scripts/release/bump.sh");
+    let root_updates: Vec<&str> = bump
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("cargo update") && !line.contains("--manifest-path"))
+        .collect();
+    assert_eq!(
+        root_updates,
+        ["cargo update --workspace"],
+        "scripts/release/bump.sh must move Cargo.lock's own crate with --workspace alone"
+    );
+}
 
 /// Each `LIBM_ALTERNATES` entry names a value the probe records, in a group S8 may re-pin, and
 /// differs from that value's primary pin, so no alternate can widen a pin that does not need it
 /// or outlive the pin it was recorded for.
 #[test]
 fn every_libm_alternate_names_a_pinned_value_it_differs_from() {
-    let pinned = |group: &str| -> Pinned {
-        match group {
-            "MONTE_CARLO_DEFAULT_HUMIDITY" => MONTE_CARLO_DEFAULT_HUMIDITY,
-            "TS_LOB_HUMID" => TS_LOB_HUMID,
-            other => panic!("{other}: add the group to this lookup"),
-        }
-    };
     for &(group_name, case, label, _, bits) in LIBM_ALTERNATES {
         assert!(s8_may_change(group_name), "{group_name} is IMMUTABLE");
-        let group = groups()
-            .into_iter()
-            .find(|group| group.name == group_name)
-            .unwrap_or_else(|| panic!("no group {group_name}"));
+        let group = group_named(group_name);
         let probe = (group.probe)();
         let (case_index, (_, pins)) = probe
             .iter()
@@ -2255,13 +1548,27 @@ fn every_libm_alternate_names_a_pinned_value_it_differs_from() {
             .iter()
             .position(|(entry, _)| entry == label)
             .unwrap_or_else(|| panic!("{group_name}/{case}: no {label}"));
-        let (pinned_case, pinned_bits) = pinned(group_name)[case_index];
+        let (pinned_case, pinned_bits) = group.pinned[case_index];
         assert_eq!(pinned_case, case);
         assert_ne!(
             pinned_bits[label_index], bits,
             "{group_name}/{case} :: {label}: the alternate is the primary pin"
         );
     }
+}
+
+/// The ulp measure the unverified-libm comparison uses.
+#[test]
+fn ulps_apart_counts_representable_values() {
+    assert_eq!(ulps_apart(1.0, 1.0), 0);
+    assert_eq!(ulps_apart(0.0, -0.0), 0);
+    assert_eq!(ulps_apart(1.0, f64::from_bits(1.0f64.to_bits() + 2)), 2);
+    assert_eq!(ulps_apart(-1.0, f64::from_bits((-1.0f64).to_bits() + 3)), 3);
+    assert_eq!(
+        ulps_apart(f64::MIN_POSITIVE, -f64::MIN_POSITIVE),
+        2 * f64::MIN_POSITIVE.to_bits()
+    );
+    assert_eq!(ulps_apart(5e-324, -5e-324), 2);
 }
 
 // ----- PINNED CONSTANTS (generated; see the module docs) -----------------------------------------
@@ -4608,12 +3915,12 @@ const KERNEL_DIRECT: Pinned = &[
 ];
 
 /// Kernel standard mode at RH 0, station and zones dry, the same families plus the lean Monte
-/// Carlo, at both stations. Compared to a relative 1e-15, not bits: the plan allows last-ulp
-/// movement here when S3 moves the kernels onto `air_at`.
+/// Carlo, at both stations.
 ///
 /// IMMUTABLE: no later step may change it, S8 included.
 ///
-/// Floats compared to a relative 1e-15; counts exactly.
+/// Compared to a relative 1e-15 until 0.50.0's R5, which made it bits like every other group: the
+/// plan allowed last-ulp movement here when S3 moved the kernels onto `air_at`, but none happened.
 #[rustfmt::skip]
 const KERNEL_STANDARD_RH0: Pinned = &[
     (

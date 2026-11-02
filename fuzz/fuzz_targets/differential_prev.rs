@@ -4,7 +4,7 @@ use ballistics_engine::{
     AtmosphericConditions as Atmo, BallisticInputs as Inp, RelativeHumidity,
     TrajectorySolver as Solver, WindConditions as Wind,
 };
-use ballistics_engine_fuzz::domain::valid_inputs;
+use ballistics_engine_fuzz::domain::{station_air, valid_inputs};
 use libfuzzer_sys::fuzz_target;
 
 use engine_prev::{
@@ -41,14 +41,24 @@ fn sign(x: f64) -> i8 {
     }
 }
 
+// Both engines fly the drawn air (each its own default atmosphere would discard it, and the two
+// sides used to fly different humidities: the current one 50 %, the 0.21.5 one the draw's).
 fn drop_at_current(inputs: &Inp, range: f64) -> Option<f64> {
-    let r = Solver::new(inputs.clone(), Wind::default(), Atmo::default())
+    let air: Atmo = station_air(inputs);
+    let r = Solver::new(inputs.clone(), Wind::default(), air)
         .solve()
         .ok()?;
     interp_y(r.points.iter().map(|p| (p.position.x, p.position.y)), range)
 }
 fn drop_at_prev(inputs: &PInp, range: f64) -> Option<f64> {
-    let r = PSolver::new(inputs.clone(), PWind::default(), PAtmo::default())
+    // 0.21.5's atmosphere takes a percent, its inputs a fraction.
+    let air = PAtmo {
+        temperature: inputs.temperature,
+        pressure: inputs.pressure,
+        humidity: inputs.humidity * 100.0,
+        altitude: inputs.altitude,
+    };
+    let r = PSolver::new(inputs.clone(), PWind::default(), air)
         .solve()
         .ok()?;
     interp_y(r.points.iter().map(|p| (p.position.x, p.position.y)), range)
@@ -86,9 +96,10 @@ fn to_prev(c: &Inp) -> PInp {
         temperature: c.temperature,
         pressure: c.pressure,
         altitude: c.altitude,
-        // The 0.21.5 field is the 0-1 fraction; the current one is a percent.
+        // The 0.21.5 field is the 0-1 fraction; the current one is a percent, read through the
+        // sensor band as the current engine reads it (a 103 % draw flies as 100 % on both).
         humidity: RelativeHumidity::try_percent(c.humidity_percent)
-            .expect("valid_inputs draws 0..=100 %")
+            .expect("valid_inputs draws inside the sensor band")
             .fraction(),
         use_rk4: true,
         ..Default::default()

@@ -847,6 +847,8 @@ pub(crate) fn compute_derivatives_with_gravity(
         let (local_density, speed_of_sound) =
             (local_air.density_kg_m3, local_air.speed_of_sound_mps);
         let mach = v_mag / speed_of_sound;
+        #[cfg(test)]
+        crate::atmosphere::air_trace::record_consumed(local_density, v_mag, mach);
 
         // Get BC value (potentially from segments)
         let bc_current = match (

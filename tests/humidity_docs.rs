@@ -2,23 +2,30 @@
 //! C6: H19 stale comments, H20 docs that contradict the code).
 //!
 //! Every number the docs give for the humidity change is recomputed here by running the engine,
-//! so a doc can neither quote an estimate nor drift from the code:
+//! so a doc can neither quote an estimate nor drift from the code. Each is checked IN PLACE: a
+//! table must hold exactly the rows the engine gives, whole (so each cell is held to its own
+//! quantity, not to the same digits found anywhere in the section), and a figure in prose is
+//! matched with the words around it. "0.49.0" is the released 0.49.0 crate itself, run beside
+//! this one (the `ballistics_engine_049` dev-dependency):
 //!
-//! - **Sound speed.** The kernels' station sound speed before 0.50.0 (dry, 0 %) and now (the
-//!   station's own humidity), at 15 °C / 50 %, 30 °C / 50 % and 35 °C / 90 %, and the change.
+//! - **Sound speed.** The kernels' station sound speed in 0.49.0 (dry, 0 %) and now (the
+//!   station's own humidity), for every row of the table, and the change.
 //! - **Trajectories.** `try_integrate_trajectory` RK4 at 1 ms: a 2 s flat shot and a 30-degree,
-//!   30 s lob, before and after. "Before" is 0.49.0's kernel air rebuilt on this code,
-//!   `KernelAtmosphere::from_legacy_params` with the humid density ratio and
-//!   `RelativeHumidity::DRY`; that reproduction was checked against the 0.49.0 build itself bit
-//!   for bit, and [`legacy_kernel_air_reproduces_0_49_0`] keeps it honest.
+//!   30 s lob, on 0.49.0 and 0.50.0; the `fast_integrate` flat shot the prose quotes; and the lean
+//!   Monte Carlo at 500 m and 1000 m. [`legacy_kernel_air_reproduces_0_49_0`] holds
+//!   `KernelAtmosphere::from_legacy_params` with `RelativeHumidity::DRY` to 0.49.0's kernel bit
+//!   for bit.
 //! - **The aloft vapour model (S8).** The air at +1 km and +3 km, and three `TrajectorySolver`
-//!   shots (flat to 1000 m, a 30-degree lob, and both from a 1500 m station), before and after.
-//!   "Before" is 0.49.0, which the train before S8 matched bit for bit there; its values were
-//!   flown by the 0.49.0 and 4281ccf builds themselves (the S8 measurement probe), and
-//!   [`the_air_before_s8_is_the_old_aloft_model`] rebuilds the air from the old formulas.
+//!   shots (flat to 1000 m, a 30-degree lob, and both from a 1500 m station), 0.49.0 against
+//!   0.50.0. [`the_air_before_s8_is_the_old_aloft_model`] also rebuilds the old air from the old
+//!   formulas. The aloft change's own share, which only the development build before it could
+//!   measure, is labelled as a one-time measurement, as is the CLI golden-corpus count.
 //! - **The Miller exception.** The factor a humid density would put on the muzzle Miller Sg,
-//!   which 0.50.0 deliberately does not apply. A pin shows the solve's Sg does not move with
+//!   which 0.50.0 deliberately does not apply, in every document that quotes it, and the spin
+//!   drift and aerodynamic jump it would move. A pin shows the solve's Sg does not move with
 //!   humidity.
+//! - **0.49.0's behaviour.** The deprecated `get_local_atmosphere`'s sound-speed shift and the
+//!   steam a NaN humidity flew as.
 //! - **Constants.** The engine's own dry sound speed at 15 °C, which `SPEED_OF_SOUND_MPS`'s doc
 //!   states.
 //!
@@ -34,11 +41,13 @@ use std::path::Path;
 use ballistics_engine::atmosphere::{calculate_air_density_cimp, moist_speed_of_sound};
 use ballistics_engine::trajectory_integration::{try_integrate_trajectory, TrajectoryParams};
 use ballistics_engine::{
-    air_at, calculate_zero_angle_with_station_presence, decode_solve_request_v1, solve_v1,
-    AtmosphericConditions, BallisticInputs, DragModel, KernelAtmosphere, LocalAir,
-    RelativeHumidity, StationAir, StationAtmospherePresence, TrajectorySolver, WindConditions,
-    HUMIDITY_SENSOR_TOLERANCE_PERCENT,
+    air_at, decode_solve_request_v1, solve_v1, BallisticInputs, DragModel, KernelAtmosphere,
+    LocalAir, RelativeHumidity, StationAir, HUMIDITY_SENSOR_TOLERANCE_PERCENT,
 };
+/// The released 0.49.0 engine, run beside this one: the "before" of every 0.49.0 -> 0.50.0
+/// figure.
+#[cfg(not(target_arch = "wasm32"))]
+use ballistics_engine_049 as old;
 
 fn read(relative: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
@@ -264,9 +273,18 @@ fn the_0_50_0_section_states_the_sensor_band_from_its_constant() {
         "HUMIDITY_SENSOR_TOLERANCE_PERCENT",
         "the band constant",
     );
-    for edge in [100.0 + band, -band, 1.0 + band / 100.0, -band / 100.0] {
-        assert_contains(&section, &format!("{edge}"), "a sensor-band edge");
-    }
+    assert_prose(
+        &section,
+        &format!(
+            "`HUMIDITY_SENSOR_TOLERANCE_PERCENT` = {band} points around 0-100 %, so a percent \
+             from {} to {}, or a fraction from {} to {}.",
+            -band,
+            100.0 + band,
+            -band / 100.0,
+            1.0 + band / 100.0
+        ),
+        "the sensor band",
+    );
 }
 
 #[test]
@@ -284,11 +302,64 @@ fn the_0_50_0_section_lists_the_downstream_follow_ups() {
 }
 
 // =================================================================================================
-// Numbers the CHANGELOG quotes, from the engine
+// Numbers the CHANGELOG quotes, from the engine, each in its own row and column
 // =================================================================================================
+//
+// Every quoted number is checked in place: a table must hold exactly the rows the engine gives,
+// each row whole (so a cell is checked against its own quantity, not against the same digits
+// anywhere in the section), and a figure in prose is checked with the words around it. "0.49.0"
+// is the released 0.49.0 crate itself, run beside this one (the `ballistics_engine_049`
+// dev-dependency; native only, so these tests are too).
+
+/// The rows of the Markdown table whose header line is `header`, in order (not the header or the
+/// `|---|` rule).
+fn table_rows(section: &str, header: &str) -> Vec<String> {
+    let mut lines = section.lines().skip_while(|line| *line != header);
+    assert_eq!(lines.next(), Some(header), "no table headed `{header}`");
+    lines.next();
+    lines
+        .take_while(|line| line.starts_with('|'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The table headed `header` holds exactly `expected`, row for row.
+fn assert_table(section: &str, header: &str, expected: &[String]) {
+    let rows = table_rows(section, header);
+    assert_eq!(
+        rows, expected,
+        "the table headed `{header}` is not the engine's:\n  doc:    {rows:#?}\n  engine: {expected:#?}"
+    );
+}
+
+/// `text` with every run of whitespace, line breaks included, as one space, and each line's
+/// leading `///`, `//!` or `//` dropped, so prose can be matched across a line wrap in a
+/// Markdown file or a doc comment.
+fn normalized(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            let line = line.trim_start();
+            line.strip_prefix("///")
+                .or_else(|| line.strip_prefix("//!"))
+                .or_else(|| line.strip_prefix("//"))
+                .unwrap_or(line)
+        })
+        .flat_map(str::split_whitespace)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `prose` (one sentence or clause, single-spaced) appears in `text` as written, line wraps aside.
+fn assert_prose(text: &str, prose: &str, what: &str) {
+    assert!(
+        normalized(text).contains(prose),
+        "{what}: missing `{prose}`"
+    );
+}
 
 const SEA_LEVEL_HPA: f64 = 1013.25;
-/// The humid conditions the CHANGELOG quotes, at sea level: (temperature C, RH percent).
+/// The humid conditions most of the CHANGELOG's figures quote, at sea level: (temperature C, RH
+/// percent).
 const QUOTED: [(f64, f64); 3] = [(15.0, 50.0), (30.0, 50.0), (35.0, 90.0)];
 
 fn station(temperature_c: f64, humidity_percent: f64) -> StationAir {
@@ -301,22 +372,59 @@ fn station(temperature_c: f64, humidity_percent: f64) -> StationAir {
     .unwrap()
 }
 
+/// What 0.49.0's kernels and lean Monte Carlo were given for a sea-level station: its humid
+/// CIPM density ratio (0.49.0's `calculate_atmosphere`), in the legacy standard-mode tuple.
+#[cfg(not(target_arch = "wasm32"))]
+fn released_tuple(temperature_c: f64, humidity_percent: f64) -> (f64, f64, f64, f64) {
+    let (density, _) = old::atmosphere::calculate_atmosphere(
+        0.0,
+        Some(temperature_c),
+        Some(SEA_LEVEL_HPA),
+        humidity_percent,
+    );
+    (0.0, temperature_c, SEA_LEVEL_HPA, density / 1.225)
+}
+
+/// The kernel sound-speed table's stations, in its order: (temperature C, RH percent).
+#[cfg(not(target_arch = "wasm32"))]
+const SOUND_SPEED_ROWS: [(f64, f64); 5] = [
+    (-10.0, 50.0),
+    (15.0, 50.0),
+    (15.0, 100.0),
+    (30.0, 50.0),
+    (35.0, 90.0),
+];
+
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn the_0_50_0_sound_speed_shifts_are_engine_output() {
-    let section = release_section();
-    for (temperature_c, humidity_percent) in QUOTED {
-        // 0.49.0's kernels flew the station's sound speed at 0 %; 0.50.0's fly its own humidity.
-        let dry = station(temperature_c, 0.0).speed_of_sound_mps();
-        let moist = station(temperature_c, humidity_percent).speed_of_sound_mps();
-        let what = format!("sound speed at {temperature_c} C / {humidity_percent} %");
-        assert_contains(&section, &format!("{dry:.3}"), &what);
-        assert_contains(&section, &format!("{moist:.3}"), &what);
-        assert_contains(
-            &section,
-            &format!("{:+.3}%", (moist / dry - 1.0) * 100.0),
-            &what,
-        );
-    }
+    let expected: Vec<String> = SOUND_SPEED_ROWS
+        .iter()
+        .map(|&(temperature_c, humidity_percent)| {
+            // 0.49.0's kernels flew the station's air with the sound speed at 0 %: its own
+            // per-step air at the station's height, humidity argument 0.
+            let (.., ratio) = released_tuple(temperature_c, humidity_percent);
+            let (_, before) = old::atmosphere::get_local_atmosphere_humid(
+                0.0,
+                0.0,
+                temperature_c,
+                SEA_LEVEL_HPA,
+                ratio,
+                0.0,
+            );
+            let after = station(temperature_c, humidity_percent).speed_of_sound_mps();
+            format!(
+                "| {temperature_c} °C / {humidity_percent} % | {before:.3} m/s | {after:.3} m/s | \
+                 {:+.3}% |",
+                (after / before - 1.0) * 100.0
+            )
+        })
+        .collect();
+    assert_table(
+        &release_section(),
+        "| Station, 1013.25 hPa | Kernel sound speed, 0.49.0 | 0.50.0 | Change |",
+        &expected,
+    );
 }
 
 const MASS_KG: f64 = 0.011_34; // .308 175 gr
@@ -325,35 +433,42 @@ const LENGTH_M: f64 = 0.031_5; // 1.24 in
 const MUZZLE_VELOCITY_MPS: f64 = 792.48; // 2600 fps
 const BC_G7: f64 = 0.243;
 
+/// `TrajectoryParams` for `engine` (this crate or 0.49.0), with its own atmosphere field.
+macro_rules! kernel_params {
+    ($engine:ident, $($atmosphere:tt)+) => {
+        $engine::trajectory_integration::TrajectoryParams {
+            mass_kg: MASS_KG,
+            bc: BC_G7,
+            drag_model: $engine::DragModel::G7,
+            wind_segments: vec![],
+            $($atmosphere)+,
+            omega_vector: None,
+            enable_spin_drift: false,
+            enable_magnus: false,
+            enable_coriolis: false,
+            target_distance_m: 1.0e6,
+            enable_wind_shear: false,
+            wind_shear_model: "none".into(),
+            shooter_altitude_m: 0.0,
+            is_twist_right: true,
+            shooting_angle: 0.0,
+            bullet_diameter: DIAMETER_M,
+            bullet_length: LENGTH_M,
+            twist_rate: 10.0,
+            custom_drag_table: None,
+            cd_scale: 1.0,
+            custom_drag_reference: false,
+            bc_segments: None,
+            use_bc_segments: false,
+            bc_segments_data: None,
+            ground_threshold: -1.0e5,
+            atmo_sock: None,
+        }
+    };
+}
+
 fn params(atmosphere: KernelAtmosphere) -> TrajectoryParams {
-    TrajectoryParams {
-        mass_kg: MASS_KG,
-        bc: BC_G7,
-        drag_model: DragModel::G7,
-        wind_segments: vec![],
-        atmosphere,
-        omega_vector: None,
-        enable_spin_drift: false,
-        enable_magnus: false,
-        enable_coriolis: false,
-        target_distance_m: 1.0e6,
-        enable_wind_shear: false,
-        wind_shear_model: "none".into(),
-        shooter_altitude_m: 0.0,
-        is_twist_right: true,
-        shooting_angle: 0.0,
-        bullet_diameter: DIAMETER_M,
-        bullet_length: LENGTH_M,
-        twist_rate: 10.0,
-        custom_drag_table: None,
-        cd_scale: 1.0,
-        custom_drag_reference: false,
-        bc_segments: None,
-        use_bc_segments: false,
-        bc_segments_data: None,
-        ground_threshold: -1.0e5,
-        atmo_sock: None,
-    }
+    kernel_params!(ballistics_engine, atmosphere)
 }
 
 /// 0.49.0's kernel air at a humid station: the humid density ratio with a 0 % sound speed.
@@ -366,18 +481,27 @@ fn legacy_kernel_air(temperature_c: f64, humidity_percent: f64) -> KernelAtmosph
     .unwrap()
 }
 
-/// `(downrange m, height m, speed m/s)` at the end of an RK4 1 ms flight.
-fn fly(atmosphere: KernelAtmosphere, angle_rad: f64, seconds: f64) -> (f64, f64, f64) {
-    let launch = [
+fn launch(angle_rad: f64) -> [f64; 6] {
+    [
         0.0,
         0.0,
         0.0,
         MUZZLE_VELOCITY_MPS * angle_rad.cos(),
         MUZZLE_VELOCITY_MPS * angle_rad.sin(),
         0.0,
-    ];
+    ]
+}
+
+/// `(downrange m, height m, speed m/s)` of a kernel state `[x, y, z, vx, vy, vz]`.
+fn endpoint(state: &impl std::ops::Index<usize, Output = f64>) -> (f64, f64, f64) {
+    let speed = (state[3] * state[3] + state[4] * state[4] + state[5] * state[5]).sqrt();
+    (state[0], state[1], speed)
+}
+
+/// `(downrange m, height m, speed m/s)` at the end of an RK4 1 ms flight.
+fn fly(atmosphere: KernelAtmosphere, angle_rad: f64, seconds: f64) -> (f64, f64, f64) {
     let steps = try_integrate_trajectory(
-        launch,
+        launch(angle_rad),
         (0.0, seconds),
         params(atmosphere),
         "RK4",
@@ -387,17 +511,64 @@ fn fly(atmosphere: KernelAtmosphere, angle_rad: f64, seconds: f64) -> (f64, f64,
     .expect("valid kernel input");
     let (time, state) = steps.last().unwrap();
     assert_eq!(*time, seconds);
-    let speed = (state[3] * state[3] + state[4] * state[4] + state[5] * state[5]).sqrt();
-    (state[0], state[1], speed)
+    endpoint(state)
+}
+
+/// The same flight on the released 0.49.0 kernel, given what 0.49.0's callers gave it.
+#[cfg(not(target_arch = "wasm32"))]
+fn fly_released(
+    temperature_c: f64,
+    humidity_percent: f64,
+    angle_rad: f64,
+    seconds: f64,
+) -> (f64, f64, f64) {
+    let steps = old::trajectory_integration::try_integrate_trajectory(
+        launch(angle_rad),
+        (0.0, seconds),
+        kernel_params!(old, atmos_params: released_tuple(temperature_c, humidity_percent)),
+        "RK4",
+        1e-6,
+        0.001,
+    )
+    .expect("valid kernel input");
+    let (time, state) = steps.last().unwrap();
+    assert_eq!(*time, seconds);
+    endpoint(state)
 }
 
 const FLAT: (f64, f64) = (0.002, 2.0);
 const LOB: (f64, f64) = (std::f64::consts::FRAC_PI_6, 30.0);
 
-/// The rebuilt "before" is 0.49.0's kernel: the 0.49.0 build itself (main 261c1eb) flew these
-/// at 15 C / 50 % (the S7 measurement probe). 1e-12 relative leaves room for another libm.
+#[cfg(not(target_arch = "wasm32"))]
+fn bits((x, y, v): (f64, f64, f64)) -> [u64; 3] {
+    [x.to_bits(), y.to_bits(), v.to_bits()]
+}
+
+/// The rebuilt "before" is 0.49.0's kernel, bit for bit: the released 0.49.0 crate flies the
+/// same shots beside it, on whatever platform runs this. The constants are what the 0.49.0 build
+/// itself (main 261c1eb) flew at 15 C / 50 % on macOS (the S7 measurement probe); 1e-12 relative
+/// leaves room for another libm.
 #[test]
 fn legacy_kernel_air_reproduces_0_49_0() {
+    #[cfg(not(target_arch = "wasm32"))]
+    for (temperature_c, humidity_percent) in QUOTED.into_iter().chain([(15.0, 0.0)]) {
+        for (shot, (angle_rad, seconds)) in [("flat", FLAT), ("lob", LOB)] {
+            assert_eq!(
+                bits(fly(
+                    legacy_kernel_air(temperature_c, humidity_percent),
+                    angle_rad,
+                    seconds
+                )),
+                bits(fly_released(
+                    temperature_c,
+                    humidity_percent,
+                    angle_rad,
+                    seconds
+                )),
+                "{shot} at {temperature_c} C / {humidity_percent} %: the rebuild is not 0.49.0"
+            );
+        }
+    }
     let close = |got: f64, want: f64| (got - want).abs() <= 1e-12 * want.abs();
     let (x, y, v) = fly(legacy_kernel_air(15.0, 50.0), FLAT.0, FLAT.1);
     assert!(close(x, 983.029_417_355_035_3), "flat x {x:?}");
@@ -418,25 +589,221 @@ fn legacy_kernel_air_reproduces_0_49_0() {
     );
 }
 
+/// The kernel shift table: each cell is `try_integrate_trajectory` RK4 at 1 ms on 0.50.0 minus the
+/// same on 0.49.0, for its own shot, quantity and station.
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn the_0_50_0_trajectory_shifts_are_engine_output() {
-    let section = release_section();
-    for (temperature_c, humidity_percent) in QUOTED {
-        let before = legacy_kernel_air(temperature_c, humidity_percent);
-        let after = KernelAtmosphere::Station(station(temperature_c, humidity_percent));
-        let what = format!("trajectory shift at {temperature_c} C / {humidity_percent} %");
+    /// `(downrange m, height mm, speed m/s)` of the flat shot and `(downrange m, height m)` of the
+    /// lob, 0.50.0 minus 0.49.0.
+    type Shift = (f64, f64, f64, f64, f64);
+    let shifts: Vec<Shift> = QUOTED
+        .iter()
+        .map(|&(temperature_c, humidity_percent)| {
+            let after = KernelAtmosphere::Station(station(temperature_c, humidity_percent));
+            let (x0, y0, v0) = fly_released(temperature_c, humidity_percent, FLAT.0, FLAT.1);
+            let (x1, y1, v1) = fly(after, FLAT.0, FLAT.1);
+            let (lx0, ly0, _) = fly_released(temperature_c, humidity_percent, LOB.0, LOB.1);
+            let (lx1, ly1, _) = fly(after, LOB.0, LOB.1);
+            (x1 - x0, (y1 - y0) * 1000.0, v1 - v0, lx1 - lx0, ly1 - ly0)
+        })
+        .collect();
+    let row = |label: String, cell: &dyn Fn(&Shift) -> String| {
+        let cells: Vec<String> = shifts.iter().map(cell).collect();
+        format!("| {label} | {} |", cells.join(" | "))
+    };
+    let flat_deg = FLAT.0.to_degrees();
+    let expected = [
+        row(
+            format!("2 s flat ({flat_deg:.2}°): downrange at 2 s"),
+            &|s| format!("{:+.3} m", s.0),
+        ),
+        row("2 s flat: height at 2 s".into(), &|s| {
+            format!("{:+.1} mm", s.1)
+        }),
+        row("2 s flat: speed at 2 s".into(), &|s| {
+            format!("{:+.3} m/s", s.2)
+        }),
+        row("30° lob: downrange at 30 s".into(), &|s| {
+            format!("{:+.3} m", s.3)
+        }),
+        row("30° lob: height at 30 s".into(), &|s| {
+            format!("{:+.3} m", s.4)
+        }),
+    ];
+    let header = format!(
+        "| Shot | {} |",
+        QUOTED
+            .iter()
+            .map(|(t, rh)| format!("{t} °C / {rh} %"))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
+    assert_table(&release_section(), &header, &expected);
 
-        let (x0, y0, v0) = fly(before, FLAT.0, FLAT.1);
-        let (x1, y1, v1) = fly(after, FLAT.0, FLAT.1);
-        assert_contains(&section, &format!("{:+.3} m", x1 - x0), &what);
-        assert_contains(&section, &format!("{:+.1} mm", (y1 - y0) * 1000.0), &what);
-        assert_contains(&section, &format!("{:+.3} m/s", v1 - v0), &what);
+    // "`fast_integrate` moves the same on the flat shot": its own 2 s flat shot, 0.50.0 minus
+    // 0.49.0, at the two conditions the sentence names, equal to the table's at its precision.
+    let fast_shift = |temperature_c: f64, humidity_percent: f64| {
+        let mut inputs = BallisticInputs {
+            bc_value: BC_G7,
+            bc_type: DragModel::G7,
+            bullet_mass: MASS_KG,
+            muzzle_velocity: MUZZLE_VELOCITY_MPS,
+            bullet_diameter: DIAMETER_M,
+            bullet_length: LENGTH_M,
+            twist_rate: 10.0,
+            caliber_inches: DIAMETER_M / 0.0254,
+            weight_grains: MASS_KG / 0.000_064_798_91,
+            temperature: temperature_c,
+            pressure: SEA_LEVEL_HPA,
+            ground_threshold: -1.0e5,
+            ..BallisticInputs::default()
+        };
+        inputs.humidity_percent = humidity_percent;
+        let after = ballistics_engine::fast_trajectory::fast_integrate(
+            &inputs,
+            &ballistics_engine::wind::WindSock::new(vec![]),
+            ballistics_engine::fast_trajectory::FastIntegrationParams {
+                horiz: 1.0e6,
+                vert: 0.0,
+                initial_state: launch(FLAT.0),
+                t_span: (0.0, FLAT.1),
+                atmosphere: KernelAtmosphere::Station(station(temperature_c, humidity_percent)),
+                atmo_sock: None,
+            },
+        );
+        let old_inputs = old::BallisticInputs {
+            bc_value: BC_G7,
+            bc_type: old::DragModel::G7,
+            bullet_mass: MASS_KG,
+            muzzle_velocity: MUZZLE_VELOCITY_MPS,
+            bullet_diameter: DIAMETER_M,
+            bullet_length: LENGTH_M,
+            twist_rate: 10.0,
+            caliber_inches: DIAMETER_M / 0.0254,
+            weight_grains: MASS_KG / 0.000_064_798_91,
+            temperature: temperature_c,
+            pressure: SEA_LEVEL_HPA,
+            ground_threshold: -1.0e5,
+            humidity: humidity_percent / 100.0,
+            ..old::BallisticInputs::default()
+        };
+        let before = old::fast_trajectory::fast_integrate(
+            &old_inputs,
+            &old::wind::WindSock::new(vec![]),
+            old::fast_trajectory::FastIntegrationParams {
+                horiz: 1.0e6,
+                vert: 0.0,
+                initial_state: launch(FLAT.0),
+                t_span: (0.0, FLAT.1),
+                atmo_params: released_tuple(temperature_c, humidity_percent),
+                atmo_sock: None,
+            },
+        );
+        let last = |t: &[f64]| t.len() - 1;
+        assert_eq!(after.t[last(&after.t)], FLAT.1);
+        assert_eq!(before.t[last(&before.t)], FLAT.1);
+        after.y[0][last(&after.t)] - before.y[0][last(&before.t)]
+    };
+    let (f15, f35) = (fast_shift(15.0, 50.0), fast_shift(35.0, 90.0));
+    assert_eq!(format!("{f15:+.3}"), format!("{:+.3}", shifts[0].0));
+    assert_eq!(format!("{f35:+.3}"), format!("{:+.3}", shifts[2].0));
+    assert_prose(
+        &release_section(),
+        &format!(
+            "`fast_integrate` moves the same on the flat shot: {f15:+.3} m at 15 °C / 50 % and \
+             {f35:+.3} m at 35 °C / 90 %."
+        ),
+        "the fast_integrate shift",
+    );
+}
 
-        let (x0, y0, _) = fly(before, LOB.0, LOB.1);
-        let (x1, y1, _) = fly(after, LOB.0, LOB.1);
-        assert_contains(&section, &format!("{:+.3} m", x1 - x0), &what);
-        assert_contains(&section, &format!("{:+.3} m", y1 - y0), &what);
+/// The lean Monte Carlo lines: `solve_trajectory_for_monte_carlo` at its default humidity (50 %),
+/// the same bullet at 15 C and sea level, on 0.49.0 and on 0.50.0.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn the_0_50_0_lean_monte_carlo_shifts_are_engine_output() {
+    macro_rules! lean_mc {
+        ($engine:ident, $target:expr) => {{
+            let inputs = $engine::BallisticInputs {
+                bc_value: BC_G7,
+                bc_type: $engine::DragModel::G7,
+                bullet_mass: MASS_KG,
+                muzzle_velocity: MUZZLE_VELOCITY_MPS,
+                bullet_diameter: DIAMETER_M,
+                bullet_length: LENGTH_M,
+                twist_rate: 10.0,
+                caliber_inches: DIAMETER_M / 0.0254,
+                weight_grains: MASS_KG / 0.000_064_798_91,
+                sight_height: 0.0,
+                muzzle_height: 0.0,
+                altitude: 0.0,
+                temperature: 15.0,
+                pressure: SEA_LEVEL_HPA,
+                ground_threshold: -1.0e5,
+                target_distance: $target,
+                ..$engine::BallisticInputs::default()
+            };
+            let out = $engine::monte_carlo::solve_trajectory_for_monte_carlo(&inputs)
+                .expect("lean Monte Carlo");
+            (out.drop, out.velocity, out.mach)
+        }};
     }
+    assert_eq!(BallisticInputs::default().humidity_percent, 50.0);
+    assert_eq!(old::BallisticInputs::default().humidity, 0.5);
+    let section = release_section();
+    let (d0, v0, m0) = lean_mc!(old, 500.0);
+    let (d1, v1, m1) = lean_mc!(ballistics_engine, 500.0);
+    assert_prose(
+        &section,
+        &format!(
+            "- at 500 m, drop {:+.3} mm ({d0:.5} to {d1:.5} m), speed {:+.3} m/s and Mach \
+             {m0:.5} to {m1:.5};",
+            (d1 - d0) * 1000.0,
+            v1 - v0
+        ),
+        "the lean Monte Carlo at 500 m",
+    );
+    let (d0, v0, m0) = lean_mc!(old, 1000.0);
+    let (d1, v1, m1) = lean_mc!(ballistics_engine, 1000.0);
+    assert_prose(
+        &section,
+        &format!(
+            "- at 1000 m, drop {:+.2} mm ({d0:.4} to {d1:.4} m), speed {:+.3} m/s and Mach \
+             {m0:.5} to {m1:.5}.",
+            (d1 - d0) * 1000.0,
+            v1 - v0
+        ),
+        "the lean Monte Carlo at 1000 m",
+    );
+}
+
+/// The figures no engine at hand can recompute are labelled as measurements: the aloft change's
+/// own share of the kernel and lean Monte Carlo shifts (measured against the development build
+/// just before it, which no released crate is), and the CLI golden corpus count.
+#[test]
+fn the_0_50_0_measured_figures_say_so() {
+    let section = release_section();
+    assert_prose(
+        &section,
+        "On the 30° lob that change alone was measured at -0.385 m of the downrange at \
+         15 °C / 50 %, -1.020 m at 30 °C / 50 % and -2.515 m at 35 °C / 90 %, against the \
+         development build just before it; no released engine reproduces that build, so these \
+         are not recomputed.",
+        "the kernels' aloft-alone share",
+    );
+    assert_prose(
+        &section,
+        "on its own it was measured, the same way, at -0.13 µm of drop and +0.0001 m/s of \
+         speed at 500 m, and -0.010 mm and -0.0007 m/s at 1000 m.",
+        "the lean Monte Carlo's aloft-alone share",
+    );
+    assert_prose(
+        &section,
+        "A golden diff of the CLI corpus against the 0.49.0 binary, run once, measured this: \
+         70 of its 418 runs move,",
+        "the corpus count",
+    );
 }
 
 // =================================================================================================
@@ -444,12 +811,10 @@ fn the_0_50_0_trajectory_shifts_are_engine_output() {
 // =================================================================================================
 
 const SEA_LEVEL_STATION_HPA: f64 = 1013.25;
-/// The conditions the aloft table quotes: (temperature C, RH percent).
-const ALOFT_QUOTED: [(f64, f64); 2] = [(15.0, 50.0), (35.0, 90.0)];
 
 /// The air over a sea-level station at 1013.25 hPa before S8, as the 0.49.0 build (main 261c1eb)
 /// and the 4281ccf build flew it, bit for bit alike: `(T C, RH %, height m, density kg/m3,
-/// sound speed m/s)`.
+/// sound speed m/s)`. The rows of the aloft table, in its order.
 const AIR_BEFORE_S8: [(f64, f64, f64, f64, f64); 4] = [
     (15.0, 50.0, 1000.0, 1.1086026577295789, 336.76382227330026),
     (15.0, 50.0, 3000.0, 0.9067541155034896, 328.7463422984116),
@@ -471,7 +836,8 @@ fn air_over_sea_level(temperature_c: f64, humidity_percent: f64, height_m: f64) 
 /// The constants above are the old model: the dry pressure lapse, the density scaled by
 /// `(T_0 P) / (P_0 T)`, and the sound speed re-derived from the held RELATIVE humidity at the
 /// local temperature and pressure. Dry air's lapse did not change, so it supplies the old
-/// temperature and pressure.
+/// temperature and pressure. They are also what the released 0.49.0 crate gives, run beside
+/// this one.
 #[test]
 fn the_air_before_s8_is_the_old_aloft_model() {
     for (temperature_c, humidity_percent, height_m, density, sound_speed) in AIR_BEFORE_S8 {
@@ -499,211 +865,201 @@ fn the_air_before_s8_is_the_old_aloft_model() {
             close(old_density, density),
             "density {what}: {old_density:?}"
         );
-    }
-}
-
-/// `(station, altitude m, pressure hPa, T C, RH %, flat drop at 1000 m m, flat speed at
-/// 1000 m m/s, lob range m, lob apex m, lob impact speed m/s)` before S8, flown by the 0.49.0
-/// and 4281ccf builds, bit for bit alike.
-#[allow(clippy::type_complexity)]
-const SHOTS_BEFORE_S8: [(&str, f64, f64, f64, f64, f64, f64, f64, f64, f64); 4] = [
-    (
-        "sea level",
-        0.0,
-        1013.25,
-        15.0,
-        50.0,
-        14.283070868744938,
-        315.91839047884184,
-        4643.827151319146,
-        1107.2037843284834,
-        140.22246913957096,
-    ),
-    (
-        "sea level",
-        0.0,
-        1013.25,
-        35.0,
-        90.0,
-        13.456344837416587,
-        333.5755196962042,
-        4967.3410410665165,
-        1174.9812842154524,
-        145.52515063650773,
-    ),
-    (
-        "1500 m",
-        1500.0,
-        845.6,
-        15.0,
-        50.0,
-        12.234306304109765,
-        362.120280940684,
-        5241.572104789031,
-        1226.5146272252885,
-        151.53885237740963,
-    ),
-    (
-        "1500 m",
-        1500.0,
-        845.6,
-        35.0,
-        90.0,
-        11.666142478948375,
-        384.60831144456057,
-        5613.809630005237,
-        1302.0284360797184,
-        157.45728165755804,
-    ),
-];
-
-const SIGHT_HEIGHT_M: f64 = 0.0381; // 1.5 in
-
-fn shot_inputs(
-    altitude_m: f64,
-    temperature_c: f64,
-    pressure_hpa: f64,
-    angle_rad: f64,
-) -> BallisticInputs {
-    BallisticInputs {
-        bc_value: BC_G7,
-        bc_type: DragModel::G7,
-        bullet_mass: MASS_KG,
-        muzzle_velocity: MUZZLE_VELOCITY_MPS,
-        bullet_diameter: DIAMETER_M,
-        bullet_length: LENGTH_M,
-        twist_rate: 10.0,
-        muzzle_angle: angle_rad,
-        sight_height: SIGHT_HEIGHT_M,
-        altitude: altitude_m,
-        temperature: temperature_c,
-        pressure: pressure_hpa,
-        use_rk4: true,
-        ..BallisticInputs::default()
-    }
-}
-
-/// `(drop at 1000 m, speed at 1000 m, lob range, lob apex, lob impact speed)` from
-/// `TrajectorySolver` (RK4): the flat shot zeroed at 100 m, the lob at 30 degrees until it falls
-/// 100 m below the muzzle.
-fn solver_shots(
-    altitude_m: f64,
-    pressure_hpa: f64,
-    temperature_c: f64,
-    humidity_percent: f64,
-) -> (f64, f64, f64, f64, f64) {
-    let air = AtmosphericConditions {
-        temperature: temperature_c,
-        pressure: pressure_hpa,
-        humidity: humidity_percent,
-        altitude: altitude_m,
-    };
-    let presence = StationAtmospherePresence::BOTH;
-    let zero = calculate_zero_angle_with_station_presence(
-        shot_inputs(altitude_m, temperature_c, pressure_hpa, 0.0),
-        100.0,
-        SIGHT_HEIGHT_M,
-        WindConditions::default(),
-        air.clone(),
-        presence,
-    )
-    .unwrap();
-    let mut flat = shot_inputs(altitude_m, temperature_c, pressure_hpa, zero);
-    flat.enable_trajectory_sampling = true;
-    flat.sample_interval = 100.0;
-    let mut solver = TrajectorySolver::new_with_station_presence(
-        flat,
-        WindConditions::default(),
-        air.clone(),
-        presence,
-    );
-    solver.set_max_range(1000.0);
-    let flat = solver.solve().unwrap();
-    let last = flat
-        .sampled_points
-        .as_ref()
-        .unwrap()
-        .last()
-        .unwrap()
-        .clone();
-    assert_eq!(last.distance_m, 1000.0);
-    let mut solver = TrajectorySolver::new_with_station_presence(
-        shot_inputs(
-            altitude_m,
-            temperature_c,
-            pressure_hpa,
-            std::f64::consts::FRAC_PI_6,
-        ),
-        WindConditions::default(),
-        air,
-        presence,
-    );
-    solver.set_max_range(30_000.0);
-    let lob = solver.solve().unwrap();
-    (
-        last.drop_m,
-        last.velocity_mps,
-        lob.max_range,
-        lob.max_height,
-        lob.impact_velocity,
-    )
-}
-
-#[test]
-fn the_aloft_vapour_model_shifts_are_engine_output() {
-    let section = release_section();
-    for (temperature_c, humidity_percent, height_m, density, sound_speed) in AIR_BEFORE_S8 {
-        assert!(ALOFT_QUOTED.contains(&(temperature_c, humidity_percent)));
-        let air = air_over_sea_level(temperature_c, humidity_percent, height_m);
-        let what = format!("air at {temperature_c} C / {humidity_percent} % +{height_m} m");
-        assert_contains(
-            &section,
-            &format!(
-                "{sound_speed:.3} → {:.3} m/s ({:+.3}%)",
-                air.speed_of_sound_mps,
-                (air.speed_of_sound_mps / sound_speed - 1.0) * 100.0
-            ),
-            &what,
-        );
-        assert_contains(
-            &section,
-            &format!(
-                "{density:.4} → {:.4} kg/m³ ({:+.3}%)",
-                air.density_kg_m3,
-                (air.density_kg_m3 / density - 1.0) * 100.0
-            ),
-            &what,
-        );
-    }
-    for (
-        station,
-        altitude_m,
-        pressure_hpa,
-        temperature_c,
-        humidity_percent,
-        drop,
-        speed,
-        range,
-        apex,
-        impact,
-    ) in SHOTS_BEFORE_S8
-    {
-        let (drop1, speed1, range1, apex1, impact1) =
-            solver_shots(altitude_m, pressure_hpa, temperature_c, humidity_percent);
-        let what = format!("{station} {temperature_c} C / {humidity_percent} %");
-        assert_contains(
-            &section,
-            &format!("{:+.3} mm", (drop1 - drop) * 1000.0),
-            &what,
-        );
-        assert_contains(&section, &format!("{:+.4} m/s", speed1 - speed), &what);
-        assert_contains(&section, &format!("{:+.3} m (", range1 - range), &what);
-        assert_contains(&section, &format!("{range:.2} → {range1:.2} m"), &what);
-        if station == "sea level" {
-            assert_contains(&section, &format!("{:+.3} m |", apex1 - apex), &what);
-            assert_contains(&section, &format!("{:+.3} m/s |", impact1 - impact), &what);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (released_density, released_sound_speed) =
+                released_air_aloft(temperature_c, humidity_percent, height_m);
+            assert!(
+                close(released_density, density),
+                "0.49.0 density {what}: {released_density:?}"
+            );
+            assert!(
+                close(released_sound_speed, sound_speed),
+                "0.49.0 c {what}: {released_sound_speed:?}"
+            );
         }
     }
+}
+
+/// 0.49.0's per-step air `height_m` over a sea-level station: `TrajectorySolver`'s lookup, the
+/// station's CIPM ratio and relative humidity carried up by `get_local_atmosphere_humid`.
+#[cfg(not(target_arch = "wasm32"))]
+fn released_air_aloft(temperature_c: f64, humidity_percent: f64, height_m: f64) -> (f64, f64) {
+    let (.., ratio) = released_tuple(temperature_c, humidity_percent);
+    old::atmosphere::get_local_atmosphere_humid(
+        height_m,
+        0.0,
+        temperature_c,
+        SEA_LEVEL_STATION_HPA,
+        ratio,
+        humidity_percent,
+    )
+}
+
+/// The aloft table, row by row: 0.49.0's air (the constants, checked against the released crate
+/// above) against 0.50.0's.
+#[test]
+fn the_aloft_air_table_is_engine_output() {
+    let expected: Vec<String> = AIR_BEFORE_S8
+        .iter()
+        .map(
+            |&(temperature_c, humidity_percent, height_m, density, sound_speed)| {
+                let air = air_over_sea_level(temperature_c, humidity_percent, height_m);
+                format!(
+                    "| {temperature_c} °C / {humidity_percent} % | +{} km | {sound_speed:.3} → \
+                     {:.3} m/s ({:+.3}%) | {density:.4} → {:.4} kg/m³ ({:+.3}%) |",
+                    height_m / 1000.0,
+                    air.speed_of_sound_mps,
+                    (air.speed_of_sound_mps / sound_speed - 1.0) * 100.0,
+                    air.density_kg_m3,
+                    (air.density_kg_m3 / density - 1.0) * 100.0
+                )
+            },
+        )
+        .collect();
+    assert_table(
+        &release_section(),
+        "| Station | Height | Sound speed | Density |",
+        &expected,
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+const SIGHT_HEIGHT_M: f64 = 0.0381; // 1.5 in
+
+/// `(drop at 1000 m, speed at 1000 m, lob range, lob apex, lob impact speed)` from
+/// `TrajectorySolver` (RK4) on `engine` (this crate or 0.49.0): the flat shot zeroed at 100 m, the
+/// lob at 30 degrees until it falls 100 m below the muzzle.
+#[cfg(not(target_arch = "wasm32"))]
+macro_rules! solver_shots {
+    ($engine:ident, $altitude_m:expr, $pressure_hpa:expr, $temperature_c:expr, $humidity:expr) => {{
+        use $engine::{
+            calculate_zero_angle_with_station_presence, AtmosphericConditions, BallisticInputs,
+            DragModel, StationAtmospherePresence, TrajectorySolver, WindConditions,
+        };
+        let (altitude_m, pressure_hpa, temperature_c) =
+            ($altitude_m, $pressure_hpa, $temperature_c);
+        let shot_inputs = |angle_rad: f64| BallisticInputs {
+            bc_value: BC_G7,
+            bc_type: DragModel::G7,
+            bullet_mass: MASS_KG,
+            muzzle_velocity: MUZZLE_VELOCITY_MPS,
+            bullet_diameter: DIAMETER_M,
+            bullet_length: LENGTH_M,
+            twist_rate: 10.0,
+            muzzle_angle: angle_rad,
+            sight_height: SIGHT_HEIGHT_M,
+            altitude: altitude_m,
+            temperature: temperature_c,
+            pressure: pressure_hpa,
+            use_rk4: true,
+            ..BallisticInputs::default()
+        };
+        let air = AtmosphericConditions {
+            temperature: temperature_c,
+            pressure: pressure_hpa,
+            humidity: $humidity,
+            altitude: altitude_m,
+        };
+        let presence = StationAtmospherePresence::BOTH;
+        let zero = calculate_zero_angle_with_station_presence(
+            shot_inputs(0.0),
+            100.0,
+            SIGHT_HEIGHT_M,
+            WindConditions::default(),
+            air.clone(),
+            presence,
+        )
+        .unwrap();
+        let mut flat = shot_inputs(zero);
+        flat.enable_trajectory_sampling = true;
+        flat.sample_interval = 100.0;
+        let mut solver = TrajectorySolver::new_with_station_presence(
+            flat,
+            WindConditions::default(),
+            air.clone(),
+            presence,
+        );
+        solver.set_max_range(1000.0);
+        let flat = solver.solve().unwrap();
+        let last = flat
+            .sampled_points
+            .as_ref()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(last.distance_m, 1000.0);
+        let mut solver = TrajectorySolver::new_with_station_presence(
+            shot_inputs(std::f64::consts::FRAC_PI_6),
+            WindConditions::default(),
+            air,
+            presence,
+        );
+        solver.set_max_range(30_000.0);
+        let lob = solver.solve().unwrap();
+        (
+            last.drop_m,
+            last.velocity_mps,
+            lob.max_range,
+            lob.max_height,
+            lob.impact_velocity,
+        )
+    }};
+}
+
+/// The shot table, row by row: each cell is `TrajectorySolver` (RK4) on 0.50.0 minus the same on
+/// the released 0.49.0, for its own station, shot, quantity and humidity.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn the_aloft_shot_table_is_engine_output() {
+    type Shots = (f64, f64, f64, f64, f64);
+    let shots = |altitude_m: f64, pressure_hpa: f64, (t, rh): (f64, f64)| -> (Shots, Shots) {
+        (
+            solver_shots!(old, altitude_m, pressure_hpa, t, rh),
+            solver_shots!(ballistics_engine, altitude_m, pressure_hpa, t, rh),
+        )
+    };
+    let conditions = [(15.0, 50.0), (35.0, 90.0)];
+    let sea: Vec<_> = conditions
+        .iter()
+        .map(|&c| shots(0.0, SEA_LEVEL_STATION_HPA, c))
+        .collect();
+    let high: Vec<_> = conditions
+        .iter()
+        .map(|&c| shots(1500.0, 845.6, c))
+        .collect();
+    let row = |label: &str, runs: &[(Shots, Shots)], cell: &dyn Fn(&Shots, &Shots) -> String| {
+        let cells: Vec<String> = runs
+            .iter()
+            .map(|(before, after)| cell(before, after))
+            .collect();
+        format!("| {label} | {} |", cells.join(" | "))
+    };
+    let drop = |b: &Shots, a: &Shots| format!("{:+.3} mm", (a.0 - b.0) * 1000.0);
+    let speed = |b: &Shots, a: &Shots| format!("{:+.4} m/s", a.1 - b.1);
+    let range = |b: &Shots, a: &Shots| format!("{:+.3} m ({:.2} → {:.2} m)", a.2 - b.2, b.2, a.2);
+    let apex = |b: &Shots, a: &Shots| format!("{:+.3} m", a.3 - b.3);
+    let impact = |b: &Shots, a: &Shots| format!("{:+.3} m/s", a.4 - b.4);
+    let expected = [
+        row("Sea level, flat: drop at 1000 m", &sea, &drop),
+        row("Sea level, flat: speed at 1000 m", &sea, &speed),
+        row("Sea level, 30° lob: range", &sea, &range),
+        row("Sea level, 30° lob: apex", &sea, &apex),
+        row("Sea level, 30° lob: impact speed", &sea, &impact),
+        row(
+            "1500 m station (845.6 hPa), flat: drop at 1000 m",
+            &high,
+            &drop,
+        ),
+        row("1500 m station, flat: speed at 1000 m", &high, &speed),
+        row("1500 m station, 30° lob: range", &high, &range),
+    ];
+    assert_table(
+        &release_section(),
+        "| Shot | 15 °C / 50 % | 35 °C / 90 % |",
+        &expected,
+    );
 }
 
 // =================================================================================================
@@ -717,21 +1073,160 @@ fn humid_miller_factor(temperature_c: f64, humidity_percent: f64) -> f64 {
         / calculate_air_density_cimp(temperature_c, SEA_LEVEL_HPA, humidity_percent)
 }
 
+/// The Miller-factor list each document gives, as written: the clause after "multiply Sg by" up to
+/// the sentence's end, split into `(factor, "T °C / RH %")` items.
+fn miller_factors(text: &str, what: &str) -> Vec<(String, String)> {
+    let text = normalized(text);
+    let start = text
+        .find("multiply Sg by ")
+        .unwrap_or_else(|| panic!("{what}: no Miller factor list"))
+        + "multiply Sg by ".len();
+    let list = &text[start..start + text[start..].find("%.").expect("the list ends") + 1];
+    list.split(", ")
+        .flat_map(|item| item.split(" and "))
+        .map(|item| {
+            let (factor, conditions) = item
+                .split_once(" at ")
+                .unwrap_or_else(|| panic!("{what}: `{item}` is not `F at T °C / RH %`"));
+            (factor.to_string(), conditions.to_string())
+        })
+        .collect()
+}
+
 #[test]
 fn the_miller_exception_is_documented_with_engine_numbers() {
-    let stability = read("src/stability.rs");
-    let section = release_section();
-    let cli_usage = read("CLI_USAGE.md");
-    for (temperature_c, humidity_percent) in QUOTED {
-        let factor = format!(
-            "{:.4}",
-            humid_miller_factor(temperature_c, humidity_percent)
-        );
-        let what = format!("the Miller factor at {temperature_c} C / {humidity_percent} %");
-        assert_contains(&stability, &factor, &format!("src/stability.rs: {what}"));
-        assert_contains(&section, &factor, &format!("CHANGELOG: {what}"));
-        assert_contains(&cli_usage, &factor, &format!("CLI_USAGE.md: {what}"));
+    for (file, text) in [
+        ("src/stability.rs", read("src/stability.rs")),
+        ("CHANGELOG 0.50.0", release_section()),
+        ("CLI_USAGE.md", read("CLI_USAGE.md")),
+    ] {
+        let factors = miller_factors(&text, file);
+        for (temperature_c, humidity_percent) in QUOTED {
+            let conditions = format!("{temperature_c} °C / {humidity_percent} %");
+            assert!(
+                factors.iter().any(|(_, at)| *at == conditions),
+                "{file}: no Miller factor at {conditions}"
+            );
+        }
+        for (factor, conditions) in factors {
+            let (temperature, humidity) = conditions
+                .strip_suffix(" %")
+                .and_then(|c| c.split_once(" °C / "))
+                .unwrap_or_else(|| panic!("{file}: `{conditions}`"));
+            let engine = format!(
+                "{:.4}",
+                humid_miller_factor(temperature.parse().unwrap(), humidity.parse().unwrap())
+            );
+            assert_eq!(
+                factor, engine,
+                "{file}: the Miller factor at {conditions} is the engine's {engine}"
+            );
+        }
     }
+}
+
+/// What the dry Miller Sg keeps: Litz spin drift at 1000 yd and the aerodynamic jump in a 10 mph
+/// crosswind, with the published (dry) Sg and with the Sg a humid correction would give, each in
+/// the words each document quotes them with.
+#[test]
+fn the_miller_exception_quotes_engine_drift_and_jump() {
+    use ballistics_engine::aerodynamic_jump::litz_crosswind_jump_moa;
+    use ballistics_engine::spin_drift::{effective_sg_from_inputs, litz_drift_inches};
+    use ballistics_engine::{
+        AtmosphericConditions, StationAtmospherePresence, TrajectorySolver, WindConditions,
+    };
+    let at = |temperature_c: f64, humidity_percent: f64| {
+        let inputs = BallisticInputs {
+            bc_value: BC_G7,
+            bc_type: DragModel::G7,
+            bullet_mass: MASS_KG,
+            muzzle_velocity: MUZZLE_VELOCITY_MPS,
+            bullet_diameter: DIAMETER_M,
+            bullet_length: LENGTH_M,
+            twist_rate: 10.0,
+            caliber_inches: DIAMETER_M / 0.0254,
+            weight_grains: MASS_KG / 0.000_064_798_91,
+            temperature: temperature_c,
+            pressure: SEA_LEVEL_HPA,
+            ground_threshold: -1.0e5,
+            ..BallisticInputs::default()
+        };
+        let sg = effective_sg_from_inputs(&inputs, temperature_c, SEA_LEVEL_HPA);
+        let humid_sg = sg * humid_miller_factor(temperature_c, humidity_percent);
+        let mut solver = TrajectorySolver::new_with_station_presence(
+            inputs,
+            WindConditions::default(),
+            AtmosphericConditions {
+                temperature: temperature_c,
+                pressure: SEA_LEVEL_HPA,
+                humidity: humidity_percent,
+                altitude: 0.0,
+            },
+            StationAtmospherePresence::BOTH,
+        );
+        solver.set_max_range(914.4); // 1000 yd
+        let time_of_flight = solver.solve().unwrap().time_of_flight;
+        let calibers = LENGTH_M / DIAMETER_M;
+        (
+            litz_drift_inches(sg, time_of_flight),
+            litz_drift_inches(humid_sg, time_of_flight),
+            litz_crosswind_jump_moa(sg, calibers, 10.0, true),
+            litz_crosswind_jump_moa(humid_sg, calibers, 10.0, true),
+        )
+    };
+    let (d15, h15, j15, k15) = at(15.0, 50.0);
+    let (d35, h35, j35, k35) = at(35.0, 90.0);
+    assert_prose(
+        &release_section(),
+        &format!(
+            "For the bullet above, spin drift at 1000 yd would go from {d15:.2} to {h15:.2} in at \
+             15 °C / 50 %, and from {d35:.2} to {h35:.2} in at 35 °C / 90 %. - The aerodynamic \
+             jump in a 10 mph crosswind would go from {j15:.4} to {k15:.4} MOA, and from \
+             {j35:.4} to {k35:.4} MOA."
+        ),
+        "CHANGELOG: the Miller exception's drift and jump",
+    );
+    assert_prose(
+        &read("src/stability.rs"),
+        &format!(
+            "drift at 1000 yd from {d15:.2} to {h15:.2} in at 15 °C / 50 % and from {d35:.2} to \
+             {h35:.2} in at 35 °C / 90 %, and the aerodynamic jump in a 10 mph crosswind from \
+             {j15:.4} to {k15:.4} MOA and from {j35:.4} to {k35:.4} MOA."
+        ),
+        "src/stability.rs: the Miller exception's drift and jump",
+    );
+}
+
+/// Two 0.49.0 behaviours the section quotes numbers for, recomputed on the released crate: the
+/// deprecated dry `get_local_atmosphere`'s sound-speed constant, and the steam a NaN humidity
+/// flew as.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn the_0_50_0_section_quotes_0_49_0_behaviour_from_the_released_crate() {
+    let section = release_section();
+    #[allow(deprecated)]
+    let (_, now) =
+        ballistics_engine::atmosphere::get_local_atmosphere(0.0, 0.0, 15.0, SEA_LEVEL_HPA, 1.0);
+    let (_, then) = old::atmosphere::get_local_atmosphere(0.0, 0.0, 15.0, SEA_LEVEL_HPA, 1.0);
+    assert_prose(
+        &section,
+        &format!(
+            "That is {:+.2e} relative, {:+.5} m/s at 15 °C.",
+            now / then - 1.0,
+            now - then
+        ),
+        "the deprecated get_local_atmosphere's sound-speed shift",
+    );
+    let (steam_density, steam_sound_speed) =
+        old::atmosphere::calculate_atmosphere(0.0, Some(15.0), Some(SEA_LEVEL_HPA), f64::NAN);
+    assert_prose(
+        &section,
+        &format!(
+            "0.49.0 capped the NaN water-vapour mole fraction at 1 and flew pure steam: \
+             {steam_density:.3} kg/m³ and {steam_sound_speed:.1} m/s at 15 °C and 1013.25 hPa."
+        ),
+        "0.49.0's NaN-humidity steam",
+    );
 }
 
 /// Pin (passes on the code as it stands): the solve's muzzle Sg is the published dry Miller

@@ -8,8 +8,8 @@
 //!
 //! The rules are those of `tests/humidity_byte_identity.rs`: pins are only ever migrated to
 //! renamed APIs, never edited; each group's header says which later step may change it; kernel
-//! standard mode at RH 0 is compared to a relative 1e-15 rather than bits; kernel outputs at
-//! RH > 0 are not pinned. Values were generated on 261c1eb (ballistics-engine 0.49.0) with
+//! outputs at RH > 0 are not pinned. Values were generated on 261c1eb (ballistics-engine 0.49.0)
+//! on macOS (aarch64) with
 //!
 //! ```text
 //! cargo test --lib humidity_byte_identity_tests::print_current_pin_values -- --ignored --nocapture
@@ -20,6 +20,23 @@
 //! S8 (the unified aloft vapour model, plan C7) re-pinned `LOCAL_AIR_HUMID_GRAVITY`, the one
 //! group here it may change; its note gives the old -> new shifts. The new bits were confirmed
 //! the same way, on macOS (aarch64) and in Linux glibc containers on aarch64 and x86_64.
+//!
+//! # How the pins are checked, and on which platforms
+//!
+//! No group here can be compared with the released 0.49.0 crate at runtime, as most of
+//! `tests/humidity_byte_identity.rs`'s groups are: 0.49.0 kept every one of these entry points
+//! `pub(crate)` (`get_local_atmosphere_humid_with_gravity`, `water_vapor_mole_fraction_uncapped`,
+//! `compute_derivatives_with_gravity`, `integrate_trajectory_with_gravity`,
+//! `fast_integrate_with_gravity`, and its `Gravity` type is private). So every group is held to
+//! its literal pins, as that file's `Check::Pinned` groups are:
+//!
+//! - bit for bit on the platforms the pins were captured and checked on ([`exact_bit_platform`]:
+//!   macOS aarch64, and Linux glibc on aarch64 and x86_64), kernel standard mode at RH 0 included (it was
+//!   compared to a relative 1e-15 until 0.50.0's R5; the bits never moved);
+//! - on any other platform, each float within [`UNVERIFIED_LIBM_ULPS`] of its pin and each count
+//!   exactly. A libm may round a `pow` or `exp` a last bit apart: FreeBSD's moved
+//!   `VAPOR_MOLE_FRACTION` (three values at -10 °C) and `LOCAL_AIR_HUMID_GRAVITY` by one or two
+//!   ulps even on the unchanged 0.49.0 code.
 
 use crate::atmosphere::{
     calculate_atmosphere, get_local_atmosphere_humid_with_gravity,
@@ -52,7 +69,40 @@ impl Pinned {
     }
 }
 
-fn check(group: &str, actual: &[Case], expected: Pins, rel_tol: Option<f64>) {
+/// Whether this build links a libm the pins were captured or checked on, on an architecture they
+/// were checked on: Apple's on macOS aarch64, or glibc on Linux aarch64 and x86_64. The same rule
+/// as `tests/humidity_byte_identity.rs`'s `Libm`, where the reasons are given.
+fn exact_bit_platform() -> bool {
+    cfg!(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(
+            target_os = "linux",
+            target_env = "gnu",
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        )
+    ))
+}
+
+/// How far, in units in the last place, a float may lie from its pin on any other platform:
+/// the largest distance measured in 0.50.0's R5 on FreeBSD 14.3, NetBSD 10.1 and OpenBSD 7.8
+/// (amd64), Alpine musl on aarch64 and x86_64, and Windows 11 (x86_64, UCRT). It is the
+/// bound `tests/humidity_byte_identity.rs` uses, where the measurement is described.
+const UNVERIFIED_LIBM_ULPS: u64 = 2;
+
+/// The distance between two finite `f64`s in units in the last place (0 for equal values, 0.0
+/// and -0.0 included).
+fn ulps_apart(a: f64, b: f64) -> u64 {
+    let line = |x: f64| -> i128 {
+        let bits = x.to_bits() as i64;
+        i128::from(if bits < 0 { i64::MIN - bits } else { bits })
+    };
+    (line(a) - line(b)).unsigned_abs() as u64
+}
+
+/// Every value must equal its pin bit for bit on an exact-bit platform; elsewhere each float
+/// must lie within [`UNVERIFIED_LIBM_ULPS`] of it, and each count must match exactly.
+fn check(group: &str, actual: &[Case], expected: Pins) {
+    let exact = exact_bit_platform();
     let names: Vec<&str> = actual.iter().map(|(name, _)| name.as_str()).collect();
     let pinned: Vec<&str> = expected.iter().map(|(name, _)| *name).collect();
     assert_eq!(names, pinned, "{group}: the probe's cases no longer match");
@@ -60,12 +110,16 @@ fn check(group: &str, actual: &[Case], expected: Pins, rel_tol: Option<f64>) {
     for ((name, values), (_, bits)) in actual.iter().zip(expected) {
         assert_eq!(values.len(), bits.len(), "{group}/{name}: quantity count");
         for ((label, value), &want) in values.iter().zip(bits.iter()) {
-            let ok = match (*value, rel_tol) {
-                (Pinned::F(got), Some(tol)) => {
+            let ok = match *value {
+                Pinned::F(got) if !exact => {
                     let pin = f64::from_bits(want);
-                    got.to_bits() == want || (got - pin).abs() <= tol * pin.abs()
+                    if got.is_nan() || pin.is_nan() {
+                        got.to_bits() == want
+                    } else {
+                        ulps_apart(got, pin) <= UNVERIFIED_LIBM_ULPS
+                    }
                 }
-                (value, _) => value.bits() == want,
+                value => value.bits() == want,
             };
             if !ok {
                 moved.push(format!(
@@ -75,9 +129,14 @@ fn check(group: &str, actual: &[Case], expected: Pins, rel_tol: Option<f64>) {
             }
         }
     }
+    let rule = if exact {
+        "bit for bit".to_string()
+    } else {
+        format!("within {UNVERIFIED_LIBM_ULPS} ulps (a libm the pins were not captured on)")
+    };
     assert!(
         moved.is_empty(),
-        "{group}: {} pins moved:\n{}",
+        "{group}: {} pins moved ({rule}):\n{}",
         moved.len(),
         moved.join("\n")
     );
@@ -381,7 +440,6 @@ fn local_air_dry_at_non_earth_gravity_is_byte_identical() {
         "LOCAL_AIR_DRY_GRAVITY",
         &probe_local_air_dry(),
         LOCAL_AIR_DRY_GRAVITY,
-        None,
     );
 }
 
@@ -391,7 +449,6 @@ fn local_air_humid_at_non_earth_gravity_is_byte_identical() {
         "LOCAL_AIR_HUMID_GRAVITY",
         &probe_local_air_humid(),
         LOCAL_AIR_HUMID_GRAVITY,
-        None,
     );
 }
 
@@ -401,7 +458,6 @@ fn vapor_mole_fraction_is_byte_identical() {
         "VAPOR_MOLE_FRACTION",
         &probe_vapor_mole_fraction(),
         VAPOR_MOLE_FRACTION,
-        None,
     );
 }
 
@@ -411,17 +467,15 @@ fn kernel_direct_mode_at_non_earth_gravity_is_byte_identical() {
         "KERNEL_DIRECT_GRAVITY",
         &probe_kernel_direct(),
         KERNEL_DIRECT_GRAVITY,
-        None,
     );
 }
 
 #[test]
-fn kernel_standard_mode_at_rh0_and_non_earth_gravity_holds_to_1e15() {
+fn kernel_standard_mode_at_rh0_and_non_earth_gravity_is_byte_identical() {
     check(
         "KERNEL_STANDARD_RH0_GRAVITY",
         &probe_kernel_standard_rh0(),
         KERNEL_STANDARD_RH0_GRAVITY,
-        Some(1e-15),
     );
 }
 
@@ -688,9 +742,11 @@ const KERNEL_DIRECT_GRAVITY: Pins = &[
 ];
 
 /// Kernel standard mode at RH 0 and 1.62 and 0 m/s², the same families, at both station bases.
-/// Floats compared to a relative 1e-15, counts exactly.
 ///
 /// IMMUTABLE: no later step may change it, S8 included.
+///
+/// Compared to a relative 1e-15 until 0.50.0's R5, which made it bits like every other group: no
+/// last-ulp movement ever happened.
 #[rustfmt::skip]
 const KERNEL_STANDARD_RH0_GRAVITY: Pins = &[
     (
@@ -842,3 +898,12 @@ const KERNEL_STANDARD_RH0_GRAVITY: Pins = &[
         ],
     ),
 ];
+
+#[test]
+fn ulps_apart_counts_representable_values() {
+    assert_eq!(ulps_apart(1.0, 1.0), 0);
+    assert_eq!(ulps_apart(0.0, -0.0), 0);
+    assert_eq!(ulps_apart(1.0, f64::from_bits(1.0f64.to_bits() + 2)), 2);
+    assert_eq!(ulps_apart(-1.0, f64::from_bits((-1.0f64).to_bits() + 3)), 3);
+    assert_eq!(ulps_apart(5e-324, -5e-324), 2);
+}

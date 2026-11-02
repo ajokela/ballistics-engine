@@ -1477,9 +1477,10 @@ const MIN_UNIFORM_SPEED_OF_SOUND_MPS: f64 = 200.0;
 /// assert!(RelativeHumidity::try_fraction(50.0).is_err());
 /// ```
 ///
-/// A bare `f64` does not convert, because it does not say whether 0.5 means 50 % or 0.5 %:
+/// A bare `f64` does not convert, because it does not say whether 0.5 means 50 % or 0.5 %
+/// (E0277: no `From<f64>`):
 ///
-/// ```compile_fail
+/// ```compile_fail,E0277
 /// use ballistics_engine::RelativeHumidity;
 ///
 /// let humidity: RelativeHumidity = 0.5.into();
@@ -2470,10 +2471,11 @@ pub struct LocalAir {
 /// }
 /// ```
 ///
-/// ```compile_fail
+/// ```compile_fail,E0639
 /// use ballistics_engine::KernelAtmosphere;
 ///
-/// // Bypassing `uniform`'s validation does not compile.
+/// // Bypassing `uniform`'s validation does not compile (E0639: the variant is
+/// // `#[non_exhaustive]`).
 /// let atmosphere = KernelAtmosphere::Uniform { density_kg_m3: -1.0, speed_of_sound_mps: 0.0 };
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -2779,6 +2781,8 @@ fn compose_local_air(
         gravity_mps2: gravity.magnitude(),
         air,
         lookup_saturation_pressures: None,
+        consumed: None,
+        consumptions: 0,
     });
     air
 }
@@ -2817,6 +2821,27 @@ pub(crate) mod air_trace {
         /// for a composition made outside that lookup (the legacy `get_local_atmosphere*`
         /// wrappers, which compose from a caller's raw base once per call).
         pub lookup_saturation_pressures: Option<u64>,
+        /// What the drag computation that followed took from this air ([`record_consumed`]):
+        /// the last one, if any did.
+        pub consumed: Option<ConsumedAir>,
+        /// How many drag computations took this air: 1 for every per-step lookup.
+        pub consumptions: u32,
+    }
+
+    /// What a per-step drag computation (`TrajectorySolver::calculate_acceleration`,
+    /// `compute_derivatives`, the `fast_integrate` substep) took from the air it had just
+    /// composed: the density its drag force used, and the airspeed and Mach its drag
+    /// coefficient was looked up at. The trace's composition records what `air_at` gave; this
+    /// records what the kernel flew, so a kernel that calls `air_at` and then flies something
+    /// else cannot pass the class tests.
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) struct ConsumedAir {
+        /// The air density in the drag force, kg/m³.
+        pub density_kg_m3: f64,
+        /// The airspeed the Mach divides, m/s.
+        pub airspeed_mps: f64,
+        /// The Mach the drag coefficient was looked up at.
+        pub mach: f64,
     }
 
     thread_local! {
@@ -2846,6 +2871,26 @@ pub(crate) mod air_trace {
                 .and_then(|entries| entries.last_mut())
             {
                 last.lookup_saturation_pressures = Some(evaluated);
+            }
+        });
+    }
+
+    /// Credit the composition this thread just recorded (the trace's last entry) with a drag
+    /// computation that took `density_kg_m3` and looked its drag coefficient up at `mach` for
+    /// `airspeed_mps`, if tracing. Called at each per-step drag site, from the values it flies.
+    pub(crate) fn record_consumed(density_kg_m3: f64, airspeed_mps: f64, mach: f64) {
+        TRACE.with(|trace| {
+            if let Some(last) = trace
+                .borrow_mut()
+                .as_mut()
+                .and_then(|entries| entries.last_mut())
+            {
+                last.consumed = Some(ConsumedAir {
+                    density_kg_m3,
+                    airspeed_mps,
+                    mach,
+                });
+                last.consumptions += 1;
             }
         });
     }

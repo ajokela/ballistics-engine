@@ -10,9 +10,11 @@
 use ballistics_engine::card_service::{come_ups_v1, range_table_v1, wind_card_v1, CardRequestV1};
 use serde_json::{json, Value};
 
-/// The exact bytes pre-MBA-1519 `main` (bfc8e87) emitted for the old-shape requests below,
-/// captured from that build and pasted here unaltered. These are golden in the strict sense:
-/// nothing in this branch computed them, so a conversion that moved by one ulp fails here.
+/// The exact bytes for the old-shape requests below. They were first captured from pre-MBA-1519
+/// `main` (bfc8e87) and pasted here unaltered, so at first nothing in the per-dimension work
+/// computed them. They have been re-captured once since, from the 0.50.0 build (below), so they
+/// are now that build's output, no longer an independent pre-1519 oracle. A conversion that
+/// moves them by one ulp still fails here.
 ///
 /// Re-captured once since, in 0.50.0 (humidity train S8, the unified aloft vapour model): the
 /// cards fly the default 50 % RH, and the air off the station's height now holds the station's
@@ -22,17 +24,17 @@ use serde_json::{json, Value};
 /// 1375.5028324586233 J, +4.7e-7) and the 600 yd 10 mph wind column (imperial wind card
 /// -1.4188703891384 -> -1.4188699544098804 MOA, -3.1e-7). The per-dimension fields resolve
 /// through the same arithmetic as before, which the tests below prove on these new bytes.
-const PRE_1519_IMPERIAL_COME_UPS: &str = r#"{"schema_version":1,"kind":"come_ups","zero_distance":100.0,"bc_for_solve":0.243,"units":{"distance":"yd","velocity":"fps","energy":"ft-lb","drop":"in","wind_speed":"mph","elevation_adjustment":"MIL","windage_adjustment":"MIL"},"rows":[{"range":100.0,"drop_adj":-0.0002383115567345896,"come_up":-0.0002383115567345896,"velocity":2471.487048765613,"energy":2373.1265064596223,"time":0.11723436605171646},{"range":200.0,"drop_adj":0.5820871779613539,"come_up":0.5823254895180885,"velocity":2299.9539267097994,"energy":2055.14507487883,"time":0.2430640594744383},{"range":300.0,"drop_adj":1.386201591216661,"come_up":0.8041144132553071,"velocity":2135.7154928928917,"energy":1772.1113552947409,"time":0.378434154516867},{"range":400.0,"drop_adj":2.318304715233842,"come_up":0.9321031240171809,"velocity":1978.346157757052,"energy":1520.5782701358603,"time":0.5243858682936872},{"range":500.0,"drop_adj":3.371952280872122,"come_up":1.05364756563828,"velocity":1826.945972476667,"energy":1296.7481015646051,"time":0.6821843656291716},{"range":600.0,"drop_adj":4.557991163092783,"come_up":1.1860388822206613,"velocity":1680.9694047434455,"energy":1097.8015258301768,"time":0.8533797629410692}]}"#;
+const OLD_SHAPE_IMPERIAL_COME_UPS: &str = r#"{"schema_version":1,"kind":"come_ups","zero_distance":100.0,"bc_for_solve":0.243,"units":{"distance":"yd","velocity":"fps","energy":"ft-lb","drop":"in","wind_speed":"mph","elevation_adjustment":"MIL","windage_adjustment":"MIL"},"rows":[{"range":100.0,"drop_adj":-0.0002383115567345896,"come_up":-0.0002383115567345896,"velocity":2471.487048765613,"energy":2373.1265064596223,"time":0.11723436605171646},{"range":200.0,"drop_adj":0.5820871779613539,"come_up":0.5823254895180885,"velocity":2299.9539267097994,"energy":2055.14507487883,"time":0.2430640594744383},{"range":300.0,"drop_adj":1.386201591216661,"come_up":0.8041144132553071,"velocity":2135.7154928928917,"energy":1772.1113552947409,"time":0.378434154516867},{"range":400.0,"drop_adj":2.318304715233842,"come_up":0.9321031240171809,"velocity":1978.346157757052,"energy":1520.5782701358603,"time":0.5243858682936872},{"range":500.0,"drop_adj":3.371952280872122,"come_up":1.05364756563828,"velocity":1826.945972476667,"energy":1296.7481015646051,"time":0.6821843656291716},{"range":600.0,"drop_adj":4.557991163092783,"come_up":1.1860388822206613,"velocity":1680.9694047434455,"energy":1097.8015258301768,"time":0.8533797629410692}]}"#;
 
-const PRE_1519_IMPERIAL_RANGE_TABLE: &str = r#"{"schema_version":1,"kind":"range_table","zero_distance":100.0,"bc_for_solve":0.243,"units":{"distance":"yd","velocity":"fps","energy":"ft-lb","drop":"in","wind_speed":"mph","elevation_adjustment":"MIL","windage_adjustment":"MOA"},"rows":[{"range":100.0,"drop_linear":-0.0008589363928091085,"drop_adj":-0.0002385934424469746,"wind_linear":-0.7087072147063299,"wind_adj":-0.676815390044545,"velocity":2471.4883185643516,"energy":2373.128944986517,"time":0.1172343314927059},{"range":200.0,"drop_linear":4.191018410500851,"drop_adj":0.5820858903473404,"wind_linear":-2.9301920467095806,"wind_adj":-1.3991667023038248,"velocity":2299.956009350782,"energy":2055.1487968066895,"time":0.24306390827015528},{"range":300.0,"drop_linear":14.97094343299353,"drop_adj":1.3861984660179194,"wind_linear":-6.830787563781233,"wind_adj":-2.174467374470359,"velocity":2135.717838332994,"energy":1772.1152475578579,"time":0.37843378363303637},{"range":400.0,"drop_linear":33.38349773580004,"drop_adj":2.318298453875003,"wind_linear":-12.593747978105789,"wind_adj":-3.006757329772757,"velocity":1978.347995929339,"energy":1520.5810958154054,"time":0.5243851536870159},{"range":500.0,"drop_linear":60.69494565889362,"drop_adj":3.3719414254940903,"wind_linear":-20.441742298755262,"wind_adj":-3.9043727790622547,"velocity":1826.9464915586927,"energy":1296.7488384432397,"time":0.6821831686069002},{"range":600.0,"drop_linear":98.45223836537404,"drop_adj":4.557973998396947,"wind_linear":-30.647591015253415,"wind_adj":-4.878074903261169,"velocity":1680.9677658066714,"energy":1097.799385129211,"time":0.8533779224134287}]}"#;
+const OLD_SHAPE_IMPERIAL_RANGE_TABLE: &str = r#"{"schema_version":1,"kind":"range_table","zero_distance":100.0,"bc_for_solve":0.243,"units":{"distance":"yd","velocity":"fps","energy":"ft-lb","drop":"in","wind_speed":"mph","elevation_adjustment":"MIL","windage_adjustment":"MOA"},"rows":[{"range":100.0,"drop_linear":-0.0008589363928091085,"drop_adj":-0.0002385934424469746,"wind_linear":-0.7087072147063299,"wind_adj":-0.676815390044545,"velocity":2471.4883185643516,"energy":2373.128944986517,"time":0.1172343314927059},{"range":200.0,"drop_linear":4.191018410500851,"drop_adj":0.5820858903473404,"wind_linear":-2.9301920467095806,"wind_adj":-1.3991667023038248,"velocity":2299.956009350782,"energy":2055.1487968066895,"time":0.24306390827015528},{"range":300.0,"drop_linear":14.97094343299353,"drop_adj":1.3861984660179194,"wind_linear":-6.830787563781233,"wind_adj":-2.174467374470359,"velocity":2135.717838332994,"energy":1772.1152475578579,"time":0.37843378363303637},{"range":400.0,"drop_linear":33.38349773580004,"drop_adj":2.318298453875003,"wind_linear":-12.593747978105789,"wind_adj":-3.006757329772757,"velocity":1978.347995929339,"energy":1520.5810958154054,"time":0.5243851536870159},{"range":500.0,"drop_linear":60.69494565889362,"drop_adj":3.3719414254940903,"wind_linear":-20.441742298755262,"wind_adj":-3.9043727790622547,"velocity":1826.9464915586927,"energy":1296.7488384432397,"time":0.6821831686069002},{"range":600.0,"drop_linear":98.45223836537404,"drop_adj":4.557973998396947,"wind_linear":-30.647591015253415,"wind_adj":-4.878074903261169,"velocity":1680.9677658066714,"energy":1097.799385129211,"time":0.8533779224134287}]}"#;
 
-const PRE_1519_IMPERIAL_WIND_CARD: &str = r#"{"schema_version":1,"kind":"wind_card","zero_distance":100.0,"bc_for_solve":0.243,"units":{"distance":"yd","velocity":"fps","energy":"ft-lb","drop":"in","wind_speed":"mph","elevation_adjustment":"MIL","windage_adjustment":"MIL"},"wind_speeds":[5.0,10.0],"wind_angles_deg":[90.0],"rows":[{"range":100.0,"wind_columns":[-0.09843092401894904,-0.19686311519620275]},{"range":200.0,"wind_columns":[-0.2034841727657323,-0.40697111759855287]},{"range":300.0,"wind_columns":[-0.3162378984861873,-0.6324803299797438]},{"range":400.0,"wind_columns":[-0.43727964063634106,-0.8745658318129019]},{"range":500.0,"wind_columns":[-0.567821785895692,-1.1356523499308477]},{"range":600.0,"wind_columns":[-0.7094293533839818,-1.4188699544098804]}]}"#;
+const OLD_SHAPE_IMPERIAL_WIND_CARD: &str = r#"{"schema_version":1,"kind":"wind_card","zero_distance":100.0,"bc_for_solve":0.243,"units":{"distance":"yd","velocity":"fps","energy":"ft-lb","drop":"in","wind_speed":"mph","elevation_adjustment":"MIL","windage_adjustment":"MIL"},"wind_speeds":[5.0,10.0],"wind_angles_deg":[90.0],"rows":[{"range":100.0,"wind_columns":[-0.09843092401894904,-0.19686311519620275]},{"range":200.0,"wind_columns":[-0.2034841727657323,-0.40697111759855287]},{"range":300.0,"wind_columns":[-0.3162378984861873,-0.6324803299797438]},{"range":400.0,"wind_columns":[-0.43727964063634106,-0.8745658318129019]},{"range":500.0,"wind_columns":[-0.567821785895692,-1.1356523499308477]},{"range":600.0,"wind_columns":[-0.7094293533839818,-1.4188699544098804]}]}"#;
 
-const PRE_1519_METRIC_COME_UPS: &str = r#"{"schema_version":1,"kind":"come_ups","zero_distance":100.0,"bc_for_solve":0.243,"units":{"distance":"m","velocity":"m/s","energy":"J","drop":"mm","wind_speed":"m/s","elevation_adjustment":"MIL","windage_adjustment":"MIL"},"rows":[{"range":100.0,"drop_adj":-0.00043294391023204873,"come_up":-0.00043294391023204873,"velocity":749.2214282012793,"energy":3182.7570435040066,"time":0.12855680088144575},{"range":200.0,"drop_adj":0.6846897349190779,"come_up":0.68512267882931,"velocity":693.1635696521198,"energy":2724.297698812993,"time":0.26732691722816576},{"range":300.0,"drop_adj":1.595074848156121,"come_up":0.9103851132370431,"velocity":639.6678285781318,"energy":2320.021957816611,"time":0.41751355410555474},{"range":400.0,"drop_adj":2.6509268767283105,"come_up":1.0558520285721895,"velocity":588.5998039514741,"energy":1964.3702575305435,"time":0.5804883582429626},{"range":500.0,"drop_adj":3.8525518172889583,"come_up":1.2016249405606478,"velocity":539.6244473704896,"energy":1651.0732360324052,"time":0.7579317727858298},{"range":600.0,"drop_adj":5.216641740421487,"come_up":1.3640899231325285,"velocity":492.53737650535805,"energy":1375.5028324586233,"time":0.9519021598335182}]}"#;
+const OLD_SHAPE_METRIC_COME_UPS: &str = r#"{"schema_version":1,"kind":"come_ups","zero_distance":100.0,"bc_for_solve":0.243,"units":{"distance":"m","velocity":"m/s","energy":"J","drop":"mm","wind_speed":"m/s","elevation_adjustment":"MIL","windage_adjustment":"MIL"},"rows":[{"range":100.0,"drop_adj":-0.00043294391023204873,"come_up":-0.00043294391023204873,"velocity":749.2214282012793,"energy":3182.7570435040066,"time":0.12855680088144575},{"range":200.0,"drop_adj":0.6846897349190779,"come_up":0.68512267882931,"velocity":693.1635696521198,"energy":2724.297698812993,"time":0.26732691722816576},{"range":300.0,"drop_adj":1.595074848156121,"come_up":0.9103851132370431,"velocity":639.6678285781318,"energy":2320.021957816611,"time":0.41751355410555474},{"range":400.0,"drop_adj":2.6509268767283105,"come_up":1.0558520285721895,"velocity":588.5998039514741,"energy":1964.3702575305435,"time":0.5804883582429626},{"range":500.0,"drop_adj":3.8525518172889583,"come_up":1.2016249405606478,"velocity":539.6244473704896,"energy":1651.0732360324052,"time":0.7579317727858298},{"range":600.0,"drop_adj":5.216641740421487,"come_up":1.3640899231325285,"velocity":492.53737650535805,"energy":1375.5028324586233,"time":0.9519021598335182}]}"#;
 
-const PRE_1519_METRIC_RANGE_TABLE: &str = r#"{"schema_version":1,"kind":"range_table","zero_distance":100.0,"bc_for_solve":0.243,"units":{"distance":"m","velocity":"m/s","energy":"J","drop":"mm","wind_speed":"m/s","elevation_adjustment":"MIL","windage_adjustment":"MIL"},"rows":[{"range":100.0,"drop_linear":-0.04332759417122845,"drop_adj":-0.00043327594171228454,"wind_linear":-21.381465662817384,"wind_adj":-0.21381465662817384,"velocity":749.2218385791115,"energy":3182.760530141095,"time":0.1285567597210484},{"range":200.0,"drop_linear":136.93764594308783,"drop_adj":0.6846882297154391,"wind_linear":-88.72285091936837,"wind_adj":-0.44361425459684184,"velocity":693.1642252183849,"energy":2724.3028518758824,"time":0.26732673673372326},{"range":300.0,"drop_linear":478.52131533125873,"drop_adj":1.5950710511041957,"wind_linear":-207.43857856392995,"wind_adj":-0.6914619285464332,"velocity":639.6685329345956,"energy":2320.027067104013,"time":0.41751310715369977},{"range":400.0,"drop_linear":1060.3677459787593,"drop_adj":2.650919364946898,"wind_linear":-383.70105887857613,"wind_adj":-0.9592526471964404,"velocity":588.6002789113701,"energy":1964.3734277613219,"time":0.5804874934385215},{"range":500.0,"drop_linear":1926.2693036639475,"drop_adj":3.852538607327895,"wind_linear":-625.0722860177899,"wind_adj":-1.2501445720355797,"velocity":539.6243969482913,"energy":1651.0729274864902,"time":0.7579303127080137},{"range":600.0,"drop_linear":3129.972369772147,"drop_adj":5.216620616286912,"wind_linear":-940.8148894286986,"wind_adj":-1.5680248157144978,"velocity":492.53648900592646,"energy":1375.4978754536571,"time":0.9518998980382989}]}"#;
+const OLD_SHAPE_METRIC_RANGE_TABLE: &str = r#"{"schema_version":1,"kind":"range_table","zero_distance":100.0,"bc_for_solve":0.243,"units":{"distance":"m","velocity":"m/s","energy":"J","drop":"mm","wind_speed":"m/s","elevation_adjustment":"MIL","windage_adjustment":"MIL"},"rows":[{"range":100.0,"drop_linear":-0.04332759417122845,"drop_adj":-0.00043327594171228454,"wind_linear":-21.381465662817384,"wind_adj":-0.21381465662817384,"velocity":749.2218385791115,"energy":3182.760530141095,"time":0.1285567597210484},{"range":200.0,"drop_linear":136.93764594308783,"drop_adj":0.6846882297154391,"wind_linear":-88.72285091936837,"wind_adj":-0.44361425459684184,"velocity":693.1642252183849,"energy":2724.3028518758824,"time":0.26732673673372326},{"range":300.0,"drop_linear":478.52131533125873,"drop_adj":1.5950710511041957,"wind_linear":-207.43857856392995,"wind_adj":-0.6914619285464332,"velocity":639.6685329345956,"energy":2320.027067104013,"time":0.41751310715369977},{"range":400.0,"drop_linear":1060.3677459787593,"drop_adj":2.650919364946898,"wind_linear":-383.70105887857613,"wind_adj":-0.9592526471964404,"velocity":588.6002789113701,"energy":1964.3734277613219,"time":0.5804874934385215},{"range":500.0,"drop_linear":1926.2693036639475,"drop_adj":3.852538607327895,"wind_linear":-625.0722860177899,"wind_adj":-1.2501445720355797,"velocity":539.6243969482913,"energy":1651.0729274864902,"time":0.7579303127080137},{"range":600.0,"drop_linear":3129.972369772147,"drop_adj":5.216620616286912,"wind_linear":-940.8148894286986,"wind_adj":-1.5680248157144978,"velocity":492.53648900592646,"energy":1375.4978754536571,"time":0.9518998980382989}]}"#;
 
-const PRE_1519_METRIC_WIND_CARD: &str = r#"{"schema_version":1,"kind":"wind_card","zero_distance":100.0,"bc_for_solve":0.243,"units":{"distance":"m","velocity":"m/s","energy":"J","drop":"mm","wind_speed":"m/s","elevation_adjustment":"MIL","windage_adjustment":"MIL"},"wind_speeds":[5.0,10.0],"wind_angles_deg":[90.0],"rows":[{"range":100.0,"wind_columns":[-0.23757232343576448,-0.47515989045655027]},{"range":200.0,"wind_columns":[-0.4929057857660132,-0.9858449939317048]},{"range":300.0,"wind_columns":[-0.768292779030205,-1.5366407332402738]},{"range":400.0,"wind_columns":[-1.0658388103164342,-2.1317576900487962]},{"range":500.0,"wind_columns":[-1.3890529493133676,-2.778214046650609]},{"range":600.0,"wind_columns":[-1.7422542163917805,-3.48464804299762]}]}"#;
+const OLD_SHAPE_METRIC_WIND_CARD: &str = r#"{"schema_version":1,"kind":"wind_card","zero_distance":100.0,"bc_for_solve":0.243,"units":{"distance":"m","velocity":"m/s","energy":"J","drop":"mm","wind_speed":"m/s","elevation_adjustment":"MIL","windage_adjustment":"MIL"},"wind_speeds":[5.0,10.0],"wind_angles_deg":[90.0],"rows":[{"range":100.0,"wind_columns":[-0.23757232343576448,-0.47515989045655027]},{"range":200.0,"wind_columns":[-0.4929057857660132,-0.9858449939317048]},{"range":300.0,"wind_columns":[-0.768292779030205,-1.5366407332402738]},{"range":400.0,"wind_columns":[-1.0658388103164342,-2.1317576900487962]},{"range":500.0,"wind_columns":[-1.3890529493133676,-2.778214046650609]},{"range":600.0,"wind_columns":[-1.7422542163917805,-3.48464804299762]}]}"#;
 
 /// The imperial request whose bytes the goldens above hold. Written the way a card request
 /// was written before MBA-1519: one `units` scalar and no per-dimension field anywhere.
@@ -135,21 +137,21 @@ fn assert_close(actual: f64, expected: f64, what: &str) {
 /// same order, or a row moves in the last digits and a saved card reprints differently from
 /// the screen it was saved off.
 #[test]
-fn an_old_shape_request_still_produces_the_exact_bytes_it_always_did() {
+fn an_old_shape_request_still_produces_its_pinned_bytes() {
     let imperial = pre_1519_imperial();
-    assert_eq!(come_ups_json(&imperial), PRE_1519_IMPERIAL_COME_UPS);
-    assert_eq!(range_table_json(&imperial), PRE_1519_IMPERIAL_RANGE_TABLE);
+    assert_eq!(come_ups_json(&imperial), OLD_SHAPE_IMPERIAL_COME_UPS);
+    assert_eq!(range_table_json(&imperial), OLD_SHAPE_IMPERIAL_RANGE_TABLE);
     assert_eq!(
         wind_card_json(&with_wind_sweep(imperial)),
-        PRE_1519_IMPERIAL_WIND_CARD
+        OLD_SHAPE_IMPERIAL_WIND_CARD
     );
 
     let metric = pre_1519_metric();
-    assert_eq!(come_ups_json(&metric), PRE_1519_METRIC_COME_UPS);
-    assert_eq!(range_table_json(&metric), PRE_1519_METRIC_RANGE_TABLE);
+    assert_eq!(come_ups_json(&metric), OLD_SHAPE_METRIC_COME_UPS);
+    assert_eq!(range_table_json(&metric), OLD_SHAPE_METRIC_RANGE_TABLE);
     assert_eq!(
         wind_card_json(&with_wind_sweep(metric)),
-        PRE_1519_METRIC_WIND_CARD
+        OLD_SHAPE_METRIC_WIND_CARD
     );
 }
 
@@ -174,8 +176,8 @@ fn naming_every_dimension_explicitly_matches_the_preset_that_implies_it() {
     spelled_out.insert("pressure_unit".into(), json!("inhg"));
     spelled_out.insert("energy_unit".into(), json!("ftlb"));
     spelled_out.insert("altitude_unit".into(), json!("meters"));
-    assert_eq!(come_ups_json(&imperial), PRE_1519_IMPERIAL_COME_UPS);
-    assert_eq!(range_table_json(&imperial), PRE_1519_IMPERIAL_RANGE_TABLE);
+    assert_eq!(come_ups_json(&imperial), OLD_SHAPE_IMPERIAL_COME_UPS);
+    assert_eq!(range_table_json(&imperial), OLD_SHAPE_IMPERIAL_RANGE_TABLE);
 
     let mut metric = pre_1519_metric();
     let spelled_out = metric.as_object_mut().unwrap();
@@ -190,8 +192,8 @@ fn naming_every_dimension_explicitly_matches_the_preset_that_implies_it() {
     spelled_out.insert("pressure_unit".into(), json!("hpa"));
     spelled_out.insert("energy_unit".into(), json!("joules"));
     spelled_out.insert("altitude_unit".into(), json!("meters"));
-    assert_eq!(come_ups_json(&metric), PRE_1519_METRIC_COME_UPS);
-    assert_eq!(range_table_json(&metric), PRE_1519_METRIC_RANGE_TABLE);
+    assert_eq!(come_ups_json(&metric), OLD_SHAPE_METRIC_COME_UPS);
+    assert_eq!(range_table_json(&metric), OLD_SHAPE_METRIC_RANGE_TABLE);
 }
 
 // -----------------------------------------------------------------------------------------
@@ -566,7 +568,7 @@ fn the_ambiguous_short_spellings_are_refused_and_the_spelled_out_ones_are_not() 
     grams["mass_unit"] = json!("grams");
     assert_eq!(
         range_table_json(&grains),
-        PRE_1519_IMPERIAL_RANGE_TABLE,
+        OLD_SHAPE_IMPERIAL_RANGE_TABLE,
         "spelling out the imperial mass and diameter must be the imperial card"
     );
     assert_ne!(

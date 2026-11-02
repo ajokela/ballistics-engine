@@ -10,9 +10,10 @@
 //!    altitude contribution.
 //!  - Physical direction: hot (low-density) near zone → less drag / more retained velocity than a
 //!    cold near zone, matching an offline CIPM hand calc.
-//!  - Fast/cli parity: the same per-zone density inputs through cli_api and the fast path agree
-//!    loosely on the endpoint (catches an incomplete fast_trajectory.rs density-freeze fix), and
-//!    a zone's humidity moves both by the same amount (catches a fast path that goes dry).
+//!  - Fast/cli parity: the same per-zone air through cli_api and the fast path agrees on the
+//!    endpoint to 1e-4 relative, the two integrators' own difference with margin (catches an
+//!    incomplete fast_trajectory.rs density-freeze fix, and a fast path that flies a zone's sound
+//!    speed dry), and a zone's humidity moves both by the same amount to 0.5 %.
 
 use ballistics_engine::atmosphere::{calculate_air_density_cimp, AtmoSock};
 use ballistics_engine::fast_trajectory::{fast_integrate, FastIntegrationParams};
@@ -255,10 +256,10 @@ fn atmo_sock_hot_near_retains_more_velocity_than_cold_near() {
 }
 
 // ------------------------------------------------------------------------------------------------
-// Fast/cli parity: the same per-zone density inputs through cli_api and the fast path agree loosely
-// on the endpoint. If the fast density-freeze (fast_trajectory.rs :616) were not fixed, the zone
-// would have NO effect on the fast path and this would diverge. Both paths give the local sound
-// speed the zone's RH, so a zone's humidity moves them alike.
+// Fast/cli parity: the same per-zone air through cli_api and the fast path agrees on the endpoint
+// to within the integrators' own difference. If the fast density-freeze (fast_trajectory.rs :616)
+// were not fixed, the zone would have NO effect on the fast path and this would diverge. Both
+// paths give the local sound speed the zone's RH, so a zone's humidity moves them alike.
 // ------------------------------------------------------------------------------------------------
 
 /// Run the plain fast_integrate path with an optional AtmoSock; return endpoint velocity and y.
@@ -340,22 +341,27 @@ fn atmo_sock_fast_and_cli_agree_on_zoned_endpoint() {
     let cli = solve_with(&inputs, &atmo, Some(hot_near), TARGET_M);
     let v_cli = impact_velocity(&cli);
 
-    // Two independent integrators (fast fixed-step RK4 vs cli_api adaptive RK45) with the same
-    // per-zone air should agree within a few percent; the integrators, not the air, differ.
+    // Two independent integrators (fast fixed-step RK4 vs cli_api adaptive RK45) fly the same
+    // per-zone air, so only the integrators differ. Measured on this shot (0.50.0's R5): 8.4e-6
+    // relative here, 1.35e-5 on a dry one-zone shot (the integrators alone), 5.2e-6 without
+    // zones. 1e-4 is about 12x the gap. 0.49.0's fast path flew the zone's sound speed dry and
+    // missed by 2.05e-3, 20x over it; the 5 % this test allowed before passed that by 24x.
     let rel = (v_fast - v_cli).abs() / v_cli;
     assert!(
-        rel < 0.05,
-        "fast vs cli zoned endpoint velocity disagree by {:.1}% (fast {v_fast:.2}, cli {v_cli:.2})",
-        rel * 100.0
+        rel < 1e-4,
+        "fast vs cli zoned endpoint velocity disagree by {rel:e} relative (fast {v_fast:.6}, cli \
+         {v_cli:.6})"
     );
 }
 
 #[test]
 fn atmo_sock_zone_humidity_moves_fast_and_cli_alike() {
     // A zone's RH alone (same T/P, RH 100 vs RH 0) must move the fast path's retained velocity
-    // by the CLI solver's amount. The two integrators' absolute endpoints differ (the 5 % check
-    // above); their RESPONSE to the zone's humidity may not, to 2 %. A fast path that gave the
-    // zone's density its RH but flew dry sound misses by about a sixth (0.49.0: +2.71 vs +2.32).
+    // by the CLI solver's amount. The two integrators' endpoints differ a little (the 1e-4
+    // check above); their RESPONSE to the zone's humidity may not, to 0.5 %. Measured (0.50.0's
+    // R5): +2.32357 vs +2.32203 m/s, 6.6e-4 apart, so 0.5 % is about 7.5x the gap. A fast path
+    // that gave the zone's density its RH but flew dry sound misses by about a sixth (0.49.0:
+    // +2.71 vs +2.32, 0.167).
     let inputs = ref_308_175gr(0.008);
     let atmo = station_atmo();
     let zone = |humidity: f64| vec![(20.0, 1000.0, humidity, TARGET_M * 5.0)];
@@ -372,7 +378,7 @@ fn atmo_sock_zone_humidity_moves_fast_and_cli_alike() {
         "the zone humidity must move the CLI solver: {cli_response:+.4} m/s"
     );
     assert!(
-        (fast_response - cli_response).abs() <= 0.02 * cli_response.abs(),
+        (fast_response - cli_response).abs() <= 0.005 * cli_response.abs(),
         "zone-RH response: fast {fast_response:+.4} m/s vs cli {cli_response:+.4} m/s"
     );
 }

@@ -8,13 +8,18 @@
 //! trace on and checks what it recorded.
 //!
 //! - **One air.** Every family, at RH 50 and 100, with and without humid zones, composes exactly
-//!   the reference's air at every step, to the bit ([`one_air_report`]).
+//!   the reference's air at every step, to the bit, and FLIES it: each step's drag force takes
+//!   that air's density and its drag coefficient is looked up at the Mach that air's sound speed
+//!   gives, to the bit ([`one_air_report`], [`consumption_problem`]). The trace records both
+//!   what `air_at` composed and what the drag site took from it (`ConsumedAir`), so a kernel
+//!   that calls `air_at` and then flies another sound speed fails here, not only in the
+//!   response test.
 //! - **The dry control.** A deliberately dry path must FAIL that check, by more than 1e-4 in the
 //!   sound speed, so no tolerance can ever hide a path that goes dry.
 //! - **Per step.** At fixed states, the four per-step sites (`TrajectorySolver`,
 //!   `compute_derivatives`, the RK4/RK45 kernel, the `fast_integrate` substep) each compose the
-//!   air [`air_at_with_gravity`] gives at that state, over a grid of stations, RH, zones,
-//!   heights, downrange and gravity.
+//!   air [`air_at_with_gravity`] gives at that state, and fly it (its density and the Mach of
+//!   its sound speed), over a grid of stations, RH, zones, heights, downrange and gravity.
 //! - **Response.** The drag and the Magnus accelerations respond to humidity at the same state
 //!   exactly as `TrajectorySolver`'s do, to 1e-12 relative: the Mach every site uses is the
 //!   reference's.
@@ -304,6 +309,9 @@ solver_families!(
     TrajectorySolverRk45,
     /// A zero through `TrajectorySolver` (`calculate_zero_angle_with_station_presence`).
     TrajectorySolverZero,
+    /// `TrajectorySolver` Monte Carlo (`run_monte_carlo_with_station_presence`), one trial with
+    /// every spread zero: its baseline solve and its trial solve (no zones; it takes none).
+    TrajectorySolverMonteCarlo,
     /// `derivatives::compute_derivatives` at several states.
     ComputeDerivatives,
     /// `trajectory_integration::integrate_trajectory`, RK4.
@@ -361,6 +369,35 @@ fn run_family(family: SolverFamily, scenario: &Scenario) -> Option<Vec<AirTraceE
                 .expect("zero")
             })
             .1
+        }
+        SolverFamily::TrajectorySolverMonteCarlo => {
+            if scenario.zones.is_some() {
+                return None;
+            }
+            let params = crate::MonteCarloParams {
+                num_simulations: 1,
+                velocity_std_dev: 0.0,
+                angle_std_dev: 0.0,
+                bc_std_dev: 0.0,
+                wind_speed_std_dev: 0.0,
+                target_distance: Some(600.0),
+                base_wind_speed: 0.0,
+                base_wind_direction: 0.0,
+                azimuth_std_dev: 0.0,
+            };
+            let (results, entries) = traced(|| {
+                crate::run_monte_carlo_with_station_presence(
+                    load(station),
+                    WindConditions::default(),
+                    params,
+                    0.0,
+                    Some(0x5EED),
+                    StationAtmospherePresence::BOTH,
+                )
+                .expect("Monte Carlo")
+            });
+            assert_eq!(results.ranges.len(), 1, "the one trial flew");
+            entries
         }
         SolverFamily::ComputeDerivatives => {
             let inputs = load(station);
@@ -616,9 +653,43 @@ fn relative_error(actual: f64, expected: f64) -> f64 {
     }
 }
 
+/// What the drag computation did with one composed air. Every composition the per-step lookup
+/// (`air_at`) made must have been taken by exactly one drag computation, whose drag force used
+/// that air's density and whose drag coefficient was looked up at the Mach of that air's sound
+/// speed, bit for bit. (A composition made outside the per-step lookup, by a legacy
+/// `get_local_atmosphere*` wrapper, feeds no drag site and is not held to this.)
+fn consumption_problem(index: usize, entry: &AirTraceEntry) -> Option<String> {
+    entry.lookup_saturation_pressures?;
+    let Some(consumed) = entry.consumed.filter(|_| entry.consumptions == 1) else {
+        return Some(format!(
+            "entry {index}: taken by {} drag computations, not 1",
+            entry.consumptions
+        ));
+    };
+    let mach = consumed.airspeed_mps / entry.air.speed_of_sound_mps;
+    if consumed.density_kg_m3.to_bits() != entry.air.density_kg_m3.to_bits() {
+        Some(format!(
+            "entry {index}: the drag flew {} kg/m3 where the air composed {} kg/m3",
+            consumed.density_kg_m3, entry.air.density_kg_m3
+        ))
+    } else if consumed.mach.to_bits() != mach.to_bits() {
+        Some(format!(
+            "entry {index}: the drag looked its Cd up at Mach {} ({} m/s over {} m/s), where the \
+             air composed a {} m/s sound speed (Mach {mach})",
+            consumed.mach,
+            consumed.airspeed_mps,
+            consumed.airspeed_mps / consumed.mach,
+            entry.air.speed_of_sound_mps
+        ))
+    } else {
+        None
+    }
+}
+
 /// Check every recorded composition against the reference at the same state: the lapse starts
 /// at the station, the base is the station's (or the active zone's) with ITS density ratio and
-/// ITS relative humidity, and the air is `air_at`'s, to the bit.
+/// ITS relative humidity, the air is `air_at`'s, to the bit, and the drag flew exactly that air
+/// ([`consumption_problem`]).
 fn one_air_report(scenario: &Scenario, entries: &[AirTraceEntry]) -> OneAirReport {
     let station = scenario.station.air();
     let bases = reference_bases(scenario);
@@ -684,7 +755,7 @@ fn one_air_report(scenario: &Scenario, entries: &[AirTraceEntry]) -> OneAirRepor
                         entry.air
                     ))
                 } else {
-                    None
+                    consumption_problem(index, entry)
                 }
             }
         };
@@ -761,6 +832,18 @@ fn every_family_gives_the_sound_speed_the_station_or_zone_humidity() {
                 failures.push(format!(
                     "{family:?} at {:?} zones={}: sound speed given RH {used:?}, \
                      allowed {allowed:?}",
+                    scenario.station,
+                    scenario.zones.is_some()
+                ));
+            }
+            // And the drag flew the sound speed it was given: each step's Mach is that air's.
+            if let Some(problem) = entries
+                .iter()
+                .enumerate()
+                .find_map(|(index, entry)| consumption_problem(index, entry))
+            {
+                failures.push(format!(
+                    "{family:?} at {:?} zones={}: {problem}",
                     scenario.station,
                     scenario.zones.is_some()
                 ));
@@ -1098,7 +1181,7 @@ fn per_step(
 }
 
 #[test]
-fn every_per_step_site_composes_air_at_at_the_same_state() {
+fn every_per_step_site_composes_and_flies_air_at_at_the_same_state() {
     let gravities = [Gravity::EARTH, Gravity::new(1.62).unwrap()];
     let mut failures = Vec::new();
     let mut checked = 0;
@@ -1131,14 +1214,21 @@ fn every_per_step_site_composes_air_at_at_the_same_state() {
                                         && entries[0].air.speed_of_sound_mps.to_bits()
                                             == expected.speed_of_sound_mps.to_bits()
                                         && entries[0].air.temperature_k.to_bits()
-                                            == expected.temperature_k.to_bits();
+                                            == expected.temperature_k.to_bits()
+                                        && consumption_problem(0, &entries[0]).is_none();
                                     if !matches && failures.len() < 40 {
                                         failures.push(format!(
                                             "{site:?} {station:?} zones={} g={} h={height_m} \
-                                             x={downrange_m}: {:?} vs air_at {expected:?}",
+                                             x={downrange_m}: {:?} vs air_at {expected:?}; \
+                                             flown: {:?}",
                                             zones.is_some(),
                                             gravity.magnitude(),
-                                            entries.iter().map(|e| e.air).collect::<Vec<_>>()
+                                            entries.iter().map(|e| e.air).collect::<Vec<_>>(),
+                                            entries
+                                                .iter()
+                                                .enumerate()
+                                                .map(|(i, e)| consumption_problem(i, e))
+                                                .collect::<Vec<_>>()
                                         ));
                                     } else if !matches {
                                         failures.push(String::new());

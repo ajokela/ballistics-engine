@@ -56,20 +56,23 @@ fn monte_carlo_agrees_with_cli_api_on_si_inputs() {
         mc.energy
     );
 
-    // The two independent solvers must agree on impact velocity and energy.
+    // The two independent solvers fly the same air (the station at the default 50 %), so only
+    // their integrators differ. Measured on this shot (0.50.0's R5): velocity 2.1e-6 and energy
+    // 4.3e-6 relative, drop 1.15e-4 m. The bounds below are about 10x, 10x and 2.6x those. The
+    // lean Monte Carlo of 0.49.0 flew the station's sound speed dry and missed by 2.3e-4,
+    // 4.7e-4 and 4.5e-4 m, so each bound catches it; the 5 % (and 5 mm) this test allowed
+    // before passed it by two orders of magnitude.
     let dvel = (mc.velocity - last.velocity_magnitude).abs() / last.velocity_magnitude;
     let den = (mc.energy - last.kinetic_energy).abs() / last.kinetic_energy;
     assert!(
-        dvel < 0.05,
-        "velocity disagreement {:.1}% (mc={:.1}, cli={:.1})",
-        dvel * 100.0,
+        dvel < 2e-5,
+        "velocity disagreement {dvel:e} relative (mc={}, cli={})",
         mc.velocity,
         last.velocity_magnitude
     );
     assert!(
-        den < 0.05,
-        "energy disagreement {:.1}% (mc={:.0}, cli={:.0})",
-        den * 100.0,
+        den < 4e-5,
+        "energy disagreement {den:e} relative (mc={}, cli={})",
         mc.energy,
         last.kinetic_energy
     );
@@ -81,8 +84,8 @@ fn monte_carlo_agrees_with_cli_api_on_si_inputs() {
         .expect("CLI trajectory reaches target distance");
     let cli_drop = i.muzzle_height + i.sight_height - cli_at_target.y;
     assert!(
-        (mc.drop - cli_drop).abs() < 0.005,
-        "drop-frame disagreement: mc={:.4}m cli={:.4}m",
+        (mc.drop - cli_drop).abs() < 3e-4,
+        "drop-frame disagreement: mc={:.6}m cli={:.6}m",
         mc.drop,
         cli_drop
     );

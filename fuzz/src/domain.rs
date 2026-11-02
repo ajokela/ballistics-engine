@@ -1,7 +1,10 @@
 //! Shared byte->input generators and invariant assertions for the fuzz harnesses.
 
 use arbitrary::{Result, Unstructured};
-use ballistics_engine::{BallisticInputs, DragModel, TrajectoryResult};
+use ballistics_engine::{
+    AtmosphericConditions, BallisticInputs, DragModel, TrajectoryResult,
+    HUMIDITY_SENSOR_TOLERANCE_PERCENT,
+};
 
 /// Map raw bytes to a finite f64 in `[lo, hi]` (deterministic).
 pub fn ranged(u: &mut Unstructured, lo: f64, hi: f64) -> Result<f64> {
@@ -37,6 +40,89 @@ fn hostile_launch_angle(u: &mut Unstructured) -> Result<f64> {
     })
 }
 
+/// A relative humidity, percent, that every surface accepts: anywhere in the sensor band
+/// (`-HUMIDITY_SENSOR_TOLERANCE_PERCENT..=100 + HUMIDITY_SENSOR_TOLERANCE_PERCENT`, read as 0 or
+/// 100 outside 0-100), with the band's edges, 0 and 100 drawn on purpose.
+pub fn band_humidity_percent(u: &mut Unstructured) -> Result<f64> {
+    let band = HUMIDITY_SENSOR_TOLERANCE_PERCENT;
+    Ok(match u.int_in_range(0u8..=9)? {
+        0 => -band,
+        1 => 0.0,
+        2 => 100.0,
+        3 => 100.0 + band,
+        4 => ranged(u, -band, 0.0)?,
+        5 => ranged(u, 100.0, 100.0 + band)?,
+        _ => ranged(u, 0.0, 100.0)?,
+    })
+}
+
+/// A relative humidity, percent, at or just beyond the sensor band's edges: the last values
+/// accepted and the first refused, and a sweep a little past each side.
+pub fn band_edge_humidity_percent(u: &mut Unstructured) -> Result<f64> {
+    let band = HUMIDITY_SENSOR_TOLERANCE_PERCENT;
+    let below = -band;
+    let above = 100.0 + band;
+    Ok(match u.int_in_range(0u8..=5)? {
+        0 => below,
+        1 => above,
+        // One ulp beyond each edge: refused.
+        2 => f64::from_bits(below.to_bits() + 1),
+        3 => f64::from_bits(above.to_bits() + 1),
+        4 => ranged(u, below - 2.0, below + 2.0)?,
+        _ => ranged(u, above - 2.0, above + 2.0)?,
+    })
+}
+
+/// The station air a draw describes: its own temperature, pressure, humidity and altitude. A
+/// harness must fly this, not `AtmosphericConditions::default()`: `TrajectorySolver` sets the
+/// inputs' humidity from its atmosphere, so a default atmosphere flies 15 C, 1013.25 hPa and
+/// 50 % whatever was drawn, and the drawn air never reaches the validator or the physics.
+pub fn station_air(inputs: &BallisticInputs) -> AtmosphericConditions {
+    AtmosphericConditions {
+        temperature: inputs.temperature,
+        pressure: inputs.pressure,
+        humidity: inputs.humidity_percent,
+        altitude: inputs.altitude,
+    }
+}
+
+/// The air `robustness_inputs` flies a hostile draw in. Each mode reaches different checks:
+/// - the default air, so the non-air fields' validation is reached even when the drawn air would
+///   be refused first;
+/// - the drawn air itself, wild temperature, pressure, altitude and humidity together;
+/// - a plausible station with the drawn (wild) humidity, so a hostile humidity reaches the band
+///   rule and the station-air construction instead of losing to a refused temperature;
+/// - a plausible station at a band edge, just inside or just outside;
+/// - a hot, saturated, low-pressure corner, where saturated air stops existing.
+pub fn hostile_air(
+    u: &mut Unstructured,
+    inputs: &BallisticInputs,
+) -> Result<AtmosphericConditions> {
+    let plausible = |u: &mut Unstructured, humidity: f64| -> Result<AtmosphericConditions> {
+        Ok(AtmosphericConditions {
+            temperature: ranged(u, -40.0, 50.0)?,
+            pressure: ranged(u, 700.0, 1100.0)?,
+            humidity,
+            altitude: ranged(u, 0.0, 3000.0)?,
+        })
+    };
+    Ok(match u.int_in_range(0u8..=4)? {
+        0 => AtmosphericConditions::default(),
+        1 => station_air(inputs),
+        2 => plausible(u, inputs.humidity_percent)?,
+        3 => {
+            let humidity = band_edge_humidity_percent(u)?;
+            plausible(u, humidity)?
+        }
+        _ => AtmosphericConditions {
+            temperature: ranged(u, 80.0, 110.0)?,
+            pressure: ranged(u, 300.0, 1013.25)?,
+            humidity: ranged(u, 90.0, 100.0 + HUMIDITY_SENSOR_TOLERANCE_PERCENT)?,
+            altitude: ranged(u, 0.0, 3000.0)?,
+        },
+    })
+}
+
 /// A ballistically plausible input. Every field is finite and in a real-world
 /// envelope so invariant/differential/solver harnesses spend budget on meaningful
 /// solves rather than rejected garbage.
@@ -58,7 +144,7 @@ pub fn valid_inputs(u: &mut Unstructured) -> Result<BallisticInputs> {
         temperature: ranged(u, -40.0, 50.0)?, // C
         pressure: ranged(u, 800.0, 1100.0)?,  // hPa
         altitude: ranged(u, 0.0, 4000.0)?,    // m
-        humidity_percent: ranged(u, 0.0, 100.0)?, // PERCENT
+        humidity_percent: band_humidity_percent(u)?, // PERCENT, the sensor band included
         use_rk4: true,
         ..Default::default()
     })
@@ -84,6 +170,15 @@ pub fn hostile_inputs(u: &mut Unstructured) -> Result<BallisticInputs> {
         target_distance: ranged(u, 10.0, 3000.0)?, // bounded on purpose
         use_rk4: true,
         ..Default::default()
+    })
+    .and_then(|mut inputs| {
+        // Drawn last, so every field above decodes as it always did (the frozen reproducers
+        // in tests/ decode through this function): in a third of draws the humidity becomes a
+        // sensor-band edge or a value just beyond one, which `wild` almost never produces.
+        if u.int_in_range(0u8..=2)? == 2 {
+            inputs.humidity_percent = band_edge_humidity_percent(u)?;
+        }
+        Ok(inputs)
     })
 }
 
@@ -144,6 +239,59 @@ mod tests {
         assert!(b.muzzle_velocity.is_finite() && b.muzzle_velocity > 0.0);
         assert!(b.twist_rate.is_finite() && b.twist_rate > 0.0);
         assert!(b.target_distance.is_finite() && b.target_distance > 0.0);
+    }
+
+    #[test]
+    fn valid_inputs_stay_inside_the_sensor_band_and_reach_its_edges() {
+        let band = HUMIDITY_SENSOR_TOLERANCE_PERCENT;
+        let mut seen = std::collections::BTreeSet::new();
+        for seed in 0u8..=255 {
+            let bytes: Vec<u8> = (0..4096)
+                .map(|i| seed.wrapping_mul(31).wrapping_add(i as u8))
+                .collect();
+            let mut u = Unstructured::new(&bytes);
+            let humidity = valid_inputs(&mut u).unwrap().humidity_percent;
+            assert!((-band..=100.0 + band).contains(&humidity), "{humidity}");
+            seen.insert(humidity.to_bits());
+        }
+        for edge in [-band, 0.0, 100.0, 100.0 + band] {
+            assert!(seen.contains(&edge.to_bits()), "edge {edge} never drawn");
+        }
+    }
+
+    /// The point of `station_air`: a harness that flies it delivers the drawn humidity to the
+    /// solver. A NaN humidity in an otherwise plausible draw is refused, naming the humidity.
+    /// (`AtmosphericConditions::default()`, which every robustness and invariant harness flew
+    /// until 0.50.0's R5, flies 50 % whatever was drawn, and the same draw solves.)
+    #[test]
+    fn the_drawn_humidity_reaches_the_solver() {
+        use ballistics_engine::{TrajectorySolver, WindConditions};
+        let bytes = vec![0xA5u8; 4096];
+        let mut u = Unstructured::new(&bytes);
+        let mut inputs = valid_inputs(&mut u).unwrap();
+        inputs.target_distance = 300.0;
+        assert!(
+            TrajectorySolver::new(
+                inputs.clone(),
+                WindConditions::default(),
+                station_air(&inputs)
+            )
+            .solve()
+            .is_ok(),
+            "the plausible draw solves in its own air"
+        );
+        inputs.humidity_percent = f64::NAN;
+        let refused = TrajectorySolver::new(
+            inputs.clone(),
+            WindConditions::default(),
+            station_air(&inputs),
+        )
+        .solve()
+        .expect_err("a NaN humidity reached the solver and was refused");
+        assert!(
+            refused.to_string().contains("humidity"),
+            "the refusal names the humidity: {refused}"
+        );
     }
 
     #[test]

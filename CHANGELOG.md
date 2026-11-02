@@ -171,9 +171,10 @@ to 1000 m. The lob is fired at 30° and flown until it falls 100 m below the muz
 The flat shot barely moves because the bullet stays within metres of the station's height. A
 1500 m station is the governing air for its own shots, so its flat fire barely moves either. Its
 lob moves a little more than at sea level, because the same relative humidity holds more vapour
-at the lower pressure. The CLI golden corpus of 418 runs moves in 70 of them, every one at a
-humidity above 0, by at most 3.4e-4 relative (the 30° lob's time of flight at 100 %). Every run
-at 0 % is byte-identical, and most table outputs round the change away.
+at the lower pressure. A golden diff of the CLI corpus against the 0.49.0 binary, run once,
+measured this: 70 of its 418 runs move, every one at a humidity above 0, by at most 3.4e-4
+relative (the 30° lob's time of flight at 100 %). Every run at 0 % is byte-identical, and most
+table outputs round the change away.
 
 ### Changed (behaviour)
 - **A humidity outside the sensor band is refused, never clamped.**
@@ -411,7 +412,9 @@ at 0 % is byte-identical, and most table outputs round the change away.
 
 ### Numeric shifts (kernel users at a humidity above 0)
 These are measured by running the engine, 0.50.0 against the 0.49.0 build (main 261c1eb).
-`tests/humidity_docs.rs` recomputes every number in the tables below.
+`tests/humidity_docs.rs` recomputes every number in the tables below, row by row, and the
+`fast_integrate` and lean Monte Carlo figures, by running this engine and the released 0.49.0
+crate side by side. The aloft change's own share is the one figure measured once instead.
 
 Only library callers of the kernels at a humidity above 0 see a change:
 - `compute_derivatives`, `try_integrate_trajectory`, `try_solve_trajectory_rust`,
@@ -438,8 +441,9 @@ The trajectory shifts below are 0.50.0 minus 0.49.0. They come from `try_integra
 RK4 at 1 ms, for a .308 175 gr bullet (G7 0.243, 2600 fps, 1.24 in) at sea level with every
 effect off. `fast_integrate` moves the same on the flat shot: -0.169 m at 15 °C / 50 % and
 -1.007 m at 35 °C / 90 %. The totals include the aloft change. On the 30° lob that change alone
-is -0.385 m of the downrange at 15 °C / 50 %, -1.020 m at 30 °C / 50 % and -2.515 m at
-35 °C / 90 %. On the flat shot it is under a millimetre.
+was measured at -0.385 m of the downrange at 15 °C / 50 %, -1.020 m at 30 °C / 50 % and
+-2.515 m at 35 °C / 90 %, against the development build just before it; no released engine
+reproduces that build, so these are not recomputed. On the flat shot it was under a millimetre.
 
 | Shot | 15 °C / 50 % | 30 °C / 50 % | 35 °C / 90 % |
 |---|---|---|---|
@@ -453,8 +457,9 @@ The lean Monte Carlo runs at its default 50 %, with the same bullet at 15 °C an
 - at 500 m, drop +0.507 mm (2.61837 to 2.61888 m), speed -0.155 m/s and Mach 1.51212 to 1.51167;
 - at 1000 m, drop +8.08 mm (15.4428 to 15.4509 m), speed +0.168 m/s and Mach 0.92664 to 0.92713.
 
-The aloft change is part of these numbers too, though a small one: on its own it is -0.13 µm of
-drop and +0.0001 m/s of speed at 500 m, and -0.010 mm and -0.0007 m/s at 1000 m.
+The aloft change is part of these numbers too, though a small one: on its own it was measured,
+the same way, at -0.13 µm of drop and +0.0001 m/s of speed at 500 m, and -0.010 mm and
+-0.0007 m/s at 1000 m.
 
 At 0 % every kernel is bit-identical to 0.49.0.
 `KernelAtmosphere::from_legacy_params((alt, t, p, ratio), RelativeHumidity::DRY)` rebuilds
@@ -473,6 +478,14 @@ against the 0.49.0 build. Use it to re-baseline a stored kernel result, not for 
     own height, is unchanged through 0.50.0. The aloft change re-pinned 2,278 others, all at a
     humidity above 0 off the station's height. Each re-pinned group's note there gives the old
     and new values.
+  - `cargo test` checks every group that must equal 0.49.0 against the released 0.49.0 crate,
+    run beside this one (a dev-dependency fetched from crates.io), bit for bit on the platform
+    running the tests, whatever its libm. The literal pins hold bit for bit on macOS aarch64
+    and Linux glibc (aarch64, x86_64). On the other platforms (FreeBSD, NetBSD, OpenBSD, musl,
+    Windows, macOS x86_64) the values only this engine computes, the groups the aloft change
+    re-pinned and the few 0.49.0 cannot run beside it, hold within 2 ulps: the farthest any of
+    those libms rounds them. Pins captured on one machine had failed there, on the BSDs even
+    for values 0.50.0 computes exactly as 0.49.0 does.
   - Before the aloft change, a golden diff of 418 CLI runs against the 0.49.0 binary covered trajectory (tables, JSON,
     CSV, every effect, RK4, Euler, a 30° lob, `--zero-humidity`, density altitude and a
     `--location` CSV), zero, come-ups, range tables, wind-card, compare, monte-carlo (seeded,
