@@ -83,7 +83,10 @@
 //! reports one outside the band, or stored air that cannot exist, as a warning
 //! (`valid: false`) rather than an error; `profile.export_a7p` refuses either;
 //! `profile.normalize` echoes it unchanged, since it re-serializes the document and reads
-//! nothing. `profile.import_a7p` reads the file's whole-percent air-humidity field
+//! nothing. Both echo the STORED value, and for a stored sensor reading outside 0-100 that
+//! flies as an end (102, -5) both add `"flown_humidity"`, the percent a flight of the profile
+//! flies (100, 0); the member is absent otherwise (since 0.50.0). `profile.export_a7p` writes
+//! that end. `profile.import_a7p` reads the file's whole-percent air-humidity field
 //! (`c_zero_air_humidity`, as the import report's `mapped` rows name it): an absent one is
 //! 0 %, the format's own meaning, because the file writes 0 by omitting the field. A file
 //! whose air cannot exist is refused.
@@ -974,12 +977,25 @@ fn decode_profile_document(
     })
 }
 
+/// The one echo rule for a stored document (R3, review C8): `profile.validate` and
+/// `profile.normalize` echo the stored `humidity` unchanged, and when it is a sensor reading
+/// outside 0-100 that flies as an end they add `"flown_humidity"`, the percent a flight of the
+/// profile flies (100 for a stored 102, 0 for a stored -5). The member is absent for a stored
+/// value in 0-100, which flies as itself, and for one that does not fly at all.
+fn with_flown_humidity(mut result: Value, profile: &crate::profile::ProfileData) -> Value {
+    if let (Some(flown), Some(object)) = (profile.flown_humidity_note(), result.as_object_mut()) {
+        object.insert("flown_humidity".to_string(), json!(flown));
+    }
+    result
+}
+
 /// `profile.validate`: parse a ProfileData document and run the cheap invariants the CLI
 /// applies when loading/saving a profile (units string, MBA-1358 tracking-CF band,
 /// MBA-1348 turret/optic assembly + validation including click-value parse) — see
 /// [`crate::profile::ProfileData::validation_warnings`]. No new physics checks. Result:
 /// `{ "valid": bool, "warnings": [..], "normalized": <the profile re-serialized by this
-/// engine> }` — `valid` is simply `warnings.is_empty()`.
+/// engine> }` — `valid` is simply `warnings.is_empty()` — plus `flown_humidity` for a stored
+/// band reading ([`with_flown_humidity`]).
 fn run_profile_validate(inner: &Value) -> String {
     let profile = match decode_profile_document(inner, "profile.validate") {
         Ok(profile) => profile,
@@ -989,11 +1005,14 @@ fn run_profile_validate(inner: &Value) -> String {
     match serde_json::to_value(&profile) {
         Ok(normalized) => success(
             "profile.validate",
-            json!({
-                "valid": warnings.is_empty(),
-                "warnings": warnings,
-                "normalized": normalized,
-            }),
+            with_flown_humidity(
+                json!({
+                    "valid": warnings.is_empty(),
+                    "warnings": warnings,
+                    "normalized": normalized,
+                }),
+                &profile,
+            ),
         ),
         Err(err) => error(
             BridgeErrorCode::InternalError,
@@ -1007,14 +1026,18 @@ fn run_profile_validate(inner: &Value) -> String {
 /// THIS engine — the supported way for an app to round-trip a stored blob through a newer
 /// engine version (unknown keys are tolerated on input and dropped on output; defaults
 /// fill in; `skip_serializing_if` keys stay absent — the same round-trip a CLI
-/// load-then-save performs). Result: `{ "profile": <re-serialized ProfileData> }`.
+/// load-then-save performs). Result: `{ "profile": <re-serialized ProfileData> }`, plus
+/// `flown_humidity` for a stored band reading ([`with_flown_humidity`]).
 fn run_profile_normalize(inner: &Value) -> String {
     let profile = match decode_profile_document(inner, "profile.normalize") {
         Ok(profile) => profile,
         Err(envelope) => return envelope,
     };
     match serde_json::to_value(&profile) {
-        Ok(normalized) => success("profile.normalize", json!({ "profile": normalized })),
+        Ok(normalized) => success(
+            "profile.normalize",
+            with_flown_humidity(json!({ "profile": normalized }), &profile),
+        ),
         Err(err) => error(
             BridgeErrorCode::InternalError,
             format!("failed to serialize normalized profile: {err}"),

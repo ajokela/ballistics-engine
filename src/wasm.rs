@@ -8584,6 +8584,9 @@ Trajectory Command:
   Basic Options:
     -v, --velocity <VEL>         Muzzle velocity (fps/m/s)
     -b, --bc <BC>                Ballistic coefficient
+    --bc-reference <REF>         BC reference standard: icao (default) or
+                                 army-standard-metro (an Army Standard Metro BC,
+                                 converted to ICAO before the solve)
     -m, --mass <MASS>            Mass (grains/grams)
     -d, --diameter <DIA>         Diameter (inches/mm)
     -a, --angle <ANGLE>          Launch angle (degrees)
@@ -8656,12 +8659,31 @@ Trajectory Command:
                                  speed which follows --units
     --temperature <TEMP>         Temperature (F/C)
     --pressure <PRESSURE>        Pressure (inHg/hPa)
-    --zero-density-altitude <DA> Zero-day density altitude for --auto-zero (ft/m);
-                                 supersedes --zero-altitude and --zero-pressure/
-                                 --zero-pressure-type for the zero solve only
+    --pressure-type <TYPE>       absolute (default) or qnh: a QNH altimeter
+                                 setting is reduced against --altitude
     --humidity <HUMIDITY>        Humidity (0-100%); a sensor reading up to 5
                                  outside is read as 0 or 100
     --altitude <ALT>             Altitude (feet/meters)
+    --density-altitude <DA>      Single-value atmosphere entry (ft/m); supersedes
+                                 --altitude and --pressure/--pressure-type
+
+  Zero Day (--auto-zero only; each defaults to the shot day's value):
+    --zero-temperature <TEMP>    Zero-day air temperature (F/C)
+    --zero-pressure <PRESSURE>   Zero-day pressure (inHg/hPa)
+    --zero-pressure-type <TYPE>  absolute or qnh for --zero-pressure [default: the
+                                 shot day's --pressure-type]
+    --zero-humidity <HUMIDITY>   Zero-day humidity (0-100%); a sensor reading up
+                                 to 5 outside is read as 0 or 100
+    --zero-altitude <ALT>        Zero-day altitude (feet/meters)
+    --zero-density-altitude <DA> Zero-day density altitude (ft/m); supersedes
+                                 --zero-altitude and --zero-pressure/
+                                 --zero-pressure-type for the zero solve only
+    --zero-velocity <VEL>        Zero-day muzzle velocity (fps/m/s); overrides
+                                 both powder models
+    --zero-powder-temp <TEMP>    Zero-day powder temperature for the
+                                 --powder-temp-curve lookup (F/C) [default: an
+                                 explicit --zero-temperature, else the shot day's
+                                 --powder-temp]
     
   Advanced Physics:
     --enable-magnus              Enable Magnus effect
@@ -8693,7 +8715,8 @@ Trajectory Command:
     --latitude <LAT>             Latitude for Coriolis (degrees)
     --shot-direction <DEG>       Compass bearing of the shot for Coriolis (0=N, 90=E)
     --shooting-angle <ANGLE>     Uphill/downhill angle (degrees)
-    --cant <DEGREES>             Rifle cant angle (degrees); positive = clockwise from the
+    --cant <DEGREES>             Rifle cant angle (degrees; --cant-angle also
+                                 accepted); positive = clockwise from the
                                  shooter, moving point of impact right and low
     --sight-height <HEIGHT>      Sight height above bore (inches/mm)
     --muzzle-height <HEIGHT>     Shooter height above ground (inches/mm; also accepts
@@ -8705,6 +8728,9 @@ Trajectory Command:
                                  defeat ground truncation
     --target-height <HEIGHT>     Target height above ground (inches/mm)
     --powder-temp <TEMP>         Powder temperature
+    --powder-temp-curve <T:V,..> Measured powder-temperature -> velocity table
+                                 (F & fps / C & m/s), interpolated at the powder
+                                 temperature; overrides --powder-temp-sensitivity
     --powder-temp-sensitivity <SENS>  Velocity change per degree"#,
         );
         #[cfg(feature = "wasm-zero")]
@@ -8717,6 +8743,9 @@ Zero Command:
   Options:
     -v, --velocity <VEL>         Muzzle velocity
     -b, --bc <BC>                Ballistic coefficient
+    --bc-reference <REF>         BC reference standard: icao (default) or
+                                 army-standard-metro (an Army Standard Metro BC,
+                                 converted to ICAO before the solve)
     -m, --mass <MASS>            Mass
     -d, --diameter <DIA>         Diameter
     --drag-model <MODEL>         Drag model (G1/G2/G5/G6/G7/G8/GI/GS/RA4)
@@ -8821,6 +8850,9 @@ Monte Carlo Command:
   Options:
     -v, --velocity <VEL>         Base velocity
     -b, --bc <BC>                Base BC
+    --bc-reference <REF>         BC reference standard: icao (default) or
+                                 army-standard-metro (an Army Standard Metro BC,
+                                 converted to ICAO before the solve)
     -m, --mass <MASS>            Mass
     -d, --diameter <DIA>         Diameter
     --drag-model <MODEL>         Drag model (G1/G2/G5/G6/G7/G8/GI/GS/RA4)
@@ -8832,7 +8864,8 @@ Monte Carlo Command:
     --angle-std <STD>            Angle std deviation
     --bc-std <STD>               BC std deviation
     --wind-speed-std <STD>       Wind speed std deviation (--wind-std also accepted)
-    --wind-direction-std <STD>   Wind direction std deviation (degrees)
+    --wind-direction-std <STD>   Wind direction std deviation (degrees;
+                                 --wind-dir-std also accepted)
     --humidity <H>               Relative humidity (0-100%), flown by every
                                  simulation and the WEZ sweep [default: 50]; a
                                  sensor reading up to 5 outside is read as 0 or 100

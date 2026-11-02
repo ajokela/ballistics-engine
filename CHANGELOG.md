@@ -16,8 +16,10 @@ and validation now apply wherever a relative humidity enters the engine.
   `atmosphere::air_at`. That covers `TrajectorySolver`, `compute_derivatives`,
   `try_integrate_trajectory`, `try_solve_trajectory_rust`, `fast_integrate*` and the lean Monte
   Carlo.
-- **Units.** A humidity is a percent on every Rust field, flag and app surface. Only the SI
-  JSON's `relative_humidity` carries a fraction.
+- **Units.** A humidity is a percent on every Rust field, `--humidity` flag and app surface.
+  Only the SI JSON's `relative_humidity` carries a fraction, and so do the request-file axes
+  that follow it: `error-budget --sigma relative-humidity=`, `tolerance --domain
+  relative-humidity=` and the perturbation API's `InputAxis::RelativeHumidity`.
 - **Default.** An omitted humidity is 50 % everywhere.
 - **Validation.** One rule applies at every boundary: `RelativeHumidity::try_percent` and
   `RelativeHumidity::try_fraction`.
@@ -46,6 +48,33 @@ exactly as before. The kernels' own change is listed under Numeric shifts.
   RelativeHumidity::try_percent(rh)?)?)` or `KernelAtmosphere::uniform(density, sound_speed)?`.
   A legacy tuple converts in one line with `KernelAtmosphere::from_legacy_params(tuple,
   humidity)?`. [MCCOY_MIGRATION.md](MCCOY_MIGRATION.md) has the migration.
+- **Some legacy tuples that 0.49.0 flew are refused by `from_legacy_params`.**
+  `tests/kernel_atmosphere_legacy_tuples.rs` lists every class, measured on 0.49.0's
+  `compute_derivatives`, with the error each one now gets:
+  - Direct mode `(density, sound speed, 0, 0)`:
+    - a negative density, which 0.49.0 flew as a forward drag, is `UniformDensityOutOfRange`;
+    - an infinite sound speed, which it flew as Mach 0, is `NotFinite`.
+  - Standard mode `(altitude, temperature, pressure, ratio)`:
+    - a NaN or -inf ratio, flown as 1.0, is `NotFinite` on `density_ratio`;
+    - a ratio of 2 or more is `DensityRatioOutOfRange` (`compute_derivatives` flew any ratio
+      above 0; `fast_integrate` already refused it);
+    - a negative pressure, flown on its ratio alone, is `NonPositivePressure`;
+    - a temperature at or below -273.15 °C is `AtOrBelowAbsoluteZero`;
+    - a temperature above water's critical point (373.946 °C) is `ImpossibleAir` even dry,
+      where 0.49.0 flew pure steam's sound speed;
+    - air that cannot exist at the stated humidity is `ImpossibleAir`. 0.49.0's kernels flew
+      every station dry, so they never saw it.
+  - A finite ratio of 0 or less still means "not supplied" and flies 1.0.
+  - Exact vacuum still converts: see `KernelAtmosphere::uniform` under Changed.
+  - The tuples 0.49.0 flew to a NaN acceleration are each a named refusal now. These are a
+    direct density of NaN or of 2 or more, a direct sound speed of 200 m/s or less, a standard
+    pressure of 0, NaN or +inf, a +inf ratio, and a NaN or infinite altitude or temperature.
+- **`tolerance::ToleranceAxisV1` gains `near_at_physical_boundary` and
+  `far_at_physical_boundary`**, so a struct literal must name them (they deserialize as
+  `false` when absent). `perturbation::physical_domain` and `PhysicalDomain` are new, and the
+  `RelativeHumidity` axis's `AxisKind::Continuous` unit is `"fraction"`, where it was `""`.
+- **`ProfileData` gains `flown_humidity` and `flown_humidity_note`.** They give the humidity a
+  flight of the profile flies, and what a stored band reading flies as.
 - **`try_integrate_trajectory` returns `KernelInputError`**, not `WindSegmentError`. The new type
   is a malformed wind segment or a refused atmosphere zone. `try_solve_trajectory_rust` still
   returns `WindSegmentError`.
@@ -166,6 +195,11 @@ at 0 % is byte-identical, and most table outputs round the change away.
   whose temperature is at or below -273.15 °C, is refused too. 0.49.0 capped such air, or flew
   NaN. It is the test `atmosphere.density_altitude` already applied, and both now state the same
   reason.
+  - The online client applies the whole rule too, before any request is sent. That covers
+    `true-velocity`'s default API path and `trajectory --online` or `--compare`, through
+    `ApiClient::true_velocity` and `calculate_trajectory`. A humidity beyond the band, or air
+    that cannot exist, is an `ApiError::RequestError` in the request's own words, and nothing
+    is sent. 0.49.0's client checked neither.
   - Every surface refuses it before any work, with the cause first, naming the reading where it
     was given and the air it cannot exist in. The CLI names the flag:
     `--humidity = 100 at 101 °C and 1013.25 hPa: no such air exists: ...`. It names
@@ -193,6 +227,19 @@ at 0 % is byte-identical, and most table outputs round the change away.
 - **A reading inside the band flies exactly as its end.** A reading is stored as exactly 100 %
   or 0 %, so it flies exactly as 0.49.0's clamp flew it. Weather meters and phone sensors read a
   little above 100 % in fog.
+  - **One echo rule.** A surface that reports the air a run flies states the end it flies as.
+    A surface that displays stored data shows the stored value and, when that is outside 0-100,
+    says what it flies as:
+    - `trajectory`'s stderr `Effective values` line gains the humidity flown:
+      `altitude=0, temp=95.0, pressure=29.92, humidity=100.0%`, whether it came from a flag, a
+      `--location` CSV or a saved profile;
+    - every flight of a saved profile flies, and echoes, a stored 102 as 100, and `dsf`, which
+      re-saves the profile it trues, stores 100;
+    - `profile show` prints the stored `Humidity: 102.0%` and a `flies as: 100.0%` line below
+      it, and prints a stored -0 as `0.0%`, not `-0.0%`;
+    - the bridge's `profile.validate` and `profile.normalize` echo the stored 102 unchanged and
+      add `"flown_humidity": 100`. The member is absent for a stored value in 0-100, and for one
+      that does not fly.
   - CLI `--humidity 102`, `105`, `-3` and `-5` are byte-identical to `100` or `0` on every
     command. Most commands refused them in 0.49.0.
   - `profile save --humidity 102` stores 100.
@@ -203,6 +250,58 @@ at 0 % is byte-identical, and most table outputs round the change away.
   0.** 0.49.0 refused them with `invalid_value`, so a phone or weather-meter reading of 101.7 % in
   fog, sent as 1.017, failed the solve. The value flies exactly as 1 (or 0), and `resolved_request`
   echoes the end it flew. The MCP solve schema states the band: minimum -0.05, maximum 1.05.
+- **Every numeric `--location` and `--profile` CSV cell is read one way.** A cell is trimmed,
+  so ` 70` is 70, as it is on `--humidity`. An empty or blank cell is absent. Any other cell
+  that is not a finite number stops the run with an error naming the column and quoting the
+  cell: `--location CSV column HUMIDITY = '65%': not a number; relative humidity is a percent
+  from 0 to 100 (...)`. In 0.49.0 such a cell was read as absent, so `65%` silently flew 50 %
+  (or a saved profile's humidity), `5g` in a TEMPERATURE column flew 59 °F, and a ` 95` padded
+  temperature flew 59 °F too. A literal `nan` DA cell was read as absent; it is now refused.
+  This covers every numeric column `trajectory` reads, in both files. Every cell is read before
+  any is used, so a bad cell stops the run even when a flag overrides its column. The same rule
+  now holds for `wind-card --wind-speeds`: an entry that is no number is refused by name, as
+  `--wind-angles` already refused one, where 0.49.0 dropped it from the card.
+- **The humidity axis of `error-budget --sigma` and `tolerance --domain` says it is a
+  fraction.** These are request-file axes, and a request file's humidity is a fraction, so they
+  stay fractions. There is no percent alias.
+  - `--sigma relative-humidity=S` refuses an `S` of 1 or more, naming the unit. 0.49.0 took
+    `relative-humidity=5` (a percent meant as 5 points) as a 500-point sigma that dominated the
+    ranking.
+  - `--domain` refuses a bound outside the axis's physical range (a humidity outside 0 to 1, a
+    negative wind speed) for that, naming the unit, before it looks at the nominal. 0.49.0
+    refused `relative-humidity=20:80` for where the nominal sat.
+  - The missing-domain hint reads `(as a fraction, 0.5 = 50 %)`, and the table prints the
+    nominal as `nominal 0.500000 fraction`. Both commands' `--help` give a humidity example.
+- **`tolerance` searches a saturated or dry humidity, and a calm wind.** Every 100-105 % (or
+  -5-0 %) reading resolves to a humidity of exactly 1 (or 0), the edge of the axis, and every
+  domain was refused for such a nominal. Now the nominal may sit on its domain's matching
+  bound, such as `relative-humidity=0.5:1` at saturation or `wind-speed=0:20` in calm air.
+  Only the other direction is searched. The closed side is reported as
+  `near_at_physical_boundary` or `far_at_physical_boundary` (`-o json`), or as `not searched --
+  the nominal is at the axis's physical boundary` in the table. It is never reported as a bound
+  or as "no effect". `error-budget` already took a one-sided difference there. A nominal on
+  any other bound is still refused.
+- **`KernelAtmosphere::uniform(0.0, c)` is an exact vacuum again.** Its density may be 0, and
+  is refused only when negative, NaN or 2 or more. The flight feels gravity and nothing else:
+  `compute_derivatives` gives exactly `[0, -9.80665, 0]` at 800 m/s, as 0.49.0's did for the
+  `(0, c, 0, 0)` tuple, and it is the one way to switch drag off. `fast_integrate` flies it too (0.49.0's refused a density of 0), and `-0.0` is stored as
+  `0.0`. The refusal reads "air density must be at least 0 (a vacuum) and less than 2
+  kg/m^3".
+- **A NaN humidity is NaN air on the raw primitives, never steam.** `calculate_atmosphere`,
+  `calculate_air_density_cimp` and its `cipm` alias, `moist_speed_of_sound`,
+  `get_local_atmosphere_humid`, `density_matched_altitude_m` and an unvalidated `AtmoSock` zone
+  flown through `air_at`, `compute_derivatives` or `integrate_trajectory` now return NaN for a
+  NaN humidity. So do a NaN pressure and air above water's critical point. 0.49.0 capped the NaN water-vapour
+  mole fraction at 1 and flew pure steam: 0.811 kg/m³ and 386.9 m/s at 15 °C and 1013.25 hPa.
+  Every finite result is bit for bit unchanged. These functions are documented as raw
+  primitives: a number outside 0-100 is clamped, and a NaN propagates. Validate with
+  `RelativeHumidity` and build a `StationAir`. Every validated surface already refused a NaN.
+- **The browser terminal's help lists every flag it parses.** `trajectory` gains entries for
+  `--pressure-type`, `--density-altitude`, a Zero Day group (`--zero-temperature`,
+  `--zero-pressure`, `--zero-pressure-type`, `--zero-humidity`, `--zero-altitude`,
+  `--zero-density-altitude`, `--zero-velocity`, `--zero-powder-temp`), `--powder-temp-curve`
+  and `--bc-reference`. `zero` and `monte-carlo` gain `--bc-reference`.
+  `tests/wasm_help_drift.rs` checks every command's parsed flags against its help.
 - **`monte-carlo --humidity`**, a percent with default 50, is new on the CLI and the browser
   terminal. It reaches the fixed-count run, `--adaptive` and `--wez`. Without the flag the
   output is byte-identical: 0.49.0 always flew 50 %.
@@ -285,6 +384,8 @@ at 0 % is byte-identical, and most table outputs round the change away.
     message (`reason` `field`, `field` `humidity`), not the format's bound.
   - `include/ballistics_bridge.h` names `profile.import_a7p`'s humidity field
     `a7p:c_zero_air_humidity`, as the import report's `mapped` rows and the refusal do.
+  - `profile.validate` and `profile.normalize` add `"flown_humidity"` for a stored band
+    reading (see the echo rule above). The member is additive.
   - The browser terminal's `trajectory` (with or without `--auto-zero`), `zero` and
     `monte-carlo` throw a failed solve, as every other command does. They returned it as
     `Error: ...` text, a success to a caller and not JSON under `-o json`.
@@ -417,9 +518,13 @@ These repositories pin the engine version and are not changed here:
   becomes a `KernelAtmosphere`, and `Air::at` becomes `air_at`. Set `inputs.humidity_percent`
   from the rocket's atmosphere. The deprecation is a `-D warnings` error there.
   `Atmosphere::default` becomes 50 %, while `icao_standard` stays dry. Recheck the OpenRocket
-  parity job: a humid rocket flight climbs kilometres, so the aloft change moves it.
+  parity job: a humid rocket flight climbs kilometres, so the aloft change moves it. Its
+  `Atmosphere::Uniform { density_kg_m3: 0.0, .. }` ("zero disables drag") converts to
+  `KernelAtmosphere::uniform(0.0, c)`, the exact vacuum; a negative density is refused.
 - **ballistics-engine-py**: does not compile unchanged.
-  - Build `KernelAtmosphere::from_legacy_params` in `fast_integrate` and `derivatives`.
+  - Build `KernelAtmosphere::from_legacy_params` in `fast_integrate` and `derivatives`. A
+    `(0, c, 0, 0)` vacuum tuple still converts; the classes listed under Breaking are refused,
+    and `derivatives()` should surface that refusal.
   - Rename to `humidity_percent` and delete its `/ 100` lines. Its dict `humidity` default moves
     from 0 to 50, which must be disclosed.
   - Give `get_local_atmosphere` a humidity.

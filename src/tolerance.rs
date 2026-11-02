@@ -90,6 +90,21 @@
 //! `Ok(None)`). A missing or invalid domain returns [`KernelError::InvalidDomain`] immediately,
 //! before any solve.
 //!
+//! Two refinements come from the axis's own physical range
+//! ([`crate::perturbation::physical_domain`]: a relative humidity is a fraction from 0 to 1, a
+//! wind speed 0 m/s or more), since 0.50.0 (R3):
+//!
+//! - A domain reaching outside that range is refused for it, with the unit named, before the
+//!   nominal is looked at: a percent typed as a humidity domain (20:80) is told it is no
+//!   fraction, not that the nominal sits outside it.
+//! - A nominal ON that range's edge may sit on the domain's matching bound: a saturated or dry
+//!   humidity (every 100-105 % or -5-0 % reading resolves to exactly 1 or 0) or a calm wind.
+//!   There is nothing past that edge, so that direction is not searched and is reported as
+//!   [`ToleranceAxisV1::near_at_physical_boundary`] or
+//!   [`ToleranceAxisV1::far_at_physical_boundary`], never as a bound or as "no effect"; the
+//!   other direction is searched as usual. This is the case `crate::error_budget` meets with a
+//!   one-sided difference.
+//!
 //! # Unavailable axes
 //!
 //! [`bisect_axis`]/[`with_axis`] can legitimately refuse to search a declared axis:
@@ -161,7 +176,7 @@ use serde::{Deserialize, Serialize};
 use crate::error_budget::{unavailable_reason, TargetGeometryV1, UnavailableReasonCodeV1};
 use crate::perturbation::access::{read_axis, with_axis, AxisValue, KernelError};
 use crate::perturbation::derive::bisect_axis;
-use crate::perturbation::taxonomy::{axis_meta, AxisKind, InputAxis};
+use crate::perturbation::taxonomy::{axis_meta, physical_domain, AxisKind, InputAxis};
 use crate::perturbation::{evaluate, Observation};
 use crate::solve_json::ResolvedSolveRequestV1;
 use crate::trajectory_observation::TrajectoryObservationError;
@@ -246,6 +261,18 @@ pub struct ToleranceAxisV1 {
     pub near_has_no_effect: bool,
     /// As `near_has_no_effect`, for the far direction.
     pub far_has_no_effect: bool,
+    /// `true` when `nominal` sits AT the configured domain's lower bound because that bound is
+    /// the axis's own physical boundary ([`crate::perturbation::physical_domain`]): a dry
+    /// humidity (a 0 to -5 % reading resolves to exactly 0), or a calm wind. There is nothing
+    /// below it, so the near direction is not searched: `near_bound` is `None` and
+    /// `near_has_no_effect` `false`, and this field says why (R3, review C11). Absent from a
+    /// report written before 0.50.0, and read as `false`.
+    #[serde(default)]
+    pub near_at_physical_boundary: bool,
+    /// As `near_at_physical_boundary`, for the upper bound: a saturated humidity (a 100-105 %
+    /// reading resolves to exactly 1).
+    #[serde(default)]
+    pub far_at_physical_boundary: bool,
     /// The smallest linear half-extent of `target` (`min(height_m, width_m) / 2.0` for a
     /// [`TargetGeometryV1::Rect`], `radius_m` for a [`TargetGeometryV1::Circle`]) -- a
     /// convenience summary of how tight the target is, identical across every axis in a report
@@ -382,7 +409,10 @@ fn limiting_boundary(
 ///   `crate::error_budget::error_budget` applies to its own `ranges_m`.
 /// - [`KernelError::InvalidDomain`] immediately, before any solve for that axis, if `domains` has
 ///   no entry for one of `axes`, either bound is not finite, the lower bound is not strictly less
-///   than the upper, or the axis's own current value does not sit strictly between them.
+///   than the upper, a bound lies outside the axis's physical range
+///   ([`crate::perturbation::physical_domain`]), or the axis's own current value does not sit
+///   strictly between them (it may sit on a bound that is the physical range's own edge; see the
+///   module doc).
 /// - Otherwise, propagates any [`KernelError`] that is not one of the four structural refusals
 ///   recorded in [`ToleranceReportV1::unavailable_axes`] instead -- see "Unavailable axes" in the
 ///   module doc.
@@ -470,7 +500,29 @@ pub fn tolerance_envelope(
                 reason: "the domain's lower bound must be strictly less than its upper bound",
             });
         }
-        if !(nominal_value > lo && nominal_value < hi) {
+        // R3 (review C3): a domain reaching past the axis's own physical range is refused for
+        // that, in the axis's unit, before the nominal is looked at, so a percent typed as a
+        // humidity domain (20:80) is told it is not a fraction.
+        let physical = physical_domain(axis);
+        if let Some(range) = physical {
+            if lo < range.lower || hi > range.upper {
+                return Err(KernelError::InvalidDomain {
+                    axis,
+                    reason: range.refusal,
+                });
+            }
+        }
+        // R3 (review C11): a nominal ON the axis's physical boundary (a saturated or dry
+        // humidity, a calm wind) may sit on the domain's matching bound. That direction has
+        // nothing to search and is reported as the physical boundary; the other is searched
+        // as usual. Any other nominal on a bound would make a zero-width probe.
+        let near_at_physical_boundary =
+            nominal_value == lo && physical.is_some_and(|range| lo == range.lower);
+        let far_at_physical_boundary =
+            nominal_value == hi && physical.is_some_and(|range| hi == range.upper);
+        let nominal_searchable = (nominal_value > lo || near_at_physical_boundary)
+            && (nominal_value < hi || far_at_physical_boundary);
+        if !nominal_searchable {
             return Err(KernelError::InvalidDomain {
                 axis,
                 reason: "the axis's own current value must sit strictly inside the configured \
@@ -515,6 +567,8 @@ pub fn tolerance_envelope(
                 unbounded_in_domain: false,
                 near_has_no_effect: false,
                 far_has_no_effect: false,
+                near_at_physical_boundary,
+                far_at_physical_boundary,
                 margin_linear_m,
             });
             continue;
@@ -529,8 +583,17 @@ pub fn tolerance_envelope(
         // `a_genuine_observation_error_propagates_not_recorded_as_unavailable`.
         let tol = bisection_tolerance(lo, hi);
         let pred = |o: &Observation| inside(o, &nominal, target);
-        let near = bisect_axis(base, axis, range_m, (nominal_value, lo), &pred, tol)?;
-        let far = bisect_axis(base, axis, range_m, (nominal_value, hi), &pred, tol)?;
+        // A direction at the physical boundary has no domain at all, so it is not searched.
+        let near = if near_at_physical_boundary {
+            None
+        } else {
+            bisect_axis(base, axis, range_m, (nominal_value, lo), &pred, tol)?
+        };
+        let far = if far_at_physical_boundary {
+            None
+        } else {
+            bisect_axis(base, axis, range_m, (nominal_value, hi), &pred, tol)?
+        };
 
         // Beyond finding a bound (or confirming its absence), each None direction is checked
         // for whether the axis has ANY measurable effect on the impact at all -- see
@@ -544,6 +607,7 @@ pub fn tolerance_envelope(
                 let o = evaluate(&with_axis(base, axis, AxisValue::Scalar(v))?, &[range_m])?[0];
                 (Some(limiting_boundary(&o, &nominal, target)), false)
             }
+            None if near_at_physical_boundary => (None, false),
             None => {
                 let o = evaluate(&with_axis(base, axis, AxisValue::Scalar(lo))?, &[range_m])?[0];
                 (None, observation_matches_nominal(&o, &nominal))
@@ -554,6 +618,7 @@ pub fn tolerance_envelope(
                 let o = evaluate(&with_axis(base, axis, AxisValue::Scalar(v))?, &[range_m])?[0];
                 (Some(limiting_boundary(&o, &nominal, target)), false)
             }
+            None if far_at_physical_boundary => (None, false),
             None => {
                 let o = evaluate(&with_axis(base, axis, AxisValue::Scalar(hi))?, &[range_m])?[0];
                 (None, observation_matches_nominal(&o, &nominal))
@@ -571,6 +636,8 @@ pub fn tolerance_envelope(
             unbounded_in_domain: near.is_none() && far.is_none(),
             near_has_no_effect,
             far_has_no_effect,
+            near_at_physical_boundary,
+            far_at_physical_boundary,
             margin_linear_m,
         });
     }
@@ -1735,5 +1802,174 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rep.schema_version, TOLERANCE_SCHEMA_VERSION_V1);
+    }
+
+    // ---- R3 (whole-branch review C3, C11): the axis's physical boundary ----
+
+    /// The `resolved()` shot at a given request `relative_humidity` (a fraction) and crosswind.
+    fn resolved_at(
+        relative_humidity: f64,
+        wind_mps: f64,
+    ) -> crate::solve_json::ResolvedSolveRequestV1 {
+        let json = serde_json::json!({
+            "schema_version": 1,
+            "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
+                           "ballistic_coefficient": 0.243},
+            "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05},
+            "shot": {"max_range_m": 900.0, "zero_distance_m": 600.0},
+            "atmosphere": {"temperature_k": 308.15, "relative_humidity": relative_humidity},
+            "wind": {"speed_mps": wind_mps,
+                     "direction_from_rad": std::f64::consts::FRAC_PI_2},
+            "solver": {}, "effects": {}, "sampling": {"interval_m": 10.0}
+        })
+        .to_string();
+        let req = crate::solve_json::decode_solve_request_v1(&json).unwrap();
+        crate::solve_v1::solve_v1(req).unwrap().resolved_request
+    }
+
+    fn axis_json(report: &ToleranceReportV1) -> serde_json::Value {
+        serde_json::to_value(&report.axes[0]).unwrap()
+    }
+
+    /// A saturated nominal (a 100-105 % reading resolves to exactly 1) is searched downward and
+    /// its upper side reported at the physical boundary, never as a bound or as "no effect".
+    #[test]
+    fn a_saturated_nominal_is_searched_down_and_its_upper_side_is_the_physical_boundary() {
+        for sent in [1.0, 1.02] {
+            let r = resolved_at(sent, 3.0);
+            assert_eq!(
+                read_axis(&r, InputAxis::RelativeHumidity),
+                Some(AxisValue::Scalar(1.0))
+            );
+            let report = tolerance_envelope(
+                &r,
+                &[InputAxis::RelativeHumidity],
+                600.0,
+                TargetGeometryV1::Rect {
+                    width_m: 0.2,
+                    height_m: 0.3,
+                },
+                &[(InputAxis::RelativeHumidity, (0.5, 1.0))],
+            )
+            .unwrap_or_else(|e| panic!("RH {sent}: {e}"));
+            let axis = axis_json(&report);
+            assert_eq!(axis["nominal"], 1.0);
+            assert_eq!(axis["far_at_physical_boundary"], true, "{axis}");
+            assert_eq!(axis["near_at_physical_boundary"], false, "{axis}");
+            assert!(axis["far_bound"].is_null(), "{axis}");
+            assert!(axis["far_limiting_boundary"].is_null(), "{axis}");
+            assert_eq!(axis["far_has_no_effect"], false, "{axis}");
+        }
+    }
+
+    /// The dry mirror: a 0 to -5 % reading resolves to exactly 0 and is searched upward.
+    #[test]
+    fn a_dry_nominal_is_searched_up_and_its_lower_side_is_the_physical_boundary() {
+        for sent in [0.0, -0.02] {
+            let r = resolved_at(sent, 3.0);
+            let report = tolerance_envelope(
+                &r,
+                &[InputAxis::RelativeHumidity],
+                600.0,
+                TargetGeometryV1::Rect {
+                    width_m: 0.2,
+                    height_m: 0.3,
+                },
+                &[(InputAxis::RelativeHumidity, (0.0, 0.5))],
+            )
+            .unwrap_or_else(|e| panic!("RH {sent}: {e}"));
+            let axis = axis_json(&report);
+            assert_eq!(axis["near_at_physical_boundary"], true, "{axis}");
+            assert_eq!(axis["far_at_physical_boundary"], false, "{axis}");
+            assert!(axis["near_bound"].is_null(), "{axis}");
+            assert_eq!(axis["near_has_no_effect"], false, "{axis}");
+        }
+    }
+
+    /// A calm wind (0 m/s, the most common wind entry) is the same case for `WindSpeed`: the
+    /// far side is searched and found, the near side is the physical boundary.
+    #[test]
+    fn a_calm_wind_is_searched_toward_more_wind() {
+        let r = resolved_at(0.5, 0.0);
+        let report = tolerance_envelope(
+            &r,
+            &[InputAxis::WindSpeed],
+            600.0,
+            TargetGeometryV1::Rect {
+                width_m: 0.2,
+                height_m: 0.3,
+            },
+            &[(InputAxis::WindSpeed, (0.0, 20.0))],
+        )
+        .expect("a calm nominal is searchable");
+        let axis = axis_json(&report);
+        assert_eq!(axis["near_at_physical_boundary"], true, "{axis}");
+        assert!(axis["far_bound"].is_number(), "{axis}");
+    }
+
+    /// A domain edge that is NOT the axis's physical boundary is still refused when the nominal
+    /// sits on it: 3 m/s of wind can be less, so a domain starting there searches nothing.
+    #[test]
+    fn a_nominal_on_an_edge_that_is_not_physical_is_still_refused() {
+        let r = resolved_at(0.5, 3.0);
+        for domain in [(3.0, 20.0), (0.0, 3.0)] {
+            let err = tolerance_envelope(
+                &r,
+                &[InputAxis::WindSpeed],
+                600.0,
+                TargetGeometryV1::Circle { radius_m: 0.3 },
+                &[(InputAxis::WindSpeed, domain)],
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("strictly inside"),
+                "{domain:?}: {err}"
+            );
+        }
+    }
+
+    /// A domain reaching outside the axis's physical range is refused up front, before any
+    /// solve and before the nominal is looked at, with the unit named: a percent typed as a
+    /// humidity domain (20:80) used to be refused for where the nominal sat.
+    #[test]
+    fn a_domain_outside_the_physical_range_is_refused_up_front_naming_the_unit() {
+        let r = resolved_at(0.5, 3.0);
+        for (axis, domain, unit) in [
+            (
+                InputAxis::RelativeHumidity,
+                (20.0, 80.0),
+                "a fraction from 0 to 1 (0.5 = 50 %)",
+            ),
+            (
+                InputAxis::RelativeHumidity,
+                (0.0, 1.000_000_1),
+                "a fraction from 0 to 1 (0.5 = 50 %)",
+            ),
+            (
+                InputAxis::RelativeHumidity,
+                (-0.1, 0.9),
+                "a fraction from 0 to 1 (0.5 = 50 %)",
+            ),
+            (InputAxis::WindSpeed, (-5.0, 20.0), "m/s"),
+        ] {
+            let err = tolerance_envelope(
+                &r,
+                &[axis],
+                600.0,
+                TargetGeometryV1::Circle { radius_m: 0.3 },
+                &[(axis, domain)],
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, KernelError::InvalidDomain { .. }),
+                "{axis:?} {domain:?}: {err:?}"
+            );
+            let text = err.to_string();
+            assert!(text.contains(unit), "{axis:?} {domain:?}: {text}");
+            assert!(
+                !text.contains("strictly inside"),
+                "{axis:?} {domain:?}: {text}"
+            );
+        }
     }
 }

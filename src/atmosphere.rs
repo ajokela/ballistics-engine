@@ -794,6 +794,11 @@ const DENSITY_MATCH_REFERENCE_PRESSURE_HPA: f64 = 1013.25;
 /// condition on Earth, but the arithmetic does not know where it stops: above 11 km it keeps
 /// answering, wrongly. Callers bound it; the bridge command refuses conditions outside
 /// -5 km..11 km (`crate::atmosphere_service`).
+///
+/// A raw primitive (R3): `humidity_percent` is not validated. A number outside 0-100 is clamped
+/// into it, and a NaN propagates to a NaN result, never to pure steam. Validate a reading with
+/// [`RelativeHumidity::try_percent`] and build the station with [`StationAir::new`], which
+/// refuse what this computes.
 pub fn density_matched_altitude_m(
     temperature_c: f64,
     station_pressure_hpa: f64,
@@ -920,6 +925,11 @@ pub fn resolve_atmosphere_for_density_altitude(
 ///
 /// # Returns
 /// Tuple of (air_density_kg_m3, speed_of_sound_mps)
+///
+/// A raw primitive (R3): `humidity_percent` is not validated. A number outside 0-100 is clamped
+/// into it, and a NaN propagates to a NaN result, never to pure steam. Validate a reading with
+/// [`RelativeHumidity::try_percent`] and build the station with [`StationAir::new`], which
+/// refuse what this computes.
 pub fn calculate_atmosphere(
     altitude_m: f64,
     temp_override_c: Option<f64>,
@@ -952,7 +962,8 @@ pub fn calculate_atmosphere(
 
     // Humidity clamp shared by the CIPM density and the moist speed of sound: a total-function
     // guard for this unvalidated public function. Validated callers (StationAir::new) pass a
-    // RelativeHumidity, already in range, so it never moves their value.
+    // RelativeHumidity, already in range, so it never moves their value. A NaN passes through
+    // the clamp and gives NaN air (the vapour cap keeps it).
     let humidity_clamped = humidity_percent.clamp(0.0, 100.0);
     let temp_c = temp_k - 273.15;
 
@@ -992,17 +1003,24 @@ pub fn calculate_atmosphere(
 /// # Arguments
 /// * `temp_k` - Temperature in Kelvin
 /// * `pressure_pa` - Total (station) pressure in Pa
-/// * `humidity_percent` - Relative humidity percentage (0-100); a value outside is clamped, a
-///   total-function guard for this unvalidated function (validate with [`RelativeHumidity`])
+/// * `humidity_percent` - Relative humidity percentage (0-100)
 ///
 /// # Returns
 /// Speed of sound in m/s
+///
+/// A raw primitive (R3): `humidity_percent` is not validated. A number outside 0-100 is clamped
+/// into it, and a NaN propagates to a NaN result, never to pure steam. Validate a reading with
+/// [`RelativeHumidity::try_percent`] and build the station with [`StationAir::new`], which
+/// refuse what this computes.
 pub fn moist_speed_of_sound(temp_k: f64, pressure_pa: f64, humidity_percent: f64) -> f64 {
     // The one CIPM vapour mole fraction (`vapor_mole_fraction`, which the density uses too),
-    // capped at the physical maximum of 1. Its pressure floor guards pressure_pa == 0 (a 0 hPa
-    // override would otherwise give +Inf -> NaN speed of sound).
-    let mole_fraction_vapor =
-        moist_air_vapor_mole_fraction(temp_k, pressure_pa, humidity_percent).min(1.0);
+    // capped at the physical maximum of 1 by the one NaN-keeping cap. Its pressure floor guards
+    // pressure_pa == 0 (a 0 hPa override would otherwise give +Inf -> NaN speed of sound).
+    let mole_fraction_vapor = capped_vapor_mole_fraction(moist_air_vapor_mole_fraction(
+        temp_k,
+        pressure_pa,
+        humidity_percent,
+    ));
 
     moist_sound_speed_at_mole_fraction(temp_k, mole_fraction_vapor)
 }
@@ -1040,7 +1058,28 @@ fn moist_molar_mass_ratio(mole_fraction_vapor: f64) -> f64 {
 /// to the bit. Exactly 0 at 0 %.
 #[inline(always)]
 fn governing_vapor_mole_fraction(temp_c: f64, pressure_hpa: f64, humidity_percent: f64) -> f64 {
-    moist_air_vapor_mole_fraction(temp_c + 273.15, pressure_hpa * 100.0, humidity_percent).min(1.0)
+    capped_vapor_mole_fraction(moist_air_vapor_mole_fraction(
+        temp_c + 273.15,
+        pressure_hpa * 100.0,
+        humidity_percent,
+    ))
+}
+
+/// The water-vapour mole fraction capped at its physical maximum, 1: `x.min(1.0)` for every
+/// number, to the bit, but a NaN stays a NaN (`f64::min` would return 1.0 for it, pure steam).
+///
+/// Every capped `x_v` in the engine goes through it ([`calculate_air_density_cimp`],
+/// [`moist_speed_of_sound`], the governing air's `x_v` aloft), so a NaN humidity, or air above
+/// water's critical point (647.096 K, where the saturation pressure is undefined), gives NaN
+/// air everywhere instead of steam (R3, review PHYS-1 and C10). A cap is reached only by air
+/// that cannot exist, which every validated boundary refuses before it gets here.
+#[inline(always)]
+fn capped_vapor_mole_fraction(mole_fraction_vapor: f64) -> f64 {
+    if mole_fraction_vapor > 1.0 {
+        1.0
+    } else {
+        mole_fraction_vapor
+    }
 }
 
 /// Enhanced air density calculation using CIPM formula with ICAO atmosphere.
@@ -1052,6 +1091,11 @@ fn governing_vapor_mole_fraction(temp_c: f64, pressure_hpa: f64, humidity_percen
 ///
 /// # Returns
 /// Air density in kg/m³
+///
+/// A raw primitive (R3): `humidity_percent` is not validated. A number outside 0-100 is clamped
+/// into it, and a NaN propagates to a NaN result, never to pure steam. Validate a reading with
+/// [`RelativeHumidity::try_percent`] and build the station with [`StationAir::new`], which
+/// refuse what this computes.
 pub fn calculate_air_density_cimp(temp_c: f64, pressure_hpa: f64, humidity_percent: f64) -> f64 {
     let t_k = temp_c + 273.15;
 
@@ -1067,11 +1111,12 @@ pub fn calculate_air_density_cimp(temp_c: f64, pressure_hpa: f64, humidity_perce
     // otherwise make x_v = +Inf -> NaN density. No-op for all valid (>0) pressures.
     let p_pa = pressure_pa.max(f64::MIN_POSITIVE);
 
-    // Mole fraction of water vapor, capped at the physical maximum of 1. The cap is silent:
-    // air whose vapor pressure would exceed its total pressure does not exist, and callers
-    // that must refuse it rather than compute pure steam test
-    // `water_vapor_mole_fraction_uncapped` first (the bridge's `atmosphere.density_altitude`).
-    let x_v = vapor_mole_fraction(p_sv, f, humidity_percent, p_pa).min(1.0);
+    // Mole fraction of water vapor, capped at the physical maximum of 1 (a NaN stays NaN). The
+    // cap is silent: air whose vapor pressure would exceed its total pressure does not exist,
+    // and callers that must refuse it rather than compute pure steam test
+    // `water_vapor_mole_fraction_uncapped` first (StationAir::new, AtmoSock::validate and the
+    // bridge's `atmosphere.density_altitude`).
+    let x_v = capped_vapor_mole_fraction(vapor_mole_fraction(p_sv, f, humidity_percent, p_pa));
 
     // Enhanced compressibility factor. CIPM virial constants use Pa.
     let z = enhanced_compressibility_factor(p_pa, t_k, x_v);
@@ -1128,7 +1173,9 @@ fn moist_air_vapor_mole_fraction(temp_k: f64, pressure_pa: f64, humidity_percent
 /// behind [`StationAir::new`] and the density-altitude service) all evaluate it here, in this
 /// operation order, so they cannot drift apart. `p_sv_hpa` is in hPa and `p_pa` in Pa; the
 /// humidity is clamped into `[0, 100]` as a total-function guard for the unvalidated legacy
-/// entry points (validated callers pass a [`RelativeHumidity`], already in range).
+/// entry points (validated callers pass a [`RelativeHumidity`], already in range), and a NaN
+/// humidity, or a NaN `p_sv_hpa` above water's critical point, gives a NaN `x_v`, which
+/// [`capped_vapor_mole_fraction`] keeps.
 #[inline(always)]
 pub(crate) fn vapor_mole_fraction(p_sv_hpa: f64, f: f64, humidity_percent: f64, p_pa: f64) -> f64 {
     // Vapor pressure with clamping. p_sv is in hPa (enhanced_saturation_vapor_pressure
@@ -1276,9 +1323,9 @@ pub fn get_local_atmosphere(
 /// `humidity_percent`, is held at every height for the virtual-temperature lapse, the density
 /// and the moist-air speed of sound at the local temperature.
 ///
-/// A legacy entry point: it clamps an out-of-range humidity instead of refusing it, and it
-/// cannot know whether `base_ratio` was built at `humidity_percent`. In-crate code calls
-/// [`air_at`] with a [`KernelAtmosphere`] instead.
+/// A legacy entry point: it clamps an out-of-range humidity instead of refusing it (a NaN
+/// propagates to NaN air, never to steam), and it cannot know whether `base_ratio` was built at
+/// `humidity_percent`. In-crate code calls [`air_at`] with a [`KernelAtmosphere`] instead.
 ///
 /// # Arguments
 /// * `altitude_m` - Query geometric altitude above mean sea level in meters
@@ -1320,7 +1367,8 @@ pub(crate) fn get_local_atmosphere_humid_with_gravity(
     gravity: Gravity,
 ) -> (f64, f64) {
     // The same composition `air_at` uses, without its validation: this legacy entry keeps its
-    // internal clamp of an out-of-range humidity, and can never diverge from `air_at`.
+    // internal clamp of an out-of-range humidity (a NaN gives NaN air), and can never diverge
+    // from `air_at`.
     let air = compose_local_air(
         altitude_m,
         base_alt,
@@ -1382,8 +1430,9 @@ const ABSOLUTE_ZERO_C: f64 = -273.15;
 /// The density ratio `density / 1.225 kg/m³` a station may carry is below this (and above 0).
 /// It is `fast_integrate`'s ceiling for a supplied standard-mode ratio.
 const MAX_STATION_DENSITY_RATIO: f64 = 2.0;
-/// Uniform (direct-mode) air must have a density below this, in kg/m³, and above 0. The same
-/// bound the kernels' direct-mode detection uses today.
+/// Uniform (direct-mode) air must have a density below this, in kg/m³, and at least 0 (a
+/// vacuum): 0.49.0's `compute_derivatives` direct-mode detection, `density < 2`, which took a
+/// density of exactly 0 as the way to switch drag off.
 const MAX_UNIFORM_DENSITY_KG_M3: f64 = 2.0;
 /// Uniform (direct-mode) air must have a speed of sound above this, in m/s. The same bound the
 /// kernels' direct-mode detection uses today.
@@ -1649,7 +1698,7 @@ pub enum AtmosphereErrorReason {
     ImpossibleAir,
     /// A station density ratio (density / 1.225 kg/m³) outside `(0, 2)`.
     DensityRatioOutOfRange,
-    /// A uniform (direct-mode) air density outside `(0, 2)` kg/m³.
+    /// A uniform (direct-mode) air density outside `[0, 2)` kg/m³ (0 is a vacuum).
     UniformDensityOutOfRange,
     /// A uniform (direct-mode) speed of sound at or below 200 m/s.
     UniformSpeedOfSoundOutOfRange,
@@ -1686,7 +1735,7 @@ impl fmt::Display for AtmosphereErrorReason {
                 "density ratio (density / 1.225 kg/m^3) must be greater than 0 and less than 2"
             }
             Self::UniformDensityOutOfRange => {
-                "air density must be greater than 0 and less than 2 kg/m^3"
+                "air density must be at least 0 (a vacuum) and less than 2 kg/m^3"
             }
             Self::UniformSpeedOfSoundOutOfRange => "speed of sound must be greater than 200 m/s",
             Self::NonPositiveZoneThreshold => {
@@ -2384,7 +2433,7 @@ pub enum KernelAtmosphere {
     /// Direct mode: the caller's density and speed of sound, unchanged at every point.
     #[non_exhaustive]
     Uniform {
-        /// Air density, kg/m³, in `(0, 2)`.
+        /// Air density, kg/m³, in `[0, 2)`; exactly 0 is a vacuum, with no drag at all.
         density_kg_m3: f64,
         /// Speed of sound, m/s, above 200.
         speed_of_sound_mps: f64,
@@ -2392,12 +2441,25 @@ pub enum KernelAtmosphere {
 }
 
 impl KernelAtmosphere {
-    /// Direct-mode air.
+    /// Direct-mode air: one density and speed of sound at every point.
+    ///
+    /// A density of exactly 0 is a vacuum: the flight feels gravity and nothing else, exactly as
+    /// 0.49.0's `compute_derivatives` flew the `(0, c, 0, 0)` tuple (R3, review API-1). `-0.0`
+    /// is the same vacuum and is stored as `0.0`.
+    ///
+    /// ```
+    /// use ballistics_engine::KernelAtmosphere;
+    ///
+    /// assert!(KernelAtmosphere::uniform(0.0, 340.29).is_ok()); // a vacuum
+    /// assert!(KernelAtmosphere::uniform(-1.0, 340.29).is_err());
+    /// ```
     ///
     /// # Errors
     ///
-    /// A `density_kg_m3` that is not finite or not in `(0, 2)`, or a `speed_of_sound_mps` that
-    /// is not finite or not above 200: the direct-mode bounds the kernels apply today.
+    /// A `density_kg_m3` that is not finite or not in `[0, 2)`, or a `speed_of_sound_mps` that
+    /// is not finite or not above 200. The upper density and lower sound-speed bounds are the
+    /// ones 0.49.0's `compute_derivatives` used to recognise direct mode; its other kernels
+    /// differed (`fast_integrate` required a density above 0).
     pub fn uniform(density_kg_m3: f64, speed_of_sound_mps: f64) -> Result<Self, AtmosphereError> {
         if !density_kg_m3.is_finite() {
             return Err(AtmosphereError::new(
@@ -2406,13 +2468,15 @@ impl KernelAtmosphere {
                 AtmosphereErrorReason::NotFinite,
             ));
         }
-        if !(density_kg_m3 > 0.0 && density_kg_m3 < MAX_UNIFORM_DENSITY_KG_M3) {
+        if !(0.0..MAX_UNIFORM_DENSITY_KG_M3).contains(&density_kg_m3) {
             return Err(AtmosphereError::new(
                 "density_kg_m3",
                 density_kg_m3,
                 AtmosphereErrorReason::UniformDensityOutOfRange,
             ));
         }
+        // -0.0 is the same vacuum as 0.0; adding 0.0 stores it as +0.0 and moves no other value.
+        let density_kg_m3 = density_kg_m3 + 0.0;
         if !speed_of_sound_mps.is_finite() {
             return Err(AtmosphereError::new(
                 "speed_of_sound_mps",
@@ -2498,6 +2562,11 @@ impl KernelAtmosphere {
 ///   height this is that air exactly (the sound speed is [`StationAir::speed_of_sound_mps`] to
 ///   the bit); at 0 % every step is the dry one, `sqrt(1.4 · 287.0531 · T)` for the sound
 ///   speed.
+///
+/// `zones` must already have passed [`AtmoSock::validate`], as every validated kernel entry
+/// checks them once ([`crate::trajectory_integration::try_integrate_trajectory`],
+/// `TrajectorySolver`, `fast_integrate*`). This per-step lookup does not: an unvalidated zone
+/// humidity outside 0-100 is clamped into it, and a NaN one gives NaN air, never steam.
 pub fn air_at(
     atmosphere: &KernelAtmosphere,
     zones: Option<&AtmoSock>,
@@ -2890,7 +2959,12 @@ pub fn get_direct_atmosphere(density: f64, speed_of_sound: f64) -> (f64, f64) {
     (density, speed_of_sound)
 }
 
-/// Legacy function name for backwards compatibility
+/// Legacy function name for backwards compatibility: [`calculate_air_density_cimp`].
+///
+/// A raw primitive (R3): `humidity_percent` is not validated. A number outside 0-100 is clamped
+/// into it, and a NaN propagates to a NaN result, never to pure steam. Validate a reading with
+/// [`RelativeHumidity::try_percent`] and build the station with [`StationAir::new`], which
+/// refuse what this computes.
 pub fn calculate_air_density_cipm(temp_c: f64, pressure_hpa: f64, humidity_percent: f64) -> f64 {
     calculate_air_density_cimp(temp_c, pressure_hpa, humidity_percent)
 }
@@ -3018,6 +3092,9 @@ mod humidity_model_tests;
 
 #[cfg(test)]
 mod aloft_vapour_tests;
+
+#[cfg(test)]
+mod nan_humidity_tests;
 
 #[cfg(test)]
 mod tests {

@@ -824,31 +824,45 @@ fn the_request_file_commands_print_the_wire_code_by_its_name() {
     }
 }
 
-/// A humidity domain beyond what `tolerance` can perturb is refused naming the code by its wire
-/// name, never the Rust variant (`solve failed (InvalidValue)`).
+/// A domain whose edge the solve refuses is refused naming the code by its wire name, never the
+/// Rust variant (`solve failed (InvalidValue)`).
+///
+/// R3 (review C3): a humidity domain beyond 0 to 1 no longer reaches the solve at all. It is
+/// refused up front for leaving the axis's physical range, naming the fraction it must be, the
+/// way the humidity axis's unit is named everywhere now; before, `relative-humidity=0:1.2`
+/// reached the solve and came back as `solve failed (invalid_value): ... outside the
+/// perturbation domain [0, 1]`. A temperature domain reaching below 0 K still reaches the
+/// solve, so it carries the wire-code check.
 #[test]
 fn tolerance_names_a_refused_solve_by_its_wire_code() {
     let dir = private_dir("tol");
     let path = dir.path().join("ok.json");
     std::fs::write(&path, solve_request(288.15, 101_325.0, 0.5).to_string()).unwrap();
-    let output = run(&[
-        "tolerance",
-        "--request",
-        path.to_str().unwrap(),
-        "--range",
-        "200",
-        "--target",
-        "rect:0.5x0.75",
-        "--axis",
-        "relative-humidity",
-        "--domain",
-        "relative-humidity=0:1.2",
-    ]);
+    let tolerance = |axis: &str, domain: &str| {
+        run(&[
+            "tolerance",
+            "--request",
+            path.to_str().unwrap(),
+            "--range",
+            "200",
+            "--target",
+            "rect:0.5x0.75",
+            "--axis",
+            axis,
+            "--domain",
+            domain,
+        ])
+    };
     assert_cli_refusal(
         "tolerance --domain relative-humidity=0:1.2",
-        &output,
-        "solve failed (invalid_value): $.atmosphere.relative_humidity = 1.2: outside the \
-         perturbation domain [0, 1]",
+        &tolerance("relative-humidity", "relative-humidity=0:1.2"),
+        "invalid tolerance-envelope domain for axis RelativeHumidity: the domain must lie \
+         within the axis's physical range, a fraction from 0 to 1 (0.5 = 50 %)",
+    );
+    assert_cli_refusal(
+        "tolerance --domain temperature=-10:400",
+        &tolerance("temperature", "temperature=-10:400"),
+        "solve failed (invalid_value): ",
     );
 }
 

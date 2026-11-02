@@ -395,7 +395,12 @@ warning: station pressure 29.92 inHg is 1.202 times the ICAO standard pressure a
 
 Every `--humidity` and `--zero-humidity` is a relative humidity in **percent**, 0 to 100. Leave
 it out and the run flies **50 %**, the same default on every command, in the browser terminal,
-over the bridge and through the C ABI (0.50.0 made this one rule everywhere).
+over the bridge and through the C ABI (0.50.0 made this one rule everywhere). The one CLI
+humidity that is not a percent is the request-file axis of `error-budget --sigma` and
+`tolerance --domain`: those commands read a solve-json request, whose humidity is a fraction,
+and their axes take the request's own units. A percent typed there (`--sigma
+relative-humidity=5`, `--domain relative-humidity=20:80`) is refused with the unit named; there
+is no percent alias.
 
 | Where | Field | Unit | Omitted |
 |---|---|---|---|
@@ -405,6 +410,7 @@ over the bridge and through the C ABI (0.50.0 made this one rule everywhere).
 | Saved profile (`--saved-profile`, `--profile`) | `humidity` | percent | 50 |
 | `.a7p` import | the file's air-humidity field, `c_zero_air_humidity` | whole percent | 0 (the format cannot tell an absent field from 0) |
 | `solve-json`, the `explain` / `error-budget` / `tolerance` request files, the MCP `solve` tool | `atmosphere.relative_humidity` | **fraction**, 0 to 1 (0.5 = 50 %) | 0.5 |
+| `error-budget --sigma relative-humidity=S`, `tolerance --domain relative-humidity=LO:HI` | the request file's humidity axis | **fraction**, like the request: a sigma below 1 (0.05 = 5 percentage points), a domain within 0 to 1 | required |
 | Bridge commands | per command; see the table in `include/ballistics_bridge.h` | | |
 
 `stability` takes no humidity: its Miller factor is dry by design (see below).
@@ -454,6 +460,18 @@ over the bridge and through the C ABI (0.50.0 made this one rule everywhere).
   `no --pressure was given, and the standard pressure at the station altitude of 20000 m is a
   pressure altitude of ... m, outside the troposphere (-5000 m to 11000 m): check the
   altitude's unit`. The bridge and the browser terminal blame the same reading.
+- **One echo rule for a reading in the band (0.50.0).** What reports the air a run FLIES states
+  the end it flies as: `trajectory`'s stderr `Effective values` line says `humidity=100.0%` for
+  a `--humidity 102`, a `--location` CSV cell of 102 or a saved profile storing 102, and
+  `compare -o json` echoes 100. What displays STORED data shows the value as stored and, when
+  that is outside 0 to 100, says what it flies as: `profile show` prints `Humidity: 102.0%`
+  and a `flies as: 100.0%` line beneath it, and the bridge's `profile.validate` and
+  `profile.normalize` echo the stored 102 and add `"flown_humidity": 100`. A value saved from a
+  reading is stored as its end (`profile save --humidity 102` stores 100, as does `dsf`'s
+  re-save of a profile it trues).
+- The online paths (`true-velocity` without `--offline`, `trajectory --online` or `--compare`)
+  apply the same rule before sending anything: a reading in the band is sent as its end, and a
+  humidity beyond the band, or air that cannot exist, is refused without contacting the service.
 
 Every error a command reports on stderr is its message, after `Error: `, with exit status 1.
 Before 0.50.0 an error that reached the top of the CLI printed as a Rust value instead, such as
@@ -702,6 +720,17 @@ Home_Range,500,29.92,70
 A `DA` or `DENSITY_ALTITUDE` column is also recognized (MBA-1366) and, when present, supersedes that row's `ALTITUDE`/`PRESSURE` exactly like the `--density-altitude` flag — see [Density Altitude](#density-altitude-as-a-direct-input---density-altitude) for the full precedence.
 
 Note which flag wins here: an explicit `--density-altitude` overrides the CSV `DA` column (CLI beats CSV, as everywhere else), but `--altitude` and `--pressure` do **not** — density altitude supersedes altitude and pressure whichever source it came from, because it is the stronger specification. A run combining a CSV `DA` row with `--altitude`/`--pressure` prints a note saying so.
+
+**Every numeric cell is read one way (0.50.0).** A cell is trimmed, so ` 70` is 70, as it is on a flag. An empty cell, or one holding only spaces, is absent, and the value falls back to the next source (a saved profile, then the default). Any other cell that is not a finite number stops the run with an error naming the column and quoting the cell. Before 0.50.0 such a cell was read as absent, so `65%` in a `HUMIDITY` column silently flew 50 %. The rule covers every numeric column `trajectory` reads: `TARGET_TEMP`/`TEMPERATURE`/`TEMP`, `PRESSURE`, `ALTITUDE`/`ALT`, `HUMIDITY`, `DA`/`DENSITY_ALTITUDE` and `WIND_DIR`/`WIND_DIRECTION` in a location row; `VELOCITY`/`MV`/`MUZZLE_VELOCITY`, `VELOCITY_ADJ`/`VEL_ADJ`, `BC`, `BC_ADJ`/`BC_ADJUSTMENT`, `ZERO_TEMP`, `ZERO_ALT`, `ZERO_RANGE`/`ZERO_DISTANCE`/`ZERO`, `V_OFFSET_MIL`, `H_OFFSET_MIL` and `BULLET_LENGTH` in a profile row. Every cell is read before any is used, so a bad cell stops the run even when a flag overrides its column. A `HUMIDITY` cell goes through the humidity rule below, and the stderr `Effective values` line reports the humidity the run flies:
+
+```
+$ ballistics trajectory -v 2822 -b 0.270 --drag-model g7 -m 140 -d 0.264 --max-range 1000 --location locations.csv --site Home_Range
+Error: --location CSV column HUMIDITY = '65%': not a number; relative humidity is a percent from 0 to 100 (a sensor reading from -5 to 105 is read as 0 or 100)
+
+# with the cell " 65" instead, the run flies 65 % and says so on stderr:
+Effective values: velocity=2822.0 (trued=2822.0), BC=0.270 (trued=0.2700)
+                  altitude=500, temp=70.0, pressure=29.92, humidity=65.0%
+```
 
 **Usage:**
 ```bash
@@ -3881,7 +3910,9 @@ difference `scheme` (the table names it only when it is not the ordinary central
 **Units.** Two conventions are in play in the example above: `--target` follows `--units`
 (inches under imperial, cm under metric -- matching `tolerance --target` below), while `--ranges`
 and every `--sigma` value are always in solve-json v1's own SI unit (meters, m/s, radians, ...),
-regardless of `--units`.
+regardless of `--units`. The relative humidity is the request's fraction too:
+`--sigma relative-humidity=0.05` is 5 percentage points. A sigma of 1 or more is refused (it is
+as wide as the whole range of a humidity), with the unit named.
 
 **Honest limits**, carried in the report's own `assumptions` field: declared sources are treated
 as independent, with no correlation between them modelled; propagation is first-order
@@ -3947,12 +3978,27 @@ impact at your true, fixed `--range`, exactly what an inaccurate rangefinder doe
 
 **Units.** The same mixed convention as `error-budget` above: `--target` follows `--units`
 (inches under imperial, cm under metric), while `--range` and every `--domain` bound are always
-in solve-json v1's own SI unit (meters, m/s, radians, ...), regardless of `--units`.
+in solve-json v1's own SI unit (meters, m/s, radians, ...), regardless of `--units`. The relative
+humidity's domain is a fraction within 0 to 1 (`--domain relative-humidity=0.2:0.8` for 20-80 %),
+and the table prints its nominal as one (`nominal 0.500000 fraction`). A domain reaching outside
+an axis's physical range (a humidity outside 0 to 1, a negative wind speed) is refused for that,
+naming the unit, before anything is solved.
+
+**A saturated or dry humidity, or a calm wind (0.50.0).** Every 100-105 % (or -5-0 %) sensor
+reading resolves to a humidity of exactly 1 (or 0), the edge of the axis, and a calm wind sits
+at 0 m/s. Such a nominal may sit on its domain's matching bound (`relative-humidity=0.5:1` at
+saturation, `wind-speed=0:20` in calm air). Only the other direction is searched; the closed
+side reads `not searched -- the nominal is at the axis's physical boundary (nothing lies past
+it)`, never a bound or "no effect". Any other nominal on a bound is still refused, since that
+direction would be a zero-width probe. Before 0.50.0 every domain was refused for these
+nominals, while `error-budget` answered them with a one-sided difference.
 
 `-o json` carries the identical numbers as a versioned `ToleranceReportV1` (`schema_version`,
 `method`, `assumptions`, `range_m`, `axes[]` with each axis's `nominal`, `near_bound`/`far_bound`,
-`near_limiting_boundary`/`far_limiting_boundary`, `unbounded_in_domain`, and the
-`near_has_no_effect`/`far_has_no_effect` flags) and `unavailable_axes[].code`/`.reason`.
+`near_limiting_boundary`/`far_limiting_boundary`, `unbounded_in_domain`, the
+`near_has_no_effect`/`far_has_no_effect` flags and, since 0.50.0, the
+`near_at_physical_boundary`/`far_at_physical_boundary` flags) and
+`unavailable_axes[].code`/`.reason`.
 
 **Honest limits**, carried in the report's own `assumptions` field: each bound holds ONE input at
 its limit while every other input stays at its nominal value -- bounds from different axes may
@@ -4998,8 +5044,9 @@ back to another curve:
     mole fraction (coefficients 0.062 and 0.378), 340.294 m/s dry and 340.748 m/s at 50 % at
     15 °C
   - Saturation vapour pressure from the Wagner-Pruss equation over liquid water
-  - Percent 0-100 on every flag, default 50; a reading up to 5 points outside flies as 0 or
-    100, and anything farther out is refused
+  - Percent 0-100 on every `--humidity` flag, default 50; a reading up to 5 points outside
+    flies as 0 or 100, and anything farther out is refused. The request-file axes of
+    `error-budget --sigma` and `tolerance --domain` are fractions, like the request itself
   - The Miller stability factor stays dry by design
 - **Altitude Effects**: Automatic pressure/density reduction with elevation
 - **ICAO Standard Atmosphere**: Full implementation up to 84km
@@ -5009,8 +5056,13 @@ back to another curve:
 
 These subcommands call the hosted service at `https://api.ballistics.7.62x51mm.sh` (override
 with `--api-url`) instead of computing locally. They require a CLI access token — create one at
-`ballisticsinsight.com/account` and save it with `login`. Every other subcommand is fully local
-and needs no token or network access.
+`ballisticsinsight.com/account` and save it with `login`. Two more paths call the hosted
+service: `true-velocity`, whose single-observation calculation is online unless `--offline` is
+given, and `trajectory --online` or `--compare`. Every other
+subcommand, and every other mode of those two, is fully local and needs no token or network
+access. Before any online request is sent, the client applies the same humidity rule a local
+solve does: a reading in the sensor band is sent as its end, and a humidity beyond the band, or
+air that cannot exist (`--humidity 100` at 214 °F), is refused without contacting the service.
 
 ```bash
 # Save your CLI access token (or run `login` with no --token to be prompted)

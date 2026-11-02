@@ -602,9 +602,10 @@ pub fn try_integrate_trajectory(
 /// Main trajectory integration function
 ///
 /// **Legacy/unchecked entry point** (MBA-1338): wind segments are sorted and consumed
-/// without validation, so non-finite fields silently poison the returned trajectory.
-/// Prefer [`try_integrate_trajectory`], which rejects malformed segments with a typed
-/// error before any integration work.
+/// without validation, so non-finite fields silently poison the returned trajectory, and so
+/// is `params.atmo_sock`: an unvalidated zone humidity outside 0-100 is clamped, and a NaN one
+/// flies NaN air (R3), never steam. Prefer [`try_integrate_trajectory`], which rejects
+/// malformed segments and zones with a typed error before any integration work.
 pub fn integrate_trajectory(
     initial_state: [f64; 6],
     t_span: (f64, f64),

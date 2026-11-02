@@ -112,7 +112,11 @@
  * profile.validate reports one outside the band, or stored air that cannot
  * exist, as a warning (valid: false) rather than an error; profile.export_a7p
  * refuses either; profile.normalize echoes it unchanged, since it
- * re-serializes the document and reads nothing. profile.import_a7p reads the
+ * re-serializes the document and reads nothing. Both echo the STORED value,
+ * and for a stored sensor reading outside 0-100 that flies as an end (102,
+ * -5) both add "flown_humidity", the percent a flight of the profile flies
+ * (100, 0); the member is absent otherwise (since 0.50.0).
+ * profile.export_a7p writes that end. profile.import_a7p reads the
  * file's whole-percent air humidity field (c_zero_air_humidity, as the
  * import report's "mapped" rows name it): an absent one is 0 %, the format's
  * own meaning, because the file writes 0 by omitting the field. A file whose

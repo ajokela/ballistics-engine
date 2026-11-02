@@ -685,6 +685,30 @@ mod tests {
         );
     }
 
+    /// R3 (review C12): the trajectory help gives the zero day's air and the pressure mode an
+    /// entry each; they used to appear only inside `--zero-density-altitude`'s description, or
+    /// not at all. `tests/wasm_help_drift.rs` checks every command's flags against its help.
+    #[wasm_bindgen_test]
+    fn trajectory_help_lists_the_zero_day_air_and_the_pressure_mode() {
+        let help = WasmBallistics::new().run_command("help").unwrap();
+        let section = help
+            .split("Trajectory Command:")
+            .nth(1)
+            .and_then(|rest| rest.split("Zero Command:").next())
+            .expect("a trajectory help section");
+        for entry in [
+            "    --zero-temperature <",
+            "    --zero-pressure <",
+            "    --zero-pressure-type <",
+            "    --zero-humidity <",
+            "    --zero-altitude <",
+            "    --pressure-type <",
+            "    --density-altitude <",
+        ] {
+            assert!(section.contains(entry), "no {entry:?} entry: {section}");
+        }
+    }
+
     #[wasm_bindgen_test]
     fn test_monte_carlo_command() {
         let wasm = WasmBallistics::new();

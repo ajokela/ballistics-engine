@@ -558,10 +558,7 @@ fn merged_moist_speed_of_sound_keeps_the_old_total_function_guards() {
         (288.15, -5.0, 50.0),
         (373.15, 101_325.0, 100.0),
         (500.0, 1_000.0, 100.0),
-        (700.0, 101_325.0, 0.0),
-        (288.15, 101_325.0, f64::NAN),
         (f64::NAN, 101_325.0, 50.0),
-        (288.15, f64::NAN, 50.0),
     ];
     for (temp_k, pressure_pa, humidity) in cases {
         let merged = moist_speed_of_sound(temp_k, pressure_pa, humidity);
@@ -570,6 +567,26 @@ fn merged_moist_speed_of_sound_keeps_the_old_total_function_guards() {
             merged.to_bits(),
             old.to_bits(),
             "c at {temp_k} K, {pressure_pa} Pa, {humidity}%: merged {merged} old {old}"
+        );
+    }
+    // R3 (review PHYS-1, C10): the inputs whose water-vapour mole fraction is NaN (a NaN
+    // humidity, a NaN pressure, and air above water's critical point, 647.096 K, even at 0 %)
+    // are NaN now. 0.49.0's `x_v.min(1.0)` read the NaN as 1 and returned pure steam's sound
+    // speed (603.0 m/s at 700 K, 386.9 m/s at 15 °C).
+    for (temp_k, pressure_pa, humidity) in [
+        (700.0, 101_325.0, 0.0),
+        (288.15, 101_325.0, f64::NAN),
+        (288.15, f64::NAN, 50.0),
+    ] {
+        let old = moist_speed_of_sound_0_49(temp_k, pressure_pa, humidity);
+        assert!(
+            old.is_finite(),
+            "0.49.0 flew {temp_k} K / {humidity} % as steam: {old}"
+        );
+        let merged = moist_speed_of_sound(temp_k, pressure_pa, humidity);
+        assert!(
+            merged.is_nan(),
+            "c at {temp_k} K, {pressure_pa} Pa, {humidity}% is NaN, not steam: {merged}"
         );
     }
 }
@@ -921,7 +938,27 @@ fn uniform_accepts_todays_direct_mode_range() {
 
 #[test]
 fn uniform_rejects_what_the_direct_mode_kernels_reject() {
-    let bad_density = [0.0, -0.0, -1.0, 2.0, 2.5, f64::NAN, f64::INFINITY];
+    // R3 (review API-1): 0 and -0 are a vacuum, which 0.49.0's compute_derivatives flew, so
+    // they are accepted (tests/kernel_atmosphere_legacy_tuples.rs pins the vacuum's drag at
+    // exactly 0); the smallest negative density is refused, as every negative one is.
+    for vacuum in [0.0, -0.0] {
+        let atmosphere = KernelAtmosphere::uniform(vacuum, 340.0).expect("a vacuum");
+        match atmosphere {
+            KernelAtmosphere::Uniform { density_kg_m3, .. } => {
+                assert_eq!(density_kg_m3.to_bits(), 0.0f64.to_bits(), "{vacuum}")
+            }
+            other => panic!("expected Uniform, got {other:?}"),
+        }
+    }
+    let bad_density = [
+        -f64::from_bits(1),
+        -1.0,
+        2.0,
+        2.5,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ];
     for density in bad_density {
         let error = KernelAtmosphere::uniform(density, 340.0).expect_err("bad density");
         assert_eq!(error.field(), "density_kg_m3", "{density}");
@@ -955,11 +992,18 @@ fn from_legacy_params_maps_the_direct_sentinel_to_uniform() {
         KernelAtmosphere::from_legacy_params((1.1, 330.0, -0.0, -0.0), RelativeHumidity::DRY)
             .expect("direct sentinel");
     assert_eq!(atmosphere, KernelAtmosphere::uniform(1.1, 330.0).unwrap());
+    // R3 (review API-1): a density of exactly 0 is the vacuum 0.49.0's compute_derivatives flew,
+    // so it converts; the nearest negative density does not.
+    assert_eq!(
+        KernelAtmosphere::from_legacy_params((0.0, 340.0, 0.0, 0.0), RelativeHumidity::DRY)
+            .expect("the vacuum sentinel"),
+        KernelAtmosphere::uniform(0.0, 340.0).unwrap()
+    );
     // A sentinel with out-of-range direct values is refused, not reinterpreted.
     for params in [
         (2.5, 340.0, 0.0, 0.0),
         (1.2, 150.0, 0.0, 0.0),
-        (0.0, 340.0, 0.0, 0.0),
+        (-f64::from_bits(1), 340.0, 0.0, 0.0),
     ] {
         assert!(
             KernelAtmosphere::from_legacy_params(params, RelativeHumidity::DRY).is_err(),

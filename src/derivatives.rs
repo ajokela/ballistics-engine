@@ -142,7 +142,9 @@ pub(crate) fn yaw_of_repose_magnus_direction(
 /// and humidity, which this function does not read.
 /// Build `atmosphere` with [`crate::StationAir::new`] (or [`KernelAtmosphere::uniform`]); a
 /// legacy `(alt, T, P, ratio)` or `(rho, c, 0, 0)` tuple converts with
-/// [`KernelAtmosphere::from_legacy_params`].
+/// [`KernelAtmosphere::from_legacy_params`]. `atmo_sock` must already have passed
+/// [`AtmoSock::validate`]: this per-step function does not validate it, so an unvalidated zone
+/// humidity outside 0-100 is clamped, and a NaN one gives a NaN acceleration, never steam.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_derivatives(
     pos: Vector3<f64>,

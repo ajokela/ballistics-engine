@@ -138,3 +138,34 @@ fn mirrored_angles_have_opposite_signed_drift() {
         "90° and 270° must be antisymmetric: {right} vs {left}"
     );
 }
+
+/// R3 (the class of review C2 and VAL-1, on a list flag): an entry of `--wind-speeds` that is
+/// no finite number stops the run naming it, as `--wind-angles` already does. It used to be
+/// dropped, so `5,1O,15` silently printed a two-column card.
+#[test]
+fn an_unreadable_wind_speed_is_refused_not_dropped() {
+    for (list, bad) in [
+        ("5,1O,15", "1O"),
+        ("5,,15", ""),
+        ("10,nan", "nan"),
+        ("abc", "abc"),
+    ] {
+        let out = run(&["--wind-speeds", list]);
+        assert!(
+            !out.status.success(),
+            "--wind-speeds {list} must be refused"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(&format!(
+                "--wind-speeds contains an invalid number: '{bad}'"
+            )),
+            "{list}: {stderr}"
+        );
+    }
+    // Spaces around an entry are no error.
+    let spaced = run(&["--wind-speeds", "5, 10 ,15"]);
+    let plain = run(&["--wind-speeds", "5,10,15"]);
+    assert!(spaced.status.success() && plain.status.success());
+    assert_eq!(spaced.stdout, plain.stdout);
+}

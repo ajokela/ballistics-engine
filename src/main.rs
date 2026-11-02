@@ -3672,10 +3672,13 @@ enum Commands {
         #[arg(long = "axis", value_name = "AXIS", action = clap::ArgAction::Append, required = true)]
         axes: Vec<String>,
 
-        /// Per-axis search domain as AXIS=LO:HI, in that axis's own physical unit (e.g.
-        /// wind-speed=0:20 for m/s, cant=-0.05:0.05 for radians). Repeatable; required once for
-        /// every --axis given -- there is no default domain, even for a categorical axis
-        /// (whose bounds then simply go unused).
+        /// Per-axis search domain as AXIS=LO:HI, in that axis's own physical unit, the request
+        /// file's (e.g. wind-speed=0:20 for m/s, cant=-0.05:0.05 for radians,
+        /// relative-humidity=0.2:0.8 for 20-80 %: the request's humidity is a fraction, so its
+        /// domain is one too, within 0 to 1). Repeatable; required once for every --axis given
+        /// -- there is no default domain, even for a categorical axis (whose bounds then simply
+        /// go unused). A nominal on its axis's physical edge (a saturated or dry humidity, a
+        /// calm wind) may sit on the matching bound; only the other direction is searched.
         #[arg(long = "domain", value_name = "AXIS=LO:HI", action = clap::ArgAction::Append)]
         domains: Vec<String>,
 
@@ -3719,10 +3722,11 @@ enum Commands {
         ranges: Vec<f64>,
 
         /// Declared one-sigma uncertainty for one input, AXIS=VALUE, in that axis's own physical
-        /// unit (e.g. wind-speed=1.5 for 1.5 m/s, muzzle-velocity-mps=5.0 for 5 m/s, cant=0.01
-        /// for 0.01 rad); repeatable, at least one required. An unrecognized axis is rejected
-        /// with the full accepted list; a duplicate axis or a negative/non-finite value is
-        /// rejected by name.
+        /// unit, the request file's (e.g. wind-speed=1.5 for 1.5 m/s, muzzle-velocity-mps=5.0
+        /// for 5 m/s, cant=0.01 for 0.01 rad, relative-humidity=0.05 for 5 percentage points:
+        /// the request's humidity is a fraction, so its sigma is one too, below 1); repeatable,
+        /// at least one required. An unrecognized axis is rejected with the full accepted list;
+        /// a duplicate axis or a negative/non-finite value is rejected by name.
         #[arg(
             long = "sigma",
             value_name = "AXIS=VALUE",
@@ -5826,9 +5830,13 @@ fn load_csv_row(path: &PathBuf, row_name: &str) -> Result<HashMap<String, String
         let record = record?;
         if let Some(name) = record.get(0) {
             if name.eq_ignore_ascii_case(row_name) {
+                // R3: every cell is trimmed here, once, so every reader (the numbers, the
+                // provenance checks, the names) sees one token, the token `--humidity` and
+                // the other flags see; a cell left empty, or holding only spaces, is absent.
                 let mut map = HashMap::new();
                 for (i, header) in headers.iter().enumerate() {
                     if let Some(val) = record.get(i) {
+                        let val = val.trim();
                         if !val.is_empty() {
                             map.insert(header.clone(), val.to_string());
                         }
@@ -5841,29 +5849,130 @@ fn load_csv_row(path: &PathBuf, row_name: &str) -> Result<HashMap<String, String
     Err(format!("Row '{}' not found in CSV", row_name).into())
 }
 
-/// Get f64 value from HashMap, trying multiple key names
-/// Whether a location CSV actually supplied one of these columns as a parseable number.
+/// One numeric cell of a `--profile` or `--location` CSV row, read the one way every numeric
+/// column is (R3, review C2 and VAL-1).
 ///
-/// `csv_get_f64` collapses "absent" and "present" into one value, which is fine for reading a
-/// number but not for deciding PROVENANCE. MBA-1417 needs provenance: a saved profile's pressure
-/// mode may only be applied when the profile's pressure VALUE is the one in use, so it has to
-/// distinguish "the CSV gave a pressure" from "the CSV gave nothing and we fell back".
-fn csv_has(map: &HashMap<String, String>, keys: &[&str]) -> bool {
-    keys.iter().any(|key| {
-        map.get(&key.to_uppercase())
-            .is_some_and(|val| val.parse::<f64>().is_ok())
-    })
-}
-
-fn csv_get_f64(map: &HashMap<String, String>, keys: &[&str], default: f64) -> f64 {
+/// `keys` are the column's accepted names, in precedence order; the first one the row has
+/// decides. `None` means the row has none of them: no such column, or a cell left empty (which
+/// [`load_csv_row`] drops, after trimming every cell). A cell that is a finite number is that
+/// number. Any other cell stops the run with an error naming the column and quoting the cell,
+/// `--location CSV column TEMPERATURE = '5g': not a number`, the way a typed flag is refused:
+/// 0.49.0 read such a cell as absent, so `65%` in a HUMIDITY column silently flew 50 % and
+/// `5g` in a TEMPERATURE column 59 °F (MBA-1425's rule: a supplied value that cannot be read
+/// stops the run).
+///
+/// The `Option` is also the cell's PROVENANCE, which MBA-1417 needs: a saved profile's pressure
+/// mode applies only when the profile's pressure VALUE is the one in use, so "the CSV gave a
+/// pressure" must be told apart from "the CSV gave nothing and the run fell back".
+fn csv_number(
+    row: &HashMap<String, String>,
+    keys: &[&str],
+    source: &str,
+) -> Result<Option<f64>, String> {
     for key in keys {
-        if let Some(val) = map.get(&key.to_uppercase()) {
-            if let Ok(v) = val.parse::<f64>() {
-                return v;
-            }
+        if let Some(cell) = row.get(*key) {
+            return match cell.parse::<f64>() {
+                Ok(value) if value.is_finite() => Ok(Some(value)),
+                Ok(_) => Err(format!(
+                    "{source} CSV column {key} = '{cell}': not a finite number"
+                )),
+                Err(_) => Err(format!(
+                    "{source} CSV column {key} = '{cell}': not a number"
+                )),
+            };
         }
     }
-    default
+    Ok(None)
+}
+
+/// A `--location` CSV's HUMIDITY cell through the one humidity validator: the percent it flies
+/// (a sensor reading in the band is the end it reads as), `None` for no cell, or the refusal
+/// naming the column. A number the band refuses reads as every refused humidity does
+/// (`--location CSV column HUMIDITY = 150: relative humidity must be a percent from 0 to 100
+/// (...)`); text that is no finite number is quoted, as every unreadable CSV cell is.
+fn csv_humidity_percent(
+    row: &HashMap<String, String>,
+    source: &str,
+) -> Result<Option<f64>, String> {
+    const COLUMN: &str = "HUMIDITY";
+    let Some(cell) = row.get(COLUMN) else {
+        return Ok(None);
+    };
+    let field = format!("{source} CSV column {COLUMN}");
+    match cell.parse::<f64>() {
+        Ok(value) if value.is_finite() => RelativeHumidity::try_percent(value)
+            .map(|humidity| Some(humidity.percent()))
+            .map_err(|error| error.at_field(field).to_string()),
+        _ => Err(format!(
+            "{field} = '{cell}': {}",
+            ballistics_engine::atmosphere::parse_humidity_percent_text(cell)
+                .err()
+                .unwrap_or_else(|| "not a finite number".to_string())
+        )),
+    }
+}
+
+/// Every numeric cell `trajectory` reads from its `--profile` CSV row, read once, up front, by
+/// [`csv_number`]: a cell that cannot be read stops the run before any of it is used, whichever
+/// later step would have read it.
+#[derive(Debug, Default)]
+struct ProfileCsvNumbers {
+    velocity: Option<f64>,
+    velocity_adjustment: Option<f64>,
+    bc: Option<f64>,
+    bc_adjustment: Option<f64>,
+    zero_temperature: Option<f64>,
+    zero_altitude: Option<f64>,
+    zero_range: Option<f64>,
+    poi_up_mil: Option<f64>,
+    poi_right_mil: Option<f64>,
+    bullet_length: Option<f64>,
+}
+
+impl ProfileCsvNumbers {
+    fn read(row: &HashMap<String, String>) -> Result<Self, String> {
+        const SOURCE: &str = "--profile";
+        let number = |keys: &[&str]| csv_number(row, keys, SOURCE);
+        Ok(Self {
+            velocity: number(&["VELOCITY", "MV", "MUZZLE_VELOCITY"])?,
+            velocity_adjustment: number(&["VELOCITY_ADJ", "VEL_ADJ"])?,
+            bc: number(&["BC"])?,
+            bc_adjustment: number(&["BC_ADJ", "BC_ADJUSTMENT"])?,
+            zero_temperature: number(&["ZERO_TEMP"])?,
+            zero_altitude: number(&["ZERO_ALT"])?,
+            zero_range: number(&["ZERO_RANGE", "ZERO_DISTANCE", "ZERO"])?,
+            poi_up_mil: number(&["V_OFFSET_MIL"])?,
+            poi_right_mil: number(&["H_OFFSET_MIL"])?,
+            bullet_length: number(&["BULLET_LENGTH", "LENGTH"])?,
+        })
+    }
+}
+
+/// Every numeric cell `trajectory` reads from its `--location` CSV row, read once, up front:
+/// [`csv_number`] for each, and the HUMIDITY through [`csv_humidity_percent`].
+#[derive(Debug, Default)]
+struct LocationCsvNumbers {
+    temperature: Option<f64>,
+    pressure: Option<f64>,
+    altitude: Option<f64>,
+    humidity_percent: Option<f64>,
+    density_altitude: Option<f64>,
+    wind_direction: Option<f64>,
+}
+
+impl LocationCsvNumbers {
+    fn read(row: &HashMap<String, String>) -> Result<Self, String> {
+        const SOURCE: &str = "--location";
+        let number = |keys: &[&str]| csv_number(row, keys, SOURCE);
+        Ok(Self {
+            temperature: number(&["TARGET_TEMP", "TEMPERATURE", "TEMP"])?,
+            pressure: number(&["PRESSURE", "PRESSURE(HPA OR INHG)"])?,
+            altitude: number(&["ALTITUDE", "ALT"])?,
+            humidity_percent: csv_humidity_percent(row, SOURCE)?,
+            density_altitude: number(&["DA", "DENSITY_ALTITUDE"])?,
+            wind_direction: number(&["WIND_DIR", "WIND_DIRECTION"])?,
+        })
+    }
 }
 
 // ============================================================================
@@ -5942,9 +6051,13 @@ fn load_profile(name: &str) -> Result<ProfileData, Box<dyn Error>> {
     }
     // Humidity train (plan C4): the stored humidity goes through the one validator ON LOAD too,
     // so a hand-edited 150 % is a named error, never a clamped flight. The error names the file
-    // the fix is made in.
-    profile
-        .validate_humidity()
+    // the fix is made in. This loader is for flights only (`profile show` and the zero-set
+    // commands read the stored file through `inspect_profile`), so it keeps the humidity the
+    // flight flies (R3, review C8): a stored band reading of 102 is 100 here, and every echo
+    // of the air a run flies says 100.
+    let mut profile = profile;
+    profile.humidity = profile
+        .flown_humidity()
         .map_err(|error| format!("{error} (the profile is stored at {})", path.display()))?;
     Ok(profile)
 }
@@ -6106,19 +6219,17 @@ fn resolve_zero_selection(
 /// `--zero-set <row name>` selects it. `None` when the row carries neither column —
 /// including every pre-existing CSV, so runs without `--zero-set` are untouched.
 fn zero_set_from_profile_csv(
-    csv: &HashMap<String, String>,
+    csv: &ProfileCsvNumbers,
     row_name: Option<&str>,
 ) -> Option<ProfileZeroSet> {
-    let has_up = csv_has(csv, &["V_OFFSET_MIL"]);
-    let has_right = csv_has(csv, &["H_OFFSET_MIL"]);
-    if !has_up && !has_right {
+    if csv.poi_up_mil.is_none() && csv.poi_right_mil.is_none() {
         return None;
     }
     Some(ProfileZeroSet {
         name: row_name.unwrap_or("imported").to_string(),
         zero_distance: None,
-        poi_up_mil: has_up.then(|| csv_get_f64(csv, &["V_OFFSET_MIL"], 0.0)),
-        poi_right_mil: has_right.then(|| csv_get_f64(csv, &["H_OFFSET_MIL"], 0.0)),
+        poi_up_mil: csv.poi_up_mil,
+        poi_right_mil: csv.poi_right_mil,
         notes: None,
     })
 }
@@ -7658,38 +7769,28 @@ fn run() -> Result<(), Box<dyn Error>> {
                 } else {
                     HashMap::new()
                 };
+            // R3: every numeric cell either CSV row supplies, read once, before any is used;
+            // one that cannot be read stops the run here, naming its column.
+            let profile_csv = ProfileCsvNumbers::read(&profile_data)?;
+            let location_csv = LocationCsvNumbers::read(&location_data)?;
 
             // Merge values: CLI args override profile/location, profile/location override defaults
             let final_velocity = velocity
-                .or_else(|| {
-                    let v = csv_get_f64(&profile_data, &["VELOCITY", "MV", "MUZZLE_VELOCITY"], 0.0);
-                    if v > 0.0 {
-                        Some(v)
-                    } else {
-                        None
-                    }
-                })
+                .or_else(|| profile_csv.velocity.filter(|v| *v > 0.0))
                 .or_else(|| saved_profile_data.as_ref().map(|p| p.velocity))
                 .unwrap_or(2800.0);
             let final_velocity_adj = if velocity_adjustment != 0.0 {
                 velocity_adjustment
             } else {
-                csv_get_f64(&profile_data, &["VELOCITY_ADJ", "VEL_ADJ"], 0.0)
+                profile_csv.velocity_adjustment.unwrap_or(0.0)
             };
             // Track WHERE the BC came from: a stored reference standard describes the profile's
             // own BC, so it may only be inherited when the BC was inherited too.
             let bc_came_from_saved_profile = bc.is_none()
-                && csv_get_f64(&profile_data, &["BC"], 0.0) <= 0.0
+                && profile_csv.bc.unwrap_or(0.0) <= 0.0
                 && saved_profile_data.is_some();
             let final_bc = bc
-                .or_else(|| {
-                    let v = csv_get_f64(&profile_data, &["BC"], 0.0);
-                    if v > 0.0 {
-                        Some(v)
-                    } else {
-                        None
-                    }
-                })
+                .or_else(|| profile_csv.bc.filter(|v| *v > 0.0))
                 .or_else(|| saved_profile_data.as_ref().map(|p| p.bc))
                 .unwrap_or(0.5);
             // MBA-1365 + whole-branch review (I1): an explicit --bc-reference always wins.
@@ -7712,7 +7813,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             let final_bc_adj = if bc_adjustment != 1.0 {
                 bc_adjustment
             } else {
-                csv_get_f64(&profile_data, &["BC_ADJ", "BC_ADJUSTMENT"], 1.0)
+                profile_csv.bc_adjustment.unwrap_or(1.0)
             };
             let final_mass = mass
                 .or_else(|| saved_profile_data.as_ref().map(|p| p.mass))
@@ -7743,7 +7844,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             // let the CSV win; omitted flag + CSV is unchanged.
             let final_wind_direction = match wind_direction {
                 Some(d) => d.degrees,
-                None => csv_get_f64(&location_data, &["WIND_DIR", "WIND_DIRECTION"], 0.0),
+                None => location_csv.wind_direction.unwrap_or(0.0),
             };
             // MBA-1368: compass bearings (from the flag OR the CSV) become
             // shooter-relative HERE — before the zero solve, the per-atmo-segment
@@ -7778,28 +7879,20 @@ fn run() -> Result<(), Box<dyn Error>> {
             // --pressure-type qnh applied its mode to a CLI absolute reading, giving 2299.49 fps
             // instead of 2222.86 at 300 yd.
             let saved_atmo = saved_profile_data.as_ref();
-            let profile_supplied_pressure = pressure.is_none()
-                && !csv_has(&location_data, &["PRESSURE", "PRESSURE(HPA OR INHG)"])
-                && saved_atmo.is_some();
+            let profile_supplied_pressure =
+                pressure.is_none() && location_csv.pressure.is_none() && saved_atmo.is_some();
             let final_temperature = match temperature {
                 Some(t) => UnitConverter::resolve_temperature(Some(t), cli.units)?,
-                None => csv_get_f64(
-                    &location_data,
-                    &["TARGET_TEMP", "TEMPERATURE", "TEMP"],
-                    csv_get_f64(
-                        &profile_data,
-                        &["ZERO_TEMP"],
-                        saved_atmo.map_or(std_temperature, |p| p.temperature),
-                    ),
-                ),
+                None => location_csv
+                    .temperature
+                    .or(profile_csv.zero_temperature)
+                    .unwrap_or_else(|| saved_atmo.map_or(std_temperature, |p| p.temperature)),
             };
             let final_pressure = match pressure {
                 Some(p) => UnitConverter::resolve_pressure(Some(p), cli.units)?,
-                None => csv_get_f64(
-                    &location_data,
-                    &["PRESSURE", "PRESSURE(HPA OR INHG)"],
-                    saved_atmo.map_or(std_pressure, |p| p.pressure),
-                ),
+                None => location_csv
+                    .pressure
+                    .unwrap_or_else(|| saved_atmo.map_or(std_pressure, |p| p.pressure)),
             };
             // MBA-1397 + MBA-1366 review: a pressure MODE describes one specific pressure
             // VALUE, so it must never be inherited apart from it. `trajectory --saved-profile`
@@ -7826,42 +7919,35 @@ fn run() -> Result<(), Box<dyn Error>> {
             // which the short-circuit order guarantees. A saved profile written before 0.49.0
             // carries no marker and keeps the legacy rule.
             let temperature_supplied = temperature.is_some()
-                || csv_has(&location_data, &["TARGET_TEMP", "TEMPERATURE", "TEMP"])
-                || csv_has(&profile_data, &["ZERO_TEMP"])
+                || location_csv.temperature.is_some()
+                || profile_csv.zero_temperature.is_some()
                 || saved_atmo.is_some_and(|p| p.temperature_supplied);
             let pressure_supplied = pressure.is_some()
-                || csv_has(&location_data, &["PRESSURE", "PRESSURE(HPA OR INHG)"])
+                || location_csv.pressure.is_some()
                 || saved_atmo.is_some_and(|p| p.pressure_supplied);
             // A typed `--altitude 0` / `--humidity 50` is a value, not the clap default.
             let altitude_typed = trajectory_flag_typed(&matches, "altitude");
             let humidity_typed = trajectory_flag_typed(&matches, "humidity");
-            // Humidity train (plan C4): a --location CSV humidity goes through the one validator:
-            // a sensor reading within 5 points of 0-100 flies as the end it reads as (S5b), and
-            // a value farther out is refused with its source named, never clamped (a saved
-            // profile's was validated when it loaded). The fallback is the one default.
+            // Humidity train (plan C4): a --location CSV humidity goes through the one validator
+            // (`LocationCsvNumbers::read`): a sensor reading within 5 points of 0-100 flies as
+            // the end it reads as (S5b), and a value farther out, or a cell that is no number,
+            // is refused with its source named, never clamped or skipped. A saved profile's was
+            // validated, and snapped to the end it flies as, when it loaded. The fallback is the
+            // one default. So this is the humidity the run flies, and every echo of it says so.
             let final_humidity = if humidity_typed {
                 humidity
-            } else if csv_has(&location_data, &["HUMIDITY"]) {
-                let csv_humidity =
-                    csv_get_f64(&location_data, &["HUMIDITY"], DEFAULT_HUMIDITY_PERCENT);
-                RelativeHumidity::try_percent(csv_humidity)
-                    .map_err(|error| error.at_field("--location CSV column HUMIDITY"))?
-                    .percent()
+            } else if let Some(percent) = location_csv.humidity_percent {
+                percent
             } else {
                 saved_atmo.map_or(DEFAULT_HUMIDITY_PERCENT, |p| p.humidity)
             };
             let final_altitude = if altitude_typed {
                 altitude
             } else {
-                csv_get_f64(
-                    &location_data,
-                    &["ALTITUDE", "ALT"],
-                    csv_get_f64(
-                        &profile_data,
-                        &["ZERO_ALT"],
-                        saved_atmo.map_or(0.0, |p| p.altitude),
-                    ),
-                )
+                location_csv
+                    .altitude
+                    .or(profile_csv.zero_altitude)
+                    .unwrap_or_else(|| saved_atmo.map_or(0.0, |p| p.altitude))
             };
 
             // MBA-1366: --density-altitude supersedes --altitude and --pressure/--pressure-type
@@ -7882,20 +7968,18 @@ fn run() -> Result<(), Box<dyn Error>> {
             // larger blast radius.
             let final_density_altitude: Option<f64> = match density_altitude {
                 Some(da) => Some(da),
-                None => {
-                    let da_csv = csv_get_f64(&location_data, &["DA", "DENSITY_ALTITUDE"], f64::NAN);
-                    if !da_csv.is_nan() {
-                        Some(da_csv)
-                    } else {
+                None => match location_csv.density_altitude {
+                    Some(da_csv) => Some(da_csv),
+                    None => {
                         let run_supplied_its_own_atmosphere = pressure.is_some()
                             || altitude_typed
-                            || csv_has(&location_data, &["PRESSURE", "PRESSURE(HPA OR INHG)"])
-                            || csv_has(&location_data, &["ALTITUDE", "ALT"]);
+                            || location_csv.pressure.is_some()
+                            || location_csv.altitude.is_some();
                         saved_atmo
                             .filter(|_| !run_supplied_its_own_atmosphere)
                             .and_then(|p| p.density_altitude)
                     }
-                }
+                },
             };
             if final_density_altitude.is_some() && (pressure.is_some() || pressure_type.is_some()) {
                 eprintln!(
@@ -7963,7 +8047,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             // the zero day names a humidity it inherits the same way.
             let shot_humidity_label = if humidity_typed {
                 SHOT_AIR_FLAGS[0].to_string()
-            } else if csv_has(&location_data, &["HUMIDITY"]) {
+            } else if location_csv.humidity_percent.is_some() {
                 "--location CSV column HUMIDITY".to_string()
             } else if let Some(profile) = saved_profile_data.as_ref() {
                 format!("profile '{}' field humidity", profile.name)
@@ -8034,17 +8118,12 @@ fn run() -> Result<(), Box<dyn Error>> {
             // the shared zero-selection resolver. With no --zero-set the set layer
             // vanishes and this is exactly the historical
             // `auto_zero.or(csv).or(profile.auto_zero.or(zero_distance))` chain.
-            let csv_zero_set = zero_set_from_profile_csv(&profile_data, profile_row.as_deref());
-            let legacy_zero: Option<f64> = {
-                let zero_from_csv =
-                    csv_get_f64(&profile_data, &["ZERO_RANGE", "ZERO_DISTANCE", "ZERO"], 0.0);
-                if zero_from_csv > 0.0 {
-                    Some(zero_from_csv)
-                } else {
-                    saved_profile_data
-                        .as_ref()
-                        .and_then(|p| p.auto_zero.or(p.zero_distance))
-                }
+            let csv_zero_set = zero_set_from_profile_csv(&profile_csv, profile_row.as_deref());
+            let legacy_zero: Option<f64> = match profile_csv.zero_range.filter(|z| *z > 0.0) {
+                Some(zero_from_csv) => Some(zero_from_csv),
+                None => saved_profile_data
+                    .as_ref()
+                    .and_then(|p| p.auto_zero.or(p.zero_distance)),
             };
             let zero_selection = resolve_zero_selection(
                 zero_set.as_deref(),
@@ -8184,16 +8263,13 @@ fn run() -> Result<(), Box<dyn Error>> {
                                 UnitSystem::Metric => l / 25.4,
                             })
                             .or_else(|| {
-                                let len =
-                                    csv_get_f64(&profile_data, &["BULLET_LENGTH", "LENGTH"], 0.0);
-                                if len > 0.0 {
-                                    Some(match cli.units {
+                                profile_csv
+                                    .bullet_length
+                                    .filter(|len| *len > 0.0)
+                                    .map(|len| match cli.units {
                                         UnitSystem::Imperial => len,
                                         UnitSystem::Metric => len / 25.4,
                                     })
-                                } else {
-                                    None
-                                }
                             })
                             .unwrap_or_else(|| {
                                 // MBA-1135: mass-based length estimate (was a mass-blind
@@ -8408,16 +8484,13 @@ fn run() -> Result<(), Box<dyn Error>> {
                             UnitSystem::Metric => l / 25.4,
                         })
                         .or_else(|| {
-                            let csv_len =
-                                csv_get_f64(&profile_data, &["BULLET_LENGTH", "LENGTH"], 0.0);
-                            if csv_len > 0.0 {
-                                Some(match cli.units {
+                            profile_csv
+                                .bullet_length
+                                .filter(|csv_len| *csv_len > 0.0)
+                                .map(|csv_len| match cli.units {
                                     UnitSystem::Imperial => csv_len,
                                     UnitSystem::Metric => csv_len / 25.4,
                                 })
-                            } else {
-                                None
-                            }
                         });
                     let length_is_user = bullet_length_user.is_some();
                     let bullet_length_in = bullet_length_user.unwrap_or_else(|| {
@@ -8508,9 +8581,11 @@ fn run() -> Result<(), Box<dyn Error>> {
                     final_velocity, trued_velocity, bc_info
                 );
                 if !location_data.is_empty() {
+                    // R3 (review C2, C8): the air the run flies, humidity included, so a CSV
+                    // cell that fell back or a band reading shows here as the value flown.
                     eprintln!(
-                        "                  altitude={:.0}, temp={:.1}, pressure={:.2}",
-                        final_altitude, final_temperature, final_pressure
+                        "                  altitude={:.0}, temp={:.1}, pressure={:.2}, humidity={:.1}%",
+                        final_altitude, final_temperature, final_pressure, final_humidity
                     );
                 }
             }
@@ -12146,11 +12221,21 @@ fn run() -> Result<(), Box<dyn Error>> {
                 _ => drag_model,
             };
 
-            // Parse wind speeds
-            let ws_vec: Vec<f64> = wind_speeds
-                .split(',')
-                .filter_map(|s| s.trim().parse::<f64>().ok())
-                .collect();
+            // Parse wind speeds. R3 (the class of review C2): an entry that is no finite number
+            // stops the run naming it, as `--wind-angles` does, where it used to be dropped (a
+            // typo'd `5,1O,15` silently printed a two-column card).
+            let mut ws_vec: Vec<f64> = Vec::new();
+            for tok in wind_speeds.split(',') {
+                let tok = tok.trim();
+                match tok.parse::<f64>() {
+                    Ok(speed) if speed.is_finite() => ws_vec.push(speed),
+                    _ => {
+                        return Err(
+                            format!("--wind-speeds contains an invalid number: '{tok}'").into()
+                        )
+                    }
+                }
+            }
             if ws_vec.is_empty() {
                 eprintln!("Error: --wind-speeds must contain at least one valid number (e.g., '5,10,15,20')");
                 std::process::exit(1);
@@ -13256,7 +13341,15 @@ fn run() -> Result<(), Box<dyn Error>> {
                             "inHg"
                         }
                     );
-                    println!("║  Humidity:      {:>10.1}%            ║", profile.humidity);
+                    // The stored value (R3, review C8), signless at zero, and what a stored
+                    // band reading flies as.
+                    println!(
+                        "║  Humidity:      {:>10.1}%            ║",
+                        profile.humidity + 0.0
+                    );
+                    if let Some(flown) = profile.flown_humidity_note() {
+                        println!("║    flies as:    {:>10.1}%            ║", flown);
+                    }
                     println!(
                         "║  Altitude:      {:>10.0} {:<10}  ║",
                         profile.altitude,
@@ -22935,6 +23028,7 @@ mod profile_unit_tests {
         let mut csv = HashMap::new();
         csv.insert("V_OFFSET_MIL".to_string(), "0.3".to_string());
         csv.insert("H_OFFSET_MIL".to_string(), "-0.1".to_string());
+        let csv = ProfileCsvNumbers::read(&csv).expect("readable cells");
         let csv_set = zero_set_from_profile_csv(&csv, Some("R1")).expect("csv set");
         assert_eq!(csv_set.poi_up_mil, Some(0.3));
         assert_eq!(csv_set.poi_right_mil, Some(-0.1));
@@ -22955,7 +23049,11 @@ mod profile_unit_tests {
         assert!(err.contains("requires a profile"), "{err}");
 
         // A CSV row without either offset column yields no ephemeral set at all.
-        assert!(zero_set_from_profile_csv(&HashMap::new(), Some("R1")).is_none());
+        assert!(zero_set_from_profile_csv(
+            &ProfileCsvNumbers::read(&HashMap::new()).expect("an empty row"),
+            Some("R1")
+        )
+        .is_none());
     }
 
     /// MBA-1360 x MBA-1358 ordering pin (the composition rule): the zero-set bias is
@@ -26526,11 +26624,23 @@ fn parse_input_axis(s: &str) -> Result<InputAxis, String> {
 }
 
 /// The physical unit `axis`'s resolved value (and any `--domain` bound for it) is expressed
-/// in on this CLI surface -- `""` for a dimensionless or categorical axis.
+/// in on this CLI surface -- `""` for a dimensionless or categorical axis. The relative
+/// humidity's is `fraction`: these commands take a solve-json request FILE, whose humidity is a
+/// fraction (0.5 = 50 %), unlike every `--humidity` flag (R3, review C3).
 fn axis_unit_suffix(axis: InputAxis) -> &'static str {
     match axis_meta(axis).kind {
         AxisKind::Continuous { unit, .. } => unit,
         AxisKind::Categorical => "",
+    }
+}
+
+/// How a hint states `axis`'s unit: `(in m/s)`, or for the relative humidity, whose unit is a
+/// fraction, `(as a fraction, 0.5 = 50 %)`; `""` for an axis with no unit.
+fn axis_unit_hint(axis: InputAxis) -> String {
+    match axis_unit_suffix(axis) {
+        "" => String::new(),
+        "fraction" => " (as a fraction, 0.5 = 50 %)".to_string(),
+        unit => format!(" (in {unit})"),
     }
 }
 
@@ -26577,6 +26687,27 @@ fn parse_sigma_arg(s: &str) -> Result<(InputAxis, f64), String> {
             "invalid --sigma for axis '{}': {value_str} must be finite and non-negative",
             axis_kebab_name(axis)
         ));
+    }
+    // R3 (review C3): a one-sigma uncertainty as wide as an axis's whole physical range is no
+    // uncertainty of it. For the relative humidity, a request-file fraction, it is a percent
+    // typed by mistake: `relative-humidity=5` was a 500-point sigma that took over the ranking.
+    if let Some(range) = ballistics_engine::perturbation::physical_domain(axis) {
+        let width = range.upper - range.lower;
+        if value >= width {
+            return Err(match axis {
+                InputAxis::RelativeHumidity => format!(
+                    "invalid --sigma for axis 'relative-humidity': {value_str} is as wide as a \
+                     relative humidity's whole range; the request file's humidity is a \
+                     fraction (0.5 = 50 %), so its sigma is one too and must be less than 1: \
+                     0.05 = 5 percentage points"
+                ),
+                _ => format!(
+                    "invalid --sigma for axis '{}': {value_str} is as wide as the axis's whole \
+                     physical range ({width})",
+                    axis_kebab_name(axis)
+                ),
+            });
+        }
     }
     Ok((axis, value))
 }
@@ -26667,19 +26798,26 @@ fn handle_explain(
     Ok(())
 }
 
-/// One axis's near/far search outcome as a table line -- the five situations a shooter must be
+/// One axis's near/far search outcome as a table line -- the situations a shooter must be
 /// able to tell apart (an axis unavailable at all is handled by the caller, one level up, since
 /// it never reaches a per-direction search): a real bound, no bound within the configured
-/// domain, no measurable effect at all, and (via the caller's own early return before this is
-/// called) the nominal itself sitting outside the target.
+/// domain, no measurable effect at all, a direction with nothing to search because the nominal
+/// is at the axis's physical boundary (a saturated or dry humidity, a calm wind; R3), and (via
+/// the caller's own early return before this is called) the nominal itself sitting outside the
+/// target.
 fn render_tolerance_direction(
     bound: Option<f64>,
     has_no_effect: bool,
     boundary: Option<LimitingBoundaryV1>,
+    at_physical_boundary: bool,
     unit: &str,
 ) -> String {
     let unit_sp = if unit.is_empty() { "" } else { " " };
-    if let Some(v) = bound {
+    if at_physical_boundary {
+        // R3 (review C11): a saturated or dry humidity, or a calm wind, has nothing past it.
+        "not searched -- the nominal is at the axis's physical boundary (nothing lies past it)"
+            .to_string()
+    } else if let Some(v) = bound {
         let edge = boundary.expect("a found bound always carries a limiting boundary");
         format!("bound at {v:.6}{unit_sp}{unit} -- crosses the {edge:?} edge")
     } else if has_no_effect {
@@ -26721,6 +26859,7 @@ fn render_tolerance_table(report: &ToleranceReportV1) -> String {
                 axis.near_bound,
                 axis.near_has_no_effect,
                 axis.near_limiting_boundary,
+                axis.near_at_physical_boundary,
                 unit
             )
         );
@@ -26731,6 +26870,7 @@ fn render_tolerance_table(report: &ToleranceReportV1) -> String {
                 axis.far_bound,
                 axis.far_has_no_effect,
                 axis.far_limiting_boundary,
+                axis.far_at_physical_boundary,
                 unit
             )
         );
@@ -26825,12 +26965,7 @@ fn handle_tolerance(
     // mention --domain at all.
     for &axis in &axes {
         if !domains.iter().any(|(a, _)| *a == axis) {
-            let unit = axis_unit_suffix(axis);
-            let hint = if unit.is_empty() {
-                String::new()
-            } else {
-                format!(" (in {unit})")
-            };
+            let hint = axis_unit_hint(axis);
             let name = axis_kebab_name(axis);
             return Err(format!(
                 "--axis {name} has no matching --domain; supply one as --domain {name}=LO:HI{hint}"
@@ -27159,6 +27294,8 @@ mod decision_support_render_tests {
                     unbounded_in_domain: false,
                     near_has_no_effect: false,
                     far_has_no_effect: false,
+                    near_at_physical_boundary: false,
+                    far_at_physical_boundary: false,
                     margin_linear_m: 0.15,
                 },
                 // 2. No bound within the domain, but the axis does move the impact.
@@ -27173,6 +27310,8 @@ mod decision_support_render_tests {
                     unbounded_in_domain: true,
                     near_has_no_effect: false,
                     far_has_no_effect: false,
+                    near_at_physical_boundary: false,
+                    far_at_physical_boundary: false,
                     margin_linear_m: 0.15,
                 },
                 // 3. No measurable effect at all -- same `None`/`None` shape as #2, must render
@@ -27188,6 +27327,8 @@ mod decision_support_render_tests {
                     unbounded_in_domain: true,
                     near_has_no_effect: true,
                     far_has_no_effect: true,
+                    near_at_physical_boundary: false,
+                    far_at_physical_boundary: false,
                     margin_linear_m: 0.15,
                 },
                 // 4. Nominal outside the target -- structurally unreachable via the CLI (see
@@ -27203,6 +27344,8 @@ mod decision_support_render_tests {
                     unbounded_in_domain: false,
                     near_has_no_effect: false,
                     far_has_no_effect: false,
+                    near_at_physical_boundary: false,
+                    far_at_physical_boundary: false,
                     margin_linear_m: 0.0,
                 },
             ],

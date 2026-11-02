@@ -1,6 +1,9 @@
 //! Request-level perturbation kernel (Phase 1 of the 0.33.0 decision-support train).
 pub mod taxonomy;
-pub use taxonomy::{axes_in_group, axis_meta, AxisKind, AxisMeta, InputAxis, InputGroup};
+pub use taxonomy::{
+    axes_in_group, axis_meta, physical_domain, AxisKind, AxisMeta, InputAxis, InputGroup,
+    PhysicalDomain,
+};
 
 // 0.33.0 decision-support Task 5: read/write access to a single taxonomy axis on a canonical
 // request. No feature gate: must compile for wasm32 (depends only on solve_json/solve_v1,

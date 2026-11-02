@@ -232,7 +232,8 @@ fn the_perturbation_axis_is_the_wire_fraction_in_and_out() {
     assert_eq!(meta.group, InputGroup::Atmosphere);
     match meta.kind {
         AxisKind::Continuous { unit, .. } => {
-            assert_eq!(unit, "", "the axis is the dimensionless wire fraction")
+            // R3 (review C3): the wire fraction, named so the CLI prints it.
+            assert_eq!(unit, "fraction", "the axis is the wire's fraction")
         }
         AxisKind::Categorical => panic!("relative humidity is continuous"),
     }

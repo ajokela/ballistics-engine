@@ -156,6 +156,8 @@ sound speed cannot disagree about it.
 | `try_integrate_trajectory` -> `Result<_, WindSegmentError>` | `Result<_, KernelInputError>` (a wind segment or an atmosphere zone) |
 | `BallisticInputs.humidity`, a 0-1 FRACTION, and `humidity_percent()` | `BallisticInputs.humidity_percent`, a PERCENT (default 50); the method is gone |
 | `atmosphere::get_local_atmosphere` | deprecated (dry by contract); use `air_at` |
+| a legacy tuple `compute_derivatives` flew: a negative or infinite direct-mode value, a NaN, -inf or >= 2 ratio, a negative pressure, a temperature at or below absolute zero or above water's critical point, air that cannot exist at the stated humidity | refused by `from_legacy_params` with a named `AtmosphereError` (see below); `(0, c, 0, 0)` is still an exact vacuum |
+| `tolerance::ToleranceAxisV1 { .. }` literal | names `near_at_physical_boundary` and `far_at_physical_boundary` too |
 
 `compute_derivatives` and `fast_integrate*` now measure a point's height from the
 `KernelAtmosphere` station's altitude, not from `inputs.altitude`.
@@ -177,7 +179,8 @@ let atmosphere = KernelAtmosphere::Station(StationAir::new(
 )?);
 // A caller that must keep its own density ratio (a legacy 4-vector) converts the tuple, at
 // the humidity the ratio was built at; direct mode's (density, sound speed, 0, 0) becomes
-// KernelAtmosphere::uniform(density, sound_speed) the same way.
+// KernelAtmosphere::uniform(density, sound_speed) the same way (a density of 0 is an exact
+// vacuum: gravity and no drag).
 let legacy = KernelAtmosphere::from_legacy_params(
     (altitude_m, temperature_c, pressure_hpa, density_ratio),
     humidity,
@@ -194,6 +197,27 @@ let legacy = KernelAtmosphere::from_legacy_params(
   and `HUMIDITY_SENSOR_TOLERANCE_PERCENT`). `InputAxis` has a `RelativeHumidity` variant, so
   glob-importing both `ballistics_engine::*` and `InputAxis::*` makes the name ambiguous; name
   one of them explicitly.
+
+## Legacy tuples that no longer convert
+
+`from_legacy_params` validates what 0.49.0's kernels flew unchecked.
+`tests/kernel_atmosphere_legacy_tuples.rs` lists every tuple class 0.49.0's
+`compute_derivatives` flew, with what 0.50.0 does with it:
+
+| 0.49.0 tuple | 0.49.0 flew it as | 0.50.0 |
+|---|---|---|
+| `(0, c, 0, 0)` or `(-0, c, 0, 0)` | an exact vacuum | the same vacuum, `KernelAtmosphere::uniform(0.0, c)` |
+| `(rho < 0, c, 0, 0)` | a forward drag | `UniformDensityOutOfRange` on `density_kg_m3` |
+| `(rho, inf, 0, 0)` | Mach 0 | `NotFinite` on `speed_of_sound_mps` |
+| `(alt, t, p, NaN or -inf)` | ratio 1.0 | `NotFinite` on `density_ratio` |
+| `(alt, t, p, ratio >= 2)` | that ratio (`fast_integrate` refused it) | `DensityRatioOutOfRange` on `density_ratio` |
+| `(alt, t, p < 0, ratio)` | its ratio, ignoring the pressure | `NonPositivePressure` on `pressure_hpa` |
+| `(alt, t <= -273.15, p, ratio)` | a finite flight | `AtOrBelowAbsoluteZero` on `temperature_c` |
+| `(alt, t > 373.946, p, ratio)` | pure steam's sound speed | `ImpossibleAir` on `temperature_c`, at any humidity |
+| any station whose humidity needs more vapour pressure than `p` | dry air (the kernel never saw the humidity) | `ImpossibleAir` on `humidity_percent` |
+
+A finite ratio of 0 or less still means "not supplied" and flies 1.0. Tuples 0.49.0 flew to a
+NaN acceleration are each a named refusal now.
 
 ## Numeric effect
 

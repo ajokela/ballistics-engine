@@ -602,14 +602,38 @@ impl ProfileData {
     /// full overwrite of every field its flags can express (and it resets `bc_segments` and
     /// `drag_curve`), so a re-save is not a safe way to repair one stored number.
     pub fn validate_humidity(&self) -> Result<(), String> {
+        self.flown_humidity().map(|_| ())
+    }
+
+    /// The humidity, PERCENT, a flight of this profile flies: the stored `humidity` through
+    /// [`Self::validate_humidity`]'s one validator, so a stored sensor reading inside the band
+    /// is the end it reads as (102 flies as 100, -5 and -0 as 0) and anything farther out is
+    /// the same refusal.
+    ///
+    /// The one echo rule (R3, review C8): a surface that reports the air FLOWN states this
+    /// value (the CLI's flight loader writes it into the profile it flies), and a surface that
+    /// displays the STORED document shows `humidity` as stored, saying what it flies as when
+    /// that is outside 0-100 ([`Self::flown_humidity_note`]).
+    pub fn flown_humidity(&self) -> Result<f64, String> {
         crate::atmosphere::RelativeHumidity::try_percent(self.humidity)
-            .map(|_| ())
+            .map(crate::atmosphere::RelativeHumidity::percent)
             .map_err(|error| {
                 format!(
                     "{}; edit the humidity stored in the profile",
                     error.at_field(format!("profile '{}' field humidity", self.name))
                 )
             })
+    }
+
+    /// What a STORED humidity outside 0-100 flies as, for a surface that shows the stored value:
+    /// `Some(100.0)` for a stored 102, `Some(0.0)` for a stored -5; `None` for a stored value in
+    /// 0-100 (it flies as itself) and for one that does not fly at all (beyond the band, or not
+    /// finite), which [`Self::validate_humidity`] reports instead.
+    pub fn flown_humidity_note(&self) -> Option<f64> {
+        // The one validator decides: it moves a stored value only when that value is a band
+        // reading outside 0-100 (-0 snaps to 0, which compares equal, so it needs no note).
+        let flown = self.flown_humidity().ok()?;
+        (flown != self.humidity).then_some(flown)
     }
 
     /// The station air a flight of this profile's OWN stored atmosphere flies, the way
