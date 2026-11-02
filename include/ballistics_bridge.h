@@ -48,6 +48,52 @@
  * Messages are text for a person; branch on codes. Per command, with a Kotlin
  * unwrap: docs/ANDROID_JNI_BRIDGE.md, "Reading a failure".
  *
+ * Relative humidity, per command. One rule: a field named "relative_humidity"
+ * (the SI wire of solve-json v1, beside temperature_k and pressure_pa) is a
+ * FRACTION, 0 to 1 (0.5 = 50 %); every other humidity is a PERCENT, 0 to 100
+ * (50 = 50 %). No field takes the other unit, and none guesses the unit from
+ * the size of the number: 50 sent as a fraction is refused, and 0.5 sent as a
+ * percent is 0.5 %. A reading up to 5 points outside the range (0.05 as a
+ * fraction) is the saturated or dry air it reads and is used exactly as 100 %
+ * or 0 %, so a sensor that reads 102 % in fog never fails a call. A value
+ * farther out, or not finite, is refused, never clamped, and so is air that
+ * cannot exist (a humidity needing more water-vapour pressure than the air's
+ * total pressure), by one rule on every command. "if omitted" is what an
+ * absent field means; "required" means its absence is refused.
+ *
+ *   command                      humidity field                unit      if omitted
+ *   solve                        atmosphere.relative_humidity  fraction  0.5
+ *   atmosphere.density_altitude  atmosphere.relative_humidity  fraction  0.5
+ *   card.come_ups                humidity                      percent   50
+ *   card.range_table             humidity                      percent   50
+ *   card.wind                    humidity                      percent   50
+ *   card.pdf                     humidity                      percent   50
+ *   profile.validate             humidity                      percent   50
+ *   profile.normalize            humidity                      percent   50
+ *   profile.import_a7p           a7p:air_humidity_pct          percent   0
+ *   profile.export_a7p           humidity                      percent   50
+ *   true.fit                     model.humidity_pct            percent   required
+ *   true.dsf                     model.humidity_pct            percent   required
+ *   true.plan                    model.humidity_pct            percent   required
+ *   true.wind                    humidity_pct                  percent   required
+ *   true.tall_target             -                             none      -
+ *   true.dial_plan               -                             none      -
+ *   meta.capabilities            -                             none      -
+ *   meta.version                 -                             none      -
+ *   reticle.catalog              -                             none      -
+ *   reticle.describe             -                             none      -
+ *   reticle.hold                 -                             none      -
+ *   reticle.holds                -                             none      -
+ *   reticle.import               -                             none      -
+ *   bc5d.info                    -                             none      -
+ *
+ * The profile.* humidity is the stored profile's own "humidity" key.
+ * profile.validate reports one outside the band as a warning (valid: false)
+ * rather than an error; profile.normalize echoes it unchanged, since it
+ * re-serializes the document and reads nothing. profile.import_a7p reads the
+ * file's whole-percent air humidity field: an absent one is 0 %, the format's
+ * own meaning, because the file writes 0 by omitting the field.
+ *
  * Contract:
  *   - The calls NEVER return NULL and NEVER throw/abort; check "ok" in the JSON.
  *   - The caller owns the input buffer; the engine does not retain it.

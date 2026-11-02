@@ -291,7 +291,8 @@ Feature-detect before calling: an engine built before this command answers `unkn
   defined), and a relative humidity that would need more water-vapor pressure than the air's
   total pressure. `solve` does not yet make the temperature check; here it is what stands
   between a unit mistake and a confident wrong number. Since 0.50.0 `solve` refuses the
-  impossible humidity itself, by the same rule.
+  impossible humidity itself, by the same rule (`StationAir::new`'s), and both messages state
+  that rule's reason word for word.
 - Each refusal is located at the field to blame — `temperature_k`, `pressure_pa` (or
   `altitude_m`, when the pressure was defaulted or a plausible QNH was reduced at an impossible
   altitude), `relative_humidity` — except a density altitude out of range with every field

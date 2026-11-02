@@ -1468,7 +1468,12 @@ pub(crate) fn resolve_atmosphere(
         relative_humidity_sent,
         DEFAULT_RELATIVE_HUMIDITY,
         "$.atmosphere.relative_humidity",
-        format!("Relative humidity defaulted to {DEFAULT_RELATIVE_HUMIDITY}."),
+        // The fraction the wire carries, with the percent it means (plan C5): a bare 0.5 is
+        // the very number a reader cannot tell from 0.5 %.
+        format!(
+            "Relative humidity defaulted to {DEFAULT_RELATIVE_HUMIDITY} ({}%).",
+            RelativeHumidity::DEFAULT.percent()
+        ),
         assumptions,
     );
 
@@ -2396,8 +2401,10 @@ mod tests {
 
     /// Humidity-consistency train (plan C4, H8): an omitted `$.atmosphere.relative_humidity` is
     /// the one default, `RelativeHumidity::DEFAULT`, in the wire's unit; the resolved echo, the
-    /// percent that flies and the notice all state that value, and the notice keeps its 0.49.0
-    /// bytes.
+    /// percent that flies and the notice all state that value. Plan C5 (H7): the notice names
+    /// the unit too, the fraction with its percent, because a bare 0.5 is exactly the number a
+    /// reader cannot tell from 0.5 %. Its code and path keep their 0.49.0 bytes (the apps key on
+    /// the path).
     #[test]
     fn an_omitted_relative_humidity_is_the_one_default_and_its_notice_says_so() {
         let prepared = prepare_request(&minimal_request()).expect("valid request");
@@ -2422,12 +2429,16 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(notices.len(), 1, "{notices:?}");
         assert_eq!(notices[0].code, ASSUMPTION_DEFAULT_APPLIED);
-        assert_eq!(notices[0].message, "Relative humidity defaulted to 0.5.");
+        assert_eq!(
+            notices[0].message,
+            "Relative humidity defaulted to 0.5 (50%)."
+        );
         assert_eq!(
             notices[0].message,
             format!(
-                "Relative humidity defaulted to {}.",
-                RelativeHumidity::DEFAULT.fraction()
+                "Relative humidity defaulted to {} ({}%).",
+                RelativeHumidity::DEFAULT.fraction(),
+                RelativeHumidity::DEFAULT.percent()
             )
         );
     }

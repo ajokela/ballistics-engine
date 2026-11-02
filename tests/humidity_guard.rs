@@ -417,6 +417,36 @@ fn every_per_step_acceleration_file_calls_air_at() {
     }
 }
 
+#[test]
+fn only_station_air_decides_whether_air_can_exist() {
+    // H10, plan C5: one impossible-air rule. Whether a temperature, pressure and humidity
+    // describe air that can exist (an uncapped water-vapour mole fraction below 1, and a
+    // temperature below water's critical point) is decided by `StationAir::new` alone, and every
+    // surface that refuses such air asks it. 0.49.0's `atmosphere.density_altitude` service
+    // evaluated the vapour fraction itself, so its refusal and the solve's were two copies of
+    // one rule that could drift apart.
+    let predicates = [
+        "water_vapor_mole_fraction_uncapped",
+        "moist_air_vapor_mole_fraction",
+        "vapor_mole_fraction",
+        "enhanced_saturation_vapor_pressure",
+    ];
+    let mut offenders = Vec::new();
+    for (path, text, production) in production_sources() {
+        for needle in predicates {
+            for at in calls(&production, needle) {
+                offenders.push(format!("{path}:{}: calls {needle}", line_of(&text, at)));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "whether air can exist is StationAir::new's to decide; refuse impossible air through \
+         it rather than evaluating the vapour fraction here:\n{}",
+        offenders.join("\n")
+    );
+}
+
 /// Offsets of the identifier `name` in `code` (not part of a longer identifier), skipping
 /// `use` declarations.
 fn identifier_uses(code: &str, name: &str) -> Vec<usize> {
@@ -556,10 +586,9 @@ fn no_production_path_converts_a_humidity_by_hand() {
     // production line outside src/atmosphere.rs scales a humidity by 100 itself, or clamps one
     // into a 0-1 fraction. 0.49.0 did both at every site that wrote the old fraction field.
     //
-    // The allowlist names each remaining site, with the step that moves it onto
-    // RelativeHumidity: the `atmosphere.density_altitude` service converts its SI-wire fraction
-    // (plan C5).
-    let allowed: BTreeMap<&str, usize> = BTreeMap::from([("src/atmosphere_service.rs", 1)]);
+    // No site is allowed: the last one, the `atmosphere.density_altitude` service's SI-wire
+    // fraction, converts through `RelativeHumidity::try_fraction` since plan C5 (step S6).
+    let allowed: BTreeMap<&str, usize> = BTreeMap::new();
     let mut found: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (path, text, production) in production_sources() {
         for (index, line) in production.lines().enumerate() {

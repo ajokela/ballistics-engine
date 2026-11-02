@@ -23,17 +23,18 @@
 //!
 //! The solve's resolver only requires temperature and pressure to be positive, which admits air
 //! that cannot exist: 5 K, a pressure altitude of 30 km. (A humidity whose vapor pressure
-//! exceeds the air's total pressure the solve now refuses too, by this service's own rule,
-//! through `StationAir::new`.) Those are also exactly what the two likeliest unit mistakes
-//! produce — °C sent as `temperature_k`, hPa sent as `pressure_pa` — so a figure computed from
-//! them is a wrong answer delivered confidently. This service refuses them instead, with the
-//! same `invalid_value` envelope and the path of the input to blame:
+//! exceeds the air's total pressure the solve refuses too: both ask the one rule,
+//! `StationAir::new`, and state its reason.) Those are also exactly what the two likeliest
+//! unit mistakes produce — °C sent as `temperature_k`, hPa sent as `pressure_pa` — so a
+//! figure computed from them is a wrong answer delivered confidently. This service refuses
+//! them instead, with the same `invalid_value` envelope and the path of the input to blame:
 //!
 //! - `temperature_k` outside 173.15–373.15 K (−100 °C to 100 °C), where the engine's
 //!   saturation-vapor and compressibility formulas are defined;
 //! - station pressure whose pressure altitude is outside −5 km to 11 km — the standard
 //!   atmosphere's troposphere, which is all the closed-form arithmetic here covers;
-//! - a relative humidity that would need more vapor pressure than the total pressure;
+//! - a relative humidity that would need more vapor pressure than the total pressure
+//!   (`StationAir::new`'s refusal, the solve's own);
 //! - either density altitude outside −5 km to 11 km.
 //!
 //! None of these rejects a condition anyone has fired a rifle in.
@@ -64,6 +65,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::atmosphere::{AtmosphereError, RelativeHumidity, StationAir};
 use crate::solve_json::{
     AtmosphereV1, PressureReferenceV1, ResolvedAtmosphereV1, SolveErrorCodeV1,
     SolveErrorEnvelopeV1, SolveErrorV1, SolveNoticeV1,
@@ -71,6 +73,8 @@ use crate::solve_json::{
 use crate::solve_v1::{KELVIN_OFFSET_C, PASCALS_PER_HECTOPASCAL};
 
 const METERS_PER_FOOT: f64 = 0.3048;
+/// The wire's one humidity field: a FRACTION, as in solve-json v1.
+const RELATIVE_HUMIDITY_PATH: &str = "$.atmosphere.relative_humidity";
 
 /// −100 °C. The engine's saturation-vapor-pressure and CIPM compressibility formulas clamp
 /// their temperature here, so below it the density would mix a clamped and an unclamped term.
@@ -196,11 +200,15 @@ pub fn density_altitude_v1(
     }
 
     // The same conversions the solve applies before handing the atmosphere to the engine
-    // (solve_v1.rs): Kelvin to Celsius, Pa to hPa, humidity fraction to percent.
+    // (solve_v1.rs): Kelvin to Celsius, Pa to hPa, and the wire's humidity fraction through the
+    // one converter, `RelativeHumidity::try_fraction`. The resolver has already read a sensor
+    // reading within the band as the end it reads as, and refused anything beyond it, so this
+    // cannot fail; it is mapped rather than unwrapped all the same.
     let temperature_c = atmosphere.temperature_k - KELVIN_OFFSET_C;
     let temperature_f = temperature_c * 9.0 / 5.0 + 32.0;
     let station_pressure_hpa = atmosphere.pressure_pa / PASCALS_PER_HECTOPASCAL;
-    let humidity_percent = atmosphere.relative_humidity * 100.0;
+    let humidity = RelativeHumidity::try_fraction(atmosphere.relative_humidity)
+        .map_err(|error| invalid_value(RELATIVE_HUMIDITY_PATH, error.reason().to_string()))?;
 
     // Pressure before vapor: hPa sent as Pa is the likelier mistake, and at 1013 Pa a warm
     // humid day would otherwise be blamed on the humidity.
@@ -214,24 +222,17 @@ pub fn density_altitude_v1(
         ));
     }
 
-    let vapor_fraction = crate::atmosphere::water_vapor_mole_fraction_uncapped(
+    // Whether this air can exist is the one rule's to decide, `StationAir::new`'s, which every
+    // solve applies to the same air: a humidity needing more water-vapour pressure than the
+    // air's total pressure is refused by both, for the same reason. The station it builds is
+    // the solver's muzzle air, so its density is the one reported below.
+    let station = StationAir::new(
+        atmosphere.altitude_m,
         temperature_c,
         station_pressure_hpa,
-        humidity_percent,
-    );
-    // NaN counts as refused: the temperature bound above should make it unreachable.
-    if vapor_fraction.is_nan() || vapor_fraction >= 1.0 {
-        return Err(invalid_value(
-            "$.atmosphere.relative_humidity",
-            format!(
-                "a relative humidity of {} at {} K needs more water-vapor pressure than the \
-                 air's total pressure of {} Pa; no such air exists",
-                atmosphere.relative_humidity,
-                echo(atmosphere.temperature_k),
-                echo(atmosphere.pressure_pa)
-            ),
-        ));
-    }
+        humidity,
+    )
+    .map_err(|error| station_refusal(&atmosphere, &error))?;
 
     let faa_rule = AltitudeV1::from_ft(crate::atmosphere::faa_rule_density_altitude_ft(
         station_pressure_hpa,
@@ -240,14 +241,9 @@ pub fn density_altitude_v1(
     let density_matched = AltitudeV1::from_m(crate::atmosphere::density_matched_altitude_m(
         temperature_c,
         station_pressure_hpa,
-        humidity_percent,
+        humidity.percent(),
     ));
-    let (air_density_kg_m3, _speed_of_sound) = crate::atmosphere::calculate_atmosphere(
-        atmosphere.altitude_m,
-        Some(temperature_c),
-        Some(station_pressure_hpa),
-        humidity_percent,
-    );
+    let air_density_kg_m3 = station.density_kg_m3();
 
     for (name, altitude) in [("faa_rule", faa_rule), ("density_matched", density_matched)] {
         if !within_troposphere(altitude.m) {
@@ -347,6 +343,32 @@ fn pressure_outside_troposphere(
             ),
         ),
     }
+}
+
+/// `StationAir::new`'s refusal of the resolved air, at the wire field to blame and with the
+/// air in the wire's own units (the humidity as the fraction that was sent), followed by the
+/// shared reason word for word. Only impossible air reaches it: the solve's resolver and the
+/// checks above have already bounded every input on its own.
+fn station_refusal(
+    atmosphere: &ResolvedAtmosphereV1,
+    error: &AtmosphereError,
+) -> SolveErrorEnvelopeV1 {
+    let path = match error.field() {
+        "temperature_c" => "$.atmosphere.temperature_k",
+        "pressure_hpa" => "$.atmosphere.pressure_pa",
+        "altitude_m" => "$.atmosphere.altitude_m",
+        _ => RELATIVE_HUMIDITY_PATH,
+    };
+    invalid_value(
+        path,
+        format!(
+            "relative_humidity = {} at {} K and {} Pa: {}",
+            atmosphere.relative_humidity,
+            echo(atmosphere.temperature_k),
+            echo(atmosphere.pressure_pa),
+            error.reason()
+        ),
+    )
 }
 
 /// A caller's number as it should appear in a message: plain for ordinary magnitudes, and in

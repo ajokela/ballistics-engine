@@ -1540,7 +1540,7 @@ mod tests {
     /// only channel. `TrajectorySolver::calculate_acceleration` (`cli_api.rs`, MBA-1136)
     /// separately recomputes a LOCAL atmosphere at every RK4/RK45 substep from the station
     /// altitude and the bullet's current height via `shot_frame_altitude`/
-    /// `get_local_atmosphere_humid`, unconditionally, regardless of pressure-reference mode or
+    /// `atmosphere::air_at`, unconditionally, regardless of pressure-reference mode or
     /// whether temperature/pressure were explicit -- `perturbation::evaluate` goes through this
     /// same solver, so it is live here too. Because the geopotential-height conversion this
     /// lapse computation uses is mildly nonlinear, comparing two DIFFERENT absolute station

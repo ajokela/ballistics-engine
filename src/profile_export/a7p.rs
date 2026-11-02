@@ -737,7 +737,16 @@ pub fn export_a7p(profile: &ProfileData) -> Result<A7pExport, A7pExportError> {
         )?,
         &mut body,
     );
-    let humidity_raw = lossy.quantize("humidity", profile.humidity, 1.0, "%", BOUND_HUMIDITY)?;
+    // A stored humidity within 5 points of 0-100 % (a sensor's reading in fog, or in very dry
+    // air) is the saturated or dry air it reads: the engine flies it as that end and `.a7p`
+    // import reads such a file as that end, so the file records that end too. A value beyond
+    // the band is no reading of real air, and the format's own bound below refuses it as
+    // before.
+    let humidity = match crate::atmosphere::RelativeHumidity::try_percent(profile.humidity) {
+        Ok(reading) => reading.percent(),
+        Err(_) => profile.humidity,
+    };
+    let humidity_raw = lossy.quantize("humidity", humidity, 1.0, "%", BOUND_HUMIDITY)?;
     if humidity_raw != 0 {
         write_i32_field(F_AIR_HUMIDITY, humidity_raw, &mut body);
     }

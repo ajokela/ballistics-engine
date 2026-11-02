@@ -749,6 +749,14 @@ pub struct AtmosphereV1 {
         deserialize_with = "deserialize_present"
     )]
     pub pressure_reference: Option<PressureReferenceV1>,
+    /// Relative humidity as a FRACTION, 0 to 1 (0.5 = 50 %), the SI wire's dimensionless form
+    /// and its only humidity field: there is no percent alias, so a percent sent by mistake
+    /// (`50`) is refused rather than flown as 5000 % or guessed at. A sensor reading within
+    /// 0.05 of the range ([`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`], 5 points) is the
+    /// saturated or dry air it reads, and resolves to exactly 1 or 0; anything farther out is
+    /// an `invalid_value` at `$.atmosphere.relative_humidity`. Converted to the percent the
+    /// engine flies by [`crate::RelativeHumidity::try_fraction`]. `None` means
+    /// [`crate::RelativeHumidity::DEFAULT`], 0.5, and is announced in `assumptions`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1143,6 +1151,9 @@ pub struct ResolvedAtmosphereV1 {
     pub altitude_m: f64,
     pub temperature_k: f64,
     pub pressure_pa: f64,
+    /// The relative humidity flown, as a FRACTION in `[0, 1]`: the request's own value with
+    /// its bits unchanged, a sensor reading within the band as the end it reads as, or the
+    /// default 0.5. Sending this echo back (see `SolveRequestV1::from`) flies the same air.
     pub relative_humidity: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latitude_rad: Option<f64>,

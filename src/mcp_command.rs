@@ -852,6 +852,109 @@ mod humidity_schema {
 }
 
 #[cfg(test)]
+mod humidity_wire {
+    use super::*;
+    use ballistics_engine::solve_json::{ResolvedSolveRequestV1, SolveRequestV1};
+
+    /// A solve-json v1 request in warm, thin air, with `relative_humidity` when given.
+    fn arguments(relative_humidity: Option<f64>) -> Value {
+        let mut atmosphere = json!({"temperature_k": 300.0, "pressure_pa": 95_000.0});
+        if let Some(fraction) = relative_humidity {
+            atmosphere["relative_humidity"] = json!(fraction);
+        }
+        json!({
+            "schema_version": 1,
+            "projectile": {"mass_kg": 0.01134, "diameter_m": 0.00782, "length_m": 0.031,
+                           "drag_model": "G7", "ballistic_coefficient": 0.243},
+            "rifle": {"muzzle_velocity_mps": 823.0},
+            "shot": {"max_range_m": 600.0, "zero_distance_m": 100.0},
+            "atmosphere": atmosphere,
+            "wind": {}, "solver": {}, "effects": {}, "sampling": {"interval_m": 100.0}
+        })
+    }
+
+    /// The `solve` tool's answer to `arguments`: whether it is an error, and its JSON text.
+    fn solve_tool(arguments: Value) -> (bool, Value) {
+        let line = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "solve", "arguments": arguments}
+        });
+        let mut initialized = true;
+        let response = dispatch_line(&line.to_string(), &mut initialized).expect("a response");
+        let result = &response["result"];
+        let text = result["content"][0]["text"].as_str().expect("text content");
+        (
+            result["isError"] == true,
+            serde_json::from_str(text).expect("the text is JSON"),
+        )
+    }
+
+    /// Humidity-consistency train, plan C5: the MCP `solve` tool is the SI wire, so its one
+    /// humidity is the fraction `relative_humidity`. The fraction sent is the fraction echoed
+    /// and flown (the library's own answer, byte for byte), the echo sent back flies the same
+    /// bits, a sensor reading within 0.05 of 0-1 flies as the end, and anything beyond the band
+    /// is refused at its path.
+    #[test]
+    fn the_solve_tool_round_trips_the_wire_fraction() {
+        for fraction in [0.0, 0.3, 0.5, 0.123_456_789_012_345_6, 1.0] {
+            let (is_error, answer) = solve_tool(arguments(Some(fraction)));
+            assert!(!is_error, "{fraction}: {answer}");
+            let echoed = answer["resolved_request"]["atmosphere"]["relative_humidity"]
+                .as_f64()
+                .unwrap();
+            assert_eq!(
+                echoed.to_bits(),
+                f64::to_bits(fraction),
+                "echo of {fraction}"
+            );
+
+            let library = ballistics_engine::solve_v1(
+                decode_solve_request_v1(&arguments(Some(fraction)).to_string()).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                answer,
+                serde_json::to_value(&library).unwrap(),
+                "the tool is the library at {fraction}"
+            );
+
+            // The resolved echo, rebuilt as a request and sent back through the tool.
+            let resolved: ResolvedSolveRequestV1 =
+                serde_json::from_value(answer["resolved_request"].clone()).unwrap();
+            let rebuilt = serde_json::to_value(SolveRequestV1::from(&resolved)).unwrap();
+            let (is_error, again) = solve_tool(rebuilt);
+            assert!(!is_error, "{again}");
+            for key in ["resolved_request", "summary", "samples"] {
+                assert_eq!(again[key], answer[key], "{key} of the echo of {fraction}");
+            }
+        }
+        for (reading, end) in [(1.03, 1.0), (1.05, 1.0), (-0.02, 0.0)] {
+            let (is_error, answer) = solve_tool(arguments(Some(reading)));
+            assert!(!is_error, "a reading of {reading} flies: {answer}");
+            assert_eq!(
+                answer,
+                solve_tool(arguments(Some(end))).1,
+                "{reading} as {end}"
+            );
+        }
+        for fraction in [50.0, 1.5, -0.1, 1.050_000_1] {
+            let (is_error, answer) = solve_tool(arguments(Some(fraction)));
+            assert!(is_error, "{fraction} must be refused: {answer}");
+            assert_eq!(answer["error"]["code"], "invalid_value", "{answer}");
+            assert_eq!(
+                answer["error"]["path"], "$.atmosphere.relative_humidity",
+                "{answer}"
+            );
+        }
+        let (_, omitted) = solve_tool(arguments(None));
+        let (_, default) = solve_tool(arguments(Some(0.5)));
+        for key in ["resolved_request", "summary", "samples"] {
+            assert_eq!(omitted[key], default[key], "omitted is 0.5: {key}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
