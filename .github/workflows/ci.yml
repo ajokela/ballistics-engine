@@ -89,8 +89,9 @@ jobs:
             git diff --check HEAD^ HEAD
           fi
 
-      # Build the feature-complete named binary before integration tests. A few legacy PDF tests
-      # execute target/debug/ballistics directly instead of CARGO_BIN_EXE_ballistics.
+      # Build every target with every feature before the tests run, so a compile error reads as one.
+      # Every integration test runs the binary through CARGO_BIN_EXE_ballistics, never a hand-built
+      # target/debug path; tests/cli_binary_path_guard.rs keeps it that way.
       - name: Build all targets and features
         run: cargo build --locked --all-targets --all-features
 

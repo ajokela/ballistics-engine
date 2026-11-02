@@ -1423,43 +1423,60 @@ mod tests {
     // --altitude/--wind-speed/--wind-direction (native parity).
     // -----------------------------------------------------------------------------
 
-    /// With NO environmental flags, `lead` output must be byte-identical to the build
-    /// from before the flags existed. These literals were captured VERBATIM from the
-    /// pre-env-flags build (commit c805229) via a temporary probe test run under
+    /// With NO environmental flags, `lead` output must be byte-identical to its goldens: the
+    /// flags are inert when absent. The literals were captured VERBATIM from the pre-env-flags
+    /// build (commit c805229) via a temporary probe test run under
     /// `wasm-pack test --safari --headless` — a true golden-compare, not a
     /// same-code-both-sides tautology. JSON strings have no trailing newline
     /// (serde_json::to_string_pretty); the table format string ends with exactly one.
+    ///
+    /// The two JSON goldens were re-captured once, in 0.50.0, from a
+    /// `wasm-pack test --headless --chrome` run of the unified aloft vapour model (humidity
+    /// train S8): `lead` flies the default 50 %, and the air off the station's height now holds
+    /// the station's water-vapour mole fraction with a virtual-temperature lapse. Every
+    /// changed field moved by the same relative step, -1.8e-8 imperial and -1.5e-8 metric.
+    /// Old -> new, imperial: `lead` 1.267051911310233 -> 1.2670518888402127, `lead_mil`
+    /// 3.1676393318758076 -> 3.167639275700587, `lead_moa` 10.890344022989026 ->
+    /// 10.890343829858619, `lead_smoa` 11.403501594752907 -> 11.403501392522115, `tof_s`
+    /// 0.5183409815796777 -> 0.5183409723873689. Metric: `lead` 1.4774105669002737 ->
+    /// 1.4774105441766052, `lead_mil` 4.221173048286496 -> 4.221172983361729, `lead_moa`
+    /// 14.512392940008974 -> 14.512392716797626, `lead_smoa` 15.196222973831386 ->
+    /// 15.196222740102225, `tof_s` 0.49247018896675787 -> 0.4924701813922017. Nothing else
+    /// moved, and the table is still the c805229 literal: it rounds the change away. The
+    /// native CLI (`lead ... --start 350 --end 350 -o json`) prints the same metric values bit
+    /// for bit, before and after; its imperial run differs from this surface's by about 4e-6,
+    /// on 0.49.0 as on 0.50.0.
     #[wasm_bindgen_test]
-    fn lead_no_env_flags_output_is_byte_identical_to_pre_env_build() {
+    fn lead_no_env_flags_output_is_byte_identical_to_its_goldens() {
         const GOLDEN_IMPERIAL_JSON: &str = r#"{
   "adjustment_unit": "mil",
   "distance_unit": "yd",
   "intercept_range": 399.9987936,
   "iterations": 0,
-  "lead": 1.267051911310233,
-  "lead_mil": 3.1676393318758076,
-  "lead_moa": 10.890344022989026,
-  "lead_smoa": 11.403501594752907,
+  "lead": 1.2670518888402127,
+  "lead_mil": 3.167639275700587,
+  "lead_moa": 10.890343829858619,
+  "lead_smoa": 11.403501392522115,
   "range": 400.0,
   "target_angle_deg": 90.0,
   "target_speed": 5.0,
   "target_speed_unit": "mph",
-  "tof_s": 0.5183409815796777
+  "tof_s": 0.5183409723873689
 }"#;
         const GOLDEN_METRIC_JSON: &str = r#"{
   "adjustment_unit": "mil",
   "distance_unit": "m",
   "intercept_range": 350.0,
   "iterations": 0,
-  "lead": 1.4774105669002737,
-  "lead_mil": 4.221173048286496,
-  "lead_moa": 14.512392940008974,
-  "lead_smoa": 15.196222973831386,
+  "lead": 1.4774105441766052,
+  "lead_mil": 4.221172983361729,
+  "lead_moa": 14.512392716797626,
+  "lead_smoa": 15.196222740102225,
   "range": 350.0,
   "target_angle_deg": 90.0,
   "target_speed": 3.0,
   "target_speed_unit": "m/s",
-  "tof_s": 0.49247018896675787
+  "tof_s": 0.4924701813922017
 }"#;
         const GOLDEN_IMPERIAL_TABLE: &str = "Moving-Target Lead\n\
 ===================\n\
@@ -1480,7 +1497,7 @@ Iterations: 0\n";
             .unwrap();
         assert_eq!(
             g1, GOLDEN_IMPERIAL_JSON,
-            "imperial JSON drifted from pre-env-flags build"
+            "imperial JSON drifted from its golden"
         );
         let g2 = wasm
             .run_command(
@@ -1490,14 +1507,14 @@ Iterations: 0\n";
             .unwrap();
         assert_eq!(
             g2, GOLDEN_METRIC_JSON,
-            "metric JSON drifted from pre-env-flags build"
+            "metric JSON drifted from its golden"
         );
         let g3 = wasm
             .run_command("lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 400")
             .unwrap();
         assert_eq!(
             g3, GOLDEN_IMPERIAL_TABLE,
-            "imperial table drifted from pre-env-flags build"
+            "imperial table drifted from its golden"
         );
     }
 
@@ -2070,7 +2087,7 @@ Iterations: 0\n";
     /// must remain byte-identical to a literal captured from the pre-MBA-1328 build
     /// (harvested via a temporary probe test run under `wasm-pack test --node`,
     /// following the MBA-1325 golden-compare methodology — see
-    /// `lead_no_env_flags_output_is_byte_identical_to_pre_env_build` above). Guards
+    /// `lead_no_env_flags_output_is_byte_identical_to_its_goldens` above). Guards
     /// against the new drag_table plumbing silently perturbing the no-table path.
     #[wasm_bindgen_test]
     fn drag_table_unloaded_output_is_byte_identical_to_pre_change_build() {
@@ -4950,13 +4967,17 @@ mod station_presence_tests {
         };
         // Captured from ab4eb0c with the sentinels compiled out: 1013 hPa typed at 150 m.
         // ab4eb0c flew ICAO 995.36 hPa there: -29.092691771258945, the omitted run's value.
+        // Re-captured once, in 0.50.0, from a headless-Chrome run of the unified aloft vapour
+        // model (humidity train S8; this solve flies the default 50 %): -28.989396602165147 ->
+        // -28.98939660215317 (+4.1e-13 relative). The native CLI gives the same bits, before
+        // and after.
         assert_eq!(
             field(
                 &chrono("--temperature 20 --altitude 150 --pressure 1013"),
                 "adjustment_percent"
             )
             .to_bits(),
-            (-28.989396602165147_f64).to_bits()
+            (-28.98939660215317_f64).to_bits()
         );
         check(
             "true-velocity --observed pressure",

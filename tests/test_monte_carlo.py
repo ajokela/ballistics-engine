@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
+import os
 import subprocess
 import json
 import sys
 
-# Run Monte Carlo simulation
+# Run Monte Carlo simulation on the binary built from this checkout. `cargo run` builds it
+# first and honours CARGO_TARGET_DIR; a hand-built ./target/debug path can run a stale
+# build, or none (tests/cli_binary_path_guard.rs).
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 cmd = [
-    "./target/debug/ballistics", "monte-carlo",
+    "cargo", "run", "--quiet", "--bin", "ballistics", "--", "monte-carlo",
     "--velocity", "800",
     "--angle", "45",
     "--bc", "0.5",
@@ -18,7 +22,7 @@ cmd = [
     "--output", "json"
 ]
 
-result = subprocess.run(cmd, capture_output=True, text=True)
+result = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO)
 
 if result.returncode != 0:
     print(f"Error running command: {result.stderr}")

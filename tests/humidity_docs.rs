@@ -24,7 +24,9 @@
 //!
 //! It also checks the CHANGELOG's 0.50.0 section carries the breaking API list, the sensor band
 //! from its constant and the downstream follow-ups, and that the stale wording H19/H20 named is
-//! gone.
+//! gone. The section is found under `## [Unreleased]` before the release cut and under
+//! `## [0.50.0] - <date>` after it, and a test applies `scripts/release/bump.sh`'s cut in memory,
+//! so cutting 0.50.0 cannot turn this suite red.
 
 use std::fs;
 use std::path::Path;
@@ -43,15 +45,156 @@ fn read(relative: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
 }
 
-/// The CHANGELOG's `## [Unreleased]` section, up to the next release heading.
-fn unreleased() -> String {
+/// The release whose CHANGELOG section holds the humidity notes.
+const HUMIDITY_RELEASE: &str = "0.50.0";
+/// The release just before it.
+const PREVIOUS_RELEASE: &str = "0.49.0";
+
+/// The CHANGELOG section that holds the 0.50.0 humidity notes: its heading line, then its body up
+/// to the next `## [` heading, split the way `scripts/release/extract-notes.sh` splits them.
+///
+/// Before the release cut the section is `## [Unreleased]`. `scripts/release/bump.sh 0.50.0`
+/// renames it `## [0.50.0] - <date>`, and work for the next release later opens a new
+/// `## [Unreleased]` above it. So the 0.50.0 heading, with any date, wins when it exists, and the
+/// `## [Unreleased]` section is the fallback. Either way the section must sit directly above
+/// `## [0.49.0]`.
+fn release_section() -> String {
+    release_section_in(&read("CHANGELOG.md"))
+}
+
+/// [`release_section`] on a CHANGELOG text.
+fn release_section_in(changelog: &str) -> String {
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(changelog.match_indices('\n').map(|(at, _)| at + 1))
+        .filter(|&at| changelog[at..].starts_with("## ["))
+        .collect();
+    let heading = |at: usize| changelog[at..].lines().next().unwrap_or_default();
+    let released = format!("## [{HUMIDITY_RELEASE}]");
+    let index = starts
+        .iter()
+        .position(|&at| heading(at).starts_with(&released))
+        .or_else(|| {
+            starts
+                .iter()
+                .position(|&at| heading(at).starts_with("## [Unreleased]"))
+        })
+        .unwrap_or_else(|| {
+            panic!("CHANGELOG.md has neither a `{released}` nor a `## [Unreleased]` section")
+        });
+    let previous = format!("## [{PREVIOUS_RELEASE}]");
+    let next = starts.get(index + 1).copied();
+    assert!(
+        next.is_some_and(|at| heading(at).starts_with(&previous)),
+        "CHANGELOG.md: `{}` must sit directly above `{previous}`, not above `{}`",
+        heading(starts[index]),
+        next.map_or("the end of the file", heading)
+    );
+    changelog[starts[index]..next.unwrap_or(changelog.len())].to_string()
+}
+
+/// A section without its heading line.
+fn body_of(section: &str) -> &str {
+    section.split_once('\n').map_or("", |(_, body)| body)
+}
+
+/// `scripts/release/bump.sh`'s CHANGELOG cut, in Rust: the first `## [Unreleased]` becomes
+/// `## [<new>] - <date>`. The test below checks the script still makes exactly this replace.
+fn bump_cut(changelog: &str, new: &str, date: &str) -> String {
+    changelog.replacen("## [Unreleased]", &format!("## [{new}] - {date}"), 1)
+}
+
+/// Whether the humidity notes still wait for the release cut, under `## [Unreleased]`.
+fn awaits_the_cut(changelog: &str) -> bool {
+    release_section_in(changelog).starts_with("## [Unreleased]")
+}
+
+/// The CHANGELOG once 0.50.0 is cut: `bump.sh`'s cut while the notes await it, the text as it
+/// stands once they sit under their dated heading.
+fn as_cut(changelog: &str, date: &str) -> String {
+    if awaits_the_cut(changelog) {
+        bump_cut(changelog, HUMIDITY_RELEASE, date)
+    } else {
+        changelog.to_string()
+    }
+}
+
+/// The release cut must not lose the humidity notes: on the CHANGELOG that `bump.sh 0.50.0`
+/// writes, the lookup finds the same section body, under its dated `## [0.50.0]` heading. Once
+/// the cut has happened, the notes must sit under that dated heading.
+#[test]
+fn the_release_cut_keeps_the_0_50_0_section() {
+    let script = read("scripts/release/bump.sh");
+    for line in [
+        "if '## [Unreleased]' not in s:",
+        "s = s.replace('## [Unreleased]', f'## [{new}] - {date}', 1)",
+        "DATE=$(date +%Y-%m-%d)",
+    ] {
+        assert_contains(&script, line, "scripts/release/bump.sh's CHANGELOG cut");
+    }
     let changelog = read("CHANGELOG.md");
-    let start = changelog
-        .find("\n## [Unreleased]")
-        .expect("CHANGELOG.md has no `## [Unreleased]` section for 0.50.0");
-    let body = &changelog[start + 1..];
-    let end = body[3..].find("\n## [").map_or(body.len(), |at| at + 3);
-    body[..end].to_string()
+    let before = release_section_in(&changelog);
+    if !awaits_the_cut(&changelog) {
+        assert!(
+            before.starts_with(&format!("## [{HUMIDITY_RELEASE}] - ")),
+            "the cut notes sit under `{}`",
+            before.lines().next().unwrap_or_default()
+        );
+        return;
+    }
+    for date in ["2026-11-02", "2027-01-31"] {
+        let after = release_section_in(&bump_cut(&changelog, HUMIDITY_RELEASE, date));
+        assert_eq!(
+            after.lines().next(),
+            Some(format!("## [{HUMIDITY_RELEASE}] - {date}").as_str()),
+            "the cut section's heading"
+        );
+        assert_eq!(body_of(&after), body_of(&before), "the cut section's body");
+    }
+}
+
+/// After 0.50.0 ships, work for the next release opens a new `## [Unreleased]` above it; the
+/// lookup must still find the 0.50.0 notes, not the new section. This holds before the cut (on
+/// the CHANGELOG `bump.sh` would write) and after it (on the CHANGELOG as it stands).
+#[test]
+fn a_later_unreleased_section_does_not_hide_the_0_50_0_notes() {
+    let cut = as_cut(&read("CHANGELOG.md"), "2026-11-02");
+    let notes = release_section_in(&cut);
+    assert!(
+        notes.starts_with(&format!("## [{HUMIDITY_RELEASE}] - ")),
+        "the cut notes sit under `{}`",
+        notes.lines().next().unwrap_or_default()
+    );
+    let at = cut.find(&notes).expect("the notes sit in the CHANGELOG");
+    let reopened = format!(
+        "{}## [Unreleased]\n\n### Added\n- Something for the next release.\n\n{}",
+        &cut[..at],
+        &cut[at..]
+    );
+    assert_eq!(
+        release_section_in(&reopened),
+        notes,
+        "the lookup must return the 0.50.0 notes, not the new section"
+    );
+}
+
+/// The section becomes the GitHub release body as it stands (`scripts/release/extract-notes.sh`),
+/// and the cut renames only its heading, so its prose must already read as released.
+#[test]
+fn the_0_50_0_section_reads_as_released() {
+    let section = release_section();
+    let body = body_of(&section);
+    for unreleased_wording in [
+        "To be released",
+        "to be released",
+        "Unreleased",
+        "this branch",
+        "the train",
+    ] {
+        assert!(
+            !body.contains(unreleased_wording),
+            "CHANGELOG 0.50.0 section: `{unreleased_wording}` reads wrong once the release is cut"
+        );
+    }
 }
 
 fn assert_contains(haystack: &str, needle: &str, what: &str) {
@@ -62,22 +205,21 @@ fn assert_contains(haystack: &str, needle: &str, what: &str) {
 // The CHANGELOG's 0.50.0 section
 // =================================================================================================
 
+/// Before the cut the notes sit under `## [Unreleased]`, after it under `## [0.50.0] - <date>`,
+/// either way directly above 0.49.0 (`release_section` asserts the position).
 #[test]
-fn the_changelog_has_an_unreleased_section_above_the_last_release() {
-    let changelog = read("CHANGELOG.md");
-    let unreleased = changelog
-        .find("\n## [Unreleased]")
-        .expect("no `## [Unreleased]` section");
-    let last_release = changelog.find("\n## [0.49.0]").expect("no 0.49.0 section");
+fn the_changelog_has_the_0_50_0_section_directly_above_0_49_0() {
+    let section = release_section();
+    let heading = section.lines().next().unwrap_or_default();
     assert!(
-        unreleased < last_release,
-        "[Unreleased] must sit above 0.49.0"
+        heading == "## [Unreleased]" || heading.starts_with(&format!("## [{HUMIDITY_RELEASE}]")),
+        "the humidity notes sit under `{heading}`"
     );
 }
 
 #[test]
-fn the_unreleased_section_lists_every_breaking_rust_api_change() {
-    let section = unreleased();
+fn the_0_50_0_section_lists_every_breaking_rust_api_change() {
+    let section = release_section();
     for name in [
         // TrajectoryParams.atmos_params / FastIntegrationParams.atmo_params -> atmosphere.
         "atmos_params",
@@ -109,13 +251,13 @@ fn the_unreleased_section_lists_every_breaking_rust_api_change() {
         "DEFAULT_HUMIDITY_PERCENT",
         "InputAxis",
     ] {
-        assert_contains(&section, name, "CHANGELOG [Unreleased] breaking list");
+        assert_contains(&section, name, "CHANGELOG 0.50.0 breaking list");
     }
 }
 
 #[test]
-fn the_unreleased_section_states_the_sensor_band_from_its_constant() {
-    let section = unreleased();
+fn the_0_50_0_section_states_the_sensor_band_from_its_constant() {
+    let section = release_section();
     let band = HUMIDITY_SENSOR_TOLERANCE_PERCENT;
     assert_contains(
         &section,
@@ -128,8 +270,8 @@ fn the_unreleased_section_states_the_sensor_band_from_its_constant() {
 }
 
 #[test]
-fn the_unreleased_section_lists_the_downstream_follow_ups() {
-    let section = unreleased();
+fn the_0_50_0_section_lists_the_downstream_follow_ups() {
+    let section = release_section();
     for repo in [
         "rockets-engine",
         "ballistics-engine-py",
@@ -160,8 +302,8 @@ fn station(temperature_c: f64, humidity_percent: f64) -> StationAir {
 }
 
 #[test]
-fn the_unreleased_sound_speed_shifts_are_engine_output() {
-    let section = unreleased();
+fn the_0_50_0_sound_speed_shifts_are_engine_output() {
+    let section = release_section();
     for (temperature_c, humidity_percent) in QUOTED {
         // 0.49.0's kernels flew the station's sound speed at 0 %; 0.50.0's fly its own humidity.
         let dry = station(temperature_c, 0.0).speed_of_sound_mps();
@@ -277,8 +419,8 @@ fn legacy_kernel_air_reproduces_0_49_0() {
 }
 
 #[test]
-fn the_unreleased_trajectory_shifts_are_engine_output() {
-    let section = unreleased();
+fn the_0_50_0_trajectory_shifts_are_engine_output() {
+    let section = release_section();
     for (temperature_c, humidity_percent) in QUOTED {
         let before = legacy_kernel_air(temperature_c, humidity_percent);
         let after = KernelAtmosphere::Station(station(temperature_c, humidity_percent));
@@ -509,7 +651,7 @@ fn solver_shots(
 
 #[test]
 fn the_aloft_vapour_model_shifts_are_engine_output() {
-    let section = unreleased();
+    let section = release_section();
     for (temperature_c, humidity_percent, height_m, density, sound_speed) in AIR_BEFORE_S8 {
         assert!(ALOFT_QUOTED.contains(&(temperature_c, humidity_percent)));
         let air = air_over_sea_level(temperature_c, humidity_percent, height_m);
@@ -578,7 +720,7 @@ fn humid_miller_factor(temperature_c: f64, humidity_percent: f64) -> f64 {
 #[test]
 fn the_miller_exception_is_documented_with_engine_numbers() {
     let stability = read("src/stability.rs");
-    let section = unreleased();
+    let section = release_section();
     let cli_usage = read("CLI_USAGE.md");
     for (temperature_c, humidity_percent) in QUOTED {
         let factor = format!(

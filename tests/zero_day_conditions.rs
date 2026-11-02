@@ -11,21 +11,12 @@
 //! downrange point.
 
 use serde_json::Value;
-use std::path::PathBuf;
 use std::process::Command;
 
-fn get_cli_binary() -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("target");
-    path.push("debug");
-    path.push("ballistics");
-    if !path.exists() {
-        path.pop();
-        path.pop();
-        path.push("release");
-        path.push("ballistics");
-    }
-    path
+/// The binary cargo built for this test run. A path built by hand under `target/` ignores
+/// `CARGO_TARGET_DIR` and can run a stale build (tests/cli_binary_path_guard.rs).
+fn get_cli_binary() -> &'static str {
+    env!("CARGO_BIN_EXE_ballistics")
 }
 
 /// Run a 300 yd trajectory zeroed at 100 yd and return (downrange_yd, height_yd) points.

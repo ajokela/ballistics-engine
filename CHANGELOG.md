@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-To be released as 0.50.0: a minor bump, because the Rust API breaks below.
+A minor bump, because the Rust API breaks below.
 
 **Humidity is handled one way on every path and surface.** The same physics, units, default
 and validation now apply wherever a relative humidity enters the engine.
@@ -188,7 +188,7 @@ at 0 % is byte-identical, and most table outputs round the change away.
   Mach by the station's moist one. It now flies and reports one station sound speed.
 
 ### Numeric shifts (kernel users at a humidity above 0)
-These are measured by running the engine, this branch against the 0.49.0 build (main 261c1eb).
+These are measured by running the engine, 0.50.0 against the 0.49.0 build (main 261c1eb).
 `tests/humidity_docs.rs` recomputes every number in the tables below.
 
 Only library callers of the kernels at a humidity above 0 see a change:
@@ -246,7 +246,7 @@ against the 0.49.0 build. Use it to re-baseline a stored kernel result, not for 
   `atmosphere.density_altitude`), solve-json, explain, error-budget, the cards and PDFs, truing,
   WEZ, moving target and BC estimation. Apps and services that fly through these surfaces see
   only the aloft change. At 0 % they do not move at all.
-  - 7,802 values were pinned before the train (`tests/humidity_byte_identity.rs`,
+  - 7,802 values were pinned before the humidity work (`tests/humidity_byte_identity.rs`,
     `src/humidity_byte_identity_tests.rs`). Every value at 0 %, and every value at the station's
     own height, is unchanged through 0.50.0. The aloft change re-pinned 2,278 others, all at a
     humidity above 0 off the station's height. Each re-pinned group's note there gives the old
