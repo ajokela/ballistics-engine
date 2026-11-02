@@ -2477,11 +2477,15 @@ mod station_presence_tests {
     /// sea-level output.
     #[test]
     fn a_metric_sourced_omitted_reading_flies_its_own_value_at_sea_level() {
+        // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the
+        // station's water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
+        // 4.4299666258599775 -> 4.429966468756218 mil and 4.429966625855552 ->
+        // 4.429966468751798 mil (both -3.5e-8).
         for (altitude_ft, pinned) in [
             // captured at ab4eb0c
-            (0.0, 0x4011b8492bd1c2a2_u64),
+            (0.0, 0x4011b8492146bcfe_u64),
             // captured at ab4eb0c (0.5 m)
-            (0.5 / 0.3048, 0x4011b8492bd1af2b_u64),
+            (0.5 / 0.3048, 0x4011b8492146a98d_u64),
         ] {
             let predict = |reading| {
                 model(reading, altitude_ft)
@@ -2513,9 +2517,12 @@ mod station_presence_tests {
     /// the chrono solve.
     #[test]
     fn an_omitted_reading_at_altitude_flies_the_legacy_air_on_every_truing_path() {
-        // captured at ab4eb0c, 59 °F / 29.92 inHg
-        const DROP_175_FT: u64 = 0x4011ad497c60a9fe; // 4.419225638770966 mil at 600 yd
-        const CHRONO_7135_FT: u64 = 0x40a4c30ea2569385; // 2657.5285822920873 fps
+        // captured at ab4eb0c, 59 °F / 29.92 inHg; re-captured in 0.50.0 (humidity train S8: the
+        // default 50 % RH aloft now holds the station's water-vapour mole fraction, with a
+        // virtual-temperature lapse), old -> new: the drop 4.419225638770966 -> 4.419225485334243
+        // mil (-3.5e-8), the chrono velocity 2657.5285822920873 -> 2657.528582291956 fps (-4.9e-14).
+        const DROP_175_FT: u64 = 0x4011ad497214a426; // 4.419225485334243 mil at 600 yd
+        const CHRONO_7135_FT: u64 = 0x40a4c30ea2569264; // 2657.528582291956 fps
         let (single, batched) =
             model(StationReading::omitted(29.92), 175.0).with_forward_model(DropUnit::Mil, |fm| {
                 (

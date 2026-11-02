@@ -16,6 +16,10 @@
 //! ```
 //!
 //! and confirmed identical in Linux (glibc) containers on aarch64 and x86_64.
+//!
+//! S8 (the unified aloft vapour model, plan C7) re-pinned `LOCAL_AIR_HUMID_GRAVITY`, the one
+//! group here it may change; its note gives the old -> new shifts. The new bits were confirmed
+//! the same way, on macOS (aarch64) and in Linux glibc containers on aarch64 and x86_64.
 
 use crate::atmosphere::{
     calculate_atmosphere, get_local_atmosphere_humid_with_gravity,
@@ -466,102 +470,121 @@ const LOCAL_AIR_DRY_GRAVITY: Pins = &[
 ///
 /// MAY CHANGE ONLY IN S8 (the unified aloft vapour model, plan C7): byte-identical through every
 /// other step.
+///
+/// Re-pinned in S8 (0.50.0, plan C7, owner-approved): the unified aloft vapour model holds the
+/// governing air's (the station's or the zone's) water-vapour mole fraction for the lapse, the
+/// density and the sound speed, with a virtual-temperature lapse. 90 of 120 values moved, all in
+/// cases with a humidity above 0 and all off the station's own height; every RH-0 and
+/// station-height value is unchanged. The largest float shift of each moved case, pinned before S8
+/// -> pinned now:
+/// - `g1.62/0m/15C/1013.25hPa/rh37.5` +12000m.speed_of_sound: 295.07029682688534 -> 295.3647829860783 (+9.98e-04)
+/// - `g1.62/0m/15C/1013.25hPa/rh50` +12000m.speed_of_sound: 295.07052519493107 -> 295.4630462416408 (+1.33e-03)
+/// - `g1.62/0m/15C/1013.25hPa/rh100` +12000m.speed_of_sound: 295.0714386636874 -> 295.85546512189603 (+2.66e-03)
+/// - `g1.62/1500m/25C/830hPa/rh37.5` +12000m.speed_of_sound: 308.23181071906737 -> 308.9226251975872 (+2.24e-03)
+/// - `g1.62/1500m/25C/830hPa/rh50` +12000m.speed_of_sound: 308.2343409820569 -> 309.1547458201768 (+2.99e-03)
+/// - `g1.62/1500m/25C/830hPa/rh100` +12000m.speed_of_sound: 308.2444616313066 -> 310.0798426319318 (+5.95e-03)
+/// - `g0/0m/15C/1013.25hPa/rh37.5` +12000m.speed_of_sound: 295.0701335029799 -> 295.3647829860783 (+9.99e-04)
+/// - `g0/0m/15C/1013.25hPa/rh50` +12000m.speed_of_sound: 295.07030743001155 -> 295.4630462416408 (+1.33e-03)
+/// - `g0/0m/15C/1013.25hPa/rh100` +12000m.speed_of_sound: 295.0710031361508 -> 295.85546512189603 (+2.66e-03)
+/// - `g0/1500m/25C/830hPa/rh37.5` +12000m.speed_of_sound: 308.2300733449599 -> 308.9226251975872 (+2.25e-03)
+/// - `g0/1500m/25C/830hPa/rh50` +12000m.speed_of_sound: 308.2320245158974 -> 309.1547458201768 (+2.99e-03)
+/// - `g0/1500m/25C/830hPa/rh100` +12000m.speed_of_sound: 308.23982896017765 -> 310.0798426319318 (+5.97e-03)
 #[rustfmt::skip]
 const LOCAL_AIR_HUMID_GRAVITY: Pins = &[
     (
         "g1.62/0m/15C/1013.25hPa/rh37.5",
         &[
-            0x3ff38ccfcb6bf6b9, 0x407556e25ee60163, 0x3ff38fee0f458cb7, 0x4075498421af4359,
-            0x3ff397453ce4b1b2, 0x40752a575b4af089, 0x3ff3be352e013a65, 0x40748ac6a01ce4e0,
-            0x3ff3ccd5417e33e0, 0x4072711fef90c7c3,
+            0x3ff38cc3cc22bfbf, 0x4075566ef3fa83bd, 0x3ff38feea94a838b, 0x40754989aec9bf48,
+            0x3ff39763879643f5, 0x40752b55060f3fc5, 0x3ff3bef1b23fbc67, 0x40748e991dc52527,
+            0x3ff3d02681454e9a, 0x407275d626af357f,
         ],
     ),
     (
         "g1.62/0m/15C/1013.25hPa/rh50",
         &[
-            0x3ff388d59bcb491d, 0x407558d9f5bca2da, 0x3ff38bf33d3e6cdf, 0x40754b52686a3349,
-            0x3ff39348ec90140b, 0x40752bd08c817792, 0x3ff3ba30f1c82c9a, 0x40748b413306fda0,
-            0x3ff3c8ce0b91e5dc, 0x40727120df06dc5e,
+            0x3ff388c5a001bc86, 0x407558402c591d60, 0x3ff38bf40a709a62, 0x40754b59cdff6554,
+            0x3ff3937147fa67ce, 0x40752d2292b33d9c, 0x3ff3bb2c1b3305ae, 0x40749059512b6a46,
+            0x3ff3cd3999d541bc, 0x40727768a32d0621,
         ],
     ),
     (
         "g1.62/0m/15C/1013.25hPa/rh100",
         &[
-            0x3ff378f365f0a3c1, 0x407560b4cc8777a3, 0x3ff37c0e7ed4c84b, 0x407552888aa57f98,
-            0x3ff3835e37648255, 0x407531b3540d29e1, 0x3ff3aa269a0e3c49, 0x40748d2b474922c1,
-            0x3ff3b8b7d1ee431f, 0x407271249cde4351,
+            0x3ff378d38868b1d0, 0x40755f820d3cdb32, 0x3ff37c1017eb7a73, 0x407552974c0fd5aa,
+            0x3ff383aeaceb0569, 0x40753455cabd120d, 0x3ff3ac1b60e634a3, 0x407497573a4bf840,
+            0x3ff3c188ba4f8910, 0x40727daffc321698,
         ],
     ),
     (
         "g1.62/1500m/25C/830hPa/rh37.5",
         &[
-            0x3feedb444a81c7e1, 0x4075bbf6fc0a6e1d, 0x3feee00576895f5c, 0x4075ae469215d60a,
-            0x3feeeb35e7dacd2a, 0x40758e7c216303fe, 0x3fef267b2535d33c, 0x4074ee0d81e87a1d,
-            0x3fee02534b047a63, 0x407343b57f28141b,
+            0x3feedb1acdca4501, 0x4075bb027ddc6474, 0x3feee0078b186721, 0x4075ae525e3a4c80,
+            0x3feeeb9e9f7f0900, 0x4075909b38d608ec, 0x3fef29060a8f463c, 0x4074f682861ff1bc,
+            0x3fee0d34f7bba4f5, 0x40734ec312a3a1a4,
         ],
     ),
     (
         "g1.62/1500m/25C/830hPa/rh50",
         &[
-            0x3feeccfc8139730f, 0x4075c0760fb1b0b2, 0x3feed1bb79f22d7b, 0x4075b26e4b63a24c,
-            0x3feedce6bd991672, 0x407591edfc85a1c7, 0x3fef18108cc47985, 0x4074ef46dcdd5342,
-            0x3fedf46fe84c092b, 0x407343bfdc5460c0,
+            0x3feeccc549ead76a, 0x4075bf3090cb53ad, 0x3feed1be3ebd9fe1, 0x4075b27e005e177b,
+            0x3feedd721ccf4696, 0x407594c123b39ea0, 0x3fef1b72e35edc72, 0x4074fa8accd3ce53,
+            0x3fee02ec4cf5da55, 0x40735279d6c0cda2,
         ],
     ),
     (
         "g1.62/1500m/25C/830hPa/rh100",
         &[
-            0x3fee9400b16ed023, 0x4075d2604f314999, 0x3fee98b6e25dda83, 0x4075c2fdbb363a11,
-            0x3feea3cd7c2ab885, 0x40759faaba1d24b9, 0x3feede89d6763916, 0x4074f42ae5422666,
-            0x3fedbd04ba565322, 0x407343e95099796b,
+            0x3fee93930f829b77, 0x4075cfd940e49d0e, 0x3fee98bc61b65928, 0x4075c31cf667c74b,
+            0x3feea4e2395588ea, 0x4075a54951fc4f79, 0x3feee5425bb1beb8, 0x40750a9cd923a6e1,
+            0x3fedd9cede71f4f5, 0x4073614709114f94,
         ],
     ),
     (
         "g0/0m/15C/1013.25hPa/rh37.5",
         &[
-            0x3ff37949fd914cde, 0x407556e845298c8b, 0x3ff390e9343182ac, 0x40754983dc5904dd,
-            0x3ff3c8e7202f926c, 0x40752a4c4cbe2688, 0x3ff4fb167288e05f, 0x40748ab0fe4954b5,
-            0x3ffa0479d72d08ad, 0x4072711f444eda71,
+            0x3ff37949fd914cde, 0x4075566ef3fa83bd, 0x3ff390e9343182ac, 0x40754989aec9bf48,
+            0x3ff3c8e7202f926c, 0x40752b55060f3fc5, 0x3ff4fb167288e05f, 0x40748e991dc52527,
+            0x3ffa0479d72d08ad, 0x407275d626af357f,
         ],
     ),
     (
         "g0/0m/15C/1013.25hPa/rh50",
         &[
-            0x3ff37553c6b349b6, 0x407558e1d202c388, 0x3ff38cee2f128acb, 0x40754b520c066ff2,
-            0x3ff3c4e0b6f38904, 0x40752bc1d06c02d2, 0x3ff4f6d1bee29982, 0x40748b245c86414b,
-            0x3ff9ff2ed2e39b1f, 0x4072711ffaaf090c,
+            0x3ff37553c6b349b6, 0x407558402c591d60, 0x3ff38cee2f128acb, 0x40754b59cdff6554,
+            0x3ff3c4e0b6f38904, 0x40752d2292b33d9c, 0x3ff4f6d1bee29982, 0x40749059512b6a46,
+            0x3ff9ff2ed2e39b1f, 0x40727768a32d0621,
         ],
     ),
     (
         "g0/0m/15C/1013.25hPa/rh100",
         &[
-            0x3ff365816d5cfda6, 0x407560c479d16815, 0x3ff37d08a49d7561, 0x40755287d25780c5,
-            0x3ff3b4cdaec0b68f, 0x40753195ebb6cc8c, 0x3ff4e5c5f35b4836, 0x40748cf1a466119e,
-            0x3ff9ea0b73bcbfa7, 0x40727122d42f3ae6,
+            0x3ff365816d5cfda6, 0x40755f820d3cdb32, 0x3ff37d08a49d7561, 0x407552974c0fd5aa,
+            0x3ff3b4cdaec0b68f, 0x40753455cabd120d, 0x3ff4e5c5f35b4836, 0x407497573a4bf840,
+            0x3ff9ea0b73bcbfa7, 0x40727daffc321698,
         ],
     ),
     (
         "g0/1500m/25C/830hPa/rh37.5",
         &[
-            0x3feebd7f2a768141, 0x4075bc040629abcc, 0x3feee1845db76168, 0x4075ae45f7cf5b78,
-            0x3fef36d9e45d739f, 0x40758e6322f5ae13, 0x3ff0842c44aa6505, 0x4074edd80eb1d7a9,
-            0x3ff3783852f6c8ba, 0x407343ae6163448c,
+            0x3feebd7f2a768141, 0x4075bb027ddc6474, 0x3feee1845db76168, 0x4075ae525e3a4c80,
+            0x3fef36d9e45d739f, 0x4075909b38d608ec, 0x3ff0842c44aa6505, 0x4074f682861ff1bc,
+            0x3ff3783852f6c8ba, 0x40734ec312a3a1a4,
         ],
     ),
     (
         "g0/1500m/25C/830hPa/rh50",
         &[
-            0x3feeaf45283e1484, 0x4075c0876b81f681, 0x3feed339afeafd11, 0x4075b26d7dfd0cd7,
-            0x3fef2867b87114f5, 0x407591ccb39859ef, 0x3ff07c8777800b33, 0x4074eeffa070c03e,
-            0x3ff36f359f9efcce, 0x407343b65f56ba65,
+            0x3feeaf45283e1484, 0x4075bf3090cb53ad, 0x3feed339afeafd11, 0x4075b27e005e177b,
+            0x3fef2867b87114f5, 0x407594c123b39ea0, 0x3ff07c8777800b33, 0x4074fa8accd3ce53,
+            0x3ff36f359f9efcce, 0x40735279d6c0cda2,
         ],
     ),
     (
         "g0/1500m/25C/830hPa/rh100",
         &[
-            0x3fee7680529c3a2a, 0x4075d282cf080881, 0x3fee9a325538553c, 0x4075c2fc22cb6855,
-            0x3feeeec2c6f5847f, 0x40759f687a5a1b59, 0x3ff05e072c759dff, 0x4074f39cab306caa,
-            0x3ff34b411d9beb3f, 0x407343d656e4498c,
+            0x3fee7680529c3a2a, 0x4075cfd940e49d0e, 0x3fee9a325538553c, 0x4075c31cf667c74b,
+            0x3feeeec2c6f5847f, 0x4075a54951fc4f79, 0x3ff05e072c759dff, 0x40750a9cd923a6e1,
+            0x3ff34b411d9beb3f, 0x4073614709114f94,
         ],
     ),
 ];

@@ -197,10 +197,17 @@ let legacy = KernelAtmosphere::from_legacy_params(
 
 ## Numeric effect
 
-Only kernel runs at a humidity above 0 move: their sound speed rises to the station's own
-moist value (+0.133 % at 15 °C / 50 %, +0.787 % at 35 °C / 90 %), so Mach falls and the drag
-coefficient moves along the drag curve. Density is unchanged. At 0 % the kernels are
-bit-identical to 0.49.0. CHANGELOG.md's 0.50.0 section has the measured trajectory shifts.
+Two changes move numbers at a humidity above 0; at 0 % nothing moves, bit for bit.
+
+- **Kernel runs.** Their sound speed rises to the station's own moist value (+0.133 % at
+  15 °C / 50 %, +0.787 % at 35 °C / 90 %), so Mach falls and the drag coefficient moves along
+  the drag curve. The station density is unchanged.
+- **Every path, `TrajectorySolver` included: the air aloft.** Away from the station's height
+  the air now holds the station's water-vapour mole fraction for its sound speed, its density
+  and its (virtual-temperature) pressure lapse. Flat fire moves by under 0.1 mm at 1000 m; a
+  30° lob moves by tenths of a metre to metres.
+
+CHANGELOG.md's 0.50.0 section has the measured shifts of both.
 
 To reproduce a 0.49.0 kernel result exactly (for re-baselining, not for new work), pass the
 same humid ratio at `RelativeHumidity::DRY`:

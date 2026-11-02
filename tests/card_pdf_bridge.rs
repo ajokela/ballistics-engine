@@ -1506,16 +1506,19 @@ mod pdf_present {
                 .as_f64()
                 .unwrap()
         };
-        // 1013.0 hPa typed at 150 m, 20 °C. Was 3.5386699839733655.
+        // 1013.0 hPa typed at 150 m, 20 °C. Was 3.5386699839733655. Re-captured in 0.50.0
+        // (humidity train S8, the default 50 % RH aloft holding the station's vapour mole
+        // fraction): 3.574955759105287 -> 3.5749559090068366 (+4.2e-8).
         assert_eq!(
             come_up_600(json!({"pressure": 1013.0})).to_bits(),
-            3.574955759105287_f64.to_bits()
+            3.5749559090068366_f64.to_bits()
         );
-        // 15 °C typed at 1500 m, 850 hPa. Was 3.326861364843243.
+        // 15 °C typed at 1500 m, 850 hPa. Was 3.326861364843243. S8: 3.280418798318465 ->
+        // 3.2804189002938626 (+3.1e-8).
         assert_eq!(
             come_up_600(json!({"altitude": 1500.0, "pressure": 850.0, "temperature": 15.0}))
                 .to_bits(),
-            3.280418798318465_f64.to_bits()
+            3.2804189002938626_f64.to_bits()
         );
     }
 

@@ -436,7 +436,10 @@ over the bridge and through the C ABI (0.50.0 made this one rule everywhere).
 Before 0.50.0 the commands disagreed. Most refused anything outside 0 to 100 at the flag, so a
 reading of 101.7 failed. `wind-card`, `compare` and a `--location` CSV flew any value clamped
 into 0 to 100, so 150 flew as 100. `monte-carlo` had no `--humidity` and always flew 50 %. A
-value from 0 to 100 flies exactly as it did in 0.49.0 on every command.
+value from 0 to 100 is read exactly as 0.49.0 read it on every command. One model change does
+move the flight at a humidity above 0, on every command: the air aloft (below). It moves flat
+fire by under 0.1 mm at 1000 m, and high-angle fire by up to a few metres (3.5 m on a 30° lob
+from a 1500 m station at 35 °C / 90 %; see the CHANGELOG).
 
 **The humid-air model**, the same on every solver path:
 
@@ -445,9 +448,18 @@ value from 0 to 100 flies exactly as it did in 0.49.0 on every command.
 - **Speed of sound:** an ideal-gas moist-air mixture, first order in the water-vapour mole
   fraction `x_v`: `gamma = 1.4 (1 - 0.062 x_v)`, `R = 287.0531 (1 + 0.378 x_v)` J/(kg·K),
   `c = sqrt(gamma R T)`. At 15 °C and 1013.25 hPa that is 340.294 m/s dry and 340.748 m/s at 50 %.
-- **Aloft:** temperature and pressure start from the station's own values and follow the ICAO
-  lapse rates (dry hydrostatics). The density keeps the station's vapour mole fraction, and the
-  sound speed keeps the station's relative humidity at the local temperature and pressure.
+- **Aloft:** the station's air is well mixed: its water-vapour mole fraction `x_v` is held at
+  every height, for the pressure lapse, the density and the sound speed alike. Temperature and
+  pressure start from the station's own values and follow the ICAO lapse rates, with the moist
+  (virtual-temperature) hydrostatic exponent: the dry one times the moist-air molar-mass ratio
+  `M_m / M_a = 1 - x_v (1 - M_v / M_a)`, so humid air's pressure falls a little more slowly
+  with height. The density keeps the station's composition, and the sound speed is the formula
+  above at the local temperature and the station's `x_v`. A downrange atmosphere zone is the
+  governing air inside its stretch of range, with its own `x_v`. Held aloft, `x_v` can exceed
+  saturation at the colder heights; condensation is not modelled. At 0 % this is exactly the
+  dry model. Before 0.50.0 the sound speed kept the station's relative humidity instead,
+  re-deriving `x_v` at the local temperature and pressure, and the lapse was dry; see the
+  CHANGELOG for what that moves (mostly high-angle fire).
 
 Humid air is lighter than dry air, so it gives less drag. It also carries sound faster, which
 lowers the Mach number at a given speed and so moves the drag coefficient along the drag curve.

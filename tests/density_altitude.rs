@@ -77,13 +77,20 @@ fn write_temp_csv(content: &str, tag: &str) -> PathBuf {
 
 /// Pinned literal captured from this branch's `ballistics` binary BEFORE MBA-1366's
 /// `--density-altitude` flag existed (i.e. before any main.rs change in this task).
+/// Re-captured once, in 0.50.0 (humidity train S8, the unified aloft vapour model: this run
+/// flies 60 % RH, and the air off the station's height now holds the station's water-vapour
+/// mole fraction with a virtual-temperature lapse). Old -> new: `time_of_flight`
+/// 0.12333720481671129 -> 0.12333721176904215 s (+5.6e-8 relative), `impact_velocity`
+/// 2199.3005312520913 -> 2199.3002948186117 (-1.1e-7) and `impact_energy` 406301.51744832145 ->
+/// 406301.43009029556 (-2.1e-7). Nothing else in the output moved, and the table baseline below
+/// rounds the change away. Both still pin "absent --density-altitude is inert".
 const PINNED_JSON_BASELINE: &str = r#"{
   "units": "metric",
   "max_range": 300.0,
   "max_height": 1.5,
-  "time_of_flight": 0.12333720481671129,
-  "impact_velocity": 2199.3005312520913,
-  "impact_energy": 406301.51744832145,
+  "time_of_flight": 0.12333721176904215,
+  "impact_velocity": 2199.3002948186117,
+  "impact_energy": 406301.43009029556,
   "stability_coefficient": 2.0961431820049854,
   "spin_drift": null,
   "trajectory": [],

@@ -22,9 +22,16 @@ and validation now apply wherever a relative humidity enters the engine.
 - **Validation.** One rule applies at every boundary: `RelativeHumidity::try_percent` and
   `RelativeHumidity::try_fraction`.
 
-`TrajectorySolver` output is byte-identical at every humidity from 0 to 100 %, so the CLI, the
-browser terminal, the C ABI, the bridge and the apps built on them fly exactly as before. What
-moves is listed under Numeric shifts.
+One model change moves every surface, apps and services that embed the engine included, and is
+disclosed on its own under **Changed (physics): one vapour model aloft**. The air above and below
+the station now holds the station's water-vapour mole fraction for its sound speed, its density and
+its pressure lapse alike. Nothing moves at 0 % humidity, or at the station's own height. Flat fire
+moves by under 0.1 mm at 1000 m. High-angle fire, and shots far above or below the station, move by
+tenths of a metre to metres.
+
+Apart from that change, `TrajectorySolver` output is byte-identical at every humidity from 0 to
+100 %, so the CLI, the browser terminal, the C ABI, the bridge and the apps built on them fly
+exactly as before. The kernels' own change is listed under Numeric shifts.
 
 ### Breaking (Rust API)
 - **The kernels take a `KernelAtmosphere`, which carries the humidity.** It replaces the
@@ -64,6 +71,62 @@ moves is listed under Numeric shifts.
   `trajectory_integration::KernelInputError` and `AtmoSock::validate` are new too.
   `perturbation::InputAxis` has a `RelativeHumidity` variant, so a glob import of both
   `ballistics_engine::*` and `InputAxis::*` makes `RelativeHumidity` ambiguous. Name one of them.
+
+### Changed (physics): one vapour model aloft, on every surface
+- **What changed.** In 0.49.0 the air away from the station's height modelled its water vapour
+  two ways at once:
+  - the density kept the station's water-vapour mole fraction `x_v`;
+  - the sound speed kept the station's relative humidity, so it re-derived a smaller `x_v` in
+    the colder air aloft;
+  - the pressure lapse was dry.
+
+  Now the station's air is well mixed. One `x_v` is held at every height for all three, and the
+  lapse is the moist (virtual-temperature) one: the dry hydrostatic exponent times
+  `M_m / M_a = 1 - x_v (1 - M_v / M_a)`, the molar-mass factor the CIPM-2007 density already
+  applies. Humid air is lighter, so its pressure falls a little more slowly with height. A
+  downrange atmosphere zone (`AtmoSock`) is the governing air within its stretch of range, with
+  its own `x_v`. Held aloft, `x_v` can exceed saturation in the colder air (at +3 km over a
+  15 °C / 50 % station); condensation is not modelled.
+- **What it moves.** Every solver path at a humidity above 0, off the station's height:
+  - `TrajectorySolver`, and so the CLI, the browser terminal, the C ABI, the bridge, solve-json,
+    explain, error-budget, the cards and PDFs, truing, Monte Carlo, WEZ and hold-corridor;
+  - the kernels and the lean Monte Carlo;
+  - rockets-engine, the Python and Ruby bindings, and apps and services that embed the engine,
+    once they move to 0.50.0.
+- **What it does not move.** Everything at 0 % humidity, bit for bit; the station's own air
+  (its density and sound speed); density altitude; and the muzzle Miller Sg, Litz spin drift
+  and the Litz aerodynamic jump formulas.
+
+The air over a sea-level station at 1013.25 hPa, 0.49.0 → 0.50.0:
+
+| Station | Height | Sound speed | Density |
+|---|---|---|---|
+| 15 °C / 50 % | +1 km | 336.764 → 336.883 m/s (+0.035%) | 1.1086 → 1.1090 kg/m³ (+0.038%) |
+| 15 °C / 50 % | +3 km | 328.746 → 329.022 m/s (+0.084%) | 0.9068 → 0.9078 kg/m³ (+0.118%) |
+| 35 °C / 90 % | +1 km | 350.299 → 350.917 m/s (+0.176%) | 1.0267 → 1.0289 kg/m³ (+0.213%) |
+| 35 °C / 90 % | +3 km | 341.782 → 343.277 m/s (+0.437%) | 0.8513 → 0.8569 kg/m³ (+0.654%) |
+
+`TrajectorySolver` shots, 0.50.0 minus 0.49.0. They use RK4 and a .308 175 gr bullet (G7 0.243,
+2600 fps, 1.24 in, 1:10 twist, 1.5 in sight height). The flat shot is zeroed at 100 m and flown
+to 1000 m. The lob is fired at 30° and flown until it falls 100 m below the muzzle.
+
+| Shot | 15 °C / 50 % | 35 °C / 90 % |
+|---|---|---|
+| Sea level, flat: drop at 1000 m | -0.007 mm | -0.035 mm |
+| Sea level, flat: speed at 1000 m | -0.0006 m/s | -0.0027 m/s |
+| Sea level, 30° lob: range | -0.383 m (4643.83 → 4643.44 m) | -2.656 m (4967.34 → 4964.68 m) |
+| Sea level, 30° lob: apex | -0.008 m | -0.102 m |
+| Sea level, 30° lob: impact speed | -0.008 m/s | -0.054 m/s |
+| 1500 m station (845.6 hPa), flat: drop at 1000 m | -0.007 mm | -0.029 mm |
+| 1500 m station, flat: speed at 1000 m | +0.0007 m/s | +0.0038 m/s |
+| 1500 m station, 30° lob: range | -0.489 m (5241.57 → 5241.08 m) | -3.477 m (5613.81 → 5610.33 m) |
+
+The flat shot barely moves because the bullet stays within metres of the station's height. A
+1500 m station is the governing air for its own shots, so its flat fire barely moves either. Its
+lob moves a little more than at sea level, because the same relative humidity holds more vapour
+at the lower pressure. The CLI golden corpus of 418 runs moves in 70 of them, every one at a
+humidity above 0, by at most 3.4e-4 relative (the 30° lob's time of flight at 100 %). Every run
+at 0 % is byte-identical, and most table outputs round the change away.
 
 ### Changed (behaviour)
 - **A humidity outside the sensor band is refused, never clamped.**
@@ -138,7 +201,8 @@ That is rockets-engine's drag, the Python binding's `fast_integrate`, `derivativ
 Monte Carlo, and any service that calls them. In 0.49.0 their sound speed was
 the 0 % value whatever the station's humidity, while their density was the humid one. Now the
 sound speed is the station's own moist value, so Mach falls and the drag coefficient moves along
-the drag curve. Density is unchanged, bit for bit.
+the drag curve. The density at the station is unchanged, bit for bit; away from it, the kernels
+move with every other path under the aloft change above.
 
 | Station, 1013.25 hPa | Kernel sound speed, 0.49.0 | 0.50.0 | Change |
 |---|---|---|---|
@@ -151,19 +215,24 @@ the drag curve. Density is unchanged, bit for bit.
 The trajectory shifts below are 0.50.0 minus 0.49.0. They come from `try_integrate_trajectory`
 RK4 at 1 ms, for a .308 175 gr bullet (G7 0.243, 2600 fps, 1.24 in) at sea level with every
 effect off. `fast_integrate` moves the same on the flat shot: -0.169 m at 15 °C / 50 % and
--1.008 m at 35 °C / 90 %.
+-1.007 m at 35 °C / 90 %. The totals include the aloft change. On the 30° lob that change alone
+is -0.385 m of the downrange at 15 °C / 50 %, -1.020 m at 30 °C / 50 % and -2.515 m at
+35 °C / 90 %. On the flat shot it is under a millimetre.
 
 | Shot | 15 °C / 50 % | 30 °C / 50 % | 35 °C / 90 % |
 |---|---|---|---|
-| 2 s flat (0.11°): downrange at 2 s | -0.169 m | -0.418 m | -1.008 m |
+| 2 s flat (0.11°): downrange at 2 s | -0.169 m | -0.418 m | -1.007 m |
 | 2 s flat: height at 2 s | -0.8 mm | -1.8 mm | -3.5 mm |
-| 2 s flat: speed at 2 s | +0.182 m/s | +0.460 m/s | +1.081 m/s |
-| 30° lob: downrange at 30 s | +1.352 m | +3.620 m | +8.853 m |
-| 30° lob: height at 30 s | +0.849 m | +2.276 m | +5.561 m |
+| 2 s flat: speed at 2 s | +0.182 m/s | +0.459 m/s | +1.078 m/s |
+| 30° lob: downrange at 30 s | +0.967 m | +2.601 m | +6.338 m |
+| 30° lob: height at 30 s | +0.844 m | +2.229 m | +5.410 m |
 
 The lean Monte Carlo runs at its default 50 %, with the same bullet at 15 °C and sea level:
 - at 500 m, drop +0.507 mm (2.61837 to 2.61888 m), speed -0.155 m/s and Mach 1.51212 to 1.51167;
-- at 1000 m, drop +8.09 mm (15.4428 to 15.4509 m), speed +0.168 m/s and Mach 0.92664 to 0.92713.
+- at 1000 m, drop +8.08 mm (15.4428 to 15.4509 m), speed +0.168 m/s and Mach 0.92664 to 0.92713.
+
+The aloft change is part of these numbers too, though a small one: on its own it is -0.13 µm of
+drop and +0.0001 m/s of speed at 500 m, and -0.010 mm and -0.0007 m/s at 1000 m.
 
 At 0 % every kernel is bit-identical to 0.49.0.
 `KernelAtmosphere::from_legacy_params((alt, t, p, ratio), RelativeHumidity::DRY)` rebuilds
@@ -171,26 +240,34 @@ At 0 % every kernel is bit-identical to 0.49.0.
 against the 0.49.0 build. Use it to re-baseline a stored kernel result, not for new work.
 
 ### Byte-identical
-- **Every `TrajectorySolver` surface at every humidity from 0 to 100 %.** These are the CLI, the
-  browser terminal and its JS builder, the C ABI (single solve and Monte Carlo), the bridge
-  (`solve`, `card.*`, `true.*`, `profile.*`, `atmosphere.density_altitude`), solve-json, explain,
-  error-budget, the cards and PDFs, truing, WEZ, moving target and BC estimation. So apps and
-  services that fly through these surfaces do not move either.
-  - The 7,802 values pinned before the change (`tests/humidity_byte_identity.rs`,
-    `src/humidity_byte_identity_tests.rs`) are unchanged.
-  - A golden diff of 418 CLI runs against the 0.49.0 binary covered trajectory (tables, JSON,
+- **Every `TrajectorySolver` surface at every humidity from 0 to 100 %, apart from the aloft
+  change.** These are the CLI, the browser terminal and its JS builder, the C ABI (single solve
+  and Monte Carlo), the bridge (`solve`, `card.*`, `true.*`, `profile.*`,
+  `atmosphere.density_altitude`), solve-json, explain, error-budget, the cards and PDFs, truing,
+  WEZ, moving target and BC estimation. Apps and services that fly through these surfaces see
+  only the aloft change. At 0 % they do not move at all.
+  - 7,802 values were pinned before the train (`tests/humidity_byte_identity.rs`,
+    `src/humidity_byte_identity_tests.rs`). Every value at 0 %, and every value at the station's
+    own height, is unchanged through 0.50.0. The aloft change re-pinned 2,278 others, all at a
+    humidity above 0 off the station's height. Each re-pinned group's note there gives the old
+    and new values.
+  - Before the aloft change, a golden diff of 418 CLI runs against the 0.49.0 binary covered trajectory (tables, JSON,
     CSV, every effect, RK4, Euler, a 30° lob, `--zero-humidity`, density altitude and a
     `--location` CSV), zero, come-ups, range tables, wind-card, compare, monte-carlo (seeded,
     `--adaptive`, `--wez`) and solve-json. It also covered explain, error-budget, tolerance,
     profiles, reticle hold and every other `--humidity` command. Runs were at the default, 0,
     30, 50, 80 and 100 %, at sea level and at a 1500 m station. Every one of those in-range
-    runs is byte-identical. The only differences are the band and rejection cases,
-    `monte-carlo --humidity` and the text changes listed under Changed.
+    runs was byte-identical. The only differences were the band and rejection cases,
+    `monte-carlo --humidity` and the text changes listed under Changed. The same corpus run
+    across the aloft change alone differs in the 70 runs counted under Changed (physics).
 - **Station air and stability.** These do not move:
   - the station density and sound speed on every path;
   - direct (uniform) mode on every kernel;
-  - the muzzle Miller Sg, Litz spin drift and the Litz aerodynamic jump;
-  - density altitude, and `get_local_atmosphere_humid`.
+  - the muzzle Miller Sg, and the Litz spin-drift and aerodynamic-jump formulas (a trajectory's
+    spin drift follows its time of flight, which the aloft change can move);
+  - density altitude;
+  - `get_local_atmosphere_humid` at 0 % and at the station's height (it shares `air_at`'s
+    composition, so above 0 % it moves aloft like every other path).
 - **The muzzle Miller Sg stays dry, deliberately.** It keeps Miller's published
   `(T / 288.15 K) · (1013.25 hPa / P)` correction, with no humidity term. That keeps the
   reported Sg, spin drift and aerodynamic jump on the numbers Miller's rule, Litz's spin-drift
@@ -210,6 +287,8 @@ against the 0.49.0 build. Use it to re-baseline a stored kernel result, not for 
   pressure is the Wagner-Pruss equation over liquid water, not Arden Buck.
 - The rustdoc of `atmosphere`, `SPEED_OF_SOUND_MPS` and `compute_stability_coefficient` is
   updated, along with README.md, MCCOY_MIGRATION.md and docs/ATMOSPHERE_DENSITY_ALTITUDE.md.
+- `air_at`, the `atmosphere` module doc and CLI_USAGE.md describe the aloft model: one held
+  water-vapour mole fraction and the virtual-temperature lapse.
 
 ### Downstream follow-ups
 These repositories pin the engine version and are not changed here:
@@ -217,7 +296,7 @@ These repositories pin the engine version and are not changed here:
   becomes a `KernelAtmosphere`, and `Air::at` becomes `air_at`. Set `inputs.humidity_percent`
   from the rocket's atmosphere. The deprecation is a `-D warnings` error there.
   `Atmosphere::default` becomes 50 %, while `icao_standard` stays dry. Recheck the OpenRocket
-  parity job.
+  parity job: a humid rocket flight climbs kilometres, so the aloft change moves it.
 - **ballistics-engine-py**: does not compile unchanged.
   - Build `KernelAtmosphere::from_legacy_params` in `fast_integrate` and `derivatives`.
   - Rename to `humidity_percent` and delete its `/ 100` lines. Its dict `humidity` default moves
@@ -226,14 +305,15 @@ These repositories pin the engine version and are not changed here:
   - Expose `station_speed_of_sound_mps`.
 - **ballistics-engine-rb**: compiles unchanged. Its `monte_carlo` should map the atmosphere hash
   into the inputs instead of ignoring it.
-- **Apps and services that embed the engine**: their `TrajectorySolver` numbers do not move, and
-  their kernel numbers move at a humidity above 0. Re-baseline their goldens against 0.50.0, and
-  fill a missing humidity with the 50 % default.
+- **Apps and services that embed the engine**: their numbers move with the aloft change at a
+  humidity above 0, in high-angle fire and in shots far above or below the station. Re-baseline
+  their goldens against 0.50.0, and fill a missing humidity with the 50 % default.
 - **handbook**: replace the Arden Buck vapour pressure (the atmosphere chapter and the
   physics-constants appendix) with the Wagner-Pruss equation. Its 0.11 / 0.6078 coefficients
   become 0.062 / 0.378. Drop the appendix's `R_DRY` 287.05 and `R_VAPOR` 461.495, which the
   engine does not have. Replace the humidity-as-ratio kernel snippets (the trajectory-solver and
-  performance chapters) with `air_at` and `KernelAtmosphere`.
+  performance chapters) with `air_at` and `KernelAtmosphere`. Describe the aloft model: the
+  station's water-vapour mole fraction held at every height, with the virtual-temperature lapse.
 
 ## [0.49.0] - 2026-10-27
 

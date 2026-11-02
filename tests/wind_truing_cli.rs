@@ -387,9 +387,16 @@ fn existing_drop_truing_output_is_unchanged_by_the_forward_model_extension() {
         2355.46875
     );
     assert_eq!(single["iterations"].as_i64().expect("i64"), 8);
+    // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
+    // calculated_drop_mil 1.790474723938981 -> 1.7904747300277135 (+3.4e-9); the multi-observation
+    // fit's fitted_muzzle_velocity 2751.8600017612553 -> 2751.8600367732274 (+1.3e-8), fitted_bc
+    // 0.3137211864942836 -> 0.31372115935846967 (-8.7e-8), condition_number 164.60013117624405 ->
+    // 164.59999067092036 (-8.5e-7) and mv_window_start_m 485.1346823453194 -> 485.1346911093253
+    // (+1.8e-8). The quantized effective velocity and the iteration count did not move.
     assert_eq!(
         single["calculated_drop_mil"].as_f64().expect("f64"),
-        1.790474723938981
+        1.7904747300277135
     );
 
     let multi: Value = serde_json::from_slice(
@@ -418,18 +425,18 @@ fn existing_drop_truing_output_is_unchanged_by_the_forward_model_extension() {
     .expect("json");
     assert_eq!(
         multi["fitted_muzzle_velocity"].as_f64().expect("f64"),
-        2751.8600017612553
+        2751.8600367732274
     );
     assert_eq!(
         multi["fitted_bc"].as_f64().expect("f64"),
-        0.3137211864942836
+        0.31372115935846967
     );
     assert_eq!(
         multi["condition_number"].as_f64().expect("f64"),
-        164.60013117624405
+        164.59999067092036
     );
     assert_eq!(
         multi["mv_window_start_m"].as_f64().expect("f64"),
-        485.1346823453194
+        485.1346911093253
     );
 }

@@ -1055,6 +1055,8 @@ fn air_at_station_is_the_legacy_humid_lookup_bit_for_bit() {
                             station.density_ratio(),
                             humidity,
                         );
+                        // The lapse at the station's own vapour mole fraction, held aloft
+                        // (S8: the virtual-temperature lapse; dry at 0 %).
                         let (temp_k, pressure_pa, density_again) =
                             local_temp_pressure_density_with_gravity(
                                 altitude_m,
@@ -1062,6 +1064,7 @@ fn air_at_station_is_the_legacy_humid_lookup_bit_for_bit() {
                                 temp_c,
                                 pressure_hpa,
                                 station.density_ratio(),
+                                governing_vapor_mole_fraction(temp_c, pressure_hpa, humidity),
                                 Gravity::EARTH,
                             );
                         assert_eq!(density.to_bits(), density_again.to_bits());

@@ -61,11 +61,11 @@
   ],
   "warnings": [],
   "summary": {
-    "actual_range_m": 23.89567376866116,
+    "actual_range_m": 23.895673768814067,
     "maximum_height_m": 1.2,
-    "time_of_flight_s": 0.029340142906669347,
-    "terminal_speed_mps": 808.315635185622,
-    "terminal_energy_j": 3704.6315217049864,
+    "time_of_flight_s": 0.029340143036509676,
+    "terminal_speed_mps": 808.3156299395725,
+    "terminal_energy_j": 3704.631473618127,
     "stability_factor": 4.095309067995591,
     "termination": "ground_threshold"
   },
@@ -81,13 +81,13 @@
       "flags": []
     },
     {
-      "distance_m": 23.89567376866116,
-      "time_s": 0.029340142906669347,
-      "speed_mps": 808.315635185622,
-      "energy_j": 3704.6315217049864,
+      "distance_m": 23.895673768814067,
+      "time_s": 0.029340143036509676,
+      "speed_mps": 808.3156299395725,
+      "energy_j": 3704.631473618127,
       "drop_m": 1.25,
-      "windage_m": -0.001075883866311069,
-      "mach": 2.3515146471573467,
+      "windage_m": -0.0010758843849282816,
+      "mach": 2.3515146318957814,
       "flags": [
         "terminal",
         "ground_threshold"

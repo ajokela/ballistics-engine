@@ -11,6 +11,11 @@
 //!   `KernelAtmosphere::from_legacy_params` with the humid density ratio and
 //!   `RelativeHumidity::DRY`; that reproduction was checked against the 0.49.0 build itself bit
 //!   for bit, and [`legacy_kernel_air_reproduces_0_49_0`] keeps it honest.
+//! - **The aloft vapour model (S8).** The air at +1 km and +3 km, and three `TrajectorySolver`
+//!   shots (flat to 1000 m, a 30-degree lob, and both from a 1500 m station), before and after.
+//!   "Before" is 0.49.0, which the train before S8 matched bit for bit there; its values were
+//!   flown by the 0.49.0 and 4281ccf builds themselves (the S8 measurement probe), and
+//!   [`the_air_before_s8_is_the_old_aloft_model`] rebuilds the air from the old formulas.
 //! - **The Miller exception.** The factor a humid density would put on the muzzle Miller Sg,
 //!   which 0.50.0 deliberately does not apply. A pin shows the solve's Sg does not move with
 //!   humidity.
@@ -27,7 +32,9 @@ use std::path::Path;
 use ballistics_engine::atmosphere::{calculate_air_density_cimp, moist_speed_of_sound};
 use ballistics_engine::trajectory_integration::{try_integrate_trajectory, TrajectoryParams};
 use ballistics_engine::{
-    decode_solve_request_v1, solve_v1, DragModel, KernelAtmosphere, RelativeHumidity, StationAir,
+    air_at, calculate_zero_angle_with_station_presence, decode_solve_request_v1, solve_v1,
+    AtmosphericConditions, BallisticInputs, DragModel, KernelAtmosphere, LocalAir,
+    RelativeHumidity, StationAir, StationAtmospherePresence, TrajectorySolver, WindConditions,
     HUMIDITY_SENSOR_TOLERANCE_PERCENT,
 };
 
@@ -287,6 +294,273 @@ fn the_unreleased_trajectory_shifts_are_engine_output() {
         let (x1, y1, _) = fly(after, LOB.0, LOB.1);
         assert_contains(&section, &format!("{:+.3} m", x1 - x0), &what);
         assert_contains(&section, &format!("{:+.3} m", y1 - y0), &what);
+    }
+}
+
+// =================================================================================================
+// S8: one vapour model aloft, on every surface
+// =================================================================================================
+
+const SEA_LEVEL_STATION_HPA: f64 = 1013.25;
+/// The conditions the aloft table quotes: (temperature C, RH percent).
+const ALOFT_QUOTED: [(f64, f64); 2] = [(15.0, 50.0), (35.0, 90.0)];
+
+/// The air over a sea-level station at 1013.25 hPa before S8, as the 0.49.0 build (main 261c1eb)
+/// and the 4281ccf build flew it, bit for bit alike: `(T C, RH %, height m, density kg/m3,
+/// sound speed m/s)`.
+const AIR_BEFORE_S8: [(f64, f64, f64, f64, f64); 4] = [
+    (15.0, 50.0, 1000.0, 1.1086026577295789, 336.76382227330026),
+    (15.0, 50.0, 3000.0, 0.9067541155034896, 328.7463422984116),
+    (35.0, 90.0, 1000.0, 1.0267223810704649, 350.29942794649406),
+    (35.0, 90.0, 3000.0, 0.8513011892339569, 341.7818362119831),
+];
+
+fn air_over_sea_level(temperature_c: f64, humidity_percent: f64, height_m: f64) -> LocalAir {
+    let station = StationAir::new(
+        0.0,
+        temperature_c,
+        SEA_LEVEL_STATION_HPA,
+        RelativeHumidity::try_percent(humidity_percent).unwrap(),
+    )
+    .unwrap();
+    air_at(&KernelAtmosphere::Station(station), None, 0.0, height_m)
+}
+
+/// The constants above are the old model: the dry pressure lapse, the density scaled by
+/// `(T_0 P) / (P_0 T)`, and the sound speed re-derived from the held RELATIVE humidity at the
+/// local temperature and pressure. Dry air's lapse did not change, so it supplies the old
+/// temperature and pressure.
+#[test]
+fn the_air_before_s8_is_the_old_aloft_model() {
+    for (temperature_c, humidity_percent, height_m, density, sound_speed) in AIR_BEFORE_S8 {
+        let dry = air_over_sea_level(temperature_c, 0.0, height_m);
+        let station = StationAir::new(
+            0.0,
+            temperature_c,
+            SEA_LEVEL_STATION_HPA,
+            RelativeHumidity::try_percent(humidity_percent).unwrap(),
+        )
+        .unwrap();
+        let old_sound_speed =
+            moist_speed_of_sound(dry.temperature_k, dry.pressure_pa, humidity_percent);
+        let old_density = station.density_ratio()
+            * ((temperature_c + 273.15) * (dry.pressure_pa / 100.0))
+            / (SEA_LEVEL_STATION_HPA * dry.temperature_k)
+            * 1.225;
+        let close = |got: f64, want: f64| (got - want).abs() <= 1e-12 * want.abs();
+        let what = format!("{temperature_c} C / {humidity_percent} % at +{height_m} m");
+        assert!(
+            close(old_sound_speed, sound_speed),
+            "c {what}: {old_sound_speed:?}"
+        );
+        assert!(
+            close(old_density, density),
+            "density {what}: {old_density:?}"
+        );
+    }
+}
+
+/// `(station, altitude m, pressure hPa, T C, RH %, flat drop at 1000 m m, flat speed at
+/// 1000 m m/s, lob range m, lob apex m, lob impact speed m/s)` before S8, flown by the 0.49.0
+/// and 4281ccf builds, bit for bit alike.
+#[allow(clippy::type_complexity)]
+const SHOTS_BEFORE_S8: [(&str, f64, f64, f64, f64, f64, f64, f64, f64, f64); 4] = [
+    (
+        "sea level",
+        0.0,
+        1013.25,
+        15.0,
+        50.0,
+        14.283070868744938,
+        315.91839047884184,
+        4643.827151319146,
+        1107.2037843284834,
+        140.22246913957096,
+    ),
+    (
+        "sea level",
+        0.0,
+        1013.25,
+        35.0,
+        90.0,
+        13.456344837416587,
+        333.5755196962042,
+        4967.3410410665165,
+        1174.9812842154524,
+        145.52515063650773,
+    ),
+    (
+        "1500 m",
+        1500.0,
+        845.6,
+        15.0,
+        50.0,
+        12.234306304109765,
+        362.120280940684,
+        5241.572104789031,
+        1226.5146272252885,
+        151.53885237740963,
+    ),
+    (
+        "1500 m",
+        1500.0,
+        845.6,
+        35.0,
+        90.0,
+        11.666142478948375,
+        384.60831144456057,
+        5613.809630005237,
+        1302.0284360797184,
+        157.45728165755804,
+    ),
+];
+
+const SIGHT_HEIGHT_M: f64 = 0.0381; // 1.5 in
+
+fn shot_inputs(
+    altitude_m: f64,
+    temperature_c: f64,
+    pressure_hpa: f64,
+    angle_rad: f64,
+) -> BallisticInputs {
+    BallisticInputs {
+        bc_value: BC_G7,
+        bc_type: DragModel::G7,
+        bullet_mass: MASS_KG,
+        muzzle_velocity: MUZZLE_VELOCITY_MPS,
+        bullet_diameter: DIAMETER_M,
+        bullet_length: LENGTH_M,
+        twist_rate: 10.0,
+        muzzle_angle: angle_rad,
+        sight_height: SIGHT_HEIGHT_M,
+        altitude: altitude_m,
+        temperature: temperature_c,
+        pressure: pressure_hpa,
+        use_rk4: true,
+        ..BallisticInputs::default()
+    }
+}
+
+/// `(drop at 1000 m, speed at 1000 m, lob range, lob apex, lob impact speed)` from
+/// `TrajectorySolver` (RK4): the flat shot zeroed at 100 m, the lob at 30 degrees until it falls
+/// 100 m below the muzzle.
+fn solver_shots(
+    altitude_m: f64,
+    pressure_hpa: f64,
+    temperature_c: f64,
+    humidity_percent: f64,
+) -> (f64, f64, f64, f64, f64) {
+    let air = AtmosphericConditions {
+        temperature: temperature_c,
+        pressure: pressure_hpa,
+        humidity: humidity_percent,
+        altitude: altitude_m,
+    };
+    let presence = StationAtmospherePresence::BOTH;
+    let zero = calculate_zero_angle_with_station_presence(
+        shot_inputs(altitude_m, temperature_c, pressure_hpa, 0.0),
+        100.0,
+        SIGHT_HEIGHT_M,
+        WindConditions::default(),
+        air.clone(),
+        presence,
+    )
+    .unwrap();
+    let mut flat = shot_inputs(altitude_m, temperature_c, pressure_hpa, zero);
+    flat.enable_trajectory_sampling = true;
+    flat.sample_interval = 100.0;
+    let mut solver = TrajectorySolver::new_with_station_presence(
+        flat,
+        WindConditions::default(),
+        air.clone(),
+        presence,
+    );
+    solver.set_max_range(1000.0);
+    let flat = solver.solve().unwrap();
+    let last = flat
+        .sampled_points
+        .as_ref()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(last.distance_m, 1000.0);
+    let mut solver = TrajectorySolver::new_with_station_presence(
+        shot_inputs(
+            altitude_m,
+            temperature_c,
+            pressure_hpa,
+            std::f64::consts::FRAC_PI_6,
+        ),
+        WindConditions::default(),
+        air,
+        presence,
+    );
+    solver.set_max_range(30_000.0);
+    let lob = solver.solve().unwrap();
+    (
+        last.drop_m,
+        last.velocity_mps,
+        lob.max_range,
+        lob.max_height,
+        lob.impact_velocity,
+    )
+}
+
+#[test]
+fn the_aloft_vapour_model_shifts_are_engine_output() {
+    let section = unreleased();
+    for (temperature_c, humidity_percent, height_m, density, sound_speed) in AIR_BEFORE_S8 {
+        assert!(ALOFT_QUOTED.contains(&(temperature_c, humidity_percent)));
+        let air = air_over_sea_level(temperature_c, humidity_percent, height_m);
+        let what = format!("air at {temperature_c} C / {humidity_percent} % +{height_m} m");
+        assert_contains(
+            &section,
+            &format!(
+                "{sound_speed:.3} → {:.3} m/s ({:+.3}%)",
+                air.speed_of_sound_mps,
+                (air.speed_of_sound_mps / sound_speed - 1.0) * 100.0
+            ),
+            &what,
+        );
+        assert_contains(
+            &section,
+            &format!(
+                "{density:.4} → {:.4} kg/m³ ({:+.3}%)",
+                air.density_kg_m3,
+                (air.density_kg_m3 / density - 1.0) * 100.0
+            ),
+            &what,
+        );
+    }
+    for (
+        station,
+        altitude_m,
+        pressure_hpa,
+        temperature_c,
+        humidity_percent,
+        drop,
+        speed,
+        range,
+        apex,
+        impact,
+    ) in SHOTS_BEFORE_S8
+    {
+        let (drop1, speed1, range1, apex1, impact1) =
+            solver_shots(altitude_m, pressure_hpa, temperature_c, humidity_percent);
+        let what = format!("{station} {temperature_c} C / {humidity_percent} %");
+        assert_contains(
+            &section,
+            &format!("{:+.3} mm", (drop1 - drop) * 1000.0),
+            &what,
+        );
+        assert_contains(&section, &format!("{:+.4} m/s", speed1 - speed), &what);
+        assert_contains(&section, &format!("{:+.3} m (", range1 - range), &what);
+        assert_contains(&section, &format!("{range:.2} → {range1:.2} m"), &what);
+        if station == "sea level" {
+            assert_contains(&section, &format!("{:+.3} m |", apex1 - apex), &what);
+            assert_contains(&section, &format!("{:+.3} m/s |", impact1 - impact), &what);
+        }
     }
 }
 

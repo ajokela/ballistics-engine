@@ -481,11 +481,16 @@ mod station_presence_exports {
     #[test]
     fn trajectory_export_is_the_legacy_one_with_flags_0_and_flies_a_supplied_pressure() {
         // captured at ab4eb0c (legacy export, in-band 1013.0 hPa at 150 m)
+        // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the
+        // station's water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
+        // 496.4039781654643 -> 496.40407051538887 (+1.9e-7), 0.12929012777614302 ->
+        // 0.12929012746272325 (-2.4e-9), 647.3738723015441 -> 647.3738655023416 (-1.1e-8),
+        // 1.8825988476707765 -> 1.8825988278983212 (-1.1e-8).
         let pinned = [
-            0x407f0676b1cf0f7a,
-            0x3fc08c94333f41cc,
-            0x40843afdb0c2e019,
-            0x3ffe1f1ff823bb7a,
+            0x407f067712a50df8,
+            0x3fc08c943292f3e3,
+            0x40843afdad324d47,
+            0x3ffe1f1ff2d4fac4,
         ];
         let bits = |h: [f64; 4]| h.map(f64::to_bits);
         assert_eq!(bits(trajectory_headline(None).unwrap()), pinned);
@@ -584,7 +589,11 @@ mod station_presence_exports {
     #[test]
     fn monte_carlo_export_is_the_legacy_one_with_flags_0_and_flies_a_supplied_pressure() {
         // captured at ab4eb0c
-        let pinned = (8, 0x407fe680b099e436_u64, 0x4080d4ad5eca7c79_u64);
+        // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the
+        // station's water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
+        // range 510.40641841997 -> 510.40631936045986 (-1.9e-7), velocity 538.5846534556614 ->
+        // 538.5844740696717 (-3.3e-7).
+        let pinned = (8, 0x407fe68048bace82_u64, 0x4080d4ad00bdb4cd_u64);
         let bits = |(n, range, velocity): (i32, f64, f64)| (n, range.to_bits(), velocity.to_bits());
         assert_eq!(bits(zero_sigma_monte_carlo(None).unwrap()), pinned);
         assert_eq!(bits(zero_sigma_monte_carlo(Some(0)).unwrap()), pinned);

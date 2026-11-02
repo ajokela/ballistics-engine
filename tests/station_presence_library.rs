@@ -100,8 +100,12 @@ fn sampled_flight_twin_reproduces_ab4eb0c_with_neither() {
     let neither = flight(20.0, 1013.0, 150.0, NEITHER);
     for f in [&legacy, &neither] {
         // captured at ab4eb0c
-        assert_eq!(f.samples[50].velocity_mps.to_bits(), 0x4080fcf76d85503f);
-        assert_eq!(f.samples[50].drop_m.to_bits(), 0x3ff70fe529243c70);
+        // re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+        // water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
+        // velocity 543.6208143630137 -> 543.6208557335875 m/s (+7.6e-8), drop
+        // 1.4413806540576637 -> 1.4413806722282556 m (+1.3e-8)
+        assert_eq!(f.samples[50].velocity_mps.to_bits(), 0x4080fcf78335fa57);
+        assert_eq!(f.samples[50].drop_m.to_bits(), 0x3ff70fe52e04e8df);
         assert_eq!(f.reach_m.to_bits(), 0x4082c00000000000);
     }
 }
@@ -167,9 +171,12 @@ fn hold_drop_mil(t: f64, p: f64, alt: f64, presence: StationAtmospherePresence) 
 #[test]
 fn hold_curve_presence_field() {
     // captured at ab4eb0c (the load had no presence then: the legacy rule)
+    // re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
+    // 3.7383589247775926 -> 3.7383588266070236 mil (-2.6e-8)
     assert_eq!(
         hold_drop_mil(20.0, 1013.0, 150.0, NEITHER).to_bits(),
-        0x400de828b955092f
+        0x400de828ac27ebba
     );
     let both = hold_drop_mil(20.0, 1013.0, 150.0, BOTH);
     assert_strictly_between(
@@ -238,11 +245,15 @@ fn lead_twin() {
     )
     .unwrap();
     // captured at ab4eb0c
-    assert_eq!(legacy.lead_m.to_bits(), 0x4007f2c005a107e0);
-    assert_eq!(legacy.time_of_flight_s.to_bits(), 0x3fe7f2c005a107e0);
+    // re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
+    // lead 2.993530315377015 -> 2.993530121212426 m and time of flight 0.7483825788442537 ->
+    // 0.7483825303031065 s (both -6.5e-8)
+    assert_eq!(legacy.lead_m.to_bits(), 0x4007f2bfeb919617);
+    assert_eq!(legacy.time_of_flight_s.to_bits(), 0x3fe7f2bfeb919617);
     assert_eq!(
         lead_m(20.0, 1013.0, 150.0, NEITHER).to_bits(),
-        0x4007f2c005a107e0
+        0x4007f2bfeb919617
     );
 
     let both = lead_m(20.0, 1013.0, 150.0, BOTH);
@@ -300,9 +311,12 @@ fn corridor_elevation_mil(t: f64, p: f64, alt: f64, presence: StationAtmosphereP
 #[test]
 fn corridor_presence_field() {
     // captured at ab4eb0c
+    // re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
+    // 4.283328501987208 -> 4.283328343262207 mil (-3.7e-8)
     assert_eq!(
         corridor_elevation_mil(20.0, 1013.0, 150.0, NEITHER).to_bits(),
-        0x40112220dde83d2a
+        0x40112220d3415d3a
     );
     let both = corridor_elevation_mil(20.0, 1013.0, 150.0, BOTH);
     assert_strictly_between(
@@ -386,10 +400,13 @@ fn chrono_correction_twin() {
     )
     .unwrap();
     // captured at ab4eb0c
-    assert_eq!(legacy.muzzle_velocity_fps.to_bits(), 0x40a4c02ed353e514);
+    // re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
+    // 2656.091456052507 -> 2656.091456052354 fps (-5.8e-14)
+    assert_eq!(legacy.muzzle_velocity_fps.to_bits(), 0x40a4c02ed353e3c3);
     assert_eq!(
         chrono(68.0, inhg(1013.0), ALT150_FT, NEITHER).to_bits(),
-        0x40a4c02ed353e514
+        0x40a4c02ed353e3c3
     );
     assert_strictly_between(
         chrono(68.0, inhg(1012.0), ALT150_FT, NEITHER),
@@ -451,8 +468,12 @@ fn true_velocity_twin() {
     let neither = true_velocity(68.0, inhg(1013.0), ALT150_FT, NEITHER);
     for r in [&legacy, &neither] {
         // captured at ab4eb0c
+        // re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+        // water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
+        // the drop 3.5794611667070355 -> 3.579461212563624 mil (+1.3e-8); the quantized velocity
+        // did not move
         assert_eq!(r.effective_velocity_fps.to_bits(), 0x40a43efbc0000000);
-        assert_eq!(r.calculated_drop_mil.to_bits(), 0x400ca2bc89427843);
+        assert_eq!(r.calculated_drop_mil.to_bits(), 0x400ca2bc8f6a1714);
     }
     // The bisection stops at the first midpoint within 0.01 mil, so the fitted velocity is
     // quantized; the supplied air must still move it off the ICAO-air answer.
@@ -526,11 +547,15 @@ fn multi_observation_truing_twin() {
     )
     .unwrap();
     // captured at ab4eb0c
-    assert_eq!(legacy.fitted_mv_fps.to_bits(), 0x40a5268cde4e141c);
-    assert_eq!(legacy.rms.to_bits(), 0x3f1d732fcd3ff3eb);
+    // re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
+    // fitted MV 2707.275133552508 -> 2707.2750095544293 fps (-4.6e-8), RMS
+    // 0.00011234263666888538 -> 0.00011259351836390552 (a near-zero residual, +2.5e-7)
+    assert_eq!(legacy.fitted_mv_fps.to_bits(), 0x40a5268cce0d64b9);
+    assert_eq!(legacy.rms.to_bits(), 0x3f1d8405ea9d0127);
     assert_eq!(
         multi(68.0, inhg(1013.0), ALT150_FT, NEITHER).to_bits(),
-        0x40a5268cde4e141c
+        0x40a5268cce0d64b9
     );
     assert_strictly_between(
         multi(68.0, inhg(1012.0), ALT150_FT, NEITHER),
@@ -576,9 +601,12 @@ fn dsf_impact(t: StationReading, p: StationReading, alt_ft: f64) -> f64 {
 fn dsf_solve_reads_presence_from_the_readings() {
     use StationReading as R;
     // captured at ab4eb0c, when these were bare f64s (the legacy rule)
+    // re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
+    // impact velocity 563.8410855127402 -> 563.840920245476 (-2.9e-7)
     assert_eq!(
         dsf_impact(R::omitted(68.0), R::omitted(inhg(1013.0)), ALT150_FT).to_bits(),
-        0x40819eba8b0a92de
+        0x40819eba3464c6e9
     );
     assert_strictly_between(
         dsf_impact(R::supplied(68.0), R::supplied(inhg(1012.0)), ALT150_FT),
@@ -631,13 +659,17 @@ fn wind_truing_reads_presence_from_the_readings() {
     };
     let miss = |t, p, alt| modeled_miss_right_m(&wind_request(t, p, alt), 10.0, 457.2).unwrap();
     // captured at ab4eb0c, when these were bare f64s (the legacy rule)
+    // re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
+    // mean crosswind 4.421398917642297 -> 4.421399255682334 mph (+7.6e-8), miss
+    // 0.28206345995734605 -> 0.2820634425080147 m (-6.2e-8)
     assert_eq!(
         mean(R::omitted(68.0), R::omitted(inhg(1013.0)), ALT150_FT).to_bits(),
-        0x4011af8332a75fb5
+        0x4011af834956db83
     );
     assert_eq!(
         miss(R::omitted(68.0), R::omitted(inhg(1013.0)), ALT150_FT).to_bits(),
-        0x3fd20d53e5fa7542
+        0x3fd20d53d33e05b9
     );
     assert_strictly_between(
         miss(R::supplied(68.0), R::supplied(inhg(1012.0)), ALT150_FT),
@@ -653,7 +685,7 @@ fn wind_truing_reads_presence_from_the_readings() {
     );
     assert_ne!(
         mean(R::supplied(68.0), R::supplied(inhg(1013.0)), ALT150_FT).to_bits(),
-        0x4011af8332a75fb5
+        0x4011af834956db83
     );
 }
 

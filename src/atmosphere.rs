@@ -19,12 +19,19 @@
 //!   in `x_v`: `gamma = 1.4 (1 - 0.062 x_v)`, `R = 287.0531 (1 + 0.378 x_v)`,
 //!   `c = sqrt(gamma R T)`. At 0 % it is the engine's one dry value, `sqrt(1.4 · 287.0531 · T)`,
 //!   340.294 m/s at 15 °C.
-//! - **Aloft.** Temperature and pressure start from the station's own values and follow the
-//!   ICAO layers' lapse rates in geopotential height, with the dry gas constant; the density
-//!   scales the station's by `(T_0 · P) / (P_0 · T)`, which holds the station's vapour mole
-//!   fraction; the sound speed holds the station's relative humidity at the local temperature
-//!   and pressure. Downrange [`AtmoSock`] zones replace the station as the base, each with its
-//!   own humidity.
+//! - **Aloft (0.50.0: one vapour model).** The governing air (the station, or the downrange
+//!   [`AtmoSock`] zone that replaces it as the base, each with its own humidity) is well mixed:
+//!   its water-vapour mole fraction `x_v` is held at every height, for all three of the lapse,
+//!   the density and the sound speed. Temperature and pressure start from the governing air's
+//!   own values and follow the ICAO layers' lapse rates in geopotential height, with the
+//!   virtual-temperature (moist) hydrostatic exponent: the dry one scaled by the moist-air
+//!   molar-mass ratio `M_m / M_a = 1 - x_v (1 - M_v / M_a)`, the factor the CIPM-2007 density
+//!   applies, so moist air's pressure falls more slowly with height. The density scales the
+//!   governing air's by `(T_0 · P) / (P_0 · T)`, and the sound speed is the formula above at the
+//!   local temperature and the governing `x_v`. Held aloft, `x_v` can exceed saturation at the
+//!   colder heights (no condensation is modelled). At 0 % every term is the dry one, bit for
+//!   bit. Until 0.50.0 the sound speed held the relative humidity instead (re-deriving `x_v` at
+//!   the local temperature and pressure) and the lapse was dry.
 //! - **Units.** [`RelativeHumidity`] stores a percent. Every Rust field and function takes a
 //!   percent (`AtmosphericConditions::humidity`, `BallisticInputs::humidity_percent`, an
 //!   [`AtmoSegment`]'s slot 2); only the SI JSON wire (`relative_humidity`) carries a fraction,
@@ -40,7 +47,7 @@
 //! Two gas constants appear here, one from each standard, each used the same way on every
 //! path: the CIPM-2007 density's `R / M_a = 8.314472 / 0.02896546 = 287.0478` J/(kg·K), inside
 //! its own formula, and the US Standard Atmosphere 1976 dry-air constant `R_AIR = 287.0531`,
-//! for the hydrostatic lapse and the sound speed.
+//! for the hydrostatic lapse (divided by `M_m / M_a` for humid air) and the sound speed.
 //!
 //! One deliberate exception: the muzzle Miller stability factor
 //! ([`crate::stability::compute_stability_coefficient`]) keeps Miller's published dry
@@ -89,8 +96,10 @@ struct AtmosphereLayer {
 const G_ACCEL_MPS2: f64 = crate::constants::G_ACCEL_MPS2;
 /// Specific gas constant for dry air, J/(kg·K), the US Standard Atmosphere 1976 value. With
 /// [`GAMMA`] it is the engine's one dry-air sound-speed constant: `sqrt(GAMMA * R_AIR * T)`. It
-/// also drives the hydrostatic lapse. The CIPM-2007 density uses its own `R / M_A` (287.0478)
-/// inside its own formula; each constant is used the same way on every path.
+/// also drives the hydrostatic lapse: as is for dry air, divided by the moist-air molar-mass
+/// ratio `M_m / M_a` for humid air (the virtual-temperature lapse). The CIPM-2007 density uses
+/// its own `R / M_A` (287.0478) inside its own formula; each constant is used the same way on
+/// every path.
 pub(crate) const R_AIR: f64 = 287.0531;
 /// Heat-capacity ratio of dry air.
 pub(crate) const GAMMA: f64 = 1.4;
@@ -100,9 +109,10 @@ const MAX_GEOMETRIC_ALTITUDE_M: f64 = 84000.0;
 const MIN_STANDARD_GEOPOTENTIAL_HEIGHT_M: f64 = -5000.0;
 const MAX_STANDARD_GEOPOTENTIAL_HEIGHT_M: f64 = 84000.0;
 
-/// CIPM-2007 constants for the moist-air density, used only inside
-/// [`calculate_air_density_cimp`]. Their ratio `R / M_A` is 287.0478 J/(kg·K), CIPM's dry-air
-/// gas constant; the sound speed and the lapse use the US-1976 [`R_AIR`] instead.
+/// CIPM-2007 constants for the moist-air density, [`calculate_air_density_cimp`]. Their ratio
+/// `R / M_A` is 287.0478 J/(kg·K), CIPM's dry-air gas constant; the sound speed and the lapse
+/// use the US-1976 [`R_AIR`] instead. `M_V / M_A` also sets the moist-air molar-mass ratio
+/// (`moist_molar_mass_ratio`) that both the density and the humid lapse aloft apply.
 const R: f64 = 8.314472; // Universal gas constant
 const M_A: f64 = 28.96546e-3; // Molar mass of dry air (kg/mol)
 const M_V: f64 = 18.01528e-3; // Molar mass of water vapor (kg/mol)
@@ -952,11 +962,11 @@ pub fn calculate_atmosphere(
     let density = calculate_air_density_cimp(temp_c, pressure_pa / 100.0, humidity_clamped);
 
     // Speed of sound uses an ideal-gas moist-air mixture approximation, first order in the
-    // water-vapor mole fraction. Extracted into `moist_speed_of_sound`, which air_at also calls
-    // at every step; its vapor pressure comes from the SAME Wagner-Pruss saturation-pressure
-    // equation (`enhanced_saturation_vapor_pressure`) and CIPM enhancement factor that the
-    // density above uses. Only the vapor fraction is shared; the acoustic relation remains
-    // ideal-gas.
+    // water-vapor mole fraction. Extracted into `moist_speed_of_sound`, whose formula air_at
+    // also evaluates at every step (at the station's x_v, held aloft); its vapor pressure comes
+    // from the SAME Wagner-Pruss saturation-pressure equation (`enhanced_saturation_vapor_pressure`)
+    // and CIPM enhancement factor that the density above uses. Only the vapor fraction is
+    // shared; the acoustic relation remains ideal-gas.
     let speed_of_sound = moist_speed_of_sound(temp_k, pressure_pa, humidity_clamped);
 
     (density, speed_of_sound)
@@ -975,8 +985,9 @@ pub fn calculate_atmosphere(
 /// not Cramer's full real-gas polynomial and does not include Cramer's pressure or
 /// carbon-dioxide terms.
 ///
-/// [`air_at`] calls it at every step of every solver family, at the local temperature and
-/// pressure and the station's (or zone's) relative humidity.
+/// It is the station's (and a downrange zone's) sound speed. Aloft, [`air_at`] evaluates the same
+/// formula at the local temperature and the station's (or zone's) own `x_v`, held at every
+/// height, so at the station's height the two agree to the bit.
 ///
 /// # Arguments
 /// * `temp_k` - Temperature in Kelvin
@@ -993,6 +1004,15 @@ pub fn moist_speed_of_sound(temp_k: f64, pressure_pa: f64, humidity_percent: f64
     let mole_fraction_vapor =
         moist_air_vapor_mole_fraction(temp_k, pressure_pa, humidity_percent).min(1.0);
 
+    moist_sound_speed_at_mole_fraction(temp_k, mole_fraction_vapor)
+}
+
+/// The moist-air sound speed of [`moist_speed_of_sound`] at a GIVEN water-vapour mole fraction:
+/// `sqrt(1.4 (1 - 0.062 x_v) · 287.0531 (1 + 0.378 x_v) · T)`. The station's sound speed
+/// evaluates it at the station's own `x_v`, and [`air_at`] at the governing air's `x_v`, held
+/// aloft; at `x_v = 0` it is the dry `sqrt(1.4 · 287.0531 · T)` to the bit.
+#[inline(always)]
+fn moist_sound_speed_at_mole_fraction(temp_k: f64, mole_fraction_vapor: f64) -> f64 {
     // Heat-capacity ratio and gas constant for moist air (mole-fraction coefficients). 0.378 is
     // the dry-air molecular-weight ratio (0.6078 would belong to specific humidity, not mole
     // fraction).
@@ -1000,6 +1020,27 @@ pub fn moist_speed_of_sound(temp_k: f64, pressure_pa: f64, humidity_percent: f64
     let r_moist = R_AIR * (1.0 + 0.378 * mole_fraction_vapor);
 
     (gamma_moist * r_moist * temp_k).sqrt()
+}
+
+/// The moist-air molar-mass ratio `M_m / M_a = 1 - x_v (1 - M_v / M_a)`, where
+/// `M_m = (1 - x_v) M_a + x_v M_v` is the molar mass of air holding a water-vapour mole fraction
+/// `x_v`. The CIPM-2007 density ([`calculate_air_density_cimp`]) multiplies by it, and the
+/// virtual-temperature lapse of [`air_at`] scales the dry hydrostatic exponent by it, so the
+/// pressure aloft falls as the density the projectile flies says it must. Exactly 1 at
+/// `x_v = 0`.
+#[inline(always)]
+fn moist_molar_mass_ratio(mole_fraction_vapor: f64) -> f64 {
+    1.0 - mole_fraction_vapor * (1.0 - M_V / M_A)
+}
+
+/// The water-vapour mole fraction of the GOVERNING air (the station's, or the active
+/// [`AtmoSock`] zone's) that [`air_at`] holds at every height: the station sound speed's own
+/// `x_v` ([`calculate_atmosphere`]'s kelvin and pascal conversions, then the one
+/// [`vapor_mole_fraction`], capped at 1), so the air at the governing air's height is that air
+/// to the bit. Exactly 0 at 0 %.
+#[inline(always)]
+fn governing_vapor_mole_fraction(temp_c: f64, pressure_hpa: f64, humidity_percent: f64) -> f64 {
+    moist_air_vapor_mole_fraction(temp_c + 273.15, pressure_hpa * 100.0, humidity_percent).min(1.0)
 }
 
 /// Enhanced air density calculation using CIPM formula with ICAO atmosphere.
@@ -1035,9 +1076,10 @@ pub fn calculate_air_density_cimp(temp_c: f64, pressure_hpa: f64, humidity_perce
     // Enhanced compressibility factor. CIPM virial constants use Pa.
     let z = enhanced_compressibility_factor(p_pa, t_k, x_v);
 
-    // Calculate density with enhanced precision
+    // Calculate density with enhanced precision. The last factor is the moist-air molar-mass
+    // ratio M_m / M_a, which the virtual-temperature lapse aloft scales by too.
     // Note: parentheses are important here for correct operator precedence
-    ((p_pa * M_A) / (z * R * t_k)) * (1.0 - x_v * (1.0 - M_V / M_A))
+    ((p_pa * M_A) / (z * R * t_k)) * moist_molar_mass_ratio(x_v)
 }
 
 /// CIPM-2007 mole fraction of water vapor, `x_v = RH * f * p_sv / p`, UNCAPPED: the one
@@ -1229,9 +1271,10 @@ pub fn get_local_atmosphere(
     (air.density_kg_m3, air.speed_of_sound_mps)
 }
 
-/// The local air, unvalidated: the same composition as [`air_at`] (identical local density, and
-/// the moist-air speed of sound, [`moist_speed_of_sound`], at the LOCAL temperature and pressure
-/// and the base humidity), from a caller-held base tuple.
+/// The local air, unvalidated: the same composition as [`air_at`], from a caller-held base
+/// tuple. The base air's water-vapour mole fraction, from `base_temp_c`, `base_press_hpa` and
+/// `humidity_percent`, is held at every height for the virtual-temperature lapse, the density
+/// and the moist-air speed of sound at the local temperature.
 ///
 /// A legacy entry point: it clamps an out-of-range humidity instead of refusing it, and it
 /// cannot know whether `base_ratio` was built at `humidity_percent`. In-crate code calls
@@ -2030,16 +2073,21 @@ impl KernelAtmosphere {
 /// - [`KernelAtmosphere::Station`] picks a base: the zone that covers `downrange_m` when
 ///   `zones` holds any (its temperature, pressure and humidity, with a CIPM density ratio at
 ///   that humidity), otherwise the station itself. An empty zone set means the station. The
-///   lapse always starts at the station altitude. Then:
-///   1. temperature and pressure follow the ICAO layers in geopotential height, with the dry
-///      gas constant;
-///   2. density is the base ratio scaled by `(T_base · P) / (P_base · T)`, so the base vapour
-///      mole fraction is held aloft;
-///   3. the speed of sound is [`moist_speed_of_sound`] at the local temperature and pressure
-///      and the BASE relative humidity, which is held aloft.
+///   lapse always starts at the station altitude. The base air is well mixed: its water-vapour
+///   mole fraction `x_v` (from its own temperature, pressure and humidity) is held at every
+///   height, for all three steps:
+///   1. temperature and pressure follow the ICAO layers in geopotential height, with the
+///      virtual-temperature hydrostatic exponent: the dry one times the moist-air molar-mass
+///      ratio `M_m / M_a = 1 - x_v (1 - M_v / M_a)`;
+///   2. density is the base ratio scaled by `(T_base · P) / (P_base · T)`, the base
+///      composition;
+///   3. the speed of sound is [`moist_speed_of_sound`]'s formula at the local temperature and
+///      the base `x_v`.
 ///
-///   The temperature and pressure of steps 1 and 2 are returned too. At 0 % this is the dry
-///   `sqrt(1.4 · 287.0531 · T)`.
+///   The temperature and pressure of steps 1 and 2 are returned too. At the base air's own
+///   height this is that air exactly (the sound speed is [`StationAir::speed_of_sound_mps`] to
+///   the bit); at 0 % every step is the dry one, `sqrt(1.4 · 287.0531 · T)` for the sound
+///   speed.
 pub fn air_at(
     atmosphere: &KernelAtmosphere,
     zones: Option<&AtmoSock>,
@@ -2099,8 +2147,17 @@ pub(crate) fn air_at_with_gravity(
 }
 
 /// The composition behind [`air_at`] and the legacy `get_local_atmosphere*` wrappers,
-/// unvalidated: the lapse, then the density from the base ratio, then the moist sound speed at
-/// the base humidity. The only place the aloft vapour model lives.
+/// unvalidated. The only place the aloft vapour model lives.
+///
+/// The governing (base) air is well mixed: its water-vapour mole fraction `x_v`, from its own
+/// temperature, pressure and humidity, is held at every height, for all three of
+/// - the lapse: the ICAO lapse rates with the virtual-temperature hydrostatic exponent, the dry
+///   one scaled by the moist-air molar-mass ratio `M_m / M_a = 1 - x_v (1 - M_v / M_a)`;
+/// - the density: the base ratio scaled by `(T_0 · P) / (P_0 · T)`, the base composition;
+/// - the sound speed: [`moist_sound_speed_at_mole_fraction`] at the local temperature and that
+///   same `x_v`.
+///
+/// At 0 % `x_v` is 0 and every term is the dry one to the bit.
 #[inline]
 fn compose_local_air(
     altitude_m: f64,
@@ -2111,17 +2168,20 @@ fn compose_local_air(
     humidity_percent: f64,
     gravity: Gravity,
 ) -> LocalAir {
+    let vapor_mole_fraction =
+        governing_vapor_mole_fraction(base_temp_c, base_press_hpa, humidity_percent);
     let (temperature_k, pressure_pa, density_kg_m3) = local_temp_pressure_density_with_gravity(
         altitude_m,
         base_alt,
         base_temp_c,
         base_press_hpa,
         base_ratio,
+        vapor_mole_fraction,
         gravity,
     );
     let air = LocalAir {
         density_kg_m3,
-        speed_of_sound_mps: moist_speed_of_sound(temperature_k, pressure_pa, humidity_percent),
+        speed_of_sound_mps: moist_sound_speed_at_mole_fraction(temperature_k, vapor_mole_fraction),
         temperature_k,
         pressure_pa,
     };
@@ -2160,7 +2220,8 @@ pub(crate) mod air_trace {
         pub base_press_hpa: f64,
         /// The base density ratio (density / 1.225).
         pub base_ratio: f64,
-        /// The relative humidity, percent, the sound speed was given.
+        /// The base relative humidity, percent: the one whose vapour mole fraction the
+        /// composition held aloft for the lapse, the density and the sound speed.
         pub humidity_percent: f64,
         /// The gravity the lapse used, m/s².
         pub gravity_mps2: f64,
@@ -2203,7 +2264,8 @@ pub(crate) mod air_trace {
     }
 }
 
-/// The lapse and density of [`compose_local_air`] in Earth gravity, for the tests. Returns
+/// The lapse and density of [`compose_local_air`] in Earth gravity, for the tests, for DRY base
+/// air (`x_v = 0`, the dry hydrostatic lapse). Returns
 /// `(local_temp_k, local_pressure_pa, density_kg_m3)`.
 #[cfg(test)]
 fn local_temp_pressure_density(
@@ -2219,16 +2281,23 @@ fn local_temp_pressure_density(
         base_temp_c,
         base_press_hpa,
         base_ratio,
+        0.0,
         Gravity::EARTH,
     )
 }
 
+/// The lapse and density of [`compose_local_air`]: temperature and pressure through the ICAO
+/// layers from the base, with the virtual-temperature hydrostatic exponent for base air holding
+/// the water-vapour mole fraction `vapor_mole_fraction` (its moist gas constant
+/// `R_AIR / (M_m / M_a)`, exactly `R_AIR` at 0), and the density from the base ratio. Returns
+/// `(local_temp_k, local_pressure_pa, density_kg_m3)`.
 fn local_temp_pressure_density_with_gravity(
     altitude_m: f64,
     base_alt: f64,
     base_temp_c: f64,
     base_press_hpa: f64,
     base_ratio: f64,
+    vapor_mole_fraction: f64,
     gravity: Gravity,
 ) -> (f64, f64, f64) {
     let base_temp_k = base_temp_c + 273.15;
@@ -2239,6 +2308,9 @@ fn local_temp_pressure_density_with_gravity(
         return (f64::NAN, f64::NAN, f64::NAN);
     }
 
+    // The virtual-temperature lapse: R_m T = R_AIR T_v with T_v = T / (M_m / M_a). At x_v = 0
+    // the ratio is exactly 1 and this is R_AIR to the bit.
+    let gas_constant = R_AIR / moist_molar_mass_ratio(vapor_mole_fraction);
     let base_geopotential_m = geometric_to_geopotential_height_m(base_alt);
     let target_geopotential_m = geometric_to_geopotential_height_m(altitude_m);
     let (temp_k, pressure_hpa) = integrate_local_atmosphere_layers(
@@ -2246,6 +2318,7 @@ fn local_temp_pressure_density_with_gravity(
         target_geopotential_m,
         base_temp_k,
         base_press_hpa,
+        gas_constant,
         gravity,
     );
 
@@ -2259,11 +2332,14 @@ fn local_temp_pressure_density_with_gravity(
 /// Carry arbitrary station temperature and pressure through each crossed ICAO
 /// layer in geopotential-height coordinates. The layer table supplies lapse rates and boundaries
 /// only; station deviations from the standard atmosphere remain anchored at the converted base.
+/// `gas_constant` (J/(kg·K)) sets the hydrostatic exponent: [`R_AIR`] for dry air, the moist
+/// `R_AIR / (M_m / M_a)` for humid air (the virtual-temperature lapse).
 fn integrate_local_atmosphere_layers(
     base_geopotential_m: f64,
     target_geopotential_m: f64,
     mut temp_k: f64,
     mut pressure_hpa: f64,
+    gas_constant: f64,
     gravity: Gravity,
 ) -> (f64, f64) {
     let mut current_alt = base_geopotential_m;
@@ -2285,6 +2361,7 @@ fn integrate_local_atmosphere_layers(
                 pressure_hpa,
                 segment_end - current_alt,
                 ICAO_LAYERS[layer_index].lapse_rate,
+                gas_constant,
                 gravity,
             );
             current_alt = segment_end;
@@ -2307,6 +2384,7 @@ fn integrate_local_atmosphere_layers(
                 pressure_hpa,
                 segment_end - current_alt,
                 ICAO_LAYERS[layer_index].lapse_rate,
+                gas_constant,
                 gravity,
             );
             current_alt = segment_end;
@@ -2316,20 +2394,24 @@ fn integrate_local_atmosphere_layers(
     (temp_k, pressure_hpa)
 }
 
+/// One layer of the hydrostatic lapse, at the gas constant `gas_constant` (see
+/// [`integrate_local_atmosphere_layers`]).
 #[inline]
 fn integrate_local_atmosphere_segment(
     base_temp_k: f64,
     base_pressure_hpa: f64,
     height_diff: f64,
     lapse_rate: f64,
+    gas_constant: f64,
     gravity: Gravity,
 ) -> (f64, f64) {
     let temp_k = base_temp_k + lapse_rate * height_diff;
     let pressure_hpa = if lapse_rate.abs() < 1e-10 {
-        base_pressure_hpa * (-gravity.magnitude() * height_diff / (R_AIR * base_temp_k)).exp()
+        base_pressure_hpa
+            * (-gravity.magnitude() * height_diff / (gas_constant * base_temp_k)).exp()
     } else {
         let temp_ratio = temp_k / base_temp_k;
-        base_pressure_hpa * temp_ratio.powf(-gravity.magnitude() / (lapse_rate * R_AIR))
+        base_pressure_hpa * temp_ratio.powf(-gravity.magnitude() / (lapse_rate * gas_constant))
     };
 
     (temp_k, pressure_hpa)
@@ -2344,13 +2426,14 @@ mod uniform_gravity_tests {
         for magnitude in [0.0, 1.62, 9.80665, 20.0] {
             let gravity = Gravity::new(magnitude).unwrap();
             let (temperature, pressure) =
-                integrate_local_atmosphere_segment(280.0, 900.0, 100.0, 0.0, gravity);
+                integrate_local_atmosphere_segment(280.0, 900.0, 100.0, 0.0, R_AIR, gravity);
             assert_eq!(temperature, 280.0);
             assert!(
                 (pressure / 900.0 - (-magnitude * 100.0 / (R_AIR * 280.0)).exp()).abs() < 1e-14
             );
-            let station =
-                local_temp_pressure_density_with_gravity(300.0, 300.0, 20.0, 900.0, 0.9, gravity);
+            let station = local_temp_pressure_density_with_gravity(
+                300.0, 300.0, 20.0, 900.0, 0.9, 0.0, gravity,
+            );
             assert_eq!(
                 station,
                 local_temp_pressure_density(300.0, 300.0, 20.0, 900.0, 0.9)
@@ -2363,6 +2446,7 @@ mod uniform_gravity_tests {
             20.0,
             900.0,
             0.9,
+            0.0,
             Gravity::new(0.0).unwrap(),
         );
         assert_eq!(pressure, 90_000.0);
@@ -2521,6 +2605,9 @@ impl AtmoSock {
 
 #[cfg(test)]
 mod humidity_model_tests;
+
+#[cfg(test)]
+mod aloft_vapour_tests;
 
 #[cfg(test)]
 mod tests {

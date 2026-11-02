@@ -6615,22 +6615,28 @@ mod station_presence_twin_tests {
     fn zero_twins_reproduce_ab4eb0c_with_neither_and_fly_a_supplied_reading() {
         // (temperature, pressure, altitude, zero angle, near crossing, far crossing for a
         // 0.002 rad bore angle), all captured at ab4eb0c.
+        // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the
+        // station's water-vapour mole fraction, with a virtual-temperature lapse), old -> new: the
+        // zero angles did not move (the bisection's 1e-7 rad step hides it); the crossings near
+        // 20.667807586483896 -> 20.66780758664646 m (+7.9e-12) and far 224.33240698998765 ->
+        // 224.33240545071135 m (-6.9e-9) at 150 m, and near 20.665489730827762 -> 20.66548973089652
+        // m (+3.3e-12) and far 227.33514089305447 -> 227.33514021685897 m (-3.0e-9) at 1500 m.
         let cases = [
             (
                 20.0,
                 1013.0,
                 150.0,
                 f64::from_bits(0x3f65f73333333333),
-                f64::from_bits(0x4034aaf5701ff812),
-                f64::from_bits(0x406c0aa313fbdeae),
+                f64::from_bits(0x4034aaf57020aad0),
+                f64::from_bits(0x406c0aa310c17a28),
             ),
             (
                 15.0,
                 850.0,
                 1500.0,
                 f64::from_bits(0x3f6594ccccccccce),
-                f64::from_bits(0x4034aa5d88f5baa5),
-                f64::from_bits(0x406c6ab97964e714),
+                f64::from_bits(0x4034aa5d88f6063f),
+                f64::from_bits(0x406c6ab977f9df7a),
             ),
         ];
         for (t, p, alt, zero, near, far) in cases {
@@ -6800,13 +6806,14 @@ mod station_presence_twin_tests {
             results.hit_probability(DEFAULT_HIT_RADIUS_M).to_bits(),
             0.14_f64.to_bits()
         );
-        let expected_ranges: [f64; 3] = [1907.972891143359, 1936.408435469319, 1912.8150447617645];
+        // The legacy seeded pins of `monte_carlo_seeded_tests`, re-captured with them in S8.
+        let expected_ranges: [f64; 3] = [1907.9716332174821, 1936.4071333440454, 1912.81384414182];
         let expected_velocities: [f64; 3] =
-            [238.6187151542299, 239.91923651600106, 243.14112455427164];
+            [238.6179931921287, 239.9185187950357, 243.14025219104838];
         let expected_positions: [(f64, f64); 3] = [
-            (-0.0643556039548101, 0.7344970252014579),
-            (0.5769422971539162, 0.27227201756386726),
-            (-0.7440425792472842, 0.1541804446282822),
+            (-0.06435559190712015, 0.7344970251956466),
+            (0.5769422272471794, 0.2722720177468328),
+            (-0.7440424901848259, 0.15418044529361857),
         ];
         for i in 0..3 {
             assert_eq!(results.ranges[i].to_bits(), expected_ranges[i].to_bits());
@@ -6843,18 +6850,24 @@ mod station_presence_twin_tests {
             ..MonteCarloParams::default()
         };
         // captured at ab4eb0c: (range, impact velocity) of the first three trials
+        // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the
+        // station's water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
+        // ranges 1933.7023025926699 -> 1933.7006673718802, 1962.5974312446554 -> 1962.5957266568341
+        // and 1938.055244658578 -> 1938.0537040308395 m (-8.0e-7 to -8.7e-7); velocities
+        // 243.03343313165846 -> 243.0324000563029, 244.31973944033203 -> 244.3187166797008 and
+        // 247.59724147726604 -> 247.596028157198 m/s (-4.2e-6 to -4.9e-6).
         let pinned = [
             (
-                f64::from_bits(0x409e36cf28692da7),
-                f64::from_bits(0x406e6111e25be26e),
+                f64::from_bits(0x409e36cd7bbf5e66),
+                f64::from_bits(0x406e61096bd7c6b4),
             ),
             (
-                f64::from_bits(0x409eaa63c504259d),
-                f64::from_bits(0x406e8a3b4e34eef5),
+                f64::from_bits(0x409eaa62062b31d5),
+                f64::from_bits(0x406e8a32ed528026),
             ),
             (
-                f64::from_bits(0x409e4838920e477c),
-                f64::from_bits(0x406ef31c9a289584),
+                f64::from_bits(0x409e4836fe30807a),
+                f64::from_bits(0x406ef312a9a45523),
             ),
         ];
         let seeded = run_monte_carlo_with_wind_and_direction_std_dev_seeded(
@@ -6941,15 +6954,20 @@ mod station_presence_twin_tests {
             assert_eq!(report.samples, 80);
             assert_eq!(report.attempts, 80);
             // captured at ab4eb0c
+            // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the
+            // station's water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
+            // the hit probability did not move; the mean impact velocity 244.8044668331616 ->
+            // 244.80335002519013 m/s (-4.6e-6) and the mean drop at the target 0.00242533056417438
+            // -> 0.002425330711117544 m (+6.1e-8).
             assert_eq!(
                 report.hit_probability.to_bits(),
                 f64::from_bits(0x3fef99999999999a).to_bits()
             );
             assert_eq!(
                 report.mean_impact_velocity_mps.to_bits(),
-                0x406e99be313a64aa
+                0x406e99b50b1cadd6
             );
-            assert_eq!(report.mean_drop_at_target_m.to_bits(), 0x3f63de496e905406);
+            assert_eq!(report.mean_drop_at_target_m.to_bits(), 0x3f63de4982c26e62);
         }
         let both = run_monte_carlo_adaptive_seeded_with_station_presence(
             &in_band_mc_inputs(),
@@ -6961,7 +6979,7 @@ mod station_presence_twin_tests {
             StationAtmospherePresence::BOTH,
         )
         .unwrap();
-        assert_ne!(both.mean_impact_velocity_mps.to_bits(), 0x406e99be313a64aa);
+        assert_ne!(both.mean_impact_velocity_mps.to_bits(), 0x406e99b50b1cadd6);
     }
 
     /// Every trial's impact position is its deviation from the baseline solve, so the baseline
@@ -7143,8 +7161,12 @@ mod station_presence_twin_tests {
             // Re-captured in 0.50.0 (humidity train, H2), where it flies 50 % in both, exactly
             // as TrajectorySolver does: the drop is 0.61 mm longer and the speed
             // 0.19 m/s lower at 500 m.
-            assert_eq!(output.drop.to_bits(), 0x4003a01ea6854164);
-            assert_eq!(output.velocity.to_bits(), 0x4080fcf3502e5d14);
+            // Re-captured again in S8 (the aloft air now holds the station's water-vapour mole
+            // fraction, with a virtual-temperature lapse): drop 2.453183461133607 ->
+            // 2.4531833213074137 m (-0.14 um), velocity 543.6188052770763 -> 543.6189355048916 m/s
+            // (+0.13 mm/s).
+            assert_eq!(output.drop.to_bits(), 0x4003a01e93c0dd30);
+            assert_eq!(output.velocity.to_bits(), 0x4080fcf394753ebe);
         }
         let low = solve(1012.0, StationAtmospherePresence::NEITHER).velocity;
         let high = solve(1014.0, StationAtmospherePresence::NEITHER).velocity;
@@ -7270,13 +7292,24 @@ mod monte_carlo_seeded_tests {
             results.hit_probability(DEFAULT_HIT_RADIUS_M)
         );
 
-        let expected_ranges: [f64; 3] = [1907.972891143359, 1936.408435469319, 1912.8150447617645];
+        // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the
+        // station's water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
+        // ranges 1907.972891143359 -> 1907.9716332174821, 1936.408435469319 -> 1936.4071333440454
+        // and 1912.8150447617645 -> 1912.81384414182 m (-6.3e-7 to -6.7e-7); velocities
+        // 238.6187151542299 -> 238.6179931921287, 239.91923651600106 -> 239.9185187950357 and
+        // 243.14112455427164 -> 243.14025219104838 m/s (-3.0e-6 to -3.6e-6); the impact positions
+        // by at most 0.12 um (-0.0643556039548101 -> -0.06435559190712015, 0.7344970252014579 ->
+        // 0.7344970251956466, 0.5769422971539162 -> 0.5769422272471794, 0.27227201756386726 ->
+        // 0.2722720177468328, -0.7440425792472842 -> -0.7440424901848259, 0.1541804446282822 ->
+        // 0.15418044529361857). The hit count did not move.
+
+        let expected_ranges: [f64; 3] = [1907.9716332174821, 1936.4071333440454, 1912.81384414182];
         let expected_velocities: [f64; 3] =
-            [238.6187151542299, 239.91923651600106, 243.14112455427164];
+            [238.6179931921287, 239.9185187950357, 243.14025219104838];
         let expected_positions: [(f64, f64, f64); 3] = [
-            (0.0, -0.0643556039548101, 0.7344970252014579),
-            (0.0, 0.5769422971539162, 0.27227201756386726),
-            (0.0, -0.7440425792472842, 0.1541804446282822),
+            (0.0, -0.06435559190712015, 0.7344970251956466),
+            (0.0, 0.5769422272471794, 0.2722720177468328),
+            (0.0, -0.7440424901848259, 0.15418044529361857),
         ];
 
         for (i, expected) in expected_ranges.iter().enumerate() {
@@ -10009,27 +10042,34 @@ mod coriolis_direction_tests {
     #[test]
     fn labeled_mach_crossings_match_pinned_pre_change_flat_vec_across_solvers() {
         // (solver_name, use_rk4, use_adaptive_rk45, expected mach_1_2, expected mach_1_0)
+        // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the
+        // station's water-vapour mole fraction, with a virtual-temperature lapse), old -> new: Mach
+        // 1.2 at 670.9878683238721 -> 670.9870968186207, 671.7257336844475 -> 671.7249603175201 and
+        // 672.4905711917901 -> 672.4897951903022 m; Mach 1.0 at 805.5274119916264 ->
+        // 805.5261199258687, 805.933409072171 -> 805.9321158082175 and 806.5709746782849 ->
+        // 806.5696791258861 m (Euler, RK4, RK45; -0.77 to -1.30 mm): this shot climbs above the
+        // station, where the held vapour gives a faster sound speed, so Mach falls sooner.
         let cases = [
             (
                 "Euler",
                 false,
                 false,
-                670.9878683238721_f64,
-                805.5274119916264_f64,
+                670.9870968186207_f64,
+                805.5261199258687_f64,
             ),
             (
                 "RK4",
                 true,
                 false,
-                671.7257336844475_f64,
-                805.933409072171_f64,
+                671.7249603175201_f64,
+                805.9321158082175_f64,
             ),
             (
                 "RK45",
                 true,
                 true,
-                672.4905711917901_f64,
-                806.5709746782849_f64,
+                672.4897951903022_f64,
+                806.5696791258861_f64,
             ),
         ];
 
