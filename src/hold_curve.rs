@@ -511,6 +511,9 @@ pub struct HoldCurveLoad {
     pub zero_distance_m: f64,
     pub temperature_c: f64,
     pub pressure_hpa: f64,
+    /// Relative humidity, PERCENT, 0 to 100 (50 = 50 %). [`HoldCurve::solve`] refuses a value
+    /// outside that range, or one that is not finite, through
+    /// [`crate::atmosphere::RelativeHumidity`]; it is never clamped.
     pub humidity: f64,
     pub altitude_m: f64,
     pub wind_speed_mps: f64,
@@ -584,6 +587,10 @@ impl HoldCurve {
         if !max_range_m.is_finite() || max_range_m <= 0.0 {
             return Err("hold curve max range must be finite and greater than zero".into());
         }
+        // The engine's one humidity validator (plan C4), with the load's own field name.
+        let humidity = crate::atmosphere::RelativeHumidity::try_percent(load.humidity)
+            .map_err(|error| error.at_field("hold curve load humidity"))?
+            .percent();
         let zero_inputs = BallisticInputs {
             bc_value: load.bc,
             bc_type: load.drag_model,
@@ -598,7 +605,7 @@ impl HoldCurve {
         let atmosphere = AtmosphericConditions {
             temperature: load.temperature_c,
             pressure: load.pressure_hpa,
-            humidity: load.humidity,
+            humidity,
             altitude: load.altitude_m,
         };
         let zero_angle = crate::calculate_zero_angle_with_station_presence(
@@ -622,7 +629,7 @@ impl HoldCurve {
             load.sight_height_m,
             load.temperature_c,
             load.pressure_hpa,
-            load.humidity,
+            humidity,
             load.altitude_m,
             load.wind_speed_mps,
             load.wind_direction_deg,

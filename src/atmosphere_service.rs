@@ -22,8 +22,9 @@
 //! # Then checks the solve does not make (yet — MBA-1594)
 //!
 //! The solve's resolver only requires temperature and pressure to be positive, which admits air
-//! that cannot exist: 5 K, a humidity whose vapor pressure exceeds the air's total pressure, a
-//! pressure altitude of 30 km. Those are also exactly what the two likeliest unit mistakes
+//! that cannot exist: 5 K, a pressure altitude of 30 km. (A humidity whose vapor pressure
+//! exceeds the air's total pressure the solve now refuses too, by this service's own rule,
+//! through `StationAir::new`.) Those are also exactly what the two likeliest unit mistakes
 //! produce — °C sent as `temperature_k`, hPa sent as `pressure_pa` — so a figure computed from
 //! them is a wrong answer delivered confidently. This service refuses them instead, with the
 //! same `invalid_value` envelope and the path of the input to blame:

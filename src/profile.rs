@@ -54,6 +54,9 @@ pub struct ProfileData {
     /// the legacy rule (29.92 inHg / 1013.25 hPa at a real altitude flies ICAO standard pressure).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pressure_supplied: bool,
+    /// Relative humidity, PERCENT, 0 to 100 (50 = 50 %), whatever `units` says. Absent means
+    /// [`crate::atmosphere::DEFAULT_HUMIDITY_PERCENT`]. A stored value outside 0 to 100 is
+    /// refused on load ([`Self::validate_humidity`]), never clamped.
     #[serde(default = "default_humidity")]
     pub humidity: f64,
     #[serde(default)]
@@ -372,7 +375,7 @@ fn default_pressure() -> f64 {
     29.92
 }
 fn default_humidity() -> f64 {
-    50.0
+    crate::atmosphere::DEFAULT_HUMIDITY_PERCENT
 }
 
 /// Assembles an all-or-nothing pair of angular profile fields — `OpticProfile`'s
@@ -588,8 +591,28 @@ impl ProfileData {
         }
     }
 
+    /// The stored `humidity`, checked by the engine's one validator,
+    /// [`crate::atmosphere::RelativeHumidity::try_percent`] (humidity-consistency train, plan C4).
+    /// The CLI refuses to load a profile that fails it, and the bridge's `profile.validate`
+    /// reports it; the message names the profile and the field, and says how to fix it.
+    ///
+    /// The fix it gives is an edit of the stored value, never a re-save: `profile save` is a
+    /// full overwrite of every field its flags can express (and it resets `bc_segments` and
+    /// `drag_curve`), so a re-save is not a safe way to repair one stored number.
+    pub fn validate_humidity(&self) -> Result<(), String> {
+        crate::atmosphere::RelativeHumidity::try_percent(self.humidity)
+            .map(|_| ())
+            .map_err(|error| {
+                format!(
+                    "{}; edit the humidity stored in the profile to a percent from 0 to 100",
+                    error.at_field(format!("profile '{}' field humidity", self.name))
+                )
+            })
+    }
+
     /// The cheap invariants the CLI already applies to a saved profile, collected instead
-    /// of short-circuited: the `units` string (`converted_to`'s gate), the MBA-1358
+    /// of short-circuited: the `units` string (`converted_to`'s gate), the stored humidity
+    /// ([`Self::validate_humidity`], `load_profile`'s gate), the MBA-1358
     /// tracking-CF band (`load_profile`'s gate), and the MBA-1348 turret/optic assembly +
     /// validation (`profile save`'s gate, including `parse_click_value` on the stored
     /// click graduations). No new physics checks — this is exactly the existing load/save
@@ -598,6 +621,9 @@ impl ProfileData {
     pub fn validation_warnings(&self) -> Vec<String> {
         let mut warnings = Vec::new();
         if let Err(err) = self.unit_system() {
+            warnings.push(err);
+        }
+        if let Err(err) = self.validate_humidity() {
             warnings.push(err);
         }
         if let Some(cf) = self.elevation_cf {

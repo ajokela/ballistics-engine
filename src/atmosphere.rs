@@ -1216,8 +1216,9 @@ pub(crate) fn get_local_atmosphere_humid_with_gravity(
 
 /// The relative humidity, in percent, that an omitted humidity means: 50 %.
 ///
-/// [`RelativeHumidity::DEFAULT`] holds the same value. `AtmosphericConditions::default` and
-/// solve v1's omitted `relative_humidity` (0.5) already mean it.
+/// [`RelativeHumidity::DEFAULT`] holds the same value. `AtmosphericConditions::default` means
+/// it, and solve v1's omitted `relative_humidity` is the same default in the SI wire's unit,
+/// `RelativeHumidity::DEFAULT.fraction()` (exactly 0.5).
 pub const DEFAULT_HUMIDITY_PERCENT: f64 = 50.0;
 
 /// Absolute zero in degrees Celsius; a station temperature must lie above it.
@@ -1326,12 +1327,15 @@ impl RelativeHumidity {
     }
 
     /// The humidity in percent, `0.0..=100.0`.
-    pub fn percent(self) -> f64 {
+    pub const fn percent(self) -> f64 {
         self.0
     }
 
     /// The humidity as a fraction, `0.0..=1.0` (`percent / 100`).
-    pub fn fraction(self) -> f64 {
+    ///
+    /// A `const fn`, so a wire default can be written as the one default in the wire's unit:
+    /// `RelativeHumidity::DEFAULT.fraction()` is exactly `0.5`.
+    pub const fn fraction(self) -> f64 {
         self.0 / 100.0
     }
 
@@ -1340,6 +1344,21 @@ impl RelativeHumidity {
     fn positive_zero(percent: f64) -> Self {
         Self(if percent == 0.0 { 0.0 } else { percent })
     }
+}
+
+/// Parse a terminal humidity flag's value (`--humidity 37.5`, `--zero-humidity 80`) through the
+/// one validator, [`RelativeHumidity::try_percent`]: a PERCENT, 0 to 100, refused and never
+/// clamped. The WASM terminal's hand-written parser calls it for every humidity flag (the native
+/// CLI's clap parser applies the same 0-100 range); its errors name the flag, for example
+/// `"--humidity = 150: relative humidity must be a percent from 0 to 100"`.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn parse_humidity_percent_arg(flag: &str, raw: &str) -> Result<f64, String> {
+    let value: f64 = raw.trim().parse().map_err(|_| {
+        format!("{flag} = {raw}: not a number; a relative humidity is a percent from 0 to 100")
+    })?;
+    RelativeHumidity::try_percent(value)
+        .map(RelativeHumidity::percent)
+        .map_err(|error| error.at_field(flag.to_string()).to_string())
 }
 
 /// Why an atmosphere value was refused. Carried by [`AtmosphereError`].
@@ -1567,29 +1586,6 @@ impl StationAir {
                 humidity.percent(),
             ),
         })
-    }
-
-    /// `TrajectorySolver`'s station at 0.49.0 semantics, for its unvalidated input.
-    ///
-    /// `calculate_atmosphere` at the raw `humidity_percent`, which clamps it into `[0, 100]`
-    /// and caps the vapour mole fraction itself: so out-of-range humidity flies clamped,
-    /// impossible air flies capped, and the station temperature and pressure are not checked,
-    /// exactly as `TrajectorySolver::resolved_atmosphere` did. The stored humidity is the
-    /// clamped one. Only a NaN humidity, which `validate_for_solve` already refuses, is an
-    /// error. It goes once `validate_for_solve` refuses what [`Self::new`] refuses.
-    pub(crate) fn legacy_clamped(
-        altitude_m: f64,
-        temperature_c: f64,
-        pressure_hpa: f64,
-        humidity_percent: f64,
-    ) -> Result<Self, AtmosphereError> {
-        let humidity = RelativeHumidity::try_percent(humidity_percent.clamp(0.0, 100.0))?;
-        Ok(Self::from_calculate_atmosphere(
-            altitude_m,
-            temperature_c,
-            pressure_hpa,
-            humidity,
-        ))
     }
 
     fn from_calculate_atmosphere(

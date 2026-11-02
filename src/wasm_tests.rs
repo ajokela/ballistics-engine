@@ -4292,6 +4292,165 @@ Impact Velocity: 2510 fps\n";
             );
         }
     }
+
+    // --- humidity-consistency train, plan C4: one validator, one default, every command ---
+
+    /// Every terminal command that takes a humidity, as `(base command, flag)`. 0.49.0
+    /// range-checked only `true-velocity` and `true-wind`; every other command flew 150 % as
+    /// 100 % (or passed it on unclamped), and `monte-carlo` had no `--humidity` at all.
+    const HUMIDITY_COMMANDS: [(&str, &str); 8] = [
+        ("trajectory -v 2700 -b 0.475 -m 168 -d 0.308", "--humidity"),
+        (
+            "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --auto-zero 100",
+            "--zero-humidity",
+        ),
+        (
+            "zero -v 2700 -b 0.475 -m 168 -d 0.308 --target-distance 300",
+            "--humidity",
+        ),
+        (
+            "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 400",
+            "--humidity",
+        ),
+        (
+            "monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 -n 20",
+            "--humidity",
+        ),
+        (
+            "true-velocity --measured-drop 30 --range 500 -b 0.243 -m 175 -d 0.308 --offline",
+            "--humidity",
+        ),
+        (
+            "true-wind --miss 600:12 --twist-rate 10 -v 2700 -b 0.243 --drag-model g7 -m 175 \
+             -d 0.308",
+            "--humidity",
+        ),
+        (
+            "estimate-bc -v 2700 -m 168 -d 0.308 --data \"100,2.5;200,10.2;300,23.5\"",
+            "--humidity",
+        ),
+    ];
+
+    #[wasm_bindgen_test]
+    fn every_humidity_flag_refuses_a_value_outside_zero_to_one_hundred() {
+        let wasm = WasmBallistics::new();
+        for (base, flag) in HUMIDITY_COMMANDS {
+            for bad in ["150", "-5", "100.0001", "nan", "inf"] {
+                let err = wasm
+                    .run_command(&format!("{base} {flag} {bad}"))
+                    .expect_err(&format!("`{base} {flag} {bad}` must be refused"));
+                let message = err.as_string().unwrap_or_default();
+                assert!(
+                    message.contains(flag)
+                        && (message.contains("percent from 0 to 100")
+                            || message.contains("must be finite")),
+                    "`{flag} {bad}`: the one validator's error: {message}"
+                );
+            }
+            for good in ["0", "100"] {
+                wasm.run_command(&format!("{base} {flag} {good}"))
+                    .unwrap_or_else(|e| panic!("`{base} {flag} {good}` is valid: {e:?}"));
+            }
+        }
+    }
+
+    /// Every command that takes a station temperature refuses air that cannot exist (212 °F,
+    /// 29.92 inHg, 100 %: saturated air at the boiling point) with the solver's one rule, the
+    /// way the native CLI does, and flies the same air at 50 %. `monte-carlo` has no
+    /// `--temperature`, so it always flies 15 °C, where every humidity exists. A refusal is
+    /// either an `Err` or, for `trajectory`, whose solve errors the terminal prints, an
+    /// `Error...` line in place of the output (`Error: ...`, or `Error calculating zero: ...`
+    /// for `--auto-zero`).
+    #[wasm_bindgen_test]
+    fn every_command_with_a_temperature_refuses_impossible_air() {
+        let wasm = WasmBallistics::new();
+        let commands = [
+            (
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308",
+                "--temperature",
+                "--humidity",
+            ),
+            (
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --auto-zero 100",
+                "--zero-temperature",
+                "--zero-humidity",
+            ),
+            (
+                "zero -v 2700 -b 0.475 -m 168 -d 0.308 --target-distance 300",
+                "--temperature",
+                "--humidity",
+            ),
+            (
+                "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 400",
+                "--temperature",
+                "--humidity",
+            ),
+            (
+                "true-velocity --measured-drop 30 --range 500 -b 0.243 -m 175 -d 0.308 --offline",
+                "--temperature",
+                "--humidity",
+            ),
+            (
+                "true-wind --miss 600:12 --twist-rate 10 -v 2700 -b 0.243 --drag-model g7 -m 175 \
+                 -d 0.308",
+                "--temperature",
+                "--humidity",
+            ),
+            (
+                "estimate-bc -v 2700 -m 168 -d 0.308 --data \"100,2.5;200,10.2;300,23.5\"",
+                "--temperature",
+                "--humidity",
+            ),
+        ];
+        for (base, temperature, humidity) in commands {
+            let message =
+                match wasm.run_command(&format!("{base} {temperature} 212 {humidity} 100")) {
+                    Err(err) => err.as_string().unwrap_or_default(),
+                    Ok(text) if text.trim_start().starts_with("Error") => text,
+                    Ok(text) => {
+                        panic!("`{base}` at 212 F / 100 % must be refused, but it ran:\n{text}")
+                    }
+                };
+            assert!(
+                message.contains("no such air exists"),
+                "`{base}`: refused with StationAir's own reason: {message}"
+            );
+            let flown = wasm
+                .run_command(&format!("{base} {temperature} 212 {humidity} 50"))
+                .unwrap_or_else(|e| panic!("`{base}` at 212 F / 50 % exists: {e:?}"));
+            assert!(
+                !flown.trim_start().starts_with("Error"),
+                "`{base}` at 212 F / 50 % exists, and flies: {flown}"
+            );
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn an_omitted_humidity_is_byte_for_byte_humidity_50() {
+        let wasm = WasmBallistics::new();
+        let deterministic = [
+            "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 -o json",
+            "zero -v 2700 -b 0.475 -m 168 -d 0.308 --target-distance 300",
+            "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 400 -o json",
+            "monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 -n 20 --wez --target-size 6x6 \
+             --wez-start 200 --wez-end 300 --wez-step 100 -o full",
+        ];
+        for base in deterministic {
+            let omitted = wasm.run_command(base).unwrap();
+            let typed = wasm.run_command(&format!("{base} --humidity 50")).unwrap();
+            assert_eq!(omitted, typed, "{base}");
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn monte_carlo_humidity_reaches_the_wez_sweep() {
+        let wasm = WasmBallistics::new();
+        let base = "monte-carlo -v 2700 -b 0.475 -m 168 -d 0.308 -n 20 --wez --target-size 6x6 \
+                    --wez-start 200 --wez-end 300 --wez-step 100 -o full";
+        let dry = wasm.run_command(&format!("{base} --humidity 0")).unwrap();
+        let saturated = wasm.run_command(&format!("{base} --humidity 100")).unwrap();
+        assert_ne!(dry, saturated, "--humidity never reached the WEZ sweep");
+    }
 }
 
 /// Coverage for the surface that survives every command gate: the `Calculator` API, the

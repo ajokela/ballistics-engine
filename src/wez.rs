@@ -250,8 +250,9 @@ fn wez_kernel_drag_model(model: DragModel) -> DragModelV1 {
 /// into that field. Differentiating under a built-in fallback model would silently misattribute
 /// variance, so custom-deck attribution remains explicitly unavailable. Every built-in [`DragModel`] is represented exactly by
 /// [`wez_kernel_drag_model`]. It is `None` too for a `base_inputs.humidity_percent` outside
-/// `0..=100`, which the SI wire cannot carry (unreachable from `compute_wez`, which flies the
-/// default humidity).
+/// `0..=100`, which the SI wire cannot carry. That is unreachable from `compute_wez`, whose
+/// humidity is a validated [`RelativeHumidity`]: the attribution's `relative_humidity` is the
+/// very value the sweep flies, as the wire's fraction.
 pub(crate) fn wez_resolved_request(
     base_inputs: &BallisticInputs,
     base_wind: &WindConditions,
@@ -653,6 +654,10 @@ pub struct WezResult {
 /// * `sight_offset_lateral_m` — lateral sight-to-bore mount offset, METERS, positive =
 ///   sight right of bore (MBA-1396); displaces every sample's initial lateral position
 ///   exactly like the trajectory command. `0.0` = neutral (byte-identical).
+/// * `humidity` — the relative humidity every baseline and sample flies, and the one the
+///   variance attribution's request carries. The rest of the air is `BallisticInputs`'s
+///   15 °C / 1013.25 hPa sea-level default. [`RelativeHumidity::DEFAULT`] is the sweep 0.49.0
+///   always flew.
 ///
 /// A fixed, distinct seed per range step (`0x57_45_5A_00 ^ step_index`) keeps a sweep
 /// reproducible run-to-run while still drawing independent samples at each range.
@@ -685,6 +690,7 @@ pub fn compute_wez(
     cd_scale: f64,
     cant: f64,
     sight_offset_lateral_m: f64,
+    humidity: RelativeHumidity,
 ) -> Result<WezResult, Box<dyn Error>> {
     if !(wez_step > 0.0 && wez_step.is_finite()) {
         return Err("--wez-step must be a positive, finite distance".into());
@@ -708,6 +714,8 @@ pub fn compute_wez(
         cd_scale,
         cant_angle: cant.to_radians(),
         sight_offset_lateral_m,
+        // Validated by its type; the baseline, every sample and the attribution read it here.
+        humidity_percent: humidity.percent(),
         ..Default::default()
     };
     let base_wind = WindConditions {
@@ -1295,6 +1303,85 @@ mod wez_tests {
         }
     }
 
+    /// Humidity train (plan C4): the sweep's humidity is a validated [`RelativeHumidity`] that
+    /// reaches the flight AND the attribution, and the attribution echoes exactly the value the
+    /// sweep flew (0.49.0's sweep could fly only the default).
+    #[test]
+    fn the_sweep_flies_and_attributes_the_humidity_it_is_given() {
+        let sweep = |humidity: RelativeHumidity| {
+            compute_wez(
+                823.0,
+                0.0,
+                0.243,
+                0.0113,
+                0.00782,
+                20,
+                5.0,
+                0.0001,
+                0.005,
+                1.0,
+                0.05,
+                3.0,
+                90.0,
+                0.0,
+                1.5,
+                TargetSizeMetric::Rect {
+                    width_m: 0.5,
+                    height_m: 0.75,
+                },
+                300.0,
+                400.0,
+                100.0,
+                DragModel::G7,
+                None,
+                1.0,
+                0.0,
+                0.0,
+                humidity,
+            )
+            .expect("compute_wez")
+        };
+        let shares = |result: &WezResult| {
+            result
+                .rows
+                .iter()
+                .map(|row| {
+                    [
+                        row.p_hit,
+                        row.wind_call_share,
+                        row.mv_sd_share,
+                        row.other_share,
+                    ]
+                })
+                .map(|row| row.map(f64::to_bits))
+                .collect::<Vec<_>>()
+        };
+        let dry = sweep(RelativeHumidity::DRY);
+        let saturated = sweep(RelativeHumidity::try_percent(100.0).unwrap());
+        assert!(dry.rows.iter().all(|row| !row.attribution_unavailable));
+        assert_ne!(
+            shares(&dry),
+            shares(&saturated),
+            "0 % and 100 % sweep the same air"
+        );
+
+        // The attribution's request carries the flown percent, as the wire's fraction.
+        for percent in [0.0, 7.0, 30.0, 55.0, 100.0] {
+            let humidity = RelativeHumidity::try_percent(percent).unwrap();
+            let inputs = BallisticInputs {
+                humidity_percent: humidity.percent(),
+                ..test_base_inputs()
+            };
+            let resolved = wez_resolved_request(&inputs, &WindConditions::default(), 2000.0)
+                .expect("a built-in model");
+            assert_eq!(
+                resolved.atmosphere.relative_humidity.to_bits(),
+                humidity.fraction().to_bits(),
+                "{percent} %"
+            );
+        }
+    }
+
     fn assert_builtin_drag_model_attribution_available(model: DragModel) {
         let result = compute_wez(
             823.0,
@@ -1324,6 +1411,7 @@ mod wez_tests {
             1.0,
             0.0,
             0.0,
+            RelativeHumidity::DEFAULT,
         )
         .expect("compute_wez");
         let row = result.rows.first().expect("one row");
@@ -1417,6 +1505,7 @@ mod wez_tests {
             1.0,
             0.0,
             0.0,
+            RelativeHumidity::DEFAULT,
         )
         .expect("compute_wez");
         let row = result.rows.first().expect("one row");
@@ -1476,6 +1565,7 @@ mod wez_tests {
             1.0,  // cd_scale
             0.0,  // cant
             0.0,  // sight_offset_lateral_m
+            RelativeHumidity::DEFAULT,
         )
         .expect("compute_wez");
 

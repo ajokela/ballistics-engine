@@ -29,7 +29,9 @@ const DEFAULT_SIGHT_HEIGHT_M: f64 = 0.05;
 const DEFAULT_MUZZLE_HEIGHT_M: f64 = 0.0;
 const DEFAULT_TWIST_RATE_M_PER_TURN: f64 = 0.3048;
 const DEFAULT_ALTITUDE_M: f64 = 0.0;
-const DEFAULT_RELATIVE_HUMIDITY: f64 = 0.5;
+/// An omitted `$.atmosphere.relative_humidity`: the one default, `RelativeHumidity::DEFAULT`
+/// (`DEFAULT_HUMIDITY_PERCENT`), as the wire's fraction, exactly 0.5.
+const DEFAULT_RELATIVE_HUMIDITY: f64 = RelativeHumidity::DEFAULT.fraction();
 const DEFAULT_TIME_STEP_S: f64 = 0.001;
 const DEFAULT_SAMPLE_INTERVAL_M: f64 = 10.0;
 const DEFAULT_GROUND_THRESHOLD_M: f64 = -100.0;
@@ -1455,7 +1457,7 @@ pub(crate) fn resolve_atmosphere(
         atmosphere.relative_humidity,
         DEFAULT_RELATIVE_HUMIDITY,
         "$.atmosphere.relative_humidity",
-        "Relative humidity defaulted to 0.5.",
+        format!("Relative humidity defaulted to {DEFAULT_RELATIVE_HUMIDITY}."),
         assumptions,
     );
 
@@ -2199,7 +2201,7 @@ fn literal_default(
     value: Option<f64>,
     default: f64,
     path: &'static str,
-    message: &'static str,
+    message: impl Into<String>,
     assumptions: &mut Vec<SolveNoticeV1>,
 ) -> f64 {
     match value {
@@ -2379,6 +2381,44 @@ mod tests {
         assert!((prepared.inputs.twist_rate - 12.0).abs() < 1.0e-12);
         assert_eq!(prepared.atmosphere.humidity, 50.0);
         assert_eq!(prepared.inputs.humidity_percent, 50.0);
+    }
+
+    /// Humidity-consistency train (plan C4, H8): an omitted `$.atmosphere.relative_humidity` is
+    /// the one default, `RelativeHumidity::DEFAULT`, in the wire's unit; the resolved echo, the
+    /// percent that flies and the notice all state that value, and the notice keeps its 0.49.0
+    /// bytes.
+    #[test]
+    fn an_omitted_relative_humidity_is_the_one_default_and_its_notice_says_so() {
+        let prepared = prepare_request(&minimal_request()).expect("valid request");
+        let resolved = prepared.resolved_request.atmosphere.relative_humidity;
+        assert_eq!(
+            resolved.to_bits(),
+            RelativeHumidity::DEFAULT.fraction().to_bits()
+        );
+        assert_eq!(resolved.to_bits(), 0.5_f64.to_bits());
+        assert_eq!(
+            prepared.atmosphere.humidity.to_bits(),
+            crate::atmosphere::DEFAULT_HUMIDITY_PERCENT.to_bits()
+        );
+        assert_eq!(
+            prepared.inputs.humidity_percent.to_bits(),
+            crate::atmosphere::DEFAULT_HUMIDITY_PERCENT.to_bits()
+        );
+        let notices = prepared
+            .assumptions
+            .iter()
+            .filter(|notice| notice.path.as_deref() == Some("$.atmosphere.relative_humidity"))
+            .collect::<Vec<_>>();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].code, ASSUMPTION_DEFAULT_APPLIED);
+        assert_eq!(notices[0].message, "Relative humidity defaulted to 0.5.");
+        assert_eq!(
+            notices[0].message,
+            format!(
+                "Relative humidity defaulted to {}.",
+                RelativeHumidity::DEFAULT.fraction()
+            )
+        );
     }
 
     #[test]

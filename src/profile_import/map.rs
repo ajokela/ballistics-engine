@@ -285,6 +285,12 @@ pub fn map_a7p_to_profile(
         format!("{:.1} hPa", src.air_pressure_hpa),
         "pressure",
     );
+    // The engine's one humidity validator (plan C4): a malformed file's humidity is refused at
+    // import, like a malformed CUSTOM curve, rather than saved and refused at every later load.
+    // An ABSENT field is 0 %, not the engine's 50 % default: a proto3 int32 cannot tell absent
+    // from 0, and the format writes 0 % by omitting the field.
+    crate::atmosphere::RelativeHumidity::try_percent(src.air_humidity_pct)
+        .map_err(|error| error.at_field("c_zero_air_humidity").to_string())?;
     push(
         "c_zero_air_humidity",
         format!("{:.0} %", src.air_humidity_pct),

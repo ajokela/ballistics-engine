@@ -606,22 +606,18 @@ fn with_density_ratio_refuses_ratios_outside_zero_to_two() {
 }
 
 #[test]
-fn legacy_clamped_station_keeps_0_49_trajectory_solver_semantics() {
-    // Until TrajectorySolver::validate_for_solve refuses what StationAir::new refuses, the
-    // solver resolves its station through this crate-private constructor. It must give exactly
-    // what 0.49.0's resolved_atmosphere gave: calculate_atmosphere at the RAW humidity, whose
-    // own guard clamps the RH and caps x_v.
-    let cases = [
+fn the_solver_station_is_station_air_new_and_refuses_what_0_49_clamped() {
+    // TrajectorySolver resolves its station through StationAir::new (plan C4), the interim
+    // crate-private `legacy_clamped` constructor is gone. A valid station is still exactly
+    // calculate_atmosphere at the given humidity, to the bit; the inputs 0.49.0 flew clamped or
+    // capped (an RH outside [0, 100], impossible air, a pressure of 0) are refused instead.
+    for (altitude_m, temp_c, pressure_hpa, humidity) in [
         (0.0, 15.0, 1013.25, 50.0),
         (1_500.0, 25.0, 830.0, 0.0),
-        (0.0, 15.0, 1013.25, 150.0),
-        (0.0, 15.0, 1013.25, -5.0),
-        (0.0, 100.0, 1013.25, 100.0),
-        (0.0, 15.0, 0.0, 50.0),
-    ];
-    for (altitude_m, temp_c, pressure_hpa, humidity) in cases {
-        let station = StationAir::legacy_clamped(altitude_m, temp_c, pressure_hpa, humidity)
-            .expect("finite humidity");
+        (0.0, 30.0, 1013.25, 100.0),
+    ] {
+        let station = StationAir::new(altitude_m, temp_c, pressure_hpa, rh(humidity))
+            .expect("a valid station");
         let (density, sound) =
             calculate_atmosphere(altitude_m, Some(temp_c), Some(pressure_hpa), humidity);
         assert_eq!(
@@ -633,13 +629,16 @@ fn legacy_clamped_station_keeps_0_49_trajectory_solver_semantics() {
             bits(&[density, sound, density / 1.225]),
             "{temp_c} C {pressure_hpa} hPa {humidity}%"
         );
-        assert_eq!(
-            station.humidity().percent().to_bits(),
-            humidity.clamp(0.0, 100.0).to_bits()
-        );
+        assert_eq!(station.humidity().percent().to_bits(), humidity.to_bits());
     }
-    let error = StationAir::legacy_clamped(0.0, 15.0, 1013.25, f64::NAN).expect_err("NaN RH");
-    assert_eq!(error.reason(), AtmosphereErrorReason::NotFinite);
+    for humidity in [150.0, -5.0, f64::NAN] {
+        let error = RelativeHumidity::try_percent(humidity).expect_err("not a humidity");
+        assert_eq!(error.field(), "humidity_percent", "{humidity}");
+    }
+    let error = StationAir::new(0.0, 100.0, 1013.25, rh(100.0)).expect_err("impossible air");
+    assert_eq!(error.reason(), AtmosphereErrorReason::ImpossibleAir);
+    let error = StationAir::new(0.0, 15.0, 0.0, rh(50.0)).expect_err("no pressure");
+    assert_eq!(error.reason(), AtmosphereErrorReason::NonPositivePressure);
 }
 
 // =================================================================================================
@@ -1223,4 +1222,50 @@ fn the_deprecated_dry_lookup_is_the_shared_composition_at_zero_humidity() {
             );
         }
     }
+}
+
+#[test]
+fn a_terminal_humidity_flag_parses_through_the_one_validator() {
+    // The WASM terminal's parser for every humidity flag (plan C4): a percent in [0, 100],
+    // refused (never clamped) outside it, with the flag named in the error.
+    for (raw, percent) in [("0", 0.0), ("100", 100.0), ("37.5", 37.5), (" 50 ", 50.0)] {
+        assert_eq!(
+            parse_humidity_percent_arg("--humidity", raw)
+                .unwrap()
+                .to_bits(),
+            f64::to_bits(percent),
+            "{raw}"
+        );
+    }
+    // -0.0 is dry air with positive-zero bits, as everywhere else.
+    assert_eq!(
+        parse_humidity_percent_arg("--humidity", "-0")
+            .unwrap()
+            .to_bits(),
+        0.0f64.to_bits()
+    );
+    assert_eq!(
+        parse_humidity_percent_arg("--humidity", "150").unwrap_err(),
+        "--humidity = 150: relative humidity must be a percent from 0 to 100"
+    );
+    assert_eq!(
+        parse_humidity_percent_arg("--zero-humidity", "-5").unwrap_err(),
+        "--zero-humidity = -5: relative humidity must be a percent from 0 to 100"
+    );
+    for raw in ["100.0001", "-0.0001", "1e3"] {
+        let error = parse_humidity_percent_arg("--humidity", raw).unwrap_err();
+        assert!(
+            error.starts_with("--humidity = ") && error.contains("percent from 0 to 100"),
+            "{raw}: {error}"
+        );
+    }
+    for raw in ["nan", "inf", "-inf"] {
+        let error = parse_humidity_percent_arg("--humidity", raw).unwrap_err();
+        assert!(error.ends_with("must be finite"), "{raw}: {error}");
+    }
+    let error = parse_humidity_percent_arg("--humidity", "fifty").unwrap_err();
+    assert!(
+        error.contains("--humidity = fifty: not a number"),
+        "{error}"
+    );
 }

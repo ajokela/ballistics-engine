@@ -1,7 +1,7 @@
 // CLI API module - provides simplified interfaces for command-line tool
 use crate::atmosphere::{
-    KernelAtmosphere, PressureReferenceMode, StationAir, StationAtmospherePresence,
-    DEFAULT_HUMIDITY_PERCENT,
+    AtmosphereError, KernelAtmosphere, PressureReferenceMode, RelativeHumidity, StationAir,
+    StationAtmospherePresence, DEFAULT_HUMIDITY_PERCENT,
 };
 use crate::cluster_bc::ClusterBCDegradation;
 use crate::gravity::Gravity;
@@ -1768,8 +1768,16 @@ impl TrajectorySolver {
 
         require_finite("atmosphere.temperature", self.atmosphere.temperature)?;
         require_finite("atmosphere.pressure", self.atmosphere.pressure)?;
-        require_finite("atmosphere.humidity", self.atmosphere.humidity)?;
         require_finite("atmosphere.altitude", self.atmosphere.altitude)?;
+        // Humidity train (plan C4): one validator and one impossible-air rule. The station RH
+        // goes through `RelativeHumidity` (a percent in [0, 100], refused and never clamped),
+        // the resolved station must be air that exists (`StationAir::new`, the predicate
+        // `atmosphere.density_altitude` applies), and so must every downrange zone.
+        self.station_air()?;
+        if let Some(sock) = &self.atmo_sock {
+            sock.validate()
+                .map_err(|error| BallisticsError::from(error.to_string()))?;
+        }
 
         require_positive("max_range", self.max_range)?;
         // Adaptive RK45 owns its step size; the caller-provided fixed step is used only by Euler
@@ -2222,18 +2230,25 @@ impl TrajectorySolver {
     /// [`crate::atmosphere::air_at_with_gravity`] lookup and is the reference for station Mach.
     ///
     /// Its density and sound speed are `calculate_atmosphere` at the resolved station, as they
-    /// always were. Until `validate_for_solve` refuses what `StationAir::new` refuses, it keeps
-    /// 0.49.0's handling of out-of-range input ([`StationAir::legacy_clamped`]): an RH outside
-    /// [0, 100] flies clamped and impossible air flies capped.
+    /// always were, through [`StationAir::new`]: so an RH outside [0, 100] (or not finite) is
+    /// refused, never clamped, and so is air that cannot exist or a resolved station pressure
+    /// at or below 0. `validate_for_solve` runs this before any integration. Errors name the
+    /// `atmosphere.*` field; a temperature or pressure error quotes the RESOLVED station value.
     fn station_air(&self) -> Result<StationAir, BallisticsError> {
+        let at_atmosphere_field = |error: AtmosphereError| {
+            let field = match error.field() {
+                "temperature_c" => "atmosphere.temperature",
+                "pressure_hpa" => "atmosphere.pressure",
+                "altitude_m" => "atmosphere.altitude",
+                _ => "atmosphere.humidity",
+            };
+            BallisticsError::from(error.at_field(field).to_string())
+        };
+        let humidity =
+            RelativeHumidity::try_percent(self.atmosphere.humidity).map_err(at_atmosphere_field)?;
         let (temp_c, pressure_hpa) = self.resolved_station_conditions();
-        StationAir::legacy_clamped(
-            self.atmosphere.altitude,
-            temp_c,
-            pressure_hpa,
-            self.atmosphere.humidity,
-        )
-        .map_err(|error| BallisticsError::from(error.at_field("atmosphere.humidity").to_string()))
+        StationAir::new(self.atmosphere.altitude, temp_c, pressure_hpa, humidity)
+            .map_err(at_atmosphere_field)
     }
 
     /// `(density, speed_of_sound, temp_c, pressure_hpa)` of [`Self::station_air`], the shape the
@@ -5235,6 +5250,9 @@ pub fn estimate_bc_fit(
 /// [`estimate_bc_fit`] knowing which of `atmosphere`'s temperature and pressure the caller
 /// supplied (0.49.0): a supplied value is the air the data was shot in, whatever its value.
 /// [`StationAtmospherePresence::NEITHER`] is bit-identical to [`estimate_bc_fit`].
+///
+/// An out-of-range humidity, or air that cannot exist, is refused before the search with the
+/// solver's own field-named error (0.50.0), not reported as data no BC fits.
 #[allow(clippy::too_many_arguments)] // Mirrors estimate_bc_fit plus the presence.
 pub fn estimate_bc_fit_with_station_presence(
     velocity: f64,
@@ -5253,6 +5271,17 @@ pub fn estimate_bc_fit_with_station_presence(
             "No data points provided for BC estimation.".to_string(),
         ));
     }
+    // The fit's air goes through the solver's own station check once, up front (humidity train,
+    // plan C4). The sweep below drops every trial that fails, so without this an out-of-range
+    // humidity or air that cannot exist would come back as "Unable to estimate BC from provided
+    // data", which blames the data for the air.
+    TrajectorySolver::new_with_station_presence(
+        BallisticInputs::default(),
+        WindConditions::default(),
+        atmosphere.clone(),
+        station_presence,
+    )
+    .station_air()?;
     let max_dist = points.iter().map(|(d, _)| *d).fold(0.0_f64, f64::max);
     // For a zeroed drop fit, drop is below the horizontal LOS which sits `sight_height`
     // above the bore at the muzzle: drop = sight_height - y. Bore-referenced fits use 0.
@@ -11143,7 +11172,8 @@ mod boundary_layer_shear_height_tests {
 mod station_air_tests {
     //! TrajectorySolver's station air comes from `StationAir`, and its per-step air from
     //! `atmosphere::air_at_with_gravity`. The end-to-end bits are pinned by the S1
-    //! byte-identity files; these check the station itself and the interim clamp.
+    //! byte-identity files; these check the station itself and that an out-of-range humidity
+    //! is refused, never clamped.
     use super::*;
     use crate::atmosphere::{calculate_atmosphere, resolve_station_conditions_with_presence};
 
@@ -11232,14 +11262,13 @@ mod station_air_tests {
         }
     }
 
-    /// Interim, 0.49.0 behaviour: an out-of-range station RH still flies clamped into
-    /// [0, 100], exactly as `calculate_atmosphere` and `moist_speed_of_sound` clamp it
-    /// internally. The humidity train's validation step replaces this with an error from
-    /// `validate_for_solve`; this test pins that the single-source refactor did not change it
-    /// early.
+    /// An out-of-range station RH is REJECTED, never clamped (humidity train, plan C4). 0.49.0
+    /// flew 150 % as 100 % and -5 % as 0 %; `validate_for_solve` now refuses both, and the
+    /// station itself (`station_air`) refuses them through `StationAir::new` too, so no solve
+    /// path can fly an unvalidated humidity.
     #[test]
-    fn out_of_range_station_humidity_still_flies_the_0_49_clamp() {
-        let solve = |humidity: f64| {
+    fn out_of_range_station_humidity_is_rejected_never_clamped() {
+        for humidity in [150.0, -5.0, 100.0001, -0.0001, f64::NAN, f64::INFINITY] {
             let mut solver = solver(
                 AtmosphericConditions {
                     humidity,
@@ -11249,33 +11278,31 @@ mod station_air_tests {
                 StationAtmospherePresence::BOTH,
             );
             solver.set_max_range(600.0);
-            assert_eq!(
-                solver
-                    .station_air()
-                    .expect("finite RH")
-                    .humidity()
-                    .percent()
-                    .to_bits(),
-                humidity.clamp(0.0, 100.0).to_bits()
+            let station = solver
+                .station_air()
+                .expect_err(&format!("RH {humidity}: the station refuses it"));
+            assert!(
+                station.to_string().contains("atmosphere.humidity"),
+                "{station}"
             );
-            solver.solve().expect("0.49.0 flies a clamped RH")
-        };
-        for (raw, clamped) in [(150.0, 100.0), (-5.0, 0.0)] {
-            let (a, b) = (solve(raw), solve(clamped));
-            assert_eq!(a.points.len(), b.points.len());
-            let last = |r: &TrajectoryResult| {
-                let p = r.points.last().unwrap();
-                [
-                    p.time,
-                    p.position.x,
-                    p.position.y,
-                    p.position.z,
-                    p.velocity_magnitude,
-                    r.station_speed_of_sound_mps,
-                ]
-                .map(f64::to_bits)
-            };
-            assert_eq!(last(&a), last(&b), "RH {raw} vs {clamped}");
+            let solve = solver
+                .solve()
+                .expect_err(&format!("RH {humidity}: the solve refuses it"));
+            assert!(solve.to_string().contains("atmosphere.humidity"), "{solve}");
+        }
+        // The ends of the range are humidities and fly as given, with no clamp in between.
+        for humidity in [0.0, 100.0] {
+            let solver = solver(
+                AtmosphericConditions {
+                    humidity,
+                    temperature: 30.0,
+                    ..AtmosphericConditions::default()
+                },
+                StationAtmospherePresence::BOTH,
+            );
+            let station = solver.station_air().expect("a valid station");
+            assert_eq!(station.humidity().percent().to_bits(), humidity.to_bits());
+            solver.solve().expect("a valid humidity flies");
         }
     }
 }

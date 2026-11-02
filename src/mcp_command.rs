@@ -546,7 +546,15 @@ fn solve_input_schema() -> Value {
                     "altitude_m": {"type": "number"},
                     "temperature_k": {"type": "number"},
                     "pressure_pa": {"type": "number"},
-                    "relative_humidity": {"type": "number"},
+                    "relative_humidity": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1,
+                        "description": format!(
+                            "relative humidity as a FRACTION 0-1 (0.5 = 50%); omitted means {}",
+                            crate::RelativeHumidity::DEFAULT.fraction()
+                        )
+                    },
                     "latitude_rad": {"type": "number"}
                 }
             },
@@ -771,6 +779,40 @@ mod effect_schema_parity {
         assert_eq!(
             published, accepted,
             "the MCP effects schema and the solve-json effects allowlist have diverged"
+        );
+    }
+}
+
+#[cfg(test)]
+mod humidity_schema {
+    use super::*;
+
+    /// Humidity-consistency train (plan C4): the one FRACTION on the SI wire says so in the
+    /// schema an MCP client reads, with the bounds the decoder enforces. A bare `number` let a
+    /// model send `50` meaning 50 % and learn its unit only from the refusal.
+    #[test]
+    fn relative_humidity_publishes_its_unit_and_bounds() {
+        let schema = solve_input_schema();
+        let humidity = &schema["properties"]["atmosphere"]["properties"]["relative_humidity"];
+        assert_eq!(humidity["type"], "number");
+        assert_eq!(humidity["minimum"], 0);
+        assert_eq!(humidity["maximum"], 1);
+        let description = humidity["description"].as_str().unwrap_or_default();
+        assert!(
+            description.contains("FRACTION") && description.contains("0.5 = 50%"),
+            "the description names the unit: {description:?}"
+        );
+        // The stated default is the one default, in the wire's unit, with its 0.49.0 bytes.
+        assert!(
+            description.ends_with("omitted means 0.5"),
+            "the description names the default: {description:?}"
+        );
+        assert!(
+            description.ends_with(&format!(
+                "omitted means {}",
+                crate::RelativeHumidity::DEFAULT.fraction()
+            )),
+            "the stated default is RelativeHumidity::DEFAULT: {description:?}"
         );
     }
 }

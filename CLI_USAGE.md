@@ -679,6 +679,16 @@ dropping them on every unrelated edit would be hostile. `trajectory --saved-prof
 `come-ups --profile` automatically apply a profile's DSF table to the solved drop and
 print a table-output-only note; see [DSF Truing](#dsf-drop-scale-factor-truing).
 
+**A re-save never silently loses stored data (0.50.0).** The carry-forward reads the stored
+file even when a load would refuse one of its values. For example, a stored humidity outside
+0 to 100 % fails to load, and the error names the file to edit. A re-save replaces that
+humidity with its own `--humidity` and keeps the DSF table, zero POI, tracking CFs, zero
+sets, reticle, click graduations and turret fields. Before 0.50.0, a profile that failed to
+load looked absent to the re-save, which then dropped all of them. Two cases now refuse the
+save instead, and leave the file as it was: a stored profile that cannot be read or parsed
+(repair it, or `profile delete` it first), and a stored `elevation_cf`/`windage_cf` outside
+its band (edit it first, because every load would refuse it).
+
 **Turret click graduations (MBA-1355).** `profile save` also accepts
 `--elevation-click <SIZE><UNIT>` and `--windage-click <SIZE><UNIT>` (e.g. `0.1mil` or
 `0.25moa`), stored as the profile's `elevation_click`/`windage_click` fields and shown by
@@ -2170,8 +2180,15 @@ Statistical analysis with parameter variations:
   --angle-std 0.5      # Angle std dev
   --bc-std 0.01        # BC std dev
   --wind-std 2         # Wind std dev
+  --humidity 80        # Relative humidity, percent 0-100 (default 50)
   --target-distance 600 # For hit probability
 ```
+
+`--humidity` (0.50.0) is the relative humidity every simulated shot flies, in percent from
+0 to 100 (default 50, the same default as every other command). It reaches the fixed-count
+run, `--adaptive` and `--wez` alike; the rest of the air is the 15 °C / 1013.25 hPa sea-level
+standard. Before 0.50.0 `monte-carlo` had no `--humidity` and always flew 50 %. As on every
+command, a value outside 0 to 100 is refused, never clamped.
 
 ### Confidence-Controlled Sampling (`--adaptive`) — MBA-1352
 

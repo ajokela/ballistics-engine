@@ -567,3 +567,231 @@ fn no_production_path_converts_a_humidity_by_hand() {
         offenders.join("\n")
     );
 }
+
+/// The byte range of the expression a literal at `at` belongs to: its field, argument list or
+/// statement. Balanced `()`/`[]` groups are read as one unit; a literal inside a call's
+/// arguments belongs to the whole call (`map_or(50.0, |p| p.humidity)`); the expression ends at
+/// a `,`, `;`, `{` or `}` outside every group; and a block's tail expression
+/// (`fn default_humidity() -> f64 { 50.0 }`) includes the item header before the block.
+fn enclosing_expression(code: &str, at: usize) -> (usize, usize) {
+    let b = code.as_bytes();
+    // The outermost group enclosing `at` within its statement: the anchor.
+    let (mut anchor_left, mut depth, mut i) = (at, 0i32, at);
+    while i > 0 {
+        i -= 1;
+        match b[i] {
+            b')' | b']' => depth += 1,
+            b'(' | b'[' if depth > 0 => depth -= 1,
+            b'(' | b'[' => anchor_left = i,
+            b';' | b'{' | b'}' if depth == 0 => break,
+            _ => {}
+        }
+    }
+    let matching_close = |open: usize| {
+        let mut depth = 0i32;
+        for (j, &c) in b.iter().enumerate().skip(open) {
+            match c {
+                b'(' | b'[' => depth += 1,
+                b')' | b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return j + 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        b.len()
+    };
+    let anchor_right = if anchor_left < at {
+        matching_close(anchor_left)
+    } else {
+        at
+    };
+    // Outward from the anchor, groups opaque, to the delimiters.
+    let (mut start, mut left_stop, mut depth, mut i) = (0, b'\0', 0i32, anchor_left);
+    while i > 0 {
+        i -= 1;
+        match b[i] {
+            b')' | b']' => depth += 1,
+            b'(' | b'[' => depth -= 1,
+            c @ (b',' | b';' | b'{' | b'}') if depth == 0 => {
+                start = i + 1;
+                left_stop = c;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let (mut end, mut right_stop, mut depth) = (b.len(), b'\0', 0i32);
+    for (j, &c) in b.iter().enumerate().skip(anchor_right) {
+        match c {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b',' | b';' | b'{' | b'}' if depth <= 0 => {
+                end = j;
+                right_stop = c;
+                break;
+            }
+            _ => {}
+        }
+    }
+    if left_stop == b'{' && right_stop == b'}' {
+        start = code[..start - 1]
+            .rfind([';', '{', '}'])
+            .map_or(0, |n| n + 1);
+    }
+    (start, end)
+}
+
+/// The literals a humidity default is written as: 50 % as a percent (`50.0`), or as the SI
+/// wire's fraction (`0.5`, `0.50`).
+const HUMIDITY_DEFAULT_SPELLINGS: [&str; 3] = ["50.0", "0.5", "0.50"];
+
+/// Offsets of a humidity-default literal ([`HUMIDITY_DEFAULT_SPELLINGS`], no further digits) in
+/// `code` whose expression (see [`enclosing_expression`]) names a humidity, in offset order.
+fn humidity_default_literals(code: &str) -> Vec<usize> {
+    let mut found: Vec<usize> = HUMIDITY_DEFAULT_SPELLINGS
+        .iter()
+        .flat_map(|spelling| literal(code, spelling))
+        .filter(|&at| {
+            let (start, end) = enclosing_expression(code, at);
+            code[start..end].to_ascii_lowercase().contains("humid")
+        })
+        .collect();
+    found.sort_unstable();
+    found
+}
+
+#[test]
+fn the_default_finder_finds_humidity_defaults_only() {
+    for code in [
+        "let mut humidity = 50.0;",
+        "let h = humidity.or_else(|| p.humidity)\n    .unwrap_or(50.0);",
+        "saved.map_or(50.0, |p| p.humidity)",
+        "fn default_humidity() -> f64 {\n    50.0\n}",
+        "Inputs { humidity_percent: 50.0, x: 1.0 }",
+        "csv(&data, &[\"H\"], saved.map_or(50.0, |p| p.humidity))",
+        "let mut humidity: f64 = 50.0;",
+        // A fraction default (solve v1's SI wire) is the same default in the other unit.
+        "const DEFAULT_RELATIVE_HUMIDITY: f64 = 0.5;",
+        "let rh = request.relative_humidity.unwrap_or(0.5);",
+        "AtmosphereV1 { relative_humidity: 0.50, x: 1.0 }",
+        "fn default_humidity_fraction() -> f64 {\n    0.5\n}",
+    ] {
+        assert_eq!(humidity_default_literals(code).len(), 1, "{code}");
+    }
+    for code in [
+        "let wind = 50.0; let humidity = h;",
+        "let humidity = 150.0;",
+        "let x = 50.05; let humidity = 1.0;",
+        "fn f() { 50.0 } fn humidity() {}",
+        "Inputs { tipoff_decay_distance: 50.0, humidity_percent: h }",
+        "call(a, 50.0); let humidity = h;",
+        "let half = 0.5; let humidity = h;",
+        "let humidity = 0.55;",
+        "let humidity = 10.5;",
+        "let humidity = 100.5;",
+        "let humidity = 0.505;",
+        "Atmo { lateral: 0.5, relative_humidity: h }",
+        "const DEFAULT_RELATIVE_HUMIDITY: f64 = RelativeHumidity::DEFAULT.fraction();",
+    ] {
+        assert!(humidity_default_literals(code).is_empty(), "{code}");
+    }
+}
+
+#[test]
+fn every_production_humidity_default_is_the_one_constant() {
+    // Plan C4, H8: one default. An omitted humidity means `DEFAULT_HUMIDITY_PERCENT` (and
+    // `RelativeHumidity::DEFAULT`) on every surface, so no production line outside
+    // src/atmosphere.rs writes its own 50.0 for one, nor its own 0.5 for the SI wire's fraction
+    // (solve v1's default is `RelativeHumidity::DEFAULT.fraction()`). (clap's
+    // `default_value = "50.0"` strings are string literals, blanked here; `src/main.rs`'s
+    // `humidity_flag_tests` pins them.)
+    let mut offenders = Vec::new();
+    for (path, text, production) in production_sources() {
+        for at in humidity_default_literals(&production) {
+            let line = line_of(&text, at);
+            let raw = text.lines().nth(line - 1).unwrap_or("").trim();
+            offenders.push(format!("{path}:{line}: {raw}"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a humidity default is a bare 50.0 or 0.5; use DEFAULT_HUMIDITY_PERCENT, or \
+         RelativeHumidity::DEFAULT.fraction() for a fraction:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn no_production_path_clamps_a_humidity_into_range() {
+    // Plan C4, H9: out-of-range input is REJECTED with a field-named error, never clamped. The
+    // only clamps left are the total-function guards inside src/atmosphere.rs, behind validated
+    // input and the legacy wrappers.
+    let mut offenders = Vec::new();
+    for (path, text, production) in production_sources() {
+        for (index, line) in production.lines().enumerate() {
+            let lower = line.to_ascii_lowercase();
+            if !lower.contains("humid") {
+                continue;
+            }
+            let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+            if compact.contains("clamp(0.0,100.0)")
+                || compact.contains(".min(100.0)")
+                || compact.contains(".max(0.0).min(")
+            {
+                let raw = text.lines().nth(index).unwrap_or("").trim();
+                offenders.push(format!("{path}:{}: {raw}", index + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a humidity is clamped; refuse it through RelativeHumidity instead:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn every_wasm_terminal_humidity_flag_goes_through_the_one_validator() {
+    // Plan C4, H9: 0.49.0's browser terminal range-checked `--humidity` only in true-velocity
+    // and true-wind; every other command flew 150 % clamped. Every `--humidity`-family arm in
+    // src/wasm.rs must parse its value with `humidity_value`, the terminal's wrapper over
+    // `atmosphere::parse_humidity_percent_arg` (the one validator, natively tested).
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let text = fs::read_to_string(root.join("src/wasm.rs")).expect("read src/wasm.rs");
+    let lines: Vec<&str> = text.lines().collect();
+    let mut arms = 0;
+    let mut offenders = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        let is_arm = (trimmed.starts_with("\"--humidity\"")
+            || trimmed.starts_with("\"--zero-humidity\""))
+            && trimmed.contains("=>");
+        if !is_arm {
+            continue;
+        }
+        arms += 1;
+        let body = lines[index..(index + 10).min(lines.len())].join("\n");
+        let arm_end = body[1..]
+            .find("\n                \"-")
+            .map_or(body.len(), |n| n + 1);
+        if !body[..arm_end].contains("humidity_value(") {
+            offenders.push(format!("src/wasm.rs:{}: {}", index + 1, trimmed));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a WASM humidity flag is parsed without the one validator:\n{}",
+        offenders.join("\n")
+    );
+    // trajectory --humidity and --zero-humidity, zero, lead, monte-carlo, true-velocity,
+    // true-wind and estimate-bc.
+    assert!(arms >= 8, "sanity: found {arms} humidity arms");
+    let shared = calls(&text, "parse_humidity_percent_arg").len();
+    assert!(
+        shared >= 1,
+        "humidity_value must call parse_humidity_percent_arg"
+    );
+}

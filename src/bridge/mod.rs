@@ -43,8 +43,9 @@
 //! (announced in `assumptions`) and the QNH reduction are therefore the solve's: the air
 //! described is the air solved through. On top of that it refuses air the solve does not yet
 //! refuse — a temperature outside −100..100 °C, a pressure or density altitude outside the
-//! troposphere, a humidity beyond the total pressure — which is what °C sent as kelvin or hPa
-//! sent as pascals looks like.
+//! troposphere — which is what °C sent as kelvin or hPa sent as pascals looks like. A humidity
+//! beyond the total pressure (air that cannot exist) is refused by both, by one rule
+//! (`StationAir::new`'s).
 //!
 //! The result reports pressure altitude, the CIPM-2007 air density the solver uses, and
 //! density altitude under TWO names, never one: `faa_rule` (NWS pressure altitude plus the

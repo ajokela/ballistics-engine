@@ -47,7 +47,7 @@ pub struct TrajectoryRequest {
     /// [`Self::temperature_supplied`]. Sent as `pressure_supplied=true`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pressure_supplied: Option<bool>,
-    /// Humidity percentage 0-100 (optional)
+    /// Relative humidity, PERCENT 0-100 (optional). Sent at full precision.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub humidity: Option<f64>,
     /// Altitude in meters (optional)
@@ -359,8 +359,10 @@ impl ApiClient {
         if request.pressure_supplied == Some(true) {
             req = req.query("pressure_supplied", "true");
         }
+        // Full precision, the shortest decimal that round-trips (humidity train, plan C4): a
+        // relative humidity is a percent on both sides, and `{:.1}` sent 37.375 as 37.4.
         if let Some(humidity) = request.humidity {
-            req = req.query("humidity", format!("{:.1}", humidity));
+            req = req.query("humidity", humidity.to_string());
         }
         if let Some(altitude) = request.altitude {
             let altitude_ft = altitude / 0.3048; // meters to feet

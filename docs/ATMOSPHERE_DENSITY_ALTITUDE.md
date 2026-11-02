@@ -289,8 +289,9 @@ Feature-detect before calling: an engine built before this command answers `unkn
 - It also refuses air that cannot exist, which is also what unit mistakes produce: a temperature
   outside 173.15–373.15 K (−100 °C to 100 °C, where the engine's humid-air formulas are
   defined), and a relative humidity that would need more water-vapor pressure than the air's
-  total pressure. `solve` does not yet make these checks; here they are what stands between a
-  unit mistake and a confident wrong number.
+  total pressure. `solve` does not yet make the temperature check; here it is what stands
+  between a unit mistake and a confident wrong number. Since 0.50.0 `solve` refuses the
+  impossible humidity itself, by the same rule.
 - Each refusal is located at the field to blame — `temperature_k`, `pressure_pa` (or
   `altitude_m`, when the pressure was defaulted or a plausible QNH was reduced at an impossible
   altitude), `relative_humidity` — except a density altitude out of range with every field

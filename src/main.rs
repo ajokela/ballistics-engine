@@ -108,7 +108,8 @@ use ballistics_engine::recoil::{
 use ballistics_engine::{
     run_monte_carlo_adaptive_seeded, trajectory_sampling, AdaptiveMcReportV1,
     AtmosphericConditions, BCSegmentData, BallisticInputs, BcReferenceStandard, DragModel,
-    McConvergence, McStopReason, MonteCarloParams, TrajectorySolver, WindConditions,
+    McConvergence, McStopReason, MonteCarloParams, RelativeHumidity, TrajectorySolver,
+    WindConditions, DEFAULT_HUMIDITY_PERCENT,
 };
 // 0.33.0 decision-support Task 8: HoldCurve (mark-to-range/bdc-match/optimal-zero/reticle
 // hold --range) and the sampled-trajectory helpers it solves through, promoted into the
@@ -1331,6 +1332,11 @@ enum Commands {
             allow_hyphen_values = true
         )]
         wind_vertical: f64,
+
+        /// Relative humidity (0-100%). Every simulated shot flies it, under --adaptive and
+        /// --wez too; the rest of the air is the 15 C / 1013.25 hPa sea-level standard.
+        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+        humidity: f64,
 
         /// Target distance (yards for imperial, meters for metric)
         #[arg(long)]
@@ -2857,7 +2863,7 @@ enum Commands {
         pressure_type: Option<PressureReferenceMode>,
 
         /// Humidity (0-100%)
-        #[arg(long, default_value = "50.0")]
+        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
         humidity: f64,
 
         /// Altitude (feet or meters based on --units)
@@ -3178,8 +3184,8 @@ enum Commands {
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Humidity (percent)
-        #[arg(long, default_value = "50.0")]
+        /// Humidity (0-100%)
+        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
         humidity: f64,
 
         /// Altitude (feet or meters based on --units)
@@ -5682,18 +5688,32 @@ fn load_reticle_description(path: &std::path::Path) -> Result<ReticleDescription
     Ok(reticle)
 }
 
-fn load_profile(name: &str) -> Result<ProfileData, Box<dyn Error>> {
-    let dir = get_profiles_dir()?;
-    let path = dir.join(format!("{}.json", name));
+/// The file a saved profile of this name lives in (it may not exist yet).
+fn profile_file_path(name: &str) -> Result<PathBuf, Box<dyn Error>> {
+    Ok(get_profiles_dir()?.join(format!("{}.json", name)))
+}
+
+/// Reads and parses the saved profile at `path`, with none of [`load_profile`]'s field checks.
+/// `Ok(None)` means no profile is stored there. Only `profile save`'s carry-forward reads a
+/// profile this way; everything that flies a profile goes through [`load_profile`].
+fn read_stored_profile(path: &std::path::Path) -> Result<Option<ProfileData>, Box<dyn Error>> {
     if !path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(path)?;
+    Ok(Some(serde_json::from_str(&content)?))
+}
+
+/// Loads a saved profile by name and checks the stored values a flight trusts.
+fn load_profile(name: &str) -> Result<ProfileData, Box<dyn Error>> {
+    let path = profile_file_path(name)?;
+    let Some(profile) = read_stored_profile(&path)? else {
         return Err(format!(
             "Profile '{}' not found. Use 'ballistics profile list' to see available profiles.",
             name
         )
         .into());
-    }
-    let content = fs::read_to_string(&path)?;
-    let profile: ProfileData = serde_json::from_str(&content)?;
+    };
     // MBA-1358: tracking correction factors are validated ON LOAD (hard error naming the
     // field) so a hand-edited or corrupted CF can never silently scale a firing solution.
     if let Some(cf) = profile.elevation_cf {
@@ -5702,7 +5722,53 @@ fn load_profile(name: &str) -> Result<ProfileData, Box<dyn Error>> {
     if let Some(cf) = profile.windage_cf {
         validate_tracking_cf(cf, "profile field windage_cf")?;
     }
+    // Humidity train (plan C4): the stored humidity goes through the one validator ON LOAD too,
+    // so a hand-edited 150 % is a named error, never a clamped flight. The error names the file
+    // the fix is made in.
+    profile
+        .validate_humidity()
+        .map_err(|error| format!("{error} (the profile is stored at {})", path.display()))?;
     Ok(profile)
+}
+
+/// The stored profile `profile save` carries fields forward from: `None` when there is none.
+///
+/// It reads the file with none of [`load_profile`]'s field checks, so a stored value a load
+/// refuses never makes the existing profile look absent; that would silently drop every field
+/// the save carries forward (gate G17: a stored humidity of 150 %, which the save overwrites
+/// from its own range-checked `--humidity` anyway). Two cases still refuse the save, so that
+/// nothing is lost:
+/// - a stored profile that cannot be read or parsed is never overwritten;
+/// - a stored tracking CF outside its band is never carried forward into a file that every
+///   later load would refuse (`load_profile`'s MBA-1358 check, applied before the write).
+fn stored_profile_to_carry_forward(name: &str) -> Result<Option<ProfileData>, Box<dyn Error>> {
+    let path = profile_file_path(name)?;
+    let existing = read_stored_profile(&path).map_err(|error| {
+        format!(
+            "profile '{name}' is stored at {} but cannot be read ({error}); profile save will not \
+             overwrite it, because a re-save carries the stored DSF table, zero POI, tracking \
+             CFs, zero sets, reticle and turret fields forward; repair the file, or delete the \
+             profile with `ballistics profile delete {name}` and save it again",
+            path.display()
+        )
+    })?;
+    if let Some(profile) = &existing {
+        for (field, cf) in [
+            ("elevation_cf", profile.elevation_cf),
+            ("windage_cf", profile.windage_cf),
+        ] {
+            if let Some(cf) = cf {
+                validate_tracking_cf(cf, &format!("profile field {field}")).map_err(|error| {
+                    format!(
+                        "{error}; profile save would carry the stored {field} forward into a \
+                         profile every load refuses, so edit it in {} first",
+                        path.display()
+                    )
+                })?;
+            }
+        }
+    }
+    Ok(existing)
 }
 
 /// MBA-1358: resolve one axis's tracking CF — explicit CLI flag beats the saved
@@ -7512,14 +7578,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             // A typed `--altitude 0` / `--humidity 50` is a value, not the clap default.
             let altitude_typed = trajectory_flag_typed(&matches, "altitude");
             let humidity_typed = trajectory_flag_typed(&matches, "humidity");
+            // Humidity train (plan C4): a --location CSV humidity goes through the one validator
+            // and is refused with its source named, never clamped (a saved profile's was
+            // validated when it loaded). The fallback is the one default.
             let final_humidity = if humidity_typed {
                 humidity
+            } else if csv_has(&location_data, &["HUMIDITY"]) {
+                let csv_humidity =
+                    csv_get_f64(&location_data, &["HUMIDITY"], DEFAULT_HUMIDITY_PERCENT);
+                RelativeHumidity::try_percent(csv_humidity)
+                    .map_err(|error| error.at_field("--location CSV column HUMIDITY"))?
+                    .percent()
             } else {
-                csv_get_f64(
-                    &location_data,
-                    &["HUMIDITY"],
-                    saved_atmo.map_or(50.0, |p| p.humidity),
-                )
+                saved_atmo.map_or(DEFAULT_HUMIDITY_PERCENT, |p| p.humidity)
             };
             let final_altitude = if altitude_typed {
                 altitude
@@ -9164,6 +9235,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             wind_ref,
             shot_direction,
             wind_vertical,
+            humidity,
             target_distance,
             target_radius,
             drag_table,
@@ -9301,6 +9373,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     cd_scale,
                     cant,
                     sight_offset_lateral_m,
+                    humidity,
                     output,
                     cli.units,
                 )?;
@@ -9328,6 +9401,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     cd_scale,
                     cant,
                     sight_offset_lateral_m,
+                    humidity,
                     AdaptiveMcCliControls {
                         confidence,
                         target_half_width: target_ci_half_width,
@@ -9361,6 +9435,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     cd_scale,
                     cant,
                     sight_offset_lateral_m,
+                    humidity,
                     seed,
                     confidence.unwrap_or(ConfidenceLevel::P95),
                     output,
@@ -10701,7 +10776,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             )?;
             let humidity = humidity
                 .or_else(|| profile_data.as_ref().map(|profile| profile.humidity))
-                .unwrap_or(50.0);
+                .unwrap_or(DEFAULT_HUMIDITY_PERCENT);
             // 0.49.0: the altitude is resolved (the flag, falling back to the profile) BEFORE the
             // pressure mode is applied, so a declared QNH reduces at the altitude flown.
             let altitude = altitude
@@ -12217,8 +12292,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                     // every unrelated edit would be hostile. Carry it forward unless
                     // `--clear-dsf` asked to drop it. MBA-1359: the zero POI offsets are in
                     // the same class (only `.a7p --zero-click` import or a hand edit can
-                    // produce them), so they are carried forward the same way.
-                    let existing_profile = load_profile(&name).ok();
+                    // produce them), so they are carried forward the same way. The stored file
+                    // is read without load_profile's field checks (see
+                    // stored_profile_to_carry_forward): a stored value a load refuses must not
+                    // make the existing profile look absent and silently drop all of this.
+                    let existing_profile = stored_profile_to_carry_forward(&name)?;
                     let carried_dsf_points = if clear_dsf {
                         None
                     } else {
@@ -15074,6 +15152,8 @@ fn run_monte_carlo_wez(
     cant: f64,
     // MBA-1396: lateral sight-mount offset, METERS (positive = sight right of bore).
     sight_offset_lateral_m: f64,
+    // Relative humidity, PERCENT (clap has range-checked it).
+    humidity: f64,
     output: MonteCarloOutput,
     units: UnitSystem,
 ) -> Result<(), Box<dyn Error>> {
@@ -15105,6 +15185,7 @@ fn run_monte_carlo_wez(
         cd_scale,
         cant,
         sight_offset_lateral_m,
+        RelativeHumidity::try_percent(humidity)?,
     )?;
 
     match output {
@@ -15161,6 +15242,7 @@ mod wez_tests {
             /* cd_scale */ 1.0,
             /* cant */ 0.0,
             /* sight_offset_lateral_m */ 0.0,
+            /* humidity */ DEFAULT_HUMIDITY_PERCENT,
             MonteCarloOutput::Summary,
             UnitSystem::Metric,
         );
@@ -15200,6 +15282,8 @@ fn run_monte_carlo(
     // MBA-1396: lateral sight-mount offset, METERS (positive = sight right of bore).
     // monte-carlo solves no zero, so only the physical initial displacement applies.
     sight_offset_lateral_m: f64,
+    // Relative humidity, PERCENT (clap has range-checked it); every sample flies it.
+    humidity: f64,
     // MBA-1352: an explicit --seed makes this run reproducible (branches to the `_seeded`
     // entry point below); `None` preserves the exact prior unseeded call, so a run without
     // --seed is byte-for-byte the same code path as before this flag existed.
@@ -15232,6 +15316,8 @@ fn run_monte_carlo(
         cd_scale,
         cant_angle: cant.to_radians(),
         sight_offset_lateral_m,
+        // The Monte Carlo sampler builds every trial's atmosphere from these inputs.
+        humidity_percent: humidity,
         ..Default::default()
     };
 
@@ -15461,6 +15547,8 @@ fn run_monte_carlo_adaptive(
     cant: f64,
     // MBA-1396: lateral sight-mount offset, METERS (positive = sight right of bore).
     sight_offset_lateral_m: f64,
+    // Relative humidity, PERCENT (clap has range-checked it); every trial flies it.
+    humidity: f64,
     controls: AdaptiveMcCliControls,
     output: MonteCarloOutput,
 ) -> Result<(), Box<dyn Error>> {
@@ -15480,6 +15568,8 @@ fn run_monte_carlo_adaptive(
         cd_scale,
         cant_angle: cant.to_radians(),
         sight_offset_lateral_m,
+        // The Monte Carlo sampler builds every trial's atmosphere from these inputs.
+        humidity_percent: humidity,
         ..Default::default()
     };
 
@@ -25059,14 +25149,30 @@ fn handle_optimal_zero(
     // command solves for it, and every candidate below overwrites it.
     let (base_load, _) = load_args.resolve(Some(1.0), units)?;
 
-    // Holds at every target for one candidate zero: one solve, read at each range.
-    let holds_at = |zero_m: f64| -> Option<Vec<f64>> {
+    // Holds at every target for one candidate zero: one solve, read at each range. The
+    // error says why, so the final report below can name the cause (a refused air, say)
+    // instead of blaming the fitted zero for it.
+    let distance_unit = match units {
+        UnitSystem::Imperial => "yd",
+        UnitSystem::Metric => "m",
+    };
+    let holds_at = |zero_m: f64| -> Result<Vec<f64>, String> {
         let mut load = base_load.clone();
         load.zero_distance_m = zero_m;
-        let curve = HoldCurve::solve(&load, curve_max_m).ok()?;
+        let curve = HoldCurve::solve(&load, curve_max_m).map_err(|e| e.to_string())?;
         parsed
             .iter()
-            .map(|target| curve.at_range(target.range_m).map(|p| p.drop_mil))
+            .map(|target| {
+                curve
+                    .at_range(target.range_m)
+                    .map(|p| p.drop_mil)
+                    .ok_or_else(|| {
+                        format!(
+                            "the trajectory does not reach {:.1} {distance_unit}",
+                            target.range_display
+                        )
+                    })
+            })
             .collect()
     };
 
@@ -25076,9 +25182,9 @@ fn handle_optimal_zero(
     // search is valid and, with fixed constants, deterministic.
     let objective = |zero_m: f64| -> f64 {
         match holds_at(zero_m) {
-            Some(holds) => holds.iter().fold(0.0_f64, |acc, h| acc.max(h.abs())),
+            Ok(holds) => holds.iter().fold(0.0_f64, |acc, h| acc.max(h.abs())),
             // An unsolvable candidate is pushed away from rather than crashing the search.
-            None => f64::INFINITY,
+            Err(_) => f64::INFINITY,
         }
     };
 
@@ -25107,14 +25213,10 @@ fn handle_optimal_zero(
         }
     }
     let best_zero_m = 0.5 * (lo + hi);
-    let holds = holds_at(best_zero_m).ok_or_else(|| {
+    let holds = holds_at(best_zero_m).map_err(|cause| {
         format!(
-            "no trajectory could be solved at the fitted zero of {:.1} {}",
+            "no trajectory could be solved at the fitted zero of {:.1} {distance_unit}: {cause}",
             UnitConverter::distance_from_metric(best_zero_m, units),
-            match units {
-                UnitSystem::Imperial => "yd",
-                UnitSystem::Metric => "m",
-            }
         )
     })?;
 
@@ -27760,5 +27862,122 @@ mod adaptive_card_row_tests {
         let expected =
             "│ 111.4 │   222.1 │ 333.200 │   555.4 │  666.50 │     778 │     889 │  9.12 │";
         assert_eq!(line, expected);
+    }
+}
+
+/// Humidity-consistency train, plan C4: every `--humidity`-family flag of the native CLI is a
+/// PERCENT with one range rule and one default. clap needs a string literal for a default, so
+/// this pins every literal to `DEFAULT_HUMIDITY_PERCENT`, and every flag's parser to the
+/// 0-100 range (0.49.0 left `wind-card --humidity` and `compare --humidity` unchecked).
+#[cfg(test)]
+mod humidity_flag_tests {
+    use super::*;
+
+    /// Every `(subcommand path, arg)` whose id names a humidity, at any depth.
+    fn humidity_args(command: &clap::Command, path: &str, out: &mut Vec<(String, clap::Arg)>) {
+        for arg in command.get_arguments() {
+            if arg.get_id().as_str().contains("humidity") {
+                out.push((path.to_string(), arg.clone()));
+            }
+        }
+        for sub in command.get_subcommands() {
+            humidity_args(sub, &format!("{path} {}", sub.get_name()), out);
+        }
+    }
+
+    /// Run `body` on a thread with room for the whole command tree: building `Cli::command()`
+    /// overflows a test thread's default 2 MiB stack in a debug build.
+    fn on_a_big_stack(body: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(64 << 20)
+            .spawn(body)
+            .expect("spawn the probe thread")
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+
+    fn all_humidity_args() -> Vec<(String, clap::Arg)> {
+        let mut out = Vec::new();
+        humidity_args(&Cli::command(), "ballistics", &mut out);
+        out
+    }
+
+    /// Whether `arg`'s own parser accepts `value`, through a one-flag probe command (the
+    /// `=` form, so a negative value is a value rather than a flag).
+    fn accepts(arg: &clap::Arg, value: &str) -> bool {
+        let long = arg.get_long().expect("a humidity flag is a long flag");
+        clap::Command::new("probe")
+            .no_binary_name(true)
+            .arg(arg.clone().required(false))
+            .try_get_matches_from([format!("--{long}={value}")])
+            .is_ok()
+    }
+
+    #[test]
+    fn every_humidity_flag_refuses_a_value_outside_zero_to_one_hundred() {
+        on_a_big_stack(|| {
+            let args = all_humidity_args();
+            assert!(
+                args.len() >= 15,
+                "sanity: found {} humidity flags",
+                args.len()
+            );
+            let mut unchecked = Vec::new();
+            for (path, arg) in &args {
+                for bad in ["150", "-5", "100.0001", "-0.0001", "nan", "inf"] {
+                    if accepts(arg, bad) {
+                        unchecked.push(format!("{path} --{}: accepts {bad}", arg.get_id()));
+                    }
+                }
+                for good in ["0", "100", "37.5"] {
+                    assert!(
+                        accepts(arg, good),
+                        "{path} --{}: refuses {good}",
+                        arg.get_id()
+                    );
+                }
+            }
+            assert!(unchecked.is_empty(), "{}", unchecked.join("\n"));
+        });
+    }
+
+    #[test]
+    fn every_humidity_default_is_the_one_default() {
+        on_a_big_stack(|| {
+            let mut checked = 0;
+            for (path, arg) in all_humidity_args() {
+                for default in arg.get_default_values() {
+                    let value: f64 = default.to_str().unwrap().parse().unwrap();
+                    assert_eq!(
+                        value.to_bits(),
+                        ballistics_engine::DEFAULT_HUMIDITY_PERCENT.to_bits(),
+                        "{path} --{}",
+                        arg.get_id()
+                    );
+                    checked += 1;
+                }
+            }
+            assert!(checked >= 14, "sanity: {checked} defaults checked");
+        });
+    }
+
+    #[test]
+    fn monte_carlo_takes_a_humidity_percent_with_the_one_default() {
+        on_a_big_stack(|| {
+            let command = Cli::command();
+            let monte_carlo = command
+                .find_subcommand("monte-carlo")
+                .expect("monte-carlo exists");
+            let humidity = monte_carlo
+                .get_arguments()
+                .find(|arg| arg.get_id() == "humidity")
+                .expect("monte-carlo --humidity (0.49.0 always flew 50 %)");
+            let defaults: Vec<_> = humidity.get_default_values().to_vec();
+            assert_eq!(defaults.len(), 1);
+            assert_eq!(
+                defaults[0].to_str().unwrap().parse::<f64>().unwrap(),
+                ballistics_engine::DEFAULT_HUMIDITY_PERCENT
+            );
+        });
     }
 }

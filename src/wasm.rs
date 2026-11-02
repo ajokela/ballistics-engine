@@ -439,6 +439,15 @@ fn require_value<'a>(args: &[&'a str], i: usize) -> Result<&'a str, JsValue> {
     }
 }
 
+/// Parse a humidity flag's value (`--humidity`, `--zero-humidity`) through the engine's one
+/// validator, [`crate::atmosphere::parse_humidity_percent_arg`]: a PERCENT from 0 to 100,
+/// refused (never clamped) outside it, with the flag named in the error. Every humidity flag of
+/// every command parses through here (humidity-consistency train, plan C4); 0.49.0
+/// range-checked only `true-velocity` and `true-wind`.
+fn humidity_value(flag: &str, raw: &str) -> Result<f64, JsValue> {
+    crate::atmosphere::parse_humidity_percent_arg(flag, raw).map_err(|e| JsValue::from_str(&e))
+}
+
 /// Parse a numeric argument value, naming the flag it came from (MBA-1361).
 ///
 /// The house convention elsewhere in this file is a per-flag `.parse().map_err(...)` with a
@@ -1324,7 +1333,7 @@ impl WasmBallistics {
         // sea-level-corrected altimeter setting (QNH) needing reduction before use.
         let mut pressure_type = PressureReferenceMode::Absolute;
         let mut zero_pressure_type: Option<PressureReferenceMode> = None;
-        let mut humidity = 50.0;
+        let mut humidity = crate::atmosphere::DEFAULT_HUMIDITY_PERCENT;
         let mut altitude = 0.0;
         // MBA-1366: density altitude (feet imperial / meters metric), supersedes
         // altitude/pressure/pressure_type when given -- see the `--density-altitude` parse arm
@@ -1630,9 +1639,7 @@ impl WasmBallistics {
                 }
                 "--humidity" => {
                     if i + 1 < args.len() {
-                        humidity = args[i + 1]
-                            .parse()
-                            .map_err(|_| JsValue::from_str("Invalid humidity"))?;
+                        humidity = humidity_value(args[i], args[i + 1])?;
                         i += 1;
                     }
                 }
@@ -1891,11 +1898,7 @@ impl WasmBallistics {
                 }
                 "--zero-humidity" => {
                     if i + 1 < args.len() {
-                        zero_humidity = Some(
-                            args[i + 1]
-                                .parse()
-                                .map_err(|_| JsValue::from_str("Invalid zero humidity"))?,
-                        );
+                        zero_humidity = Some(humidity_value(args[i], args[i + 1])?);
                         i += 1;
                     }
                 }
@@ -3238,11 +3241,7 @@ impl WasmBallistics {
                 }
                 "--humidity" => {
                     if i + 1 < args.len() {
-                        humidity = Some(
-                            args[i + 1]
-                                .parse()
-                                .map_err(|_| JsValue::from_str("Invalid humidity"))?,
-                        );
+                        humidity = Some(humidity_value(args[i], args[i + 1])?);
                         i += 1;
                     }
                 }
@@ -3724,11 +3723,7 @@ impl WasmBallistics {
                 }
                 "--humidity" => {
                     if i + 1 < args.len() {
-                        humidity = Some(
-                            args[i + 1]
-                                .parse()
-                                .map_err(|_| JsValue::from_str("Invalid humidity"))?,
-                        );
+                        humidity = Some(humidity_value(args[i], args[i + 1])?);
                         i += 1;
                     }
                 }
@@ -4178,6 +4173,8 @@ impl WasmBallistics {
         // resolved against self.drag_table once the arg-parse loop is done, shared by both
         // the base and --wez dispatch below.
         let mut cd_scale: Option<f64> = None;
+        // Relative humidity, PERCENT (validated at parse); native `monte-carlo --humidity`.
+        let mut humidity = crate::atmosphere::DEFAULT_HUMIDITY_PERCENT;
         // MBA-1343 Phase C: WEZ (Weapon Employment Zone) sweep mode, mirroring the
         // native `monte-carlo --wez` flag set (MBA-1317). The wez-only flags are kept
         // as Options so using one without --wez can be rejected (native clap's
@@ -4284,6 +4281,10 @@ impl WasmBallistics {
                     );
                     i += 1;
                 }
+                "--humidity" => {
+                    humidity = humidity_value(args[i], require_value(args, i)?)?;
+                    i += 1;
+                }
                 "--wez" => {
                     wez = true;
                 }
@@ -4385,6 +4386,7 @@ impl WasmBallistics {
                 wez_step,
                 drag_model,
                 cd_scale,
+                humidity,
                 output,
             );
         }
@@ -4479,6 +4481,8 @@ impl WasmBallistics {
         inputs.muzzle_angle = angle * std::f64::consts::PI / 180.0;
         inputs.muzzle_height = 1.5;
         inputs.ground_threshold = 0.0;
+        // The sampler builds every trial's atmosphere from these inputs.
+        inputs.humidity_percent = humidity;
 
         // Create Monte Carlo parameters
         let params = MonteCarloParams {
@@ -4674,6 +4678,7 @@ impl WasmBallistics {
         wez_step: Option<f64>,
         drag_model: &str,
         cd_scale: Option<f64>,
+        humidity: f64,
         output: &str,
     ) -> Result<String, JsValue> {
         // Native clap defaults: --velocity-std 1.0, --wind-std 1.0, --wind-call-error
@@ -4796,6 +4801,9 @@ impl WasmBallistics {
             cd_scale,
             0.0, // cant
             0.0, // sight_offset_lateral_m (not exposed on this surface, like cant)
+            // Validated when --humidity was parsed; this cannot fail.
+            crate::atmosphere::RelativeHumidity::try_percent(humidity)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?,
         )
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -4855,7 +4863,7 @@ impl WasmBallistics {
         let mut pressure: Option<f64> = None;
         // MBA-1426 item 3: native true-velocity has honored --pressure-type since MBA-1416.
         let mut pressure_type: Option<PressureReferenceMode> = None;
-        let mut humidity = 50.0;
+        let mut humidity = crate::atmosphere::DEFAULT_HUMIDITY_PERCENT;
         let mut altitude = 0.0;
         let mut output = "table";
 
@@ -4975,9 +4983,7 @@ impl WasmBallistics {
                     i += 1;
                 }
                 "--humidity" => {
-                    humidity = require_value(args, i)?
-                        .parse()
-                        .map_err(|_| JsValue::from_str("Invalid humidity"))?;
+                    humidity = humidity_value(args[i], require_value(args, i)?)?;
                     i += 1;
                 }
                 "--pressure-type" => {
@@ -5041,10 +5047,6 @@ impl WasmBallistics {
                 )))
             }
         };
-
-        if !(0.0..=100.0).contains(&humidity) {
-            return Err(JsValue::from_str("--humidity must be between 0 and 100"));
-        }
 
         // Native clap's f64_range validators for the bullet parameters (same bounds
         // under either unit system). The hand-rolled parser previously accepted any
@@ -5358,7 +5360,7 @@ impl WasmBallistics {
         let mut temperature: Option<f64> = None;
         let mut pressure: Option<f64> = None;
         let mut pressure_type: Option<PressureReferenceMode> = None;
-        let mut humidity = 50.0;
+        let mut humidity = crate::atmosphere::DEFAULT_HUMIDITY_PERCENT;
         let mut altitude = 0.0;
         let mut output = "table";
 
@@ -5478,9 +5480,7 @@ impl WasmBallistics {
                     i += 1;
                 }
                 "--humidity" => {
-                    humidity = require_value(args, i)?
-                        .parse()
-                        .map_err(|_| JsValue::from_str("Invalid humidity"))?;
+                    humidity = humidity_value(args[i], require_value(args, i)?)?;
                     i += 1;
                 }
                 "--altitude" => {
@@ -5542,9 +5542,6 @@ impl WasmBallistics {
             }
         };
 
-        if !(0.0..=100.0).contains(&humidity) {
-            return Err(JsValue::from_str("--humidity must be between 0 and 100"));
-        }
         // Native clap's f64_range validators (same bounds under either unit system).
         if !(0.0..=6000.0).contains(&velocity) {
             return Err(JsValue::from_str(&format!(
@@ -5763,7 +5760,7 @@ impl WasmBallistics {
         let mut pressure: Option<f64> = None;
         // MBA-1426 item 3: native estimate-bc has honored --pressure-type since MBA-1416.
         let mut pressure_type: Option<PressureReferenceMode> = None;
-        let mut humidity: f64 = 50.0;
+        let mut humidity: f64 = crate::atmosphere::DEFAULT_HUMIDITY_PERCENT;
         let mut altitude: f64 = 0.0;
 
         // Parse "d,v;d,v;..." pairs, tolerating surrounding quotes/whitespace.
@@ -5883,9 +5880,7 @@ impl WasmBallistics {
                 }
                 "--humidity" => {
                     if i + 1 < args.len() {
-                        humidity = args[i + 1]
-                            .parse()
-                            .map_err(|_| JsValue::from_str("Invalid humidity"))?;
+                        humidity = humidity_value(args[i], args[i + 1])?;
                         i += 1;
                     }
                 }
@@ -8594,6 +8589,8 @@ Monte Carlo Command:
     --bc-std <STD>               BC std deviation
     --wind-speed-std <STD>       Wind speed std deviation (--wind-std also accepted)
     --wind-direction-std <STD>   Wind direction std deviation (degrees)
+    --humidity <H>               Relative humidity (0-100%), flown by every
+                                 simulation and the WEZ sweep [default: 50]
 
   WEZ (Weapon Employment Zone) sweep:
     --wez                        WEZ sweep mode: hit probability vs range for a
@@ -9041,7 +9038,7 @@ impl Calculator {
             wind_segments: Vec::new(),
             temperature_f: None,
             pressure_inhg: None,
-            humidity_percent: 50.0,
+            humidity_percent: crate::atmosphere::DEFAULT_HUMIDITY_PERCENT,
             altitude_ft: 0.0,
 
             sight_height_inches: 2.0,

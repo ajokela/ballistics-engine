@@ -250,9 +250,10 @@ impl WindTruingRequest {
         if !self.temperature_f.value.is_finite() {
             return Err("temperature must be finite".to_string());
         }
-        if !self.humidity_pct.is_finite() || !(0.0..=100.0).contains(&self.humidity_pct) {
-            return Err("humidity must be finite and within 0..=100 percent".to_string());
-        }
+        // The engine's one humidity validator (plan C4): a percent in [0, 100], refused with
+        // its field named, never clamped.
+        crate::atmosphere::RelativeHumidity::try_percent(self.humidity_pct)
+            .map_err(|error| error.at_field("humidity_pct").to_string())?;
         if !self.altitude_ft.is_finite() {
             return Err("altitude must be finite".to_string());
         }
@@ -1214,6 +1215,32 @@ mod tests {
     /// round-trip tests from a KNOWN wind.
     fn modeled_lateral_m(request: &WindTruingRequest, crosswind_mph: f64, range_m: f64) -> f64 {
         modeled_miss_right_m(request, crosswind_mph, range_m).expect("forward model must solve")
+    }
+
+    /// Humidity-consistency train (plan C4): the request's humidity goes through the engine's
+    /// one validator, `RelativeHumidity::try_percent`, and its field-named error.
+    #[test]
+    fn humidity_is_refused_by_the_one_shared_validator() {
+        let observation = WindObservation {
+            range_m: 457.2,
+            miss_right_m: 0.1,
+            sigma_m: None,
+        };
+        for humidity in [150.0, -5.0, 100.0001, f64::NAN, f64::INFINITY] {
+            let mut request = base_request(vec![observation]);
+            request.humidity_pct = humidity;
+            let error = request.validate().expect_err("an out-of-range humidity");
+            assert!(
+                error.contains("humidity_pct")
+                    && (error.contains("percent from 0 to 100") || error.contains("finite")),
+                "RH {humidity}: {error}"
+            );
+        }
+        for humidity in [0.0, 100.0] {
+            let mut request = base_request(vec![observation]);
+            request.humidity_pct = humidity;
+            request.validate().expect("a valid humidity");
+        }
     }
 
     /// Round trip: take a KNOWN crosswind, read the lateral miss it produces at three
