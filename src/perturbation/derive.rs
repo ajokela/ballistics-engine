@@ -40,7 +40,9 @@
 //! # One-sided fallback
 //!
 //! Several continuous axes have a hard physical domain narrower than all reals: `WindSpeed` is
-//! a non-negative magnitude, `RelativeHumidity` is confined to `[0, 1]`, and `TargetDistance`
+//! a non-negative magnitude, `RelativeHumidity` is confined to `[0, 1]` (narrower than the
+//! sensor band the solve accepts, so this module refuses a perturbed humidity outside it
+//! itself, as the solve's own `InvalidValue`), and `TargetDistance`
 //! (== `shot.max_range_m`) cannot shrink below a range the caller is asking about. A central
 //! difference at or near such a boundary needs a perturbed value on the wrong side of it --
 //! still air (`speed_mps: 0.0`, the default absent any `wind` block at all) is the most
@@ -231,8 +233,8 @@ pub fn central_difference(
     // max_range_m) -- see the module doc's "One-sided fallback". But NOT every failure here
     // qualifies for the fallback: only a genuine domain rejection does (review fix I4(a) -- see
     // `KernelError::is_domain_rejection`'s doc for exactly why `Err(_)` alone is wrong here).
-    let plus_result = evaluate(&plus_req, ranges_m);
-    let minus_result = evaluate(&minus_req, ranges_m);
+    let plus_result = evaluate_within_domain(axis, x + h, &plus_req, ranges_m);
+    let minus_result = evaluate_within_domain(axis, x - h, &minus_req, ranges_m);
 
     // Computed on borrowed references, BEFORE the match below moves `plus_result`/`minus_result`,
     // so the match arms need no guard-vs-move subtlety.
@@ -317,7 +319,8 @@ pub fn bisect_axis(
         return Err(KernelError::CategoricalAxis(axis));
     }
     let at = |v: f64| -> Result<bool, KernelError> {
-        let obs = evaluate(&with_axis(base, axis, AxisValue::Scalar(v))?, &[range_m])?;
+        let request = with_axis(base, axis, AxisValue::Scalar(v))?;
+        let obs = evaluate_within_domain(axis, v, &request, &[range_m])?;
         Ok(predicate(&obs[0]))
     };
     let (mut lo, mut hi) = domain;
@@ -337,6 +340,39 @@ pub fn bisect_axis(
         }
     }
     Ok(Some(0.5 * (lo + hi)))
+}
+
+/// [`evaluate`], unless `value` lies outside `axis`'s physical domain where that domain is
+/// narrower than what the solve accepts; then the same domain rejection the solve gives a value
+/// it refuses (an `InvalidValue` [`KernelError::Solve`]), without solving.
+///
+/// The one such axis is `RelativeHumidity`. The solve reads a fraction up to 0.05 outside
+/// `[0, 1]` as a SENSOR reading of saturated or dry air and flies the end it reads as
+/// ([`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`]). A perturbed humidity is a hypothetical
+/// physical humidity, not a reading: one there would fly the end itself, and a central
+/// difference at 0 or 1 would silently come out at half the slope. So `[0, 1]` stays its
+/// domain here, and the one-sided fallback takes over at both ends, as it always did. The
+/// domain is the humidity type's own
+/// ([`crate::atmosphere::RelativeHumidity::is_physical_fraction`]), not a second range written
+/// here.
+fn evaluate_within_domain(
+    axis: InputAxis,
+    value: f64,
+    request: &crate::solve_json::SolveRequestV1,
+    ranges_m: &[f64],
+) -> Result<Vec<Observation>, KernelError> {
+    if axis == InputAxis::RelativeHumidity
+        && !crate::atmosphere::RelativeHumidity::is_physical_fraction(value)
+    {
+        return Err(KernelError::Solve {
+            code: crate::solve_json::SolveErrorCodeV1::InvalidValue,
+            message: format!(
+                "$.atmosphere.relative_humidity = {value}: outside the perturbation domain \
+                 [0, 1] of a physical relative humidity"
+            ),
+        });
+    }
+    evaluate(request, ranges_m)
 }
 
 #[cfg(test)]
@@ -971,6 +1007,39 @@ mod tests {
             "the minus side (-0.001) leaves RelativeHumidity's [0, 1] domain"
         );
         assert!(d[0].d_drop_d_x.is_finite());
+    }
+
+    /// S5b (owner decision 2026-11-01): the solve now reads a fraction up to 0.05 outside
+    /// `[0, 1]` as a sensor reading of saturated or dry air, so a perturbed humidity there would
+    /// fly the end itself and halve the derivative. A perturbation is a hypothetical humidity,
+    /// not a reading: `[0, 1]` stays `RelativeHumidity`'s domain here, at BOTH ends. A request
+    /// that sent a saturated-air reading (1.03) resolves to exactly 1, and differentiates
+    /// backward from there.
+    #[test]
+    fn relative_humidity_falls_back_to_one_sided_at_the_saturated_boundary() {
+        for sent in [1.0, 1.03] {
+            let json = serde_json::json!({
+                "schema_version": 1,
+                "projectile": {"mass_kg": 0.0113, "diameter_m": 0.00782, "drag_model": "G7",
+                               "ballistic_coefficient": 0.243},
+                "rifle": {"muzzle_velocity_mps": 823.0, "sight_height_m": 0.05},
+                "shot": {"max_range_m": 900.0, "zero_distance_m": 100.0},
+                "atmosphere": {"relative_humidity": sent},
+                "wind": {}, "solver": {}, "effects": {}, "sampling": {"interval_m": 25.0}
+            })
+            .to_string();
+            let req = crate::solve_json::decode_solve_request_v1(&json).unwrap();
+            let r = crate::solve_v1::solve_v1(req).unwrap().resolved_request;
+            assert_eq!(r.atmosphere.relative_humidity.to_bits(), 1.0_f64.to_bits());
+            let d = central_difference(&r, InputAxis::RelativeHumidity, &[600.0], None)
+                .unwrap_or_else(|e| panic!("saturated air must fall back, got {e:?}"));
+            assert_eq!(
+                d[0].scheme,
+                DifferenceScheme::BackwardOneSided,
+                "the plus side (1.001) leaves RelativeHumidity's [0, 1] domain"
+            );
+            assert!(d[0].d_drop_d_x.is_finite() && d[0].d_drop_d_x != 0.0);
+        }
     }
 
     /// I4 review fix, continued: `TargetDistance` (== `shot.max_range_m`) hits the same class

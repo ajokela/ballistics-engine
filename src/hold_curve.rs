@@ -511,8 +511,9 @@ pub struct HoldCurveLoad {
     pub zero_distance_m: f64,
     pub temperature_c: f64,
     pub pressure_hpa: f64,
-    /// Relative humidity, PERCENT, 0 to 100 (50 = 50 %). [`HoldCurve::solve`] refuses a value
-    /// outside that range, or one that is not finite, through
+    /// Relative humidity, PERCENT, 0 to 100 (50 = 50 %). A sensor reading within
+    /// [`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`] of that range flies as the end it reads as;
+    /// [`HoldCurve::solve`] refuses a value beyond it, or one that is not finite, through
     /// [`crate::atmosphere::RelativeHumidity`]; it is never clamped.
     pub humidity: f64,
     pub altitude_m: f64,

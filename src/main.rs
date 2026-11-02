@@ -438,6 +438,22 @@ impl clap::builder::TypedValueParser for F64RangeParser {
     }
 }
 
+/// The value parser of every `--humidity`-family flag (humidity-consistency train, S5b): a
+/// relative humidity PERCENT through the engine's one rule, [`RelativeHumidity::try_percent`].
+/// A sensor reading up to `HUMIDITY_SENSOR_TOLERANCE_PERCENT` (5) outside 0-100 parses as the
+/// end it reads as (`--humidity 101.7` is 100, `--humidity -2` is 0), so every command flies,
+/// echoes and saves that end; anything farther out, or not finite, is refused. clap names the
+/// flag and the value in front of the reason.
+fn parse_humidity_percent(raw: &str) -> Result<f64, String> {
+    let value: f64 = raw
+        .trim()
+        .parse()
+        .map_err(|_| "not a number; a relative humidity is a percent from 0 to 100".to_string())?;
+    RelativeHumidity::try_percent(value)
+        .map(RelativeHumidity::percent)
+        .map_err(|error| error.reason().to_string())
+}
+
 /// `--confidence`'s three permitted levels, parsed directly into
 /// [`ConfidenceLevel`] (MBA-1352). That type
 /// derives no clap trait of its own -- `mc_stats.rs` is deliberately clap-free so it keeps
@@ -747,8 +763,14 @@ enum Commands {
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Humidity (0-100%)
-        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
+        /// fog) is read as 100 or 0.
+        #[arg(
+            long,
+            default_value = "50.0",
+            value_parser = parse_humidity_percent,
+            allow_negative_numbers = true
+        )]
         humidity: f64,
 
         /// Altitude (feet or meters based on --units)
@@ -1058,8 +1080,13 @@ enum Commands {
         #[arg(long, value_enum)]
         zero_pressure_type: Option<PressureReferenceMode>,
 
-        /// Zero-day relative humidity for --auto-zero (percent, 0-100)
-        #[arg(long, value_parser = f64_range(0.0, 100.0))]
+        /// Zero-day relative humidity for --auto-zero, percent 0-100. A sensor reading up to 5
+        /// outside that range (101.7 in fog) is read as 100 or 0.
+        #[arg(
+            long,
+            value_parser = parse_humidity_percent,
+            allow_negative_numbers = true
+        )]
         zero_humidity: Option<f64>,
 
         /// Zero-day altitude for --auto-zero (feet imperial / meters metric)
@@ -1333,9 +1360,15 @@ enum Commands {
         )]
         wind_vertical: f64,
 
-        /// Relative humidity (0-100%). Every simulated shot flies it, under --adaptive and
-        /// --wez too; the rest of the air is the 15 C / 1013.25 hPa sea-level standard.
-        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
+        /// fog) is read as 100 or 0. Every simulated shot flies it, under --adaptive and --wez too;
+        /// the rest of the air is the 15 C / 1013.25 hPa sea-level standard.
+        #[arg(
+            long,
+            default_value = "50.0",
+            value_parser = parse_humidity_percent,
+            allow_negative_numbers = true
+        )]
         humidity: f64,
 
         /// Target distance (yards for imperial, meters for metric)
@@ -1561,8 +1594,14 @@ enum Commands {
         #[arg(long, value_enum, default_value = "absolute")]
         pressure_type: PressureReferenceMode,
 
-        /// Humidity (0-100%)
-        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
+        /// fog) is read as 100 or 0.
+        #[arg(
+            long,
+            default_value = "50.0",
+            value_parser = parse_humidity_percent,
+            allow_negative_numbers = true
+        )]
         humidity: f64,
 
         /// Altitude (feet or meters based on --units)
@@ -1660,8 +1699,14 @@ enum Commands {
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Relative humidity the data was measured at (percent, 0–100)
-        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+        /// Relative humidity the data was measured at, percent 0-100. A sensor reading up to 5
+        /// outside that range (101.7 in fog) is read as 100 or 0.
+        #[arg(
+            long,
+            default_value = "50.0",
+            value_parser = parse_humidity_percent,
+            allow_negative_numbers = true
+        )]
         humidity: f64,
 
         /// Altitude the data was measured at (feet imperial / meters metric)
@@ -1903,8 +1948,14 @@ enum Commands {
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Humidity (0-100%)
-        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
+        /// fog) is read as 100 or 0.
+        #[arg(
+            long,
+            default_value = "50.0",
+            value_parser = parse_humidity_percent,
+            allow_negative_numbers = true
+        )]
         humidity: f64,
 
         /// Altitude (feet for imperial, meters for metric)
@@ -2082,8 +2133,14 @@ enum Commands {
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Humidity (0-100%)
-        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
+        /// fog) is read as 100 or 0.
+        #[arg(
+            long,
+            default_value = "50.0",
+            value_parser = parse_humidity_percent,
+            allow_negative_numbers = true
+        )]
         humidity: f64,
 
         /// Altitude (feet for imperial, meters for metric)
@@ -2193,8 +2250,13 @@ enum Commands {
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Relative humidity (0-100 percent)
-        #[arg(long, value_parser = f64_range(0.0, 100.0))]
+        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
+        /// fog) is read as 100 or 0.
+        #[arg(
+            long,
+            value_parser = parse_humidity_percent,
+            allow_negative_numbers = true
+        )]
         humidity: Option<f64>,
 
         /// Altitude (feet or meters based on global --units)
@@ -2296,8 +2358,14 @@ enum Commands {
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Humidity (0-100%)
-        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
+        /// fog) is read as 100 or 0.
+        #[arg(
+            long,
+            default_value = "50.0",
+            value_parser = parse_humidity_percent,
+            allow_negative_numbers = true
+        )]
         humidity: f64,
 
         /// Altitude (feet or meters based on --units)
@@ -2422,8 +2490,14 @@ enum Commands {
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Humidity (0-100%)
-        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
+        /// fog) is read as 100 or 0.
+        #[arg(
+            long,
+            default_value = "50.0",
+            value_parser = parse_humidity_percent,
+            allow_negative_numbers = true
+        )]
         humidity: f64,
 
         /// Altitude (feet or meters based on --units)
@@ -2522,8 +2596,14 @@ enum Commands {
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Humidity (0-100%)
-        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
+        /// fog) is read as 100 or 0.
+        #[arg(
+            long,
+            default_value = "50.0",
+            value_parser = parse_humidity_percent,
+            allow_negative_numbers = true
+        )]
         humidity: f64,
 
         /// Altitude (feet or meters based on --units)
@@ -2862,8 +2942,14 @@ enum Commands {
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Humidity (0-100%)
-        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
+        /// fog) is read as 100 or 0.
+        #[arg(
+            long,
+            default_value = "50.0",
+            value_parser = parse_humidity_percent,
+            allow_negative_numbers = true
+        )]
         humidity: f64,
 
         /// Altitude (feet or meters based on --units)
@@ -3058,8 +3144,14 @@ enum Commands {
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Humidity (0-100%)
-        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
+        /// fog) is read as 100 or 0.
+        #[arg(
+            long,
+            default_value = "50.0",
+            value_parser = parse_humidity_percent,
+            allow_negative_numbers = true
+        )]
         humidity: f64,
 
         /// Altitude (feet or meters based on --units)
@@ -3184,8 +3276,14 @@ enum Commands {
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Humidity (0-100%)
-        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
+        /// fog) is read as 100 or 0.
+        #[arg(
+            long,
+            default_value = "50.0",
+            value_parser = parse_humidity_percent,
+            allow_negative_numbers = true
+        )]
         humidity: f64,
 
         /// Altitude (feet or meters based on --units)
@@ -3298,8 +3396,14 @@ enum Commands {
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Humidity (0-100%)
-        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
+        /// fog) is read as 100 or 0.
+        #[arg(
+            long,
+            default_value = "50.0",
+            value_parser = parse_humidity_percent,
+            allow_negative_numbers = true
+        )]
         humidity: f64,
 
         /// Altitude (feet or meters based on --units)
@@ -3845,8 +3949,14 @@ enum ReticleAction {
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Humidity (0-100%)
-        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
+        /// fog) is read as 100 or 0.
+        #[arg(
+            long,
+            default_value = "50.0",
+            value_parser = parse_humidity_percent,
+            allow_negative_numbers = true
+        )]
         humidity: f64,
 
         /// Altitude (feet or meters based on --units)
@@ -4010,8 +4120,14 @@ struct InverseSolverLoadArgs {
     #[arg(long, value_enum)]
     pressure_type: Option<PressureReferenceMode>,
 
-    /// Humidity (0-100%)
-    #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+    /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in fog)
+    /// is read as 100 or 0.
+    #[arg(
+        long,
+        default_value = "50.0",
+        value_parser = parse_humidity_percent,
+        allow_negative_numbers = true
+    )]
     humidity: f64,
 
     /// Altitude (feet or meters based on --units)
@@ -4191,8 +4307,14 @@ enum ProfileAction {
         #[arg(long, value_enum, default_value = "absolute")]
         pressure_type: PressureReferenceMode,
 
-        /// Default humidity
-        #[arg(long, default_value = "50.0", value_parser = f64_range(0.0, 100.0))]
+        /// Default relative humidity, percent 0-100. A sensor reading up to 5 outside that range
+        /// (101.7 in fog) is read as 100 or 0 and saved.
+        #[arg(
+            long,
+            default_value = "50.0",
+            value_parser = parse_humidity_percent,
+            allow_negative_numbers = true
+        )]
         humidity: f64,
 
         /// Default altitude
@@ -7578,9 +7700,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             // A typed `--altitude 0` / `--humidity 50` is a value, not the clap default.
             let altitude_typed = trajectory_flag_typed(&matches, "altitude");
             let humidity_typed = trajectory_flag_typed(&matches, "humidity");
-            // Humidity train (plan C4): a --location CSV humidity goes through the one validator
-            // and is refused with its source named, never clamped (a saved profile's was
-            // validated when it loaded). The fallback is the one default.
+            // Humidity train (plan C4): a --location CSV humidity goes through the one validator:
+            // a sensor reading within 5 points of 0-100 flies as the end it reads as (S5b), and
+            // a value farther out is refused with its source named, never clamped (a saved
+            // profile's was validated when it loaded). The fallback is the one default.
             let final_humidity = if humidity_typed {
                 humidity
             } else if csv_has(&location_data, &["HUMIDITY"]) {
@@ -27868,7 +27991,8 @@ mod adaptive_card_row_tests {
 /// Humidity-consistency train, plan C4: every `--humidity`-family flag of the native CLI is a
 /// PERCENT with one range rule and one default. clap needs a string literal for a default, so
 /// this pins every literal to `DEFAULT_HUMIDITY_PERCENT`, and every flag's parser to the
-/// 0-100 range (0.49.0 left `wind-card --humidity` and `compare --humidity` unchecked).
+/// 0-100 range and its sensor band (0.49.0 left `wind-card --humidity` and `compare
+/// --humidity` unchecked).
 #[cfg(test)]
 mod humidity_flag_tests {
     use super::*;
@@ -27924,7 +28048,9 @@ mod humidity_flag_tests {
             );
             let mut unchecked = Vec::new();
             for (path, arg) in &args {
-                for bad in ["150", "-5", "100.0001", "-0.0001", "nan", "inf"] {
+                // Beyond the 5-point sensor band (S5b: -5, 100.0001 and -0.0001 are readings,
+                // the next test's).
+                for bad in ["150", "-5.0000001", "105.0000001", "-20", "nan", "inf"] {
                     if accepts(arg, bad) {
                         unchecked.push(format!("{path} --{}: accepts {bad}", arg.get_id()));
                     }
@@ -27938,6 +28064,65 @@ mod humidity_flag_tests {
                 }
             }
             assert!(unchecked.is_empty(), "{}", unchecked.join("\n"));
+        });
+    }
+
+    /// The value `arg`'s own parser gives `value`, through the same one-flag probe.
+    fn parsed(arg: &clap::Arg, value: &str) -> f64 {
+        let long = arg.get_long().expect("a humidity flag is a long flag");
+        let id = arg.get_id().to_string();
+        *clap::Command::new("probe")
+            .no_binary_name(true)
+            .arg(arg.clone().required(false))
+            .try_get_matches_from([format!("--{long}={value}")])
+            .unwrap_or_else(|e| panic!("--{long}={value}: {e}"))
+            .get_one::<f64>(&id)
+            .expect("a parsed humidity")
+    }
+
+    /// S5b (owner decision 2026-11-01): every humidity flag reads a sensor reading within 5
+    /// points of the range as the end it reads as, so the value the command flies, echoes and
+    /// saves is the end itself, and takes a negative reading without `=`.
+    #[test]
+    fn every_humidity_flag_reads_a_sensor_reading_as_the_end_it_reads_as() {
+        on_a_big_stack(|| {
+            for (path, arg) in all_humidity_args() {
+                for (reading, end) in [
+                    ("100.0000001", 100.0),
+                    ("101.7", 100.0),
+                    ("105", 100.0),
+                    ("-0", 0.0),
+                    ("-2", 0.0),
+                    ("-5", 0.0),
+                ] {
+                    assert_eq!(
+                        parsed(&arg, reading).to_bits(),
+                        f64::to_bits(end),
+                        "{path} --{}={reading}",
+                        arg.get_id()
+                    );
+                }
+                for (inside, value) in [("0", 0.0), ("37.5", 37.5), ("100", 100.0)] {
+                    assert_eq!(
+                        parsed(&arg, inside).to_bits(),
+                        f64::to_bits(value),
+                        "{path} --{}={inside}",
+                        arg.get_id()
+                    );
+                }
+                let long = arg.get_long().unwrap();
+                let id = arg.get_id().to_string();
+                let spaced = clap::Command::new("probe")
+                    .no_binary_name(true)
+                    .arg(arg.clone().required(false))
+                    .try_get_matches_from([format!("--{long}"), "-2".to_string()])
+                    .unwrap_or_else(|e| panic!("{path} --{long} -2: {e}"));
+                assert_eq!(
+                    spaced.get_one::<f64>(&id).map(|v| v.to_bits()),
+                    Some(0.0_f64.to_bits()),
+                    "{path} --{long} -2"
+                );
+            }
         });
     }
 

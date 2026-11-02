@@ -14,6 +14,11 @@
 //! - Air that cannot exist is refused by the solver's one rule on every command that takes a
 //!   station temperature.
 //!
+//! - The sensor band (S5b, owner decision 2026-11-01): a reading within 5 points of the range
+//!   (101.7 in fog, -2 in desert air), from a flag, a `--location` CSV or a saved profile, is
+//!   the saturated or dry air it reads, byte for byte the output of the end itself. Only a value
+//!   beyond the band is refused.
+//!
 //! The clap defaults themselves are pinned to `DEFAULT_HUMIDITY_PERCENT` inside the binary's
 //! own tests (`src/main.rs`, `humidity_flag_tests`).
 
@@ -198,7 +203,8 @@ const MONTE_CARLO_WEZ: &[&str] = &[
 #[test]
 fn wind_card_and_compare_range_check_their_humidity_like_every_other_command() {
     for (label, base) in [("wind-card", WIND_CARD), ("compare", COMPARE)] {
-        for bad in ["150", "-5", "100.0001", "nan"] {
+        // Beyond the 5-point sensor band (S5b: -5 and 100.0001 are readings, flown below).
+        for bad in ["150", "-5.0000001", "105.0000001", "nan"] {
             // The `=` form, so a negative value reaches the humidity parser as a value.
             let flag = format!("--humidity={bad}");
             let text = refusal_of(
@@ -219,7 +225,7 @@ fn wind_card_and_compare_range_check_their_humidity_like_every_other_command() {
 #[test]
 fn monte_carlo_refuses_an_out_of_range_humidity() {
     for base in [MONTE_CARLO, MONTE_CARLO_ADAPTIVE, MONTE_CARLO_WEZ] {
-        for bad in ["150", "-5"] {
+        for bad in ["150", "-5.0000001"] {
             let flag = format!("--humidity={bad}");
             let text = refusal_of(
                 &run(&with(base, &[flag.as_str()])),
@@ -227,7 +233,7 @@ fn monte_carlo_refuses_an_out_of_range_humidity() {
             );
             // The parser's own range refusal, not an unknown-flag error.
             assert!(
-                text.contains("humidity") && text.contains("not in range"),
+                text.contains("humidity") && text.contains("percent from 0 to 100"),
                 "{text}"
             );
         }
@@ -423,7 +429,8 @@ fn location_csv(humidity: &str) -> (PrivateDir, std::path::PathBuf) {
 
 #[test]
 fn a_location_csv_humidity_outside_zero_to_one_hundred_is_refused_naming_its_source() {
-    for bad in ["150", "-5", "100.5"] {
+    // Beyond the 5-point sensor band (S5b: -5 and 100.5 are readings, flown in the band test).
+    for bad in ["150", "-5.0000001", "105.0000001"] {
         let (_dir, csv) = location_csv(bad);
         let text = refusal_of(
             &run(&with(
@@ -505,7 +512,7 @@ const SAVED_PROFILE_TRAJECTORY: &[&str] = &[
 
 #[test]
 fn a_saved_profile_humidity_outside_zero_to_one_hundred_is_refused_naming_its_source() {
-    for bad in [150.0, -5.0] {
+    for bad in [150.0, -5.000_000_1] {
         let home = home_with_profile(bad);
         let output = run_at_home(home.path(), SAVED_PROFILE_TRAJECTORY);
         let text = refusal_of(&output, &format!("saved profile humidity {bad}"));
@@ -624,7 +631,7 @@ fn home_with_carried_fields() -> (PrivateDir, serde_json::Value) {
 
 #[test]
 fn re_saving_a_profile_whose_stored_humidity_is_refused_keeps_every_carried_field() {
-    for bad in [150.0, -5.0] {
+    for bad in [150.0, -5.000_000_1] {
         let (home, baseline) = home_with_carried_fields();
         let mut profile = baseline.clone();
         profile["humidity"] = serde_json::json!(bad);
@@ -716,6 +723,142 @@ fn profile_save_never_carries_forward_a_tracking_cf_every_load_would_refuse() {
             text.contains(key)
                 && text.contains(&humid_profile_path(home.path()).display().to_string()),
             "the refusal names the field and the file: {text}"
+        );
+    }
+}
+
+// --- the sensor band (S5b) ----------------------------------------------------------------------
+
+/// Readings within 5 points of the range, each with the end it reads as.
+const SENSOR_READINGS: [(&str, &str); 6] = [
+    ("100.0000001", "100"),
+    ("101.7", "100"),
+    ("105", "100"),
+    ("-0", "0"),
+    ("-2", "0"),
+    ("-5", "0"),
+];
+
+/// `trajectory --auto-zero` with a zero-day humidity.
+const AUTO_ZERO: &[&str] = &[
+    "trajectory",
+    "-v",
+    "2700",
+    "-b",
+    "0.475",
+    "-m",
+    "168",
+    "-d",
+    "0.308",
+    "--max-range",
+    "500",
+    "--auto-zero",
+    "200",
+    "-o",
+    "json",
+];
+
+#[test]
+fn every_command_flies_a_sensor_reading_as_the_end_it_reads_as() {
+    for (label, base, flag) in [
+        ("trajectory", TRAJECTORY, "--humidity"),
+        ("trajectory --auto-zero", AUTO_ZERO, "--zero-humidity"),
+        ("zero", ZERO, "--humidity"),
+        ("wind-card", WIND_CARD, "--humidity"),
+        ("compare", COMPARE, "--humidity"),
+        ("come-ups", COME_UPS, "--humidity"),
+        ("estimate-bc", ESTIMATE_BC, "--humidity"),
+        ("mpbr", MPBR, "--humidity"),
+        ("mark-to-range", MARK_TO_RANGE, "--humidity"),
+        ("monte-carlo", MONTE_CARLO, "--humidity"),
+        ("monte-carlo --adaptive", MONTE_CARLO_ADAPTIVE, "--humidity"),
+        ("monte-carlo --wez", MONTE_CARLO_WEZ, "--humidity"),
+    ] {
+        for (reading, end) in SENSOR_READINGS {
+            let at = |value: &str| {
+                let typed = format!("{flag}={value}");
+                stdout_of(
+                    &run(&with(base, &[typed.as_str()])),
+                    &format!("{label} {typed}"),
+                )
+            };
+            assert_eq!(at(reading), at(end), "{label} {flag}={reading}");
+        }
+        // A negative reading needs no `=`: the flag takes it as its value.
+        let spaced = stdout_of(
+            &run(&with(base, &[flag, "-2"])),
+            &format!("{label} {flag} -2"),
+        );
+        let end = format!("{flag}=0");
+        assert_eq!(
+            spaced,
+            stdout_of(
+                &run(&with(base, &[end.as_str()])),
+                &format!("{label} {end}")
+            ),
+            "{label} {flag} -2"
+        );
+    }
+}
+
+#[test]
+fn a_location_csv_or_saved_profile_reading_flies_as_the_end_it_reads_as() {
+    for (reading, end) in SENSOR_READINGS {
+        let (_dir, csv) = location_csv(reading);
+        let from_csv = stdout_of(
+            &run(&with(
+                TRAJECTORY,
+                &["--location", csv.to_str().unwrap(), "--site", "TestSite"],
+            )),
+            &format!("--location HUMIDITY {reading}"),
+        );
+        let (_end_dir, end_csv) = location_csv(end);
+        let at_end = stdout_of(
+            &run(&with(
+                TRAJECTORY,
+                &[
+                    "--location",
+                    end_csv.to_str().unwrap(),
+                    "--site",
+                    "TestSite",
+                ],
+            )),
+            &format!("--location HUMIDITY {end}"),
+        );
+        assert_eq!(from_csv, at_end, "--location HUMIDITY {reading}");
+
+        let reading_home = home_with_profile(reading.parse().unwrap());
+        let end_home = home_with_profile(end.parse().unwrap());
+        assert_eq!(
+            stdout_of(
+                &run_at_home(reading_home.path(), SAVED_PROFILE_TRAJECTORY),
+                &format!("a saved profile at {reading}")
+            ),
+            stdout_of(
+                &run_at_home(end_home.path(), SAVED_PROFILE_TRAJECTORY),
+                &format!("a saved profile at {end}")
+            ),
+            "saved profile humidity {reading}"
+        );
+    }
+}
+
+#[test]
+fn profile_save_stores_a_sensor_reading_as_the_end_it_reads_as() {
+    for (reading, end) in SENSOR_READINGS {
+        let home = private_dir("save");
+        let flag = format!("--humidity={reading}");
+        stdout_of(
+            &run_at_home(home.path(), &with(SAVE_HUMID, &[flag.as_str()])),
+            &format!("profile save {flag}"),
+        );
+        assert_eq!(
+            stored_profile(home.path())["humidity"]
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            end.parse::<f64>().unwrap().to_bits(),
+            "profile save {flag}"
         );
     }
 }

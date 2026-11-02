@@ -605,7 +605,7 @@ pub(crate) fn prepare_request(
         "$.atmosphere.pressure_pa",
         "pressure conversion to hectopascals overflowed",
     )?;
-    // The wire's fraction (already checked to be in [0, 1]) as the one percent both engine
+    // The wire's fraction (already resolved into [0, 1]) as the one percent both engine
     // structs carry.
     let humidity_percent =
         RelativeHumidity::try_fraction(resolved_request.atmosphere.relative_humidity)
@@ -1381,9 +1381,20 @@ pub(crate) fn resolve_atmosphere(
     if let Some(value) = atmosphere.pressure_pa {
         require_positive("$.atmosphere.pressure_pa", value)?;
     }
-    if let Some(value) = atmosphere.relative_humidity {
-        require_range("$.atmosphere.relative_humidity", value, 0.0, 1.0)?;
-    }
+    // The sensor band (S5b, `HUMIDITY_SENSOR_TOLERANCE_PERCENT`): a fraction up to 0.05
+    // outside [0, 1] is a reading of saturated or dry air (an app's Kestrel or phone sensor in
+    // fog), and resolves to the end it reads as, so the resolved request echoes, and every
+    // consumer of it flies, that end. An in-range fraction keeps its bits. Beyond the band it is
+    // refused exactly as before: the same path, code and message.
+    let relative_humidity_sent = match atmosphere.relative_humidity {
+        Some(value) => Some(RelativeHumidity::snap_fraction(value).map_err(|_| {
+            invalid_value(
+                "$.atmosphere.relative_humidity",
+                "value must be finite and in the inclusive range [0, 1]",
+            )
+        })?),
+        None => None,
+    };
     if let Some(value) = atmosphere.latitude_rad {
         require_range(
             "$.atmosphere.latitude_rad",
@@ -1454,7 +1465,7 @@ pub(crate) fn resolve_atmosphere(
         }
     };
     let relative_humidity = literal_default(
-        atmosphere.relative_humidity,
+        relative_humidity_sent,
         DEFAULT_RELATIVE_HUMIDITY,
         "$.atmosphere.relative_humidity",
         format!("Relative humidity defaulted to {DEFAULT_RELATIVE_HUMIDITY}."),
@@ -2640,9 +2651,27 @@ mod tests {
 
     #[test]
     fn semantic_conflicts_and_invalid_values_keep_exact_paths() {
+        // S5b (owner decision 2026-11-01): 1.01 is a sensor reading of saturated air, within
+        // 0.05 of the range, so it resolves to exactly 1 and flies as 100 %.
         let mut request = minimal_request();
         request.atmosphere.relative_humidity = Some(1.01);
-        let error = prepare_request(&request).expect_err("humidity above one");
+        let prepared = prepare_request(&request).expect("a reading within 0.05 of one");
+        assert_eq!(
+            prepared
+                .resolved_request
+                .atmosphere
+                .relative_humidity
+                .to_bits(),
+            1.0_f64.to_bits()
+        );
+        assert_eq!(
+            prepared.inputs.humidity_percent.to_bits(),
+            100.0_f64.to_bits()
+        );
+        // Beyond the band it is refused, with the same path and code as before.
+        let mut request = minimal_request();
+        request.atmosphere.relative_humidity = Some(1.06);
+        let error = prepare_request(&request).expect_err("humidity above the band");
         assert_eq!(error.error.code, SolveErrorCodeV1::InvalidValue);
         assert_eq!(error.error.path(), Some("$.atmosphere.relative_humidity"));
 

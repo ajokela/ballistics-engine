@@ -206,7 +206,8 @@ pub struct BallisticInputs {
     pub pressure: f64,    // millibars/hPa
     /// Relative humidity, PERCENT, `0..=100` (50.0 = 50 %): the unit of
     /// [`AtmosphericConditions::humidity`] and of every atmosphere function, so it passes
-    /// between them unconverted. Default [`DEFAULT_HUMIDITY_PERCENT`].
+    /// between them unconverted. Default [`DEFAULT_HUMIDITY_PERCENT`]. A sensor reading within
+    /// [`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`] of the range flies as the end it reads as.
     ///
     /// A [`TrajectorySolver`] flies its [`AtmosphericConditions`] and sets this field from it.
     /// The entry points that take inputs alone (the `run_monte_carlo*` family and
@@ -795,7 +796,9 @@ pub struct AtmosphericConditions {
     pub temperature: f64, // Celsius
     pub pressure: f64,    // hPa
     /// Relative humidity, PERCENT, `0..=100`, the same unit as
-    /// [`BallisticInputs::humidity_percent`]. Default [`DEFAULT_HUMIDITY_PERCENT`].
+    /// [`BallisticInputs::humidity_percent`]. Default [`DEFAULT_HUMIDITY_PERCENT`]. A sensor
+    /// reading within [`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`] of the range (101.7 in fog)
+    /// flies as the end it reads as; a value beyond that is refused by the solve.
     pub humidity: f64,
     pub altitude: f64, // meters
 }
@@ -1770,7 +1773,9 @@ impl TrajectorySolver {
         require_finite("atmosphere.pressure", self.atmosphere.pressure)?;
         require_finite("atmosphere.altitude", self.atmosphere.altitude)?;
         // Humidity train (plan C4): one validator and one impossible-air rule. The station RH
-        // goes through `RelativeHumidity` (a percent in [0, 100], refused and never clamped),
+        // goes through `RelativeHumidity` (a percent in [0, 100], a sensor reading within 5
+        // points of it flown as the end it reads as, anything farther out refused and never
+        // clamped),
         // the resolved station must be air that exists (`StationAir::new`, the predicate
         // `atmosphere.density_altitude` applies), and so must every downrange zone.
         self.station_air()?;
@@ -2230,9 +2235,10 @@ impl TrajectorySolver {
     /// [`crate::atmosphere::air_at_with_gravity`] lookup and is the reference for station Mach.
     ///
     /// Its density and sound speed are `calculate_atmosphere` at the resolved station, as they
-    /// always were, through [`StationAir::new`]: so an RH outside [0, 100] (or not finite) is
-    /// refused, never clamped, and so is air that cannot exist or a resolved station pressure
-    /// at or below 0. `validate_for_solve` runs this before any integration. Errors name the
+    /// always were, through [`StationAir::new`]: so an RH within
+    /// [`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`] (5 points) of [0, 100] is a sensor reading
+    /// that flies exactly as 100 or 0, an RH beyond that band (or not finite) is refused, never
+    /// clamped, and so is air that cannot exist or a resolved station pressure at or below 0. `validate_for_solve` runs this before any integration. Errors name the
     /// `atmosphere.*` field; a temperature or pressure error quotes the RESOLVED station value.
     fn station_air(&self) -> Result<StationAir, BallisticsError> {
         let at_atmosphere_field = |error: AtmosphereError| {
@@ -9900,7 +9906,8 @@ mod coriolis_direction_tests {
     fn humidity_percent_is_a_percent_field_that_relative_humidity_validates_never_clamps() {
         // 0.50.0 (H5): the field is a PERCENT with the engine's one default, and the clamping
         // 0-1 -> 0-100 helper is gone. RelativeHumidity::try_percent is its validator: it keeps
-        // 0..=100 bit for bit and refuses anything else. 0.49.0's helper clamped 1.5 to 100 %.
+        // 0..=100 bit for bit, reads a sensor reading within 5 points of it as its end (S5b), and
+        // refuses anything farther out. 0.49.0's helper clamped 1.5 to 100 %.
         let inputs = BallisticInputs::default();
         assert_eq!(
             inputs.humidity_percent.to_bits(),
@@ -9914,10 +9921,21 @@ mod coriolis_direction_tests {
             let validated = crate::RelativeHumidity::try_percent(percent).expect("in range");
             assert_eq!(validated.percent().to_bits(), percent.to_bits());
         }
-        for percent in [150.0, -5.0, 100.0001, f64::NAN, f64::INFINITY] {
+        for percent in [150.0, -5.000_000_1, 105.000_000_1, f64::NAN, f64::INFINITY] {
             assert!(
                 crate::RelativeHumidity::try_percent(percent).is_err(),
                 "{percent} must be refused, not clamped"
+            );
+        }
+        // S5b: a sensor reading within 5 points of the range is the end it reads as.
+        for (percent, end) in [(-5.0, 0.0), (100.0001, 100.0)] {
+            assert_eq!(
+                crate::RelativeHumidity::try_percent(percent)
+                    .expect("a reading in the band")
+                    .percent()
+                    .to_bits(),
+                f64::to_bits(end),
+                "{percent}"
             );
         }
     }
@@ -11172,8 +11190,8 @@ mod boundary_layer_shear_height_tests {
 mod station_air_tests {
     //! TrajectorySolver's station air comes from `StationAir`, and its per-step air from
     //! `atmosphere::air_at_with_gravity`. The end-to-end bits are pinned by the S1
-    //! byte-identity files; these check the station itself and that an out-of-range humidity
-    //! is refused, never clamped.
+    //! byte-identity files; these check the station itself, that a humidity beyond the sensor
+    //! band is refused, never clamped, and that a reading within it flies as its end.
     use super::*;
     use crate::atmosphere::{calculate_atmosphere, resolve_station_conditions_with_presence};
 
@@ -11262,13 +11280,15 @@ mod station_air_tests {
         }
     }
 
-    /// An out-of-range station RH is REJECTED, never clamped (humidity train, plan C4). 0.49.0
+    /// An out-of-range station RH (beyond the S5b sensor band) is REJECTED, never clamped
+    /// (humidity train, plan C4). 0.49.0
     /// flew 150 % as 100 % and -5 % as 0 %; `validate_for_solve` now refuses both, and the
     /// station itself (`station_air`) refuses them through `StationAir::new` too, so no solve
     /// path can fly an unvalidated humidity.
     #[test]
     fn out_of_range_station_humidity_is_rejected_never_clamped() {
-        for humidity in [150.0, -5.0, 100.0001, -0.0001, f64::NAN, f64::INFINITY] {
+        // S5b: beyond the 5-point sensor band (a reading within it is the next test's).
+        for humidity in [150.0, -5.000_000_1, 105.000_000_1, f64::NAN, f64::INFINITY] {
             let mut solver = solver(
                 AtmosphericConditions {
                     humidity,
@@ -11303,6 +11323,66 @@ mod station_air_tests {
             let station = solver.station_air().expect("a valid station");
             assert_eq!(station.humidity().percent().to_bits(), humidity.to_bits());
             solver.solve().expect("a valid humidity flies");
+        }
+    }
+
+    /// S5b (owner decision 2026-11-01): a station reading within 5 points of the range is
+    /// sensor error in saturated or dry air, so the station is the end it reads as, and the
+    /// solve flies that end to the bit, on every integrator: the 0.49.0 clamp's numbers, now
+    /// for the band only.
+    #[test]
+    fn a_station_reading_within_five_points_of_the_range_flies_the_end_bit_for_bit() {
+        let flight = |humidity: f64, rk4: bool, rk45: bool| -> Vec<u64> {
+            let mut solver = TrajectorySolver::new_with_station_presence(
+                BallisticInputs {
+                    use_rk4: rk4,
+                    use_adaptive_rk45: rk45,
+                    ..BallisticInputs::default()
+                },
+                WindConditions::default(),
+                AtmosphericConditions {
+                    humidity,
+                    temperature: 30.0,
+                    ..AtmosphericConditions::default()
+                },
+                StationAtmospherePresence::BOTH,
+            );
+            solver.set_max_range(600.0);
+            let station = solver
+                .station_air()
+                .expect("a reading in the band is a station");
+            let result = solver.solve().expect("a reading in the band flies");
+            let mut bits = vec![
+                station.humidity().percent().to_bits(),
+                station.density_kg_m3().to_bits(),
+                station.speed_of_sound_mps().to_bits(),
+            ];
+            for point in &result.points {
+                bits.extend([
+                    point.time.to_bits(),
+                    point.position.x.to_bits(),
+                    point.position.y.to_bits(),
+                    point.position.z.to_bits(),
+                    point.velocity_magnitude.to_bits(),
+                ]);
+            }
+            bits
+        };
+        for (rk4, rk45) in [(false, false), (true, false), (true, true)] {
+            for (reading, end) in [
+                (100.0001, 100.0),
+                (101.7, 100.0),
+                (105.0, 100.0),
+                (-0.0001, 0.0),
+                (-2.0, 0.0),
+                (-5.0, 0.0),
+            ] {
+                assert_eq!(
+                    flight(reading, rk4, rk45),
+                    flight(end, rk4, rk45),
+                    "RH {reading} must fly {end} (rk4 {rk4}, rk45 {rk45})"
+                );
+            }
         }
     }
 }

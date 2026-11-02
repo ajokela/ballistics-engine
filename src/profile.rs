@@ -55,8 +55,10 @@ pub struct ProfileData {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pressure_supplied: bool,
     /// Relative humidity, PERCENT, 0 to 100 (50 = 50 %), whatever `units` says. Absent means
-    /// [`crate::atmosphere::DEFAULT_HUMIDITY_PERCENT`]. A stored value outside 0 to 100 is
-    /// refused on load ([`Self::validate_humidity`]), never clamped.
+    /// [`crate::atmosphere::DEFAULT_HUMIDITY_PERCENT`]. A stored sensor reading within
+    /// [`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`] of 0 to 100 is kept as stored and flies as
+    /// the end it reads as; a value beyond that is refused on load
+    /// ([`Self::validate_humidity`]), never clamped.
     #[serde(default = "default_humidity")]
     pub humidity: f64,
     #[serde(default)]

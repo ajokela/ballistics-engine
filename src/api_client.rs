@@ -47,7 +47,9 @@ pub struct TrajectoryRequest {
     /// [`Self::temperature_supplied`]. Sent as `pressure_supplied=true`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pressure_supplied: Option<bool>,
-    /// Relative humidity, PERCENT 0-100 (optional). Sent at full precision.
+    /// Relative humidity, PERCENT 0-100 (optional). Sent at full precision; a sensor reading
+    /// within 5 points of the range is sent as the end it reads as, and a value beyond that is
+    /// refused before sending (`HUMIDITY_SENSOR_TOLERANCE_PERCENT`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub humidity: Option<f64>,
     /// Altitude in meters (optional)
@@ -138,6 +140,22 @@ pub struct ApiTrajectoryPoint {
     pub time: f64,
 }
 
+/// The humidity a request sends: checked by the engine's one rule,
+/// [`crate::RelativeHumidity::try_percent`], before anything goes over the network. A sensor
+/// reading within `HUMIDITY_SENSOR_TOLERANCE_PERCENT` of 0-100 is sent as the end it reads as
+/// (101.7 as 100), the value every local solve flies; a value beyond the band is a
+/// [`ApiError::RequestError`] naming the field.
+#[cfg(feature = "online")]
+fn sendable_humidity(humidity: Option<f64>) -> Result<Option<f64>, ApiError> {
+    humidity
+        .map(|percent| {
+            crate::RelativeHumidity::try_percent(percent)
+                .map(crate::RelativeHumidity::percent)
+                .map_err(|error| ApiError::RequestError(error.at_field("humidity").to_string()))
+        })
+        .transpose()
+}
+
 /// Request structure for velocity truing via Flask API
 #[derive(Debug, Clone, Serialize)]
 pub struct TrueVelocityRequest {
@@ -176,7 +194,8 @@ pub struct TrueVelocityRequest {
     /// for an omitted value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pressure_supplied: Option<bool>,
-    /// Humidity percentage (default: 50)
+    /// Relative humidity, PERCENT 0-100 (default: 50). A sensor reading within 5 points of the
+    /// range is sent as the end it reads as, and a value beyond that is refused before sending.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub humidity: Option<f64>,
     /// Sight height in inches (default: 2.0)
@@ -304,6 +323,8 @@ impl ApiClient {
         &self,
         request: &TrajectoryRequest,
     ) -> Result<TrajectoryResponse, ApiError> {
+        // The engine's one humidity rule, before anything is sent.
+        let humidity = sendable_humidity(request.humidity)?;
         // Flask API uses GET /v1/calculate with query parameters (imperial units)
         let url = format!("{}/v1/calculate", self.base_url);
 
@@ -361,7 +382,7 @@ impl ApiClient {
         }
         // Full precision, the shortest decimal that round-trips (humidity train, plan C4): a
         // relative humidity is a percent on both sides, and `{:.1}` sent 37.375 as 37.4.
-        if let Some(humidity) = request.humidity {
+        if let Some(humidity) = humidity {
             req = req.query("humidity", humidity.to_string());
         }
         if let Some(altitude) = request.altitude {
@@ -585,7 +606,12 @@ impl ApiClient {
     ) -> Result<TrueVelocityResponse, ApiError> {
         let url = format!("{}/v1/true-velocity", self.base_url);
 
-        let body = serde_json::to_string(request)
+        // The engine's one humidity rule, before anything is sent.
+        let request = TrueVelocityRequest {
+            humidity: sendable_humidity(request.humidity)?,
+            ..request.clone()
+        };
+        let body = serde_json::to_string(&request)
             .map_err(|e| ApiError::RequestError(format!("Failed to serialize request: {}", e)))?;
 
         let mut req = ureq::post(&url)

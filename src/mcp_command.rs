@@ -548,10 +548,17 @@ fn solve_input_schema() -> Value {
                     "pressure_pa": {"type": "number"},
                     "relative_humidity": {
                         "type": "number",
-                        "minimum": 0,
-                        "maximum": 1,
+                        // The sensor band the decoder accepts (S5b), taken from the one rule
+                        // (HUMIDITY_SENSOR_TOLERANCE_PERCENT, in the wire's fraction), never
+                        // written out again here: -0.05 and 1.05.
+                        "minimum": crate::RelativeHumidity::FRACTION_BAND.0,
+                        "maximum": crate::RelativeHumidity::FRACTION_BAND.1,
                         "description": format!(
-                            "relative humidity as a FRACTION 0-1 (0.5 = 50%); omitted means {}",
+                            "relative humidity as a FRACTION 0-1 (0.5 = 50%); a sensor reading \
+                             within {} ({} points) of that range is read as saturated (1) or \
+                             dry (0) air; omitted means {}",
+                            -crate::RelativeHumidity::FRACTION_BAND.0,
+                            ballistics_engine::HUMIDITY_SENSOR_TOLERANCE_PERCENT,
                             crate::RelativeHumidity::DEFAULT.fraction()
                         )
                     },
@@ -788,19 +795,46 @@ mod humidity_schema {
     use super::*;
 
     /// Humidity-consistency train (plan C4): the one FRACTION on the SI wire says so in the
-    /// schema an MCP client reads, with the bounds the decoder enforces. A bare `number` let a
+    /// schema an MCP client reads, with the bounds the decoder enforces (since S5b, the sensor
+    /// band around 0-1). A bare `number` let a
     /// model send `50` meaning 50 % and learn its unit only from the refusal.
     #[test]
     fn relative_humidity_publishes_its_unit_and_bounds() {
         let schema = solve_input_schema();
         let humidity = &schema["properties"]["atmosphere"]["properties"]["relative_humidity"];
         assert_eq!(humidity["type"], "number");
-        assert_eq!(humidity["minimum"], 0);
-        assert_eq!(humidity["maximum"], 1);
+        // S5b (owner decision 2026-11-01): the bounds are the sensor band the decoder
+        // accepts, 0.05 either side of [0, 1], and the description says what a value in the
+        // band means.
+        assert_eq!(humidity["minimum"], -0.05);
+        assert_eq!(humidity["maximum"], 1.05);
         let description = humidity["description"].as_str().unwrap_or_default();
         assert!(
             description.contains("FRACTION") && description.contains("0.5 = 50%"),
             "the description names the unit: {description:?}"
+        );
+        assert!(
+            description.contains("within 0.05 (5 points) of that range")
+                && description.contains("saturated (1) or dry (0) air"),
+            "the description explains the band: {description:?}"
+        );
+        // The bounds are the one rule's edges: each is accepted, and the next double out is
+        // refused.
+        let (minimum, maximum) = (
+            humidity["minimum"].as_f64().unwrap(),
+            humidity["maximum"].as_f64().unwrap(),
+        );
+        assert!(crate::RelativeHumidity::try_fraction(minimum).is_ok());
+        assert!(crate::RelativeHumidity::try_fraction(maximum).is_ok());
+        let below = f64::from_bits(minimum.to_bits() + 1);
+        let above = f64::from_bits(maximum.to_bits() + 1);
+        assert!(below < minimum && above > maximum);
+        assert!(crate::RelativeHumidity::try_fraction(below).is_err());
+        assert!(crate::RelativeHumidity::try_fraction(above).is_err());
+        assert_eq!(
+            ballistics_engine::HUMIDITY_SENSOR_TOLERANCE_PERCENT,
+            5.0,
+            "the description's 0.05 (5 points) is the tolerance"
         );
         // The stated default is the one default, in the wire's unit, with its 0.49.0 bytes.
         assert!(

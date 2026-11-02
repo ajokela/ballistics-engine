@@ -680,8 +680,9 @@ dropping them on every unrelated edit would be hostile. `trajectory --saved-prof
 print a table-output-only note; see [DSF Truing](#dsf-drop-scale-factor-truing).
 
 **A re-save never silently loses stored data (0.50.0).** The carry-forward reads the stored
-file even when a load would refuse one of its values. For example, a stored humidity outside
-0 to 100 % fails to load, and the error names the file to edit. A re-save replaces that
+file even when a load would refuse one of its values. For example, a stored humidity beyond
+the sensor band around 0 to 100 % (more than 5 points outside it) fails to load, and the error
+names the file to edit. A re-save replaces that
 humidity with its own `--humidity` and keeps the DSF table, zero POI, tracking CFs, zero
 sets, reticle, click graduations and turret fields. Before 0.50.0, a profile that failed to
 load looked absent to the re-save, which then dropped all of them. Two cases now refuse the
@@ -2188,7 +2189,8 @@ Statistical analysis with parameter variations:
 0 to 100 (default 50, the same default as every other command). It reaches the fixed-count
 run, `--adaptive` and `--wez` alike; the rest of the air is the 15 °C / 1013.25 hPa sea-level
 standard. Before 0.50.0 `monte-carlo` had no `--humidity` and always flew 50 %. As on every
-command, a value outside 0 to 100 is refused, never clamped.
+command, a sensor reading up to 5 points outside 0 to 100 (101.7 in fog, -2 in very dry air) is
+read as 100 or 0 and flies exactly as that end; a value farther out is refused, never clamped.
 
 ### Confidence-Controlled Sampling (`--adaptive`) — MBA-1352
 

@@ -345,13 +345,17 @@ static int test_station_presence(const FFIBallisticInputs* base) {
 }
 
 // 0.50.0 (humidity-consistency train): a relative humidity is a PERCENT from 0 to 100, and a
-// value outside that range is REFUSED, never clamped. 0.49.0 flew 150 as 100 %. The single
-// solve and the Monte Carlo return NULL, the zero angle NaN; 0 and 100 still fly.
+// value beyond the 5-point sensor band around it is REFUSED, never clamped. 0.49.0 flew 150 as
+// 100 %. The single solve and the Monte Carlo return NULL, the zero angle NaN; 0 and 100 still
+// fly. A sensor reading within the band (101.7 in fog, -2 in desert air) is the saturated or
+// dry air it reads, and flies that end to the bit.
 static int test_humidity_validation(const FFIBallisticInputs* base) {
     FFIBallisticInputs inputs = *base;
     inputs.enable_wind_shear = 0;
-    const double bad[] = {150.0, -5.0, 100.0001, NAN};
+    const double bad[] = {150.0, -5.0000001, 105.0000001, NAN};
     const double good[] = {0.0, 100.0};
+    const double readings[][2] = {{100.0001, 100.0}, {101.7, 100.0}, {105.0, 100.0},
+                                  {-2.0, 0.0}, {-5.0, 0.0}};
     FFIMonteCarloParams params = {
         .num_simulations = 3,
         .velocity_std_dev = 0.0,
@@ -395,7 +399,34 @@ static int test_humidity_validation(const FFIBallisticInputs* base) {
             return 1;
         }
     }
-    printf("150, -5, 100.0001 and NaN %% refused; 0 and 100 %% fly\n\n");
+    for (size_t i = 0; i < sizeof readings / sizeof readings[0]; i++) {
+        FFIAtmosphericConditions at_reading = {
+            .temperature = 15.0, .pressure = 1013.25, .humidity = readings[i][0], .altitude = 0.0
+        };
+        FFIAtmosphericConditions at_end = at_reading;
+        at_end.humidity = readings[i][1];
+        FFITrajectoryResult* reading = ballistics_calculate_trajectory(
+            &inputs, NULL, &at_reading, 300.0, 1.0);
+        FFITrajectoryResult* end = ballistics_calculate_trajectory(
+            &inputs, NULL, &at_end, 300.0, 1.0);
+        double zero_reading = ballistics_calculate_zero_angle(&inputs, NULL, &at_reading, 100.0);
+        double zero_end = ballistics_calculate_zero_angle(&inputs, NULL, &at_end, 100.0);
+        FFIMonteCarloResults* mc = ballistics_monte_carlo(&inputs, &at_reading, &params);
+        int same = reading != NULL && end != NULL && mc != NULL &&
+                   reading->impact_velocity == end->impact_velocity &&
+                   reading->max_height == end->max_height &&
+                   reading->time_of_flight == end->time_of_flight &&
+                   zero_reading == zero_end;
+        ballistics_free_trajectory_result(reading);
+        ballistics_free_trajectory_result(end);
+        ballistics_free_monte_carlo_results(mc);
+        if (!same) {
+            printf("FATAL: humidity %.10g %% must fly as %.10g %%\n", readings[i][0], readings[i][1]);
+            return 1;
+        }
+    }
+    printf("150, -5.0000001, 105.0000001 and NaN %% refused; 0 and 100 %% fly; "
+           "101.7 flies as 100 %% and -2 as 0 %%\n\n");
     return 0;
 }
 

@@ -685,3 +685,44 @@ fn a_humid_zone_moves_every_zoned_family_as_it_moves_the_reference() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+// =================================================================================================
+// The sensor-tolerance band (S5b, owner decision 2026-11-01)
+// =================================================================================================
+
+/// Readings within 5 points of the range, each with the end it reads as.
+const SENSOR_READINGS: [(f64, f64); 6] = [
+    (100.000_000_1, 100.0),
+    (101.7, 100.0),
+    (105.0, 100.0),
+    (-0.0, 0.0),
+    (-2.0, 0.0),
+    (-5.0, 0.0),
+];
+
+#[test]
+fn every_family_flies_a_sensor_reading_as_the_end_it_reads_as_bit_for_bit() {
+    let bits = |e: Endpoint| [e.height_m.to_bits(), e.speed_mps.to_bits()];
+    for (reading, end) in SENSOR_READINGS {
+        for family in FAMILIES {
+            assert_eq!(
+                bits(endpoint(family, SEA_LEVEL, reading, 1000.0)),
+                bits(endpoint(family, SEA_LEVEL, end, 1000.0)),
+                "{family:?}: station RH {reading} must fly {end}"
+            );
+        }
+        // The zoned families, the station and a zone each at the reading.
+        let station = ZONE_STATION;
+        let zone = |humidity: f64| {
+            vec![
+                (station.temperature_c, station.pressure_hpa, 50.0, 400.0),
+                (30.0, 990.0, humidity, 1.0e6),
+            ]
+        };
+        assert_eq!(
+            zoned_endpoints(station, reading, Some(zone(reading))),
+            zoned_endpoints(station, end, Some(zone(end))),
+            "zoned families at RH {reading}"
+        );
+    }
+}

@@ -1140,8 +1140,9 @@ impl TruingModelInputsV1 {
         if !self.temperature_f.value.is_finite() {
             return Err("temperature must be finite".to_string());
         }
-        // The engine's one humidity validator (plan C4): a percent in [0, 100], refused with
-        // its field named, never clamped.
+        // The engine's one humidity validator (plan C4): a percent in [0, 100], a sensor
+        // reading within 5 points of it flown as the end it reads as (S5b), anything farther
+        // out refused with its field named, never clamped.
         crate::atmosphere::RelativeHumidity::try_percent(self.humidity_pct)
             .map_err(|error| error.at_field("humidity_pct").to_string())?;
         if !self.altitude_ft.is_finite() {

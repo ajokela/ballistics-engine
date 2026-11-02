@@ -17,7 +17,11 @@
 //!   does not call `air_at`;
 //! - a fixed sound speed (`340.29`, `343.0`) outside its allowlisted, documented sites;
 //! - a humidity scaled by 100 or clamped into a 0-1 fraction by hand (plan C3, H5): a Rust
-//!   humidity is a percent, and a wire fraction converts through `RelativeHumidity`.
+//!   humidity is a percent, and a wire fraction converts through `RelativeHumidity`;
+//! - a humidity bounded by hand (S5b): a range, an ordering comparison, `min`/`max` or a
+//!   low-high argument pair against 0, 1, 100 or a sensor-band edge, on a line or in an
+//!   expression that names a humidity (in a string too, such as a wire path). The one range is
+//!   `RelativeHumidity`'s.
 //!
 //! Together with `-D warnings` on the deprecated dry `get_local_atmosphere`, no in-crate path can
 //! silently go dry.
@@ -43,6 +47,20 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// `text` with every comment and every string or char literal's contents replaced by spaces,
 /// newlines kept, so byte offsets and line numbers survive.
 fn code_only(text: &str) -> String {
+    blank_non_code(text, true)
+}
+
+/// `text` with every comment replaced by spaces but string and char literals KEPT, newlines
+/// kept, so byte offsets and line numbers match [`code_only`]'s. For telling whether code NAMES
+/// a humidity, which a wire path (`"$.atmosphere.relative_humidity"`) or a flag name does from
+/// inside a string.
+fn without_comments(text: &str) -> String {
+    blank_non_code(text, false)
+}
+
+/// [`code_only`] and [`without_comments`]: comments always blanked, string and char literal
+/// contents blanked when `blank_literals`.
+fn blank_non_code(text: &str, blank_literals: bool) -> String {
     let bytes = text.as_bytes();
     let mut out = bytes.to_vec();
     let blank = |out: &mut Vec<u8>, from: usize, to: usize| {
@@ -50,6 +68,11 @@ fn code_only(text: &str) -> String {
             if *byte != b'\n' {
                 *byte = b' ';
             }
+        }
+    };
+    let blank_literal = |out: &mut Vec<u8>, from: usize, to: usize| {
+        if blank_literals {
+            blank(out, from, to);
         }
     };
     let mut i = 0;
@@ -98,7 +121,7 @@ fn code_only(text: &str) -> String {
                     .windows(terminator.len())
                     .position(|w| w == terminator.as_slice())
                     .map_or(bytes.len(), |n| body + n);
-                blank(&mut out, body, end);
+                blank_literal(&mut out, body, end);
                 i = end + terminator.len();
             }
             b'"' => {
@@ -106,19 +129,19 @@ fn code_only(text: &str) -> String {
                 while j < bytes.len() && bytes[j] != b'"' {
                     j += if bytes[j] == b'\\' { 2 } else { 1 };
                 }
-                blank(&mut out, i + 1, j.min(bytes.len()));
+                blank_literal(&mut out, i + 1, j.min(bytes.len()));
                 i = j + 1;
             }
             b'\'' => {
                 // A char literal ('x', '\n', '\u{..}'), or a lifetime ('a).
                 if bytes.get(i + 1) == Some(&b'\\') {
                     let end = text[i + 2..].find('\'').map_or(bytes.len(), |n| i + 2 + n);
-                    blank(&mut out, i + 1, end);
+                    blank_literal(&mut out, i + 1, end);
                     i = end + 1;
                 } else if let Some(c) = text[i + 1..].chars().next() {
                     let after = i + 1 + c.len_utf8();
                     if bytes.get(after) == Some(&b'\'') {
-                        blank(&mut out, i + 1, after);
+                        blank_literal(&mut out, i + 1, after);
                         i = after + 1;
                     } else {
                         i += 1;
@@ -186,7 +209,14 @@ fn test_item_ranges(code: &str) -> Vec<(usize, usize)> {
 
 /// `code` (already `code_only`) with every `#[cfg(test)]` item blanked, newlines kept.
 fn without_test_items(code: &str) -> String {
-    let mut out = code.as_bytes().to_vec();
+    without_test_items_of(code, code)
+}
+
+/// `text` (the same file as `code`, `code_only`, byte for byte) with every `#[cfg(test)]` item
+/// that `code` holds blanked, newlines kept. Each item runs from its ASCII `#` to its ASCII `;`
+/// or `}`, so whole characters are blanked and `text` stays UTF-8.
+fn without_test_items_of(text: &str, code: &str) -> String {
+    let mut out = text.as_bytes().to_vec();
     for (start, end) in test_item_ranges(code) {
         for byte in &mut out[start..end] {
             if *byte != b'\n' {
@@ -194,7 +224,7 @@ fn without_test_items(code: &str) -> String {
             }
         }
     }
-    String::from_utf8(out).expect("ASCII blanking")
+    String::from_utf8(out).expect("blanking whole characters keeps UTF-8")
 }
 
 /// Files declared `#[cfg(test)] mod name;`: test-only through and through.
@@ -727,8 +757,9 @@ fn every_production_humidity_default_is_the_one_constant() {
 #[test]
 fn no_production_path_clamps_a_humidity_into_range() {
     // Plan C4, H9: out-of-range input is REJECTED with a field-named error, never clamped. The
-    // only clamps left are the total-function guards inside src/atmosphere.rs, behind validated
-    // input and the legacy wrappers.
+    // only clamps left are inside src/atmosphere.rs: the sensor band's snap of a reading to the
+    // end it reads as (S5b, `RelativeHumidity`'s one rule), and the total-function guards behind
+    // validated input and the legacy wrappers.
     let mut offenders = Vec::new();
     for (path, text, production) in production_sources() {
         for (index, line) in production.lines().enumerate() {
@@ -749,6 +780,308 @@ fn no_production_path_clamps_a_humidity_into_range() {
     assert!(
         offenders.is_empty(),
         "a humidity is clamped; refuse it through RelativeHumidity instead:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// The values a hand-written humidity bound is written with, by magnitude: dry and saturated
+/// air in either unit (0, 1 and 100) and the sensor band's edges in either unit (5, 105, 0.05
+/// and 1.05).
+const HUMIDITY_BOUND_VALUES: [f64; 7] = [0.0, 1.0, 100.0, 5.0, 105.0, 0.05, 1.05];
+
+/// The FLOAT literal that starts at `at` in `code` (`0.0`, `1e2`, `100_f64`, `1.05`; not the
+/// tail of an identifier, a field access or a longer number): its end offset and its value.
+/// Every humidity is an `f64`, so a bound on one is a float literal, and an integer (`0..n`,
+/// `len() > 0`) is never one.
+fn float_literal_at(code: &str, at: usize) -> Option<(usize, f64)> {
+    let b = code.as_bytes();
+    if !b.get(at)?.is_ascii_digit() {
+        return None;
+    }
+    // `x.0` is a field; `..1.0` (a range's end) is a literal.
+    let after_a_field_dot = at > 0 && b[at - 1] == b'.' && !(at > 1 && b[at - 2] == b'.');
+    if after_a_field_dot || (at > 0 && (b[at - 1].is_ascii_alphanumeric() || b[at - 1] == b'_')) {
+        return None;
+    }
+    let digits = |mut j: usize| {
+        while b.get(j).is_some_and(|c| c.is_ascii_digit() || *c == b'_') {
+            j += 1;
+        }
+        j
+    };
+    let mut end = digits(at);
+    let mut float = false;
+    if b.get(end) == Some(&b'.') && b.get(end + 1).is_some_and(u8::is_ascii_digit) {
+        end = digits(end + 1);
+        float = true;
+    }
+    if matches!(b.get(end), Some(b'e' | b'E')) {
+        let sign = usize::from(matches!(b.get(end + 1), Some(b'+' | b'-')));
+        if b.get(end + 1 + sign).is_some_and(u8::is_ascii_digit) {
+            end = digits(end + 1 + sign);
+            float = true;
+        }
+    }
+    let number_end = end;
+    while b
+        .get(end)
+        .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_')
+    {
+        end += 1;
+    }
+    match code[number_end..end].trim_start_matches('_') {
+        "" => {}
+        "f64" | "f32" => float = true,
+        _ => return None,
+    }
+    if !float {
+        return None;
+    }
+    let value = code[at..number_end].replace('_', "").parse().ok()?;
+    Some((end, value))
+}
+
+/// The float literal that ENDS at `end` in `code`, whitespace before `end` skipped: its start
+/// and its value.
+fn float_literal_ending_at(code: &str, end: usize) -> Option<(usize, f64)> {
+    let end = code[..end].trim_end().len();
+    let b = code.as_bytes();
+    let mut start = end;
+    while start > 0
+        && (b[start - 1].is_ascii_alphanumeric() || b[start - 1] == b'_' || b[start - 1] == b'.')
+    {
+        start -= 1;
+    }
+    let (literal_end, value) = float_literal_at(code, start)?;
+    (literal_end == end).then_some((start, value))
+}
+
+/// The float literal that BEGINS the operand at `from` in `code`, whitespace and one unary
+/// minus skipped: its start and its value.
+fn float_literal_after(code: &str, from: usize) -> Option<(usize, f64)> {
+    let skip_spaces = |at: usize| at + (code[at..].len() - code[at..].trim_start().len());
+    let mut at = skip_spaces(from);
+    if code.as_bytes().get(at) == Some(&b'-') {
+        at = skip_spaces(at + 1);
+    }
+    float_literal_at(code, at).map(|(_, value)| (at, value))
+}
+
+/// Offsets in `code` (production code, `code_only`) of the float literals that bound a value by
+/// hand with one of the [`HUMIDITY_BOUND_VALUES`]: an end of a range
+/// (`(0.0..=1.0).contains(&v)`, `(0.0..).contains(&v)`), an operand of an ordering comparison
+/// (`v > 100.0`, `1.0 < v`, `v >= -0.05`), an argument of `min` or `max` (`v.min(100.0)`,
+/// `f64::max(v, 0.0)`), or a pair of such arguments of any call, next to each other, low then
+/// high (`v.clamp(0.0, 1.0)`, `require_range(path, v, 0.0, 1.0)`, `in_band(v, -5.0, 105.0)`;
+/// a run of zeros, `f(.., 0.0, 0.0, ..)`, is not a range). Sorted, without repeats.
+fn hand_written_bounds(code: &str) -> Vec<usize> {
+    let b = code.as_bytes();
+    let bound = |found: Option<(usize, f64)>| {
+        found
+            .filter(|(_, value)| HUMIDITY_BOUND_VALUES.contains(&value.abs()))
+            .map(|(at, _)| at)
+    };
+    let mut out = Vec::new();
+    // Ranges: `a..b` and `a..=b`, never `...`.
+    for (at, _) in code.match_indices("..") {
+        if (at > 0 && b[at - 1] == b'.') || b.get(at + 2) == Some(&b'.') {
+            continue;
+        }
+        let operator_end = if b.get(at + 2) == Some(&b'=') {
+            at + 3
+        } else {
+            at + 2
+        };
+        out.extend(bound(float_literal_ending_at(code, at)));
+        out.extend(bound(float_literal_after(code, operator_end)));
+    }
+    // Ordering comparisons: `<`, `<=`, `>`, `>=`, never a shift, `->` or `=>`.
+    for (i, &c) in b.iter().enumerate() {
+        if c != b'<' && c != b'>' {
+            continue;
+        }
+        let previous = i.checked_sub(1).map(|j| b[j]);
+        let next = b.get(i + 1).copied();
+        if next == Some(c)
+            || previous == Some(c)
+            || (c == b'>' && matches!(previous, Some(b'-' | b'=')))
+        {
+            continue;
+        }
+        let operator_end = if next == Some(b'=') { i + 2 } else { i + 1 };
+        out.extend(bound(float_literal_ending_at(code, i)));
+        out.extend(bound(float_literal_after(code, operator_end)));
+    }
+    // Calls: `min`/`max` with one bound literal argument, any call with a low-high pair.
+    for (open, _) in code.match_indices('(') {
+        let name_end = code[..open].trim_end().len();
+        let name_start = code[..name_end]
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .map_or(0, |n| n + 1);
+        let name = &code[name_start..name_end];
+        if name.is_empty() || name.as_bytes()[0].is_ascii_digit() {
+            continue;
+        }
+        let (mut depth, mut argument_start, mut arguments) = (0i32, open + 1, Vec::new());
+        for (j, &c) in b.iter().enumerate().skip(open) {
+            match c {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        arguments.push((argument_start, j));
+                        break;
+                    }
+                }
+                b',' if depth == 1 => {
+                    arguments.push((argument_start, j));
+                    argument_start = j + 1;
+                }
+                _ => {}
+            }
+        }
+        // Each argument that is a bound literal and nothing else: its offset and signed value.
+        let literals: Vec<Option<(usize, f64)>> = arguments
+            .into_iter()
+            .map(|(start, end)| {
+                let (at, value) = float_literal_after(code, start)?;
+                let literal_end = float_literal_at(code, at)?.0;
+                let negative = code[start..at].trim() == "-";
+                (code[literal_end..end].trim().is_empty() && HUMIDITY_BOUND_VALUES.contains(&value))
+                    .then_some((at, if negative { -value } else { value }))
+            })
+            .collect();
+        if matches!(name, "min" | "max") {
+            out.extend(literals.iter().flatten().map(|&(at, _)| at));
+        }
+        for pair in literals.windows(2) {
+            if let [Some((low_at, low)), Some((high_at, high))] = *pair {
+                if low < high {
+                    out.extend([low_at, high_at]);
+                }
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Offsets of the [`hand_written_bounds`] in the PRODUCTION code of `text` (a whole source
+/// file: comments, string contents and `#[cfg(test)]` items blanked) whose line, or whose
+/// expression ([`enclosing_expression`]), names a humidity. The name may be inside a string: a
+/// wire path (`"$.atmosphere.relative_humidity"`) names one.
+fn hand_written_humidity_bounds(text: &str) -> Vec<usize> {
+    let code = code_only(text);
+    let production = without_test_items(&code);
+    let names = without_test_items_of(&without_comments(text), &code).to_ascii_lowercase();
+    hand_written_bounds(&production)
+        .into_iter()
+        .filter(|&at| {
+            let line_start = names[..at].rfind('\n').map_or(0, |n| n + 1);
+            let line_end = names[at..].find('\n').map_or(names.len(), |n| at + n);
+            let (start, end) = enclosing_expression(&production, at);
+            names[line_start..line_end].contains("humid") || names[start..end].contains("humid")
+        })
+        .collect()
+}
+
+#[test]
+fn the_bound_finder_finds_hand_written_humidity_bounds_only() {
+    for (code, count) in [
+        // The perturbation layer's S5b domain check, as first written, on one line and on two.
+        (
+            "if axis == InputAxis::RelativeHumidity && !(0.0..=1.0).contains(&value) {}",
+            2,
+        ),
+        (
+            "if axis == InputAxis::RelativeHumidity\n    && !(0.0..=1.0).contains(&value)\n{}",
+            2,
+        ),
+        ("let ok = (0.0..=100.0).contains(&humidity);", 2),
+        ("let ok = (-5.0..=105.0).contains(&humidity_percent);", 2),
+        ("let ok = (0.0..).contains(&humidity);", 1),
+        ("if humidity_percent > 100.0 {}", 1),
+        ("if 100.0 < humidity {}", 1),
+        ("let ok = humidity_fraction >= 1.05;", 1),
+        ("let ok = relative_humidity < -0.05;", 1),
+        ("let ok = humidity <= 1e2;", 1),
+        ("let h = humidity.min(100.0);", 1),
+        ("let h = humidity.max(0.0_f64);", 1),
+        ("let h = f64::max(humidity, 0.0);", 1),
+        ("let h = humidity.clamp(-5.0, 105.0);", 2),
+        // A wire path names the humidity from inside a string: solve v1's 0.49 decoder check.
+        (
+            "require_range(\"$.atmosphere.relative_humidity\", value, 0.0, 1.0)?;",
+            2,
+        ),
+        // A block's tail expression includes its item header.
+        (
+            "fn saturated(humidity_percent: f64) -> bool {\n    p > 100.0\n}",
+            1,
+        ),
+        (
+            "let ok = (..=1.0).contains(&humidity) && (..100.0).contains(&humidity_percent);",
+            2,
+        ),
+    ] {
+        assert_eq!(hand_written_humidity_bounds(code).len(), count, "{code}");
+    }
+    for code in [
+        "humidity: Option<f64>,",
+        "fn f(humidity: f64) -> Result<f64, String> { g(humidity) }",
+        "let humidities: Vec<Vec<f64>> = Vec::new();",
+        "for i in 0..humidities.len() {}",
+        "if humidities.len() > 0 {}",
+        "if humidity > threshold {}",
+        "if humidity > 50.0 {}",
+        "if humidity_percent > 1000.0 {}",
+        "if humidity < 0.5 {}",
+        "let x = humidity_percent - 100.0;",
+        "let band = humidity_band.0..=humidity_band.1;",
+        "let h = match humidity { Some(h) => h, None => 0.0 };",
+        "let h = RelativeHumidity::try_percent(100.0);",
+        "let h = RelativeHumidity::DEFAULT.fraction();",
+        // The humidity is named only in a comment, or on another line and expression.
+        "let x = distance.max(0.0); // humidity",
+        "if speed > 0.0 {\n    humidity = h;\n}",
+        "let wind = Vector3::new(0.0, 0.0, 1.0);\nlet humidity = h;",
+        // Positional zeros in a call that also takes the humidity are not a range.
+        "fly(velocity, humidity, 0.0, 0.0, 1.5)",
+        "fly(velocity, humidity, 1.0, 0.0)",
+        "#[cfg(test)]\nfn t() { assert!(humidity > 100.0); }",
+    ] {
+        assert!(hand_written_humidity_bounds(code).is_empty(), "{code}");
+    }
+}
+
+#[test]
+fn no_production_path_bounds_a_humidity_by_hand() {
+    // S5b (owner decision 2026-11-01): a relative humidity has ONE range, RelativeHumidity's
+    // in src/atmosphere.rs: the sensor band a reading may lie in
+    // (HUMIDITY_SENSOR_TOLERANCE_PERCENT, `RelativeHumidity::FRACTION_BAND`) and the 0..=1
+    // physical humidity it snaps into (`RelativeHumidity::is_physical_fraction`). So no
+    // production line or expression outside src/atmosphere.rs that names a humidity checks one
+    // against 0, 1, 100 or a band edge itself (a range, an ordering comparison, `min`/`max`,
+    // or a call with two such bounds). A second range would drift from the band; one did in
+    // S5b's first draft (the perturbation layer's `(0.0..=1.0).contains`), and solve v1's 0.49
+    // `require_range(.., 0.0, 1.0)` was another.
+    let mut offenders = Vec::new();
+    for (path, text, _) in production_sources() {
+        let mut lines: Vec<usize> = hand_written_humidity_bounds(&text)
+            .into_iter()
+            .map(|at| line_of(&text, at))
+            .collect();
+        lines.dedup();
+        for line in lines {
+            let raw = text.lines().nth(line - 1).unwrap_or("").trim();
+            offenders.push(format!("{path}:{line}: {raw}"));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a humidity is bounded by hand; take its range from RelativeHumidity \
+         (try_percent/try_fraction, FRACTION_BAND, is_physical_fraction):\n{}",
         offenders.join("\n")
     );
 }

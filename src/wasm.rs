@@ -440,8 +440,9 @@ fn require_value<'a>(args: &[&'a str], i: usize) -> Result<&'a str, JsValue> {
 }
 
 /// Parse a humidity flag's value (`--humidity`, `--zero-humidity`) through the engine's one
-/// validator, [`crate::atmosphere::parse_humidity_percent_arg`]: a PERCENT from 0 to 100,
-/// refused (never clamped) outside it, with the flag named in the error. Every humidity flag of
+/// validator, [`crate::atmosphere::parse_humidity_percent_arg`]: a PERCENT from 0 to 100; a
+/// sensor reading up to 5 outside it is the end it reads as, and anything farther out is refused
+/// (never clamped), with the flag named in the error. Every humidity flag of
 /// every command parses through here (humidity-consistency train, plan C4); 0.49.0
 /// range-checked only `true-velocity` and `true-wind`.
 fn humidity_value(flag: &str, raw: &str) -> Result<f64, JsValue> {
@@ -8417,7 +8418,8 @@ Trajectory Command:
     --zero-density-altitude <DA> Zero-day density altitude for --auto-zero (ft/m);
                                  supersedes --zero-altitude and --zero-pressure/
                                  --zero-pressure-type for the zero solve only
-    --humidity <HUMIDITY>        Humidity (0-100%)
+    --humidity <HUMIDITY>        Humidity (0-100%); a sensor reading up to 5
+                                 outside is read as 0 or 100
     --altitude <ALT>             Altitude (feet/meters)
     
   Advanced Physics:
@@ -8590,7 +8592,8 @@ Monte Carlo Command:
     --wind-speed-std <STD>       Wind speed std deviation (--wind-std also accepted)
     --wind-direction-std <STD>   Wind direction std deviation (degrees)
     --humidity <H>               Relative humidity (0-100%), flown by every
-                                 simulation and the WEZ sweep [default: 50]
+                                 simulation and the WEZ sweep [default: 50]; a
+                                 sensor reading up to 5 outside is read as 0 or 100
 
   WEZ (Weapon Employment Zone) sweep:
     --wez                        WEZ sweep mode: hit probability vs range for a
@@ -8663,7 +8666,8 @@ True Velocity Command:
     --pressure <P>               Pressure (inHg/hPa). Omitted: ICAO standard at
                                  --altitude; a typed value flies as typed
     --pressure-type <TYPE>       absolute (default) or qnh (reduced vs --altitude)
-    --humidity <H>               Humidity (0-100%) [default: 50]
+    --humidity <H>               Humidity (0-100%) [default: 50]; a sensor
+                                 reading up to 5 outside is read as 0 or 100
     --altitude <A>               Altitude (ft/m) [default: 0]
     --offline                    Accepted for native-command parity (the WASM
                                  terminal always calculates locally)
@@ -8716,7 +8720,8 @@ True Wind Command:
     --pressure <P>               Pressure (inHg/hPa). Omitted: ICAO standard at
                                  --altitude; a typed value flies as typed
     --pressure-type <TYPE>       absolute (default) or qnh (reduced vs --altitude)
-    --humidity <H>               Humidity (0-100%) [default: 50]
+    --humidity <H>               Humidity (0-100%) [default: 50]; a sensor
+                                 reading up to 5 outside is read as 0 or 100
     --altitude <A>               Altitude (ft/m) [default: 0]
     --offline                    Accepted for native-command parity (this command
                                  is local on both surfaces)

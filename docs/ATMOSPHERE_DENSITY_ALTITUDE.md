@@ -39,7 +39,7 @@ and are not negotiable: there is no `temperature_c`, and humidity is a fraction.
 | `temperature_k` | ICAO standard at `altitude_m` | Station temperature, **kelvin** (°C + 273.15). |
 | `pressure_pa` | ICAO standard at `altitude_m` | Pressure, **pascals** (hPa × 100). Station pressure unless `pressure_reference` says otherwise. |
 | `pressure_reference` | `"absolute"` | `"absolute"`: `pressure_pa` is station pressure. `"qnh"`: it is a sea-level-corrected reading, reduced to station pressure at `altitude_m` first. |
-| `relative_humidity` | `0.5` | **Fraction** 0–1. 50% is `0.5`; `50.0` is refused. |
+| `relative_humidity` | `0.5` | **Fraction** 0–1. 50% is `0.5`; `50.0` is refused. A sensor reading up to `0.05` outside 0–1 is read as `0` or `1`, as in a solve. |
 | `latitude_rad` | absent | Validated as the solve validates it (radians, ±π/2 — a value in degrees is refused), echoed back, otherwise unused. |
 
 Two practical rules:

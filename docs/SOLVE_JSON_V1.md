@@ -123,7 +123,13 @@ All dimensional input and result fields use SI units, made explicit by their suf
 
 - `_kg` is kilograms, `_m` is metres, `_mps` is metres per second, and `_j` is joules.
 - `_s` is seconds, `_pa` is pascals, `_k` is kelvin, and `_rad` is radians.
-- `relative_humidity` is a dimensionless fraction from `0` through `1`.
+- `relative_humidity` is a dimensionless fraction from `0` through `1`. A sensor reading up to
+  `0.05` outside that range (a weather meter or phone at 101.7 % in fog, or a little below 0 % in
+  very dry air) is read as saturated (`1`) or dry (`0`) air: it resolves to exactly `1` or `0` in
+  `resolved_request`, and the solve flies that end to the bit. A value beyond `-0.05` or `1.05`
+  is an `invalid_value` at `$.atmosphere.relative_humidity`, as before. Weather is an input
+  source, never a gate: relative-humidity sensors are good to about ±2-3 % and read above 100 %
+  in condensing air, while free air is supersaturated by under 1 %.
 - Wind angles are wind-from directions relative to the shot axis: `0` is a headwind and positive
   `pi / 2` is wind from the shooter's right.
 - `drop_m` is positive below the line of sight.
@@ -670,7 +676,7 @@ is the right model only when the rifle was zeroed in the air it is being shot in
 | `temperature_k` | no | ICAO at `altitude_m` | Authoritative station temperature when present. |
 | `pressure_pa` | no | ICAO at `altitude_m` | Station or sea-level pressure when present; see `pressure_reference`. |
 | `pressure_reference` | no | `"absolute"` | Whether `pressure_pa` is absolute station pressure or a QNH altimeter setting. |
-| `relative_humidity` | no | `0.5` | Relative-humidity fraction. |
+| `relative_humidity` | no | `0.5` | Relative-humidity fraction, `0` to `1`; a reading up to `0.05` outside is read as `0` or `1`. |
 | `latitude_rad` | no | absent | Geodetic latitude; needed when Coriolis is enabled. |
 
 An empty atmosphere object selects ICAO standard conditions at the resolved altitude (sea level

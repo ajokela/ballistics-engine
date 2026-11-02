@@ -101,15 +101,9 @@ fn negative_zero_percent_is_dry_air_with_positive_zero_bits() {
 
 #[test]
 fn try_percent_rejects_out_of_range_and_non_finite_values_without_clamping() {
-    let out_of_range = [
-        -5.0,
-        -0.0001,
-        -1e-300,
-        100.0001,
-        100.000_000_000_001,
-        150.0,
-        1e300,
-    ];
+    // S5b: a reading within 5 points of the range is saturated or dry air (the band tests
+    // above); only a value beyond the band is refused, and it is refused unchanged.
+    let out_of_range = [-5.000_000_1, 105.000_000_1, 150.0, 1e300];
     for percent in out_of_range {
         let error = RelativeHumidity::try_percent(percent).expect_err("out of range");
         assert_eq!(error.field(), "humidity_percent", "{percent}");
@@ -171,7 +165,7 @@ fn try_fraction_accepts_the_closed_unit_range_and_scales_by_exactly_100() {
 
 #[test]
 fn try_fraction_rejects_out_of_range_and_non_finite_values_without_clamping() {
-    for fraction in [1.5, -0.1, -1e-300, 1.000_000_000_000_001, 50.0, 100.0] {
+    for fraction in [1.5, -0.1, -0.050_000_1, 1.050_000_1, 50.0, 100.0] {
         let error = RelativeHumidity::try_fraction(fraction).expect_err("out of range");
         assert_eq!(error.field(), "relative_humidity", "{fraction}");
         assert_eq!(error.value().to_bits(), fraction.to_bits(), "{fraction}");
@@ -208,6 +202,269 @@ fn fraction_round_trips_are_exact_at_the_ends_and_within_one_ulp_elsewhere() {
         assert!(
             ulps_apart(back, percent) <= 1,
             "percent {percent} came back as {back}"
+        );
+    }
+}
+
+// =================================================================================================
+// The sensor-tolerance band (owner decision 2026-11-01, step S5b)
+// =================================================================================================
+
+/// Percents a humidity SENSOR can report around saturated air: within 5 points above 100,
+/// they are saturated air, stored as exactly 100.
+const SATURATED_READINGS: [f64; 6] = [
+    100.000_000_000_001,
+    100.000_000_1,
+    100.0001,
+    101.7,
+    104.999_999_9,
+    105.0,
+];
+/// ...and around dry air: within 5 points below 0 (and a negative zero), dry air, stored as
+/// exactly +0.0.
+const DRY_READINGS: [f64; 7] = [-0.0, -1e-300, -0.0001, -2.0, -3.0, -4.999_999_9, -5.0];
+
+#[test]
+fn the_sensor_band_is_five_points_either_side_in_both_units() {
+    assert_eq!(
+        HUMIDITY_SENSOR_TOLERANCE_PERCENT.to_bits(),
+        5.0_f64.to_bits()
+    );
+    // The band edges are the decimal literals themselves, so 105.0, -5.0, 1.05 and -0.05 are
+    // inside and the next double out is not.
+    assert_eq!(
+        [HUMIDITY_PERCENT_BAND.0, HUMIDITY_PERCENT_BAND.1].map(f64::to_bits),
+        [-5.0_f64, 105.0].map(f64::to_bits)
+    );
+    assert_eq!(
+        [HUMIDITY_FRACTION_BAND.0, HUMIDITY_FRACTION_BAND.1].map(f64::to_bits),
+        [-0.05_f64, 1.05].map(f64::to_bits)
+    );
+    for edge in [-5.0_f64, 105.0] {
+        assert!(RelativeHumidity::try_percent(edge).is_ok(), "{edge}");
+        let beyond = f64::from_bits(if edge > 0.0 {
+            edge.to_bits() + 1
+        } else {
+            (-edge).to_bits().wrapping_add(1) | (1 << 63)
+        });
+        assert!(RelativeHumidity::try_percent(beyond).is_err(), "{beyond}");
+    }
+    for edge in [-0.05_f64, 1.05] {
+        assert!(RelativeHumidity::try_fraction(edge).is_ok(), "{edge}");
+        let beyond = f64::from_bits(if edge > 0.0 {
+            edge.to_bits() + 1
+        } else {
+            (-edge).to_bits().wrapping_add(1) | (1 << 63)
+        });
+        assert!(RelativeHumidity::try_fraction(beyond).is_err(), "{beyond}");
+    }
+}
+
+/// S5b: the two other places a humidity's range is needed take it from the one rule rather than
+/// writing a second one. The MCP schema publishes `RelativeHumidity::FRACTION_BAND`, which is
+/// the band `try_fraction` enforces; and the perturbation layer's physical domain is
+/// `is_physical_fraction`, the fractions the band leaves where it found them, which is exactly
+/// `0.0..=1.0` (the domain that layer had before the band, so its derivatives are unchanged).
+#[test]
+fn the_published_fraction_band_and_the_physical_domain_come_from_the_one_rule() {
+    assert_eq!(
+        [
+            RelativeHumidity::FRACTION_BAND.0,
+            RelativeHumidity::FRACTION_BAND.1
+        ]
+        .map(f64::to_bits),
+        [HUMIDITY_FRACTION_BAND.0, HUMIDITY_FRACTION_BAND.1].map(f64::to_bits)
+    );
+    let below_one = f64::from_bits(1.0_f64.to_bits() - 1);
+    let above_one = f64::from_bits(1.0_f64.to_bits() + 1);
+    for fraction in [0.0, -0.0, 1e-300, 0.25, 0.5, below_one, 1.0] {
+        assert!(
+            RelativeHumidity::is_physical_fraction(fraction),
+            "{fraction}"
+        );
+    }
+    for fraction in [
+        above_one,
+        1.001,
+        1.03,
+        1.05,
+        -1e-300,
+        -0.001,
+        -0.03,
+        -0.05,
+        1.06,
+        1.5,
+        50.0,
+        -1.0,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ] {
+        assert!(
+            !RelativeHumidity::is_physical_fraction(fraction),
+            "{fraction}"
+        );
+    }
+    // Exactly the closed unit interval, on a sweep across both band edges.
+    for step in -1_200..=1_200 {
+        let fraction = f64::from(step) * 1e-3;
+        assert_eq!(
+            RelativeHumidity::is_physical_fraction(fraction),
+            (0.0..=1.0).contains(&fraction),
+            "{fraction}"
+        );
+    }
+}
+
+#[test]
+fn try_percent_reads_a_sensor_reading_within_five_points_as_saturated_or_dry_air() {
+    for percent in SATURATED_READINGS {
+        let humidity = RelativeHumidity::try_percent(percent)
+            .unwrap_or_else(|e| panic!("{percent} is a saturated-air reading: {e}"));
+        assert_eq!(
+            humidity.percent().to_bits(),
+            100.0_f64.to_bits(),
+            "{percent}"
+        );
+        assert_eq!(
+            humidity.fraction().to_bits(),
+            1.0_f64.to_bits(),
+            "{percent}"
+        );
+        assert_eq!(humidity, rh(100.0), "{percent}");
+    }
+    for percent in DRY_READINGS {
+        let humidity = RelativeHumidity::try_percent(percent)
+            .unwrap_or_else(|e| panic!("{percent} is a dry-air reading: {e}"));
+        assert_eq!(humidity.percent().to_bits(), 0.0_f64.to_bits(), "{percent}");
+        assert_eq!(humidity, RelativeHumidity::DRY, "{percent}");
+    }
+    // The exact ends and the inside of the range are untouched, bit for bit.
+    for percent in [0.0, 1e-300, 0.0001, 7.0, 55.0, 99.9999, 100.0] {
+        assert_eq!(
+            rh(percent).percent().to_bits(),
+            percent.to_bits(),
+            "{percent}"
+        );
+    }
+}
+
+#[test]
+fn try_percent_refuses_a_reading_beyond_the_sensor_band_unchanged() {
+    for percent in [
+        105.000_000_1,
+        105.000_000_000_001,
+        106.0,
+        150.0,
+        1e300,
+        -5.000_000_1,
+        -5.000_000_000_001,
+        -20.0,
+        -1e300,
+    ] {
+        let error = RelativeHumidity::try_percent(percent).expect_err("beyond the band");
+        assert_eq!(error.field(), "humidity_percent", "{percent}");
+        assert_eq!(error.value().to_bits(), percent.to_bits(), "{percent}");
+        assert_eq!(
+            error.reason(),
+            AtmosphereErrorReason::HumidityPercentOutOfRange,
+            "{percent}"
+        );
+    }
+    for percent in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let error = RelativeHumidity::try_percent(percent).expect_err("non-finite");
+        assert_eq!(error.reason(), AtmosphereErrorReason::NotFinite);
+    }
+}
+
+#[test]
+fn try_fraction_reads_a_sensor_reading_within_five_points_as_saturated_or_dry_air() {
+    // 1.0 is exactly 100 %, and a fraction up to 0.05 above it is saturated air.
+    for fraction in [1.0, 1.000_000_000_000_001, 1.0001, 1.03, 1.049_999_9, 1.05] {
+        let humidity = RelativeHumidity::try_fraction(fraction)
+            .unwrap_or_else(|e| panic!("{fraction} is a saturated-air reading: {e}"));
+        assert_eq!(
+            humidity.percent().to_bits(),
+            100.0_f64.to_bits(),
+            "{fraction}"
+        );
+        assert_eq!(humidity, rh(100.0), "{fraction}");
+    }
+    for fraction in [-0.0, -1e-300, -0.0001, -0.03, -0.049_999_9, -0.05] {
+        let humidity = RelativeHumidity::try_fraction(fraction)
+            .unwrap_or_else(|e| panic!("{fraction} is a dry-air reading: {e}"));
+        assert_eq!(
+            humidity.percent().to_bits(),
+            0.0_f64.to_bits(),
+            "{fraction}"
+        );
+        assert_eq!(humidity, RelativeHumidity::DRY, "{fraction}");
+    }
+}
+
+#[test]
+fn try_fraction_refuses_a_reading_beyond_the_sensor_band_unchanged() {
+    // A percent sent where a fraction belongs (50.0, 100.0) stays an error.
+    for fraction in [
+        1.050_000_1,
+        1.06,
+        1.5,
+        50.0,
+        100.0,
+        -0.050_000_1,
+        -0.1,
+        -1.0,
+    ] {
+        let error = RelativeHumidity::try_fraction(fraction).expect_err("beyond the band");
+        assert_eq!(error.field(), "relative_humidity", "{fraction}");
+        assert_eq!(error.value().to_bits(), fraction.to_bits(), "{fraction}");
+        assert_eq!(
+            error.reason(),
+            AtmosphereErrorReason::HumidityFractionOutOfRange,
+            "{fraction}"
+        );
+    }
+    for fraction in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let error = RelativeHumidity::try_fraction(fraction).expect_err("non-finite");
+        assert_eq!(error.reason(), AtmosphereErrorReason::NotFinite);
+    }
+}
+
+#[test]
+fn a_reading_in_the_band_is_the_same_station_and_zone_air_as_the_end_it_reads_as() {
+    // The snapped humidity is the end itself, so the station air (density, sound speed, ratio)
+    // and a zone built at the reading are the end's to the bit.
+    for (reading, end) in [(101.7, 100.0), (105.0, 100.0), (-2.0, 0.0), (-5.0, 0.0)] {
+        for (altitude_m, temp_c, pressure_hpa) in [
+            (0.0, 15.0, 1013.25),
+            (1_500.0, 30.0, 830.0),
+            (0.0, -10.0, 1030.0),
+        ] {
+            let at_reading = StationAir::new(altitude_m, temp_c, pressure_hpa, rh(reading))
+                .expect("a reading in the band is a station");
+            let at_end = StationAir::new(altitude_m, temp_c, pressure_hpa, rh(end)).unwrap();
+            assert_eq!(at_reading, at_end, "{reading} -> {end} at {temp_c} C");
+        }
+        assert!(AtmoSock::new(vec![(15.0, 1013.25, reading, 300.0)])
+            .validate()
+            .is_ok());
+    }
+    // The band does not relax impossible air: saturated air at the boiling point read as 102 %
+    // is refused exactly as 100 % is, at the station and in a zone.
+    for reading in [100.0, 101.7, 105.0] {
+        let error = StationAir::new(0.0, 100.0, 1013.25, rh(reading)).expect_err("steam");
+        assert_eq!(
+            error.reason(),
+            AtmosphereErrorReason::ImpossibleAir,
+            "{reading}"
+        );
+        let error = AtmoSock::new(vec![(100.0, 1013.25, reading, 300.0)])
+            .validate()
+            .expect_err("steam");
+        assert_eq!(
+            error.reason(),
+            AtmosphereErrorReason::ImpossibleAir,
+            "{reading}"
         );
     }
 }
@@ -610,7 +867,8 @@ fn the_solver_station_is_station_air_new_and_refuses_what_0_49_clamped() {
     // TrajectorySolver resolves its station through StationAir::new (plan C4), the interim
     // crate-private `legacy_clamped` constructor is gone. A valid station is still exactly
     // calculate_atmosphere at the given humidity, to the bit; the inputs 0.49.0 flew clamped or
-    // capped (an RH outside [0, 100], impossible air, a pressure of 0) are refused instead.
+    // capped (an RH beyond the sensor band around [0, 100], impossible air, a pressure of 0) are
+    // refused instead.
     for (altitude_m, temp_c, pressure_hpa, humidity) in [
         (0.0, 15.0, 1013.25, 50.0),
         (1_500.0, 25.0, 830.0, 0.0),
@@ -631,7 +889,7 @@ fn the_solver_station_is_station_air_new_and_refuses_what_0_49_clamped() {
         );
         assert_eq!(station.humidity().percent().to_bits(), humidity.to_bits());
     }
-    for humidity in [150.0, -5.0, f64::NAN] {
+    for humidity in [150.0, -5.000_000_1, f64::NAN] {
         let error = RelativeHumidity::try_percent(humidity).expect_err("not a humidity");
         assert_eq!(error.field(), "humidity_percent", "{humidity}");
     }
@@ -1105,12 +1363,12 @@ fn atmo_sock_validate_refuses_each_bad_zone_field_by_name_without_clamping() {
             Reason::HumidityPercentOutOfRange,
         ),
         (
-            (15.0, 1013.25, 100.0001, 300.0),
+            (15.0, 1013.25, 105.000_000_1, 300.0),
             "humidity_percent",
             Reason::HumidityPercentOutOfRange,
         ),
         (
-            (15.0, 1013.25, -0.0001, 300.0),
+            (15.0, 1013.25, -5.000_000_1, 300.0),
             "humidity_percent",
             Reason::HumidityPercentOutOfRange,
         ),
@@ -1226,8 +1484,9 @@ fn the_deprecated_dry_lookup_is_the_shared_composition_at_zero_humidity() {
 
 #[test]
 fn a_terminal_humidity_flag_parses_through_the_one_validator() {
-    // The WASM terminal's parser for every humidity flag (plan C4): a percent in [0, 100],
-    // refused (never clamped) outside it, with the flag named in the error.
+    // The WASM terminal's parser for every humidity flag (plan C4): a percent in [0, 100], a
+    // sensor reading within 5 points of it read as the end (S5b), anything farther out refused
+    // (never clamped), with the flag named in the error.
     for (raw, percent) in [("0", 0.0), ("100", 100.0), ("37.5", 37.5), (" 50 ", 50.0)] {
         assert_eq!(
             parse_humidity_percent_arg("--humidity", raw)
@@ -1249,10 +1508,27 @@ fn a_terminal_humidity_flag_parses_through_the_one_validator() {
         "--humidity = 150: relative humidity must be a percent from 0 to 100"
     );
     assert_eq!(
-        parse_humidity_percent_arg("--zero-humidity", "-5").unwrap_err(),
-        "--zero-humidity = -5: relative humidity must be a percent from 0 to 100"
+        parse_humidity_percent_arg("--zero-humidity", "-5.0000001").unwrap_err(),
+        "--zero-humidity = -5.0000001: relative humidity must be a percent from 0 to 100"
     );
-    for raw in ["100.0001", "-0.0001", "1e3"] {
+    // A sensor reading within 5 points of the range is the end it reads as, to the bit.
+    for (raw, end) in [
+        ("100.0001", 100.0),
+        ("101.7", 100.0),
+        ("105", 100.0),
+        ("-0.0001", 0.0),
+        ("-2", 0.0),
+        ("-5", 0.0),
+    ] {
+        assert_eq!(
+            parse_humidity_percent_arg("--humidity", raw)
+                .unwrap_or_else(|e| panic!("{raw}: {e}"))
+                .to_bits(),
+            f64::to_bits(end),
+            "{raw}"
+        );
+    }
+    for raw in ["105.0000001", "-5.0000001", "1e3"] {
         let error = parse_humidity_percent_arg("--humidity", raw).unwrap_err();
         assert!(
             error.starts_with("--humidity = ") && error.contains("percent from 0 to 100"),

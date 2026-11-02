@@ -153,8 +153,10 @@ pub struct CorridorLoad {
     pub sight_height_m: f64,
     pub temperature_c: f64,
     pub pressure_hpa: f64,
-    /// Relative humidity, PERCENT, 0 through 100 (50 = 50 %). A value outside that range, or one
-    /// that is not finite, is refused as [`WindScenarioError::InvalidHumidity`], never clamped.
+    /// Relative humidity, PERCENT, 0 through 100 (50 = 50 %). A sensor reading within
+    /// [`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`] of that range flies as the end it reads as;
+    /// a value beyond it, or one that is not finite, is refused as
+    /// [`WindScenarioError::InvalidHumidity`], never clamped.
     pub humidity_pct: f64,
     pub altitude_m: f64,
     /// Which of `temperature_c` / `pressure_hpa` were supplied (0.49.0). A supplied value flies
@@ -215,8 +217,9 @@ pub enum WindScenarioError {
     InvalidTarget { message: String },
     /// A load or atmosphere value was not usable.
     InvalidLoad { field: &'static str, value: f64 },
-    /// The load's humidity is not a relative humidity percent from 0 to 100 (or not finite),
-    /// refused by the engine's one validator, [`crate::atmosphere::RelativeHumidity`].
+    /// The load's humidity is not a relative humidity percent from 0 to 100, nor a sensor
+    /// reading within [`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`] of that range (or it is not
+    /// finite), refused by the engine's one validator, [`crate::atmosphere::RelativeHumidity`].
     InvalidHumidity(crate::atmosphere::AtmosphereError),
     /// The scenario set could not be decoded at all.
     MalformedDocument { message: String },
@@ -613,8 +616,8 @@ impl RobustHoldRequest {
                 return Err(WindScenarioError::InvalidLoad { field, value });
             }
         }
-        // The documented 0-100 percent, enforced by the one validator (plan C4); 0.49.0 checked
-        // only finiteness and flew 150 as 100 %.
+        // The documented 0-100 percent and its sensor band, enforced by the one validator (plan
+        // C4, S5b); 0.49.0 checked only finiteness and flew 150 as 100 %.
         crate::atmosphere::RelativeHumidity::try_percent(load.humidity_pct)
             .map_err(|error| WindScenarioError::InvalidHumidity(error.at_field("humidity_pct")))?;
         Ok(())

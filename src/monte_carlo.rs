@@ -33,8 +33,9 @@ pub struct TrajectoryOutput {
 /// It flies `inputs`' station air, its humidity included, exactly as `TrajectorySolver` does
 /// (the station is a [`StationAir`], and `fast_integrate` takes each step's air from
 /// [`crate::atmosphere::air_at`]); the reported Mach is the final speed over that station's
-/// sound speed. An `inputs.humidity_percent` outside `0..=100` or air that cannot exist is an
-/// `Err`, never clamped.
+/// sound speed. An `inputs.humidity_percent` within [`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`]
+/// (5 points) of `0..=100` is a sensor reading of saturated or dry air and flies exactly as 100
+/// or 0; one beyond that band, or air that cannot exist, is an `Err`, never clamped.
 ///
 /// Presence-blind: `inputs`' temperature and pressure go through the legacy default-sentinel
 /// rule (a sea-level default at a real altitude flies ICAO standard air). See

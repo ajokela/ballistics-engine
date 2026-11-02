@@ -309,8 +309,10 @@ pub(crate) fn wez_resolved_request(
             altitude_m: base_inputs.altitude,
             temperature_k: base_inputs.temperature + 273.15,
             pressure_pa: base_inputs.pressure * 100.0,
-            // The SI wire's fraction, from the inputs' percent. A humidity outside 0..=100 has
-            // no wire fraction, so it gets no attribution.
+            // The SI wire's fraction, from the inputs' percent: a sensor reading within the
+            // band (S5b) has the fraction of the end it reads as (1 or 0), the same air the
+            // solve flies; a humidity beyond the band has no wire fraction, so it gets no
+            // attribution.
             relative_humidity: RelativeHumidity::try_percent(base_inputs.humidity_percent)
                 .ok()?
                 .fraction(),

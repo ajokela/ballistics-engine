@@ -193,8 +193,11 @@ pub struct FFIWindConditions {
 pub struct FFIAtmosphericConditions {
     pub temperature: c_double, // Celsius
     pub pressure: c_double,    // hPa
-    pub humidity: c_double,    // percentage (0-100)
-    pub altitude: c_double,    // meters
+    /// Relative humidity, PERCENT, 0-100. A sensor reading within 5 points of the range
+    /// (`HUMIDITY_SENSOR_TOLERANCE_PERCENT`) flies as the end it reads as; a value beyond it
+    /// makes the call return NULL (a zero angle, NaN).
+    pub humidity: c_double,
+    pub altitude: c_double, // meters
 }
 
 #[repr(C)]

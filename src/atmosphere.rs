@@ -1221,6 +1221,38 @@ pub(crate) fn get_local_atmosphere_humid_with_gravity(
 /// `RelativeHumidity::DEFAULT.fraction()` (exactly 0.5).
 pub const DEFAULT_HUMIDITY_PERCENT: f64 = 50.0;
 
+/// How far, in percentage points, a relative-humidity READING may lie outside 0-100 % and
+/// still be read as the saturated (100 %) or dry (0 %) air it measures: 5.
+///
+/// Weather is an input source, never a gate. The humidity a shooter enters is most often a
+/// sensor's (a Kestrel, a WEATHERmeter, a phone), and relative-humidity sensors are good to
+/// about ±2-3 %: in fog and other condensing air they read above 100 %, where free air is
+/// supersaturated by under 1 %, and in very dry air they can read a little below 0 %. Such a
+/// reading is sensor error around saturated or dry air, not a different atmosphere, and must
+/// not fail a calculation. So [`RelativeHumidity::try_percent`] accepts a percent from -5 to
+/// 105 and stores it clamped into 0..=100 (101.7 is exactly 100, -2 exactly 0), and
+/// [`RelativeHumidity::try_fraction`] does the same with a fraction from -0.05 to 1.05. Every
+/// surface reads humidity through those two constructors, so every surface has this band.
+///
+/// A value farther out is refused, as before: it is not a reading of real air but a wrong unit
+/// (a percent sent as a fraction) or a typo. Air that cannot exist at all (a water-vapour mole
+/// fraction of 1 or more) is a separate rule, [`StationAir::new`]'s, and the band does not
+/// relax it.
+pub const HUMIDITY_SENSOR_TOLERANCE_PERCENT: f64 = 5.0;
+
+/// The percents [`RelativeHumidity::try_percent`] accepts: the sensor band around 0..=100.
+const HUMIDITY_PERCENT_BAND: (f64, f64) = (
+    -HUMIDITY_SENSOR_TOLERANCE_PERCENT,
+    100.0 + HUMIDITY_SENSOR_TOLERANCE_PERCENT,
+);
+
+/// The fractions [`RelativeHumidity::try_fraction`] accepts: the same band in fraction units,
+/// exactly -0.05 and 1.05.
+const HUMIDITY_FRACTION_BAND: (f64, f64) = (
+    -HUMIDITY_SENSOR_TOLERANCE_PERCENT / 100.0,
+    1.0 + HUMIDITY_SENSOR_TOLERANCE_PERCENT / 100.0,
+);
+
 /// Absolute zero in degrees Celsius; a station temperature must lie above it.
 const ABSOLUTE_ZERO_C: f64 = -273.15;
 /// The density ratio `density / 1.225 kg/m³` a station may carry is below this (and above 0).
@@ -1237,8 +1269,12 @@ const MIN_UNIFORM_SPEED_OF_SOUND_MPS: f64 = 200.0;
 ///
 /// It stores a PERCENT in `[0, 100]`, and [`Self::fraction`] gives the same humidity in
 /// `[0, 1]`. The two constructors name the unit at the call site, and there is deliberately no
-/// `From<f64>`, so a bare number is never read in the wrong unit. Out-of-range input is refused
-/// with an [`AtmosphereError`], never clamped.
+/// `From<f64>`, so a bare number is never read in the wrong unit.
+///
+/// One rule, the sensor band ([`HUMIDITY_SENSOR_TOLERANCE_PERCENT`]): a reading up to 5 points
+/// outside the range is the saturated or dry air it measures, stored as exactly 100 or 0, so it
+/// flies exactly as that end does. Anything farther out, or not finite, is refused with an
+/// [`AtmosphereError`] that reports the value unchanged.
 ///
 /// ```
 /// use ballistics_engine::RelativeHumidity;
@@ -1250,7 +1286,13 @@ const MIN_UNIFORM_SPEED_OF_SOUND_MPS: f64 = 200.0;
 /// assert_eq!(from_fraction.percent(), 50.0);
 /// assert_eq!(from_percent.fraction(), 0.5);
 ///
+/// // A sensor reading in fog, or in very dry air, is that air.
+/// assert_eq!(RelativeHumidity::try_percent(101.7).unwrap().percent(), 100.0);
+/// assert_eq!(RelativeHumidity::try_percent(-2.0).unwrap(), RelativeHumidity::DRY);
+/// assert_eq!(RelativeHumidity::try_fraction(1.03).unwrap().percent(), 100.0);
+///
 /// assert!(RelativeHumidity::try_percent(150.0).is_err());
+/// assert!(RelativeHumidity::try_percent(105.0000001).is_err());
 /// // A percent sent where a fraction belongs is refused, not read as 50 %.
 /// assert!(RelativeHumidity::try_fraction(50.0).is_err());
 /// ```
@@ -1272,58 +1314,73 @@ impl RelativeHumidity {
     /// Dry air, 0 %.
     pub const DRY: Self = Self(0.0);
 
+    /// The lowest and the highest fraction [`Self::try_fraction`] accepts, both included: the
+    /// sensor band ([`HUMIDITY_SENSOR_TOLERANCE_PERCENT`]) in fraction units, exactly
+    /// `(-0.05, 1.05)`.
+    ///
+    /// For a schema that publishes the bounds the decoder enforces (the MCP server's
+    /// `relative_humidity`), so the band it states is derived from the one number rather than
+    /// written out again.
+    pub const FRACTION_BAND: (f64, f64) = HUMIDITY_FRACTION_BAND;
+
     /// A relative humidity given in PERCENT.
     ///
-    /// Accepts a finite `percent` with `0.0 <= percent <= 100.0`, both ends included, and stores
-    /// it unchanged (`-0.0` is stored as `0.0`). Anything else is refused, with field
-    /// `humidity_percent` and reason [`AtmosphereErrorReason::NotFinite`] or
+    /// Accepts a finite `percent` from -5 to 105, both ends included (the sensor band,
+    /// [`HUMIDITY_SENSOR_TOLERANCE_PERCENT`]). A percent in `0.0..=100.0` is stored unchanged,
+    /// one above 100 as exactly 100 and one below 0 (or `-0.0`) as `0.0`. Anything else is
+    /// refused, with field `humidity_percent`, the value unchanged, and reason
+    /// [`AtmosphereErrorReason::NotFinite`] or
     /// [`AtmosphereErrorReason::HumidityPercentOutOfRange`].
     pub fn try_percent(percent: f64) -> Result<Self, AtmosphereError> {
-        const FIELD: &str = "humidity_percent";
-        if !percent.is_finite() {
-            return Err(AtmosphereError::new(
-                FIELD,
-                percent,
-                AtmosphereErrorReason::NotFinite,
-            ));
-        }
-        if !(0.0..=100.0).contains(&percent) {
-            return Err(AtmosphereError::new(
-                FIELD,
-                percent,
-                AtmosphereErrorReason::HumidityPercentOutOfRange,
-            ));
-        }
-        Ok(Self::positive_zero(percent))
+        sensor_band(
+            percent,
+            HUMIDITY_PERCENT_BAND,
+            100.0,
+            "humidity_percent",
+            AtmosphereErrorReason::HumidityPercentOutOfRange,
+        )
+        .map(Self)
     }
 
     /// A relative humidity given as a FRACTION, the SI wire's `relative_humidity`.
     ///
-    /// Accepts a finite `fraction` with `0.0 <= fraction <= 1.0` and stores `fraction * 100.0`,
-    /// exact at 0, 0.5 and 1 and within one ulp of the decimal percent elsewhere. Anything else
-    /// is refused, with field `relative_humidity` and reason
+    /// Accepts a finite `fraction` from -0.05 to 1.05, both ends included (the sensor band in
+    /// fraction units), and stores the fraction snapped into `0.0..=1.0` times 100: an
+    /// in-range fraction is `fraction * 100.0`, exact at 0, 0.5 and 1 and within one ulp of the
+    /// decimal percent elsewhere, one above 1 is exactly 100, one below 0 is 0. Anything else is
+    /// refused, with field `relative_humidity`, the value unchanged, and reason
     /// [`AtmosphereErrorReason::NotFinite`] or
     /// [`AtmosphereErrorReason::HumidityFractionOutOfRange`]; so a percent sent by mistake
     /// (`50.0`) is an error rather than 5000 %.
     pub fn try_fraction(fraction: f64) -> Result<Self, AtmosphereError> {
-        const FIELD: &str = "relative_humidity";
-        if !fraction.is_finite() {
-            return Err(AtmosphereError::new(
-                FIELD,
-                fraction,
-                AtmosphereErrorReason::NotFinite,
-            ));
-        }
-        if !(0.0..=1.0).contains(&fraction) {
-            return Err(AtmosphereError::new(
-                FIELD,
-                fraction,
-                AtmosphereErrorReason::HumidityFractionOutOfRange,
-            ));
-        }
         // The very conversion solve v1 and the density-altitude service apply today, so a
         // caller moving onto this constructor flies the same bits.
-        Ok(Self::positive_zero(fraction * 100.0))
+        Self::snap_fraction(fraction).map(|fraction| Self(fraction * 100.0))
+    }
+
+    /// The fraction [`Self::try_fraction`] accepts, snapped into `0.0..=1.0` in the fraction's
+    /// own unit: an in-range fraction comes back with its bits unchanged (`-0.0` as `0.0`),
+    /// one above 1 as exactly 1 and one below 0 as 0. For a wire that echoes the fraction it
+    /// flies (solve v1's resolved `relative_humidity`); its errors are `try_fraction`'s.
+    pub(crate) fn snap_fraction(fraction: f64) -> Result<f64, AtmosphereError> {
+        sensor_band(
+            fraction,
+            HUMIDITY_FRACTION_BAND,
+            1.0,
+            "relative_humidity",
+            AtmosphereErrorReason::HumidityFractionOutOfRange,
+        )
+    }
+
+    /// Whether `fraction` is a relative humidity in `0.0..=1.0` itself, not merely a sensor
+    /// reading the band reads as one: exactly the fractions [`Self::snap_fraction`] leaves
+    /// where it found them (`-0.0` included, NaN and the infinities not).
+    ///
+    /// For a caller that moves a humidity HYPOTHETICALLY rather than reading one, the
+    /// perturbation layer's central difference: a perturbed 1.001 is not fog read by a sensor,
+    /// and flying it as saturated air would silently halve the derivative at the end.
+    pub(crate) fn is_physical_fraction(fraction: f64) -> bool {
+        matches!(Self::snap_fraction(fraction), Ok(snapped) if snapped == fraction)
     }
 
     /// The humidity in percent, `0.0..=100.0`.
@@ -1338,18 +1395,45 @@ impl RelativeHumidity {
     pub const fn fraction(self) -> f64 {
         self.0 / 100.0
     }
+}
 
-    /// `-0.0` and `0.0` are the same humidity; store the positive one so equal humidities have
-    /// equal bits. Every other value is returned unchanged.
-    fn positive_zero(percent: f64) -> Self {
-        Self(if percent == 0.0 { 0.0 } else { percent })
+/// The one sensor-band rule, in a unit whose saturated air is `saturated` (100 for a percent,
+/// 1 for a fraction): a finite `value` inside `band` comes back snapped into
+/// `0.0..=saturated` (at or below 0, `-0.0` included, as `+0.0`; above `saturated` as exactly
+/// `saturated`; otherwise unchanged); anything else is refused with `field` and the value
+/// unchanged.
+fn sensor_band(
+    value: f64,
+    (lowest, highest): (f64, f64),
+    saturated: f64,
+    field: &'static str,
+    out_of_band: AtmosphereErrorReason,
+) -> Result<f64, AtmosphereError> {
+    if !value.is_finite() {
+        return Err(AtmosphereError::new(
+            field,
+            value,
+            AtmosphereErrorReason::NotFinite,
+        ));
     }
+    if !(lowest..=highest).contains(&value) {
+        return Err(AtmosphereError::new(field, value, out_of_band));
+    }
+    Ok(if value <= 0.0 {
+        0.0
+    } else if value > saturated {
+        saturated
+    } else {
+        value
+    })
 }
 
 /// Parse a terminal humidity flag's value (`--humidity 37.5`, `--zero-humidity 80`) through the
-/// one validator, [`RelativeHumidity::try_percent`]: a PERCENT, 0 to 100, refused and never
-/// clamped. The WASM terminal's hand-written parser calls it for every humidity flag (the native
-/// CLI's clap parser applies the same 0-100 range); its errors name the flag, for example
+/// one validator, [`RelativeHumidity::try_percent`]: a PERCENT, 0 to 100, and a sensor reading
+/// up to [`HUMIDITY_SENSOR_TOLERANCE_PERCENT`] outside it is the end it reads as (`101.7` gives
+/// `100.0`); anything farther out is refused, never clamped. The WASM terminal's hand-written
+/// parser calls it for every humidity flag (the native CLI's clap parser goes through the same
+/// constructor); its errors name the flag, for example
 /// `"--humidity = 150: relative humidity must be a percent from 0 to 100"`.
 #[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn parse_humidity_percent_arg(flag: &str, raw: &str) -> Result<f64, String> {
@@ -1367,9 +1451,11 @@ pub(crate) fn parse_humidity_percent_arg(flag: &str, raw: &str) -> Result<f64, S
 pub enum AtmosphereErrorReason {
     /// The value is NaN or infinite.
     NotFinite,
-    /// A relative humidity percent outside `[0, 100]`.
+    /// A relative humidity percent outside `[0, 100]` by more than the sensor band,
+    /// [`HUMIDITY_SENSOR_TOLERANCE_PERCENT`]: below -5 or above 105.
     HumidityPercentOutOfRange,
-    /// A relative humidity fraction outside `[0, 1]`.
+    /// A relative humidity fraction outside `[0, 1]` by more than the sensor band: below -0.05
+    /// or above 1.05.
     HumidityFractionOutOfRange,
     /// A temperature at or below absolute zero, -273.15 °C.
     AtOrBelowAbsoluteZero,
@@ -2283,8 +2369,9 @@ impl AtmoSock {
     /// Check every zone the way [`StationAir::new`] checks a station, plus its threshold.
     ///
     /// A zone needs a finite temperature above -273.15 °C, a finite pressure above 0, a
-    /// relative humidity that [`RelativeHumidity::try_percent`] accepts (finite, 0 to 100,
-    /// never clamped), air that can exist (the same impossible-air test), and an
+    /// relative humidity that [`RelativeHumidity::try_percent`] accepts (finite, 0 to 100, or a
+    /// sensor reading within [`HUMIDITY_SENSOR_TOLERANCE_PERCENT`] of it, which the zone flies
+    /// as the end it reads as), air that can exist (the same impossible-air test), and an
     /// `until_distance_m` above 0 (`+inf` is allowed, `NaN` is not). An empty sock is valid: it
     /// means the station.
     ///

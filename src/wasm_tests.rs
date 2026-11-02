@@ -4335,7 +4335,9 @@ Impact Velocity: 2510 fps\n";
     fn every_humidity_flag_refuses_a_value_outside_zero_to_one_hundred() {
         let wasm = WasmBallistics::new();
         for (base, flag) in HUMIDITY_COMMANDS {
-            for bad in ["150", "-5", "100.0001", "nan", "inf"] {
+            // Beyond the 5-point sensor band (S5b: -5 and 100.0001 are readings, the next
+            // test's).
+            for bad in ["150", "-5.0000001", "105.0000001", "nan", "inf"] {
                 let err = wasm
                     .run_command(&format!("{base} {flag} {bad}"))
                     .expect_err(&format!("`{base} {flag} {bad}` must be refused"));
@@ -4350,6 +4352,34 @@ Impact Velocity: 2510 fps\n";
             for good in ["0", "100"] {
                 wasm.run_command(&format!("{base} {flag} {good}"))
                     .unwrap_or_else(|e| panic!("`{base} {flag} {good}` is valid: {e:?}"));
+            }
+        }
+    }
+
+    /// S5b (owner decision 2026-11-01): every humidity flag reads a sensor reading within 5
+    /// points of the range as the end it reads as, so each command's output is the end's, byte
+    /// for byte. `monte-carlo` is left out of the comparison (its draws are unseeded here) but
+    /// must fly the reading.
+    #[wasm_bindgen_test]
+    fn every_humidity_flag_flies_a_sensor_reading_as_the_end_it_reads_as() {
+        let wasm = WasmBallistics::new();
+        for (base, flag) in HUMIDITY_COMMANDS {
+            for (reading, end) in [
+                ("100.0000001", "100"),
+                ("101.7", "100"),
+                ("105", "100"),
+                ("-0", "0"),
+                ("-2", "0"),
+                ("-5", "0"),
+            ] {
+                let at = |value: &str| {
+                    wasm.run_command(&format!("{base} {flag} {value}"))
+                        .unwrap_or_else(|e| panic!("`{base} {flag} {value}` flies: {e:?}"))
+                };
+                let flown = at(reading);
+                if !base.starts_with("monte-carlo") {
+                    assert_eq!(flown, at(end), "`{base} {flag} {reading}`");
+                }
             }
         }
     }

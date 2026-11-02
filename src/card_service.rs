@@ -334,8 +334,10 @@ pub struct CardRequestV1 {
     #[serde(default)]
     pub pressure: Option<f64>,
     /// Relative humidity, PERCENT, 0 to 100 (50 = 50 %). Dimensionless, so no unit field governs
-    /// it. Omitted means [`DEFAULT_HUMIDITY_PERCENT`]; a value outside 0 to 100 (or not finite)
-    /// is refused as an invalid request, never clamped.
+    /// it. Omitted means [`DEFAULT_HUMIDITY_PERCENT`]. A sensor reading within
+    /// [`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`] (5 points) of 0 to 100 (101.7 in fog, -2 in
+    /// very dry air) is the saturated or dry air it reads and flies exactly as 100 or 0; a value
+    /// beyond that band (or not finite) is refused as an invalid request, never clamped.
     #[serde(default = "default_humidity")]
     pub humidity: f64,
     /// Site elevation, in `altitude_unit` — which defaults to METRES whatever `units` says.
@@ -1230,7 +1232,8 @@ fn resolve_inner(
             "tracking correction factors must lie in (0.5, 1.5)".into(),
         ));
     }
-    // The engine's one humidity validator (plan C4): a percent in [0, 100], refused and never
+    // The engine's one humidity validator (plan C4): a percent in [0, 100], a sensor reading
+    // within 5 points of it read as the end (S5b), anything farther out refused and never
     // clamped. 0.49.0 flew 150 as 100 % here.
     let humidity = RelativeHumidity::try_percent(req.humidity).map_err(|error| {
         CardServiceError::InvalidRequest(error.at_field("humidity").to_string())

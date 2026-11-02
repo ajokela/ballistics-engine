@@ -289,12 +289,15 @@ pub fn map_a7p_to_profile(
     // import, like a malformed CUSTOM curve, rather than saved and refused at every later load.
     // An ABSENT field is 0 %, not the engine's 50 % default: a proto3 int32 cannot tell absent
     // from 0, and the format writes 0 % by omitting the field.
-    crate::atmosphere::RelativeHumidity::try_percent(src.air_humidity_pct)
-        .map_err(|error| error.at_field("c_zero_air_humidity").to_string())?;
+    // A reading within the sensor band (S5b, HUMIDITY_SENSOR_TOLERANCE_PERCENT: a meter's
+    // 102 % in fog) is imported as the end it reads as, the value a `profile save` of it stores.
+    let humidity_percent = crate::atmosphere::RelativeHumidity::try_percent(src.air_humidity_pct)
+        .map_err(|error| error.at_field("c_zero_air_humidity").to_string())?
+        .percent();
     push(
         "c_zero_air_humidity",
         format!("{:.0} %", src.air_humidity_pct),
-        format!("{:.0} %", src.air_humidity_pct),
+        format!("{:.0} %", humidity_percent),
         "humidity",
     );
     if !src.bullet_name.is_empty() {
@@ -496,7 +499,7 @@ pub fn map_a7p_to_profile(
         // omitted one, so both are readings and fly as stored, even 15 C / 1013.25 hPa.
         temperature_supplied: true,
         pressure_supplied: true,
-        humidity: src.air_humidity_pct,
+        humidity: humidity_percent,
         altitude: 0.0,
         bullet_name: if src.bullet_name.is_empty() {
             None

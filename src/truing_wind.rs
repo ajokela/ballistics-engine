@@ -250,8 +250,9 @@ impl WindTruingRequest {
         if !self.temperature_f.value.is_finite() {
             return Err("temperature must be finite".to_string());
         }
-        // The engine's one humidity validator (plan C4): a percent in [0, 100], refused with
-        // its field named, never clamped.
+        // The engine's one humidity validator (plan C4): a percent in [0, 100], a sensor
+        // reading within 5 points of it flown as the end it reads as (S5b), anything farther
+        // out refused with its field named, never clamped.
         crate::atmosphere::RelativeHumidity::try_percent(self.humidity_pct)
             .map_err(|error| error.at_field("humidity_pct").to_string())?;
         if !self.altitude_ft.is_finite() {
@@ -1226,7 +1227,8 @@ mod tests {
             miss_right_m: 0.1,
             sigma_m: None,
         };
-        for humidity in [150.0, -5.0, 100.0001, f64::NAN, f64::INFINITY] {
+        // Beyond the 5-point sensor band (S5b: -5 and 100.0001 are readings, flown below).
+        for humidity in [150.0, -5.000_000_1, 105.000_000_1, f64::NAN, f64::INFINITY] {
             let mut request = base_request(vec![observation]);
             request.humidity_pct = humidity;
             let error = request.validate().expect_err("an out-of-range humidity");
@@ -1240,6 +1242,17 @@ mod tests {
             let mut request = base_request(vec![observation]);
             request.humidity_pct = humidity;
             request.validate().expect("a valid humidity");
+        }
+        // S5b: a sensor reading within 5 points of the range is the end it reads as, and the
+        // forward model flies that end to the bit.
+        for (reading, end) in [(100.0001, 100.0), (101.7, 100.0), (-2.0, 0.0), (-5.0, 0.0)] {
+            let at = |humidity: f64| {
+                let mut request = base_request(vec![observation]);
+                request.humidity_pct = humidity;
+                request.validate().expect("a sensor reading");
+                modeled_lateral_m(&request, 10.0, 457.2).to_bits()
+            };
+            assert_eq!(at(reading), at(end), "RH {reading}");
         }
     }
 

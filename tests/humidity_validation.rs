@@ -2,8 +2,10 @@
 //! every input boundary.
 //!
 //! A relative humidity is a PERCENT in `[0, 100]` on every Rust and app surface (a FRACTION in
-//! `[0, 1]` only on the SI JSON wire), and a value outside that range, a non-finite one, or air
-//! that cannot exist is REJECTED with a field-named error. 0.49.0 clamped it instead on most
+//! `[0, 1]` only on the SI JSON wire). A sensor reading within 5 points of that range (S5b,
+//! `HUMIDITY_SENSOR_TOLERANCE_PERCENT`) is the saturated or dry air it reads and flies exactly as
+//! the end; a value beyond the band, a non-finite one, or air that cannot exist is REJECTED
+//! with a field-named error. 0.49.0 clamped it instead on most
 //! surfaces (150 flew as 100 %, -5 as 0 %), and every solve capped impossible air while
 //! `atmosphere.density_altitude` refused it. The one validator is `RelativeHumidity` and the one
 //! impossible-air rule is `StationAir::new`'s (the density-altitude service's own predicate).
@@ -11,6 +13,11 @@
 //! The card, hold-curve, corridor, bridge and C ABI surfaces range-check the humidity at their own
 //! parse step and refuse impossible air through the solver's one rule; both refusals are pinned
 //! here per surface, so a surface that stopped reaching either check is seen.
+//!
+//! The sensor-tolerance band (step S5b, owner decision 2026-11-01): weather is an input source,
+//! never a gate, so a READING within 5 points of the range (a Kestrel at 101.7 % in fog, a
+//! phone at -2 % in desert air) is the saturated or dry air it reads, on every surface, and
+//! flies that end to the bit. Only a value beyond the band (`BAD_PERCENTS`) is refused.
 //!
 //! Public API only. The CLI surfaces are in `tests/humidity_cli.rs`, the WASM terminal in
 //! `src/wasm_tests.rs`, and the source guard in `tests/humidity_guard.rs`.
@@ -22,16 +29,29 @@ use ballistics_engine::{
     DEFAULT_HUMIDITY_PERCENT,
 };
 
-/// Percents every boundary must refuse: out of range on either side, by a little and by a lot,
-/// and not finite.
+/// Percents every boundary must refuse: beyond the 5-point sensor band on either side, by a
+/// little and by a lot, and not finite. (Before S5b this held -5, -0.0001 and 100.0001, which are
+/// now sensor readings: see [`SENSOR_READINGS`].)
 const BAD_PERCENTS: [f64; 7] = [
-    -5.0,
+    -5.000_000_1,
     150.0,
-    -0.0001,
-    100.0001,
+    -20.0,
+    105.000_000_1,
     f64::NAN,
     f64::INFINITY,
     f64::NEG_INFINITY,
+];
+
+/// Sensor readings within 5 points of the range, each with the end it reads as: saturated air
+/// above 100 and dry air below 0 (a negative zero included). Each must fly the end to the bit.
+const SENSOR_READINGS: [(f64, f64); 7] = [
+    (100.000_000_1, 100.0),
+    (101.7, 100.0),
+    (105.0, 100.0),
+    (-0.0, 0.0),
+    (-0.0001, 0.0),
+    (-2.0, 0.0),
+    (-5.0, 0.0),
 ];
 
 /// Both ends of the range are humidities, and so is a negative zero.
@@ -158,6 +178,18 @@ fn trajectory_solver_refuses_impossible_air_by_the_one_shared_rule() {
     solver(load(), atmosphere(95.0, 1013.25, 50.0))
         .solve()
         .expect("95 C / 1013.25 hPa / 50 % exists");
+    // S5b: the sensor band does not relax it. Saturated air at the boiling point read as a
+    // sensor's 102 % is the 100 % that cannot exist.
+    for reading in [101.7, 105.0] {
+        let message = solver(load(), atmosphere(100.0, 1013.25, reading))
+            .solve()
+            .expect_err("a reading of air that cannot exist")
+            .to_string();
+        assert!(
+            message.contains(IMPOSSIBLE_AIR_REASON),
+            "{reading}: {message}"
+        );
+    }
 }
 
 #[test]
@@ -183,7 +215,7 @@ fn trajectory_solver_validates_every_downrange_atmosphere_zone() {
             "atmo_sock.zones[1].humidity_percent",
         ),
         (
-            (15.0, 1013.25, -5.0, 600.0),
+            (15.0, 1013.25, -5.000_000_1, 600.0),
             "atmo_sock.zones[1].humidity_percent",
         ),
         (
@@ -235,7 +267,7 @@ fn zero_and_monte_carlo_inherit_the_refusal() {
         target_distance: Some(100.0),
         ..MonteCarloParams::default()
     };
-    for humidity in [150.0, -5.0] {
+    for humidity in [150.0, -5.000_000_1] {
         let result = run_monte_carlo(
             BallisticInputs {
                 humidity_percent: humidity,
@@ -371,7 +403,8 @@ fn impossible_air_is_refused_identically_by_the_station_the_solve_solve_v1_and_d
 
 #[test]
 fn solve_v1_keeps_refusing_a_humidity_fraction_outside_zero_to_one() {
-    for fraction in [1.5, -0.1, 50.0, 1.0001] {
+    // Beyond the 0.05 sensor band (S5b moved 1.0001, a saturated-air reading, to the band test).
+    for fraction in [1.5, -0.1, 50.0, 1.050_000_1, -0.050_000_1] {
         let decoded = ballistics_engine::solve_json::decode_solve_request_v1(
             &serde_json::json!({
                 "schema_version": 1,
@@ -652,7 +685,7 @@ fn bridge(command: &str, request: serde_json::Value) -> serde_json::Value {
 #[test]
 fn bridge_card_commands_reject_an_out_of_range_humidity() {
     for command in ["card.come_ups", "card.range_table", "card.wind"] {
-        for humidity in [150.0, -5.0] {
+        for humidity in [150.0, -5.000_000_1] {
             let mut request = card_request_json();
             request["humidity"] = serde_json::json!(humidity);
             if command == "card.wind" {
@@ -705,7 +738,7 @@ fn bridge_true_commands_reject_through_the_shared_validator() {
             "humidity_pct": humidity, "altitude_ft": 0.0
         })
     };
-    for humidity in [150.0, -5.0] {
+    for humidity in [150.0, -5.000_000_1] {
         let out = bridge(
             "true.dsf",
             serde_json::json!({
@@ -731,7 +764,7 @@ fn bridge_profile_validate_flags_an_out_of_range_stored_humidity() {
             "diameter": 0.308, "drag_model": "G7", "humidity": humidity
         })
     };
-    for humidity in [150.0, -5.0] {
+    for humidity in [150.0, -5.000_000_1] {
         let out = bridge("profile.validate", profile(humidity));
         assert_eq!(out["ok"], true, "{out}");
         assert_eq!(out["result"]["valid"], false, "RH {humidity}: {out}");
@@ -901,6 +934,30 @@ mod ffi {
         }
     }
 
+    /// S5b: the C ABI reads a sensor reading within 5 points of the range as the end it reads
+    /// as: the single solve and the zero angle are the end's to the bit, and the Monte Carlo
+    /// flies it.
+    #[test]
+    fn the_c_abi_flies_a_sensor_reading_as_the_end_it_reads_as() {
+        let zero = |humidity: f64| {
+            let inputs = inputs();
+            unsafe {
+                ballistics_calculate_zero_angle(&inputs, std::ptr::null(), &air(humidity), 100.0)
+            }
+            .to_bits()
+        };
+        for (reading, end) in SENSOR_READINGS {
+            let flown = trajectory(Some(&air(reading)));
+            assert!(flown.is_some(), "RH {reading} flies");
+            assert_eq!(flown, trajectory(Some(&air(end))), "RH {reading}");
+            assert_eq!(zero(reading), zero(end), "zero angle at RH {reading}");
+            assert!(
+                monte_carlo_succeeds(&air(reading)),
+                "Monte Carlo at RH {reading}"
+            );
+        }
+    }
+
     #[test]
     fn a_null_c_atmosphere_is_the_engine_default_humidity_bit_for_bit() {
         assert_eq!(
@@ -974,7 +1031,8 @@ mod a7p {
 
     #[test]
     fn an_out_of_range_a7p_humidity_is_refused_at_import() {
-        for humidity in [150, -5, 101] {
+        // Beyond the 5-point sensor band (S5b: -5 and 101 are readings, the next test's).
+        for humidity in [150, -6, 106] {
             let doc = parse_a7p(&a7p(Some(humidity))).expect("the envelope parses");
             let error = map_a7p_to_profile(&doc, None, None)
                 .err()
@@ -988,6 +1046,29 @@ mod a7p {
             let doc = parse_a7p(&a7p(Some(humidity))).unwrap();
             let profile = map_a7p_to_profile(&doc, None, None).unwrap().profile;
             assert_eq!(profile.humidity, humidity as f64);
+        }
+    }
+
+    /// S5b: a file's humidity within 5 points of the range is a sensor reading, imported as the
+    /// end it reads as.
+    #[test]
+    fn an_a7p_humidity_within_five_points_of_the_range_imports_as_the_end() {
+        for (humidity, end) in [
+            (101, 100.0),
+            (103, 100.0),
+            (105, 100.0),
+            (-1, 0.0),
+            (-5, 0.0),
+        ] {
+            let doc = parse_a7p(&a7p(Some(humidity))).unwrap();
+            let profile = map_a7p_to_profile(&doc, None, None)
+                .unwrap_or_else(|e| panic!("RH {humidity} imports: {e}"))
+                .profile;
+            assert_eq!(
+                profile.humidity.to_bits(),
+                f64::to_bits(end),
+                "RH {humidity}"
+            );
         }
     }
 
@@ -1084,4 +1165,453 @@ fn the_online_client_sends_the_humidity_at_full_precision() {
             "RH {humidity} must round-trip exactly, not to one decimal: sent {sent:?}"
         );
     }
+}
+
+// --- the sensor band, surface by surface (S5b) --------------------------------------------------
+
+/// Every trajectory point of `solver`'s solve, as bits.
+fn flight_bits(mut solver: TrajectorySolver) -> Vec<u64> {
+    solver.set_max_range(300.0);
+    let result = solver.solve().expect("a sensor reading flies");
+    result
+        .points
+        .iter()
+        .flat_map(|p| {
+            [
+                p.time,
+                p.position.x,
+                p.position.y,
+                p.position.z,
+                p.velocity_magnitude,
+            ]
+        })
+        .map(f64::to_bits)
+        .collect()
+}
+
+#[test]
+fn trajectory_solver_flies_a_sensor_reading_as_the_end_it_reads_as() {
+    for method in METHODS {
+        for (reading, end) in SENSOR_READINGS {
+            assert_eq!(
+                flight_bits(solver(
+                    with_method(method),
+                    atmosphere(15.0, 1013.25, reading)
+                )),
+                flight_bits(solver(with_method(method), atmosphere(15.0, 1013.25, end))),
+                "{method:?}: station RH {reading} must fly {end}"
+            );
+            // The same reading in a downrange zone.
+            let zoned = |humidity: f64| {
+                let mut solver = solver(with_method(method), atmosphere(15.0, 1013.25, 50.0));
+                solver.set_atmo_segments(vec![
+                    (15.0, 1013.25, 50.0, 100.0),
+                    (25.0, 1000.0, humidity, 600.0),
+                ]);
+                flight_bits(solver)
+            };
+            assert_eq!(
+                zoned(reading),
+                zoned(end),
+                "{method:?}: zone RH {reading} must fly {end}"
+            );
+        }
+    }
+}
+
+#[test]
+fn zero_monte_carlo_and_the_bc_estimator_read_a_sensor_reading_as_the_end() {
+    use ballistics_engine::estimate_bc_fit;
+    use ballistics_engine::monte_carlo::solve_trajectory_for_monte_carlo_with_station_presence;
+    let points = [(100.0, 0.08), (200.0, 0.34), (300.0, 0.82)];
+    let estimate = |humidity: f64| {
+        let fit = estimate_bc_fit(
+            800.0,
+            0.0109,
+            0.00782,
+            &points,
+            DragModel::G7,
+            ballistics_engine::BcFitMode::Drop,
+            atmosphere(15.0, 1013.25, humidity),
+            None,
+            0.05,
+        )
+        .expect("a sensor reading fits");
+        format!("{fit:?}")
+    };
+    let zero = |humidity: f64| {
+        calculate_zero_angle_with_conditions(
+            load(),
+            100.0,
+            0.0,
+            WindConditions::default(),
+            atmosphere(15.0, 1013.25, humidity),
+        )
+        .expect("a sensor reading zeroes")
+        .to_bits()
+    };
+    let lean = |humidity: f64| {
+        let output = solve_trajectory_for_monte_carlo_with_station_presence(
+            &BallisticInputs {
+                humidity_percent: humidity,
+                target_distance: 300.0,
+                ..load()
+            },
+            StationAtmospherePresence::BOTH,
+        )
+        .expect("a sensor reading flies the lean Monte Carlo");
+        format!("{output:?}")
+    };
+    let params = MonteCarloParams {
+        num_simulations: 3,
+        target_distance: Some(100.0),
+        ..MonteCarloParams::default()
+    };
+    for (reading, end) in SENSOR_READINGS {
+        assert_eq!(zero(reading), zero(end), "zero at RH {reading}");
+        assert_eq!(lean(reading), lean(end), "lean Monte Carlo at RH {reading}");
+        assert_eq!(
+            estimate(reading),
+            estimate(end),
+            "estimate_bc_fit at RH {reading}"
+        );
+        run_monte_carlo(
+            BallisticInputs {
+                humidity_percent: reading,
+                ..load()
+            },
+            params.clone(),
+        )
+        .unwrap_or_else(|e| panic!("the Monte Carlo flies RH {reading}: {e}"));
+    }
+}
+
+/// A solve-json v1 request at the given atmosphere, solved, as the response's JSON or the
+/// refusal's.
+fn solve_v1_json(atmosphere: serde_json::Value) -> Result<String, String> {
+    let request = ballistics_engine::solve_json::decode_solve_request_v1(
+        &serde_json::json!({
+            "schema_version": 1,
+            "projectile": {"mass_kg": 0.01134, "diameter_m": 0.00782, "length_m": 0.031,
+                           "drag_model": "G7", "ballistic_coefficient": 0.243},
+            "rifle": {"muzzle_velocity_mps": 823.0},
+            "shot": {"max_range_m": 300.0, "zero_distance_m": 100.0},
+            "atmosphere": atmosphere,
+            "wind": {}, "solver": {}, "effects": {}, "sampling": {}
+        })
+        .to_string(),
+    )
+    .map_err(|e| format!("{e:?}"))?;
+    ballistics_engine::solve_v1(request)
+        .map(|response| serde_json::to_string(&response).unwrap())
+        .map_err(|e| serde_json::to_string(&e).unwrap())
+}
+
+/// Fractions within 0.05 of the SI wire's range, each with the end it reads as.
+const SENSOR_FRACTIONS: [(f64, f64); 6] = [
+    (1.000_000_1, 1.0),
+    (1.03, 1.0),
+    (1.05, 1.0),
+    (-0.0, 0.0),
+    (-0.02, 0.0),
+    (-0.05, 0.0),
+];
+
+#[test]
+fn solve_v1_and_density_altitude_read_a_sensor_fraction_as_the_end_it_reads_as() {
+    use ballistics_engine::atmosphere_service::{
+        decode_density_altitude_request_v1, density_altitude_v1,
+    };
+    let density_altitude = |fraction: f64| {
+        let request = decode_density_altitude_request_v1(&serde_json::json!({
+            "atmosphere": {"temperature_k": 300.0, "pressure_pa": 95_000.0,
+                           "relative_humidity": fraction}
+        }))
+        .expect("decodes");
+        serde_json::to_string(&density_altitude_v1(&request).expect("a sensor reading")).unwrap()
+    };
+    for (reading, end) in SENSOR_FRACTIONS {
+        let at = |fraction: f64| {
+            solve_v1_json(serde_json::json!({
+                "temperature_k": 300.0, "pressure_pa": 95_000.0, "relative_humidity": fraction
+            }))
+            .unwrap_or_else(|e| panic!("relative_humidity {fraction} flies: {e}"))
+        };
+        // The whole response, the resolved request's echo included: the reading resolves to
+        // the end, and flies it.
+        assert_eq!(
+            at(reading),
+            at(end),
+            "solve v1 at relative_humidity {reading}"
+        );
+        assert_eq!(
+            density_altitude(reading),
+            density_altitude(end),
+            "density_altitude at relative_humidity {reading}"
+        );
+    }
+    // Beyond the band: the same path and code as before S5b.
+    for fraction in [1.06, 1.050_000_1, -0.06, -0.050_000_1] {
+        let refused = solve_v1_json(serde_json::json!({"relative_humidity": fraction}))
+            .expect_err("beyond the band");
+        let refused: serde_json::Value = serde_json::from_str(&refused).unwrap();
+        assert_eq!(refused["error"]["code"], "invalid_value", "{refused}");
+        assert_eq!(
+            refused["error"]["path"], "$.atmosphere.relative_humidity",
+            "{refused}"
+        );
+    }
+}
+
+#[test]
+fn card_hold_curve_and_corridor_read_a_sensor_reading_as_the_end_it_reads_as() {
+    use ballistics_engine::card_service::{come_ups_v1, range_table_v1};
+    use ballistics_engine::hold_curve::HoldCurve;
+    use ballistics_engine::wind_scenarios::solve_robust_hold;
+    let card = |humidity: f64| {
+        let request = card_request(Some(humidity));
+        (
+            serde_json::to_string(&come_ups_v1(&request).expect("come-ups flies")).unwrap(),
+            serde_json::to_string(&range_table_v1(&request).expect("range table flies")).unwrap(),
+        )
+    };
+    let hold = |humidity: f64| {
+        let curve = HoldCurve::solve(&hold_load(humidity), 300.0).expect("the hold curve flies");
+        let mut bits = vec![curve.reach_m().to_bits()];
+        for range in curve.sample_ranges_m() {
+            if let Some(point) = curve.at_range(range) {
+                bits.extend(
+                    [
+                        point.drop_mil,
+                        point.wind_mil,
+                        point.velocity_mps,
+                        point.time_s,
+                    ]
+                    .map(f64::to_bits),
+                );
+            }
+        }
+        bits
+    };
+    let corridor = |humidity: f64| {
+        serde_json::to_string(&solve_robust_hold(&corridor_request(humidity)).expect("flies"))
+            .unwrap()
+    };
+    for (reading, end) in SENSOR_READINGS {
+        assert_eq!(card(reading), card(end), "card at RH {reading}");
+        assert_eq!(hold(reading), hold(end), "hold curve at RH {reading}");
+        assert_eq!(corridor(reading), corridor(end), "corridor at RH {reading}");
+    }
+}
+
+#[cfg(feature = "bridge")]
+#[test]
+fn the_bridge_reads_a_sensor_reading_as_the_end_it_reads_as() {
+    let true_dsf = |humidity: f64| {
+        bridge(
+            "true.dsf",
+            serde_json::json!({
+                "model": {
+                    "muzzle_velocity_fps": 1600.0, "ballistic_coefficient": 0.243,
+                    "drag_model": "g7", "mass_gr": 168.0, "diameter_in": 0.308,
+                    "zero_distance_yd": 100.0, "sight_height_in": 2.0,
+                    "temperature_f": 59.0, "pressure_inhg": 29.92,
+                    "humidity_pct": humidity, "altitude_ft": 0.0
+                },
+                "range_yd": 200.0, "observed_drop": 12.0, "drop_unit": "mil"
+            }),
+        )
+    };
+    // The apps' live shot path: solve-json v1 through the bridge's `solve`, and the
+    // density-altitude command, at a wire fraction in the band.
+    let wire = |command: &str, fraction: f64| {
+        let atmosphere = serde_json::json!({
+            "temperature_k": 300.0, "pressure_pa": 95_000.0, "relative_humidity": fraction
+        });
+        let request = if command == "solve" {
+            serde_json::json!({
+                "schema_version": 1,
+                "projectile": {"mass_kg": 0.01134, "diameter_m": 0.00782, "length_m": 0.031,
+                               "drag_model": "G7", "ballistic_coefficient": 0.243},
+                "rifle": {"muzzle_velocity_mps": 823.0},
+                "shot": {"max_range_m": 300.0, "zero_distance_m": 100.0},
+                "atmosphere": atmosphere,
+                "wind": {}, "solver": {}, "effects": {}, "sampling": {}
+            })
+        } else {
+            serde_json::json!({"atmosphere": atmosphere})
+        };
+        bridge(command, request)
+    };
+    for (reading, end) in SENSOR_FRACTIONS {
+        for command in ["solve", "atmosphere.density_altitude"] {
+            let out = wire(command, reading);
+            assert_eq!(out["ok"], true, "{command} at {reading} flies: {out}");
+            assert_eq!(
+                out,
+                wire(command, end),
+                "{command} at relative_humidity {reading}"
+            );
+        }
+    }
+    for fraction in [1.06, -0.06] {
+        for command in ["solve", "atmosphere.density_altitude"] {
+            let out = wire(command, fraction);
+            assert_eq!(
+                out["ok"], false,
+                "{command} at {fraction} is refused: {out}"
+            );
+            assert!(
+                out.to_string().contains("$.atmosphere.relative_humidity"),
+                "{command} at {fraction}: located at the field: {out}"
+            );
+        }
+    }
+    for (reading, end) in SENSOR_READINGS {
+        for command in ["card.come_ups", "card.range_table", "card.wind"] {
+            let at = |humidity: f64| {
+                let mut request = card_request_json();
+                request["humidity"] = serde_json::json!(humidity);
+                if command == "card.wind" {
+                    request["wind_speeds"] = serde_json::json!([5.0, 10.0]);
+                }
+                bridge(command, request)
+            };
+            let out = at(reading);
+            assert_eq!(out["ok"], true, "{command} RH {reading} flies: {out}");
+            assert_eq!(out, at(end), "{command} at RH {reading}");
+        }
+        let out = true_dsf(reading);
+        assert_eq!(out["ok"], true, "true.dsf RH {reading} flies: {out}");
+        assert_eq!(out, true_dsf(end), "true.dsf at RH {reading}");
+        let out = bridge(
+            "profile.validate",
+            serde_json::json!({
+                "name": "humid", "velocity": 2700.0, "bc": 0.243, "mass": 175.0,
+                "diameter": 0.308, "drag_model": "G7", "humidity": reading
+            }),
+        );
+        assert_eq!(
+            out["result"]["valid"], true,
+            "a stored reading of {reading} is valid: {out}"
+        );
+    }
+}
+
+/// The online client sends a sensor reading as the end it reads as, and refuses a value beyond
+/// the band before it sends anything.
+#[cfg(feature = "online")]
+#[test]
+fn the_online_client_sends_a_sensor_reading_as_the_end_it_reads_as() {
+    let request = |humidity: f64| {
+        ballistics_engine::api_client::TrajectoryRequestBuilder::new()
+            .bc_value(0.475)
+            .bc_type("G1")
+            .bullet_mass(10.9)
+            .muzzle_velocity(823.0)
+            .target_distance(500.0)
+            .humidity(humidity)
+            .build()
+            .unwrap()
+    };
+    for (reading, end) in SENSOR_READINGS {
+        let request_line = captured_query(&request(reading));
+        let sent = request_line
+            .split(['?', '&', ' '])
+            .find_map(|pair| pair.strip_prefix("humidity="))
+            .unwrap_or_else(|| panic!("no humidity in {request_line:?}"));
+        assert_eq!(
+            sent.parse::<f64>().unwrap().to_bits(),
+            f64::to_bits(end),
+            "RH {reading} is sent as {end}: sent {sent:?}"
+        );
+    }
+    // The velocity-truing POST body too.
+    for (reading, end) in SENSOR_READINGS {
+        let body = captured_true_velocity_body(reading);
+        let sent: serde_json::Value = serde_json::from_str(&body).expect("a JSON body");
+        assert_eq!(
+            sent["humidity"].as_f64().map(f64::to_bits),
+            Some(f64::to_bits(end)),
+            "RH {reading} is sent as {end}: {body}"
+        );
+    }
+    // Nothing listens here: a request that got as far as the network would fail differently.
+    let client = ballistics_engine::api_client::ApiClient::new("http://127.0.0.1:9", 1);
+    for humidity in BAD_PERCENTS {
+        match client.calculate_trajectory(&request(humidity)) {
+            Err(ballistics_engine::api_client::ApiError::RequestError(message)) => assert!(
+                message.contains("humidity"),
+                "RH {humidity}: the refusal names the field: {message}"
+            ),
+            other => panic!("RH {humidity} must be refused before sending: {other:?}"),
+        }
+        match client.true_velocity(&true_velocity_request(humidity)) {
+            Err(ballistics_engine::api_client::ApiError::RequestError(message)) => assert!(
+                message.contains("humidity"),
+                "RH {humidity}: the refusal names the field: {message}"
+            ),
+            other => panic!("RH {humidity} must be refused before sending: {other:?}"),
+        }
+    }
+}
+
+#[cfg(feature = "online")]
+fn true_velocity_request(humidity: f64) -> ballistics_engine::api_client::TrueVelocityRequest {
+    ballistics_engine::api_client::TrueVelocityRequest {
+        measured_drop_mil: 3.6,
+        range_yd: 500.0,
+        bc: 0.475,
+        drag_model: "G1".to_string(),
+        weight_gr: 168.0,
+        caliber: 0.308,
+        zero_range_yd: Some(100.0),
+        chrono_velocity_fps: None,
+        altitude_ft: None,
+        temperature_f: None,
+        pressure_inhg: None,
+        temperature_supplied: None,
+        pressure_supplied: None,
+        humidity: Some(humidity),
+        sight_height_in: None,
+        use_bc_enhancement: None,
+    }
+}
+
+/// The JSON body `ApiClient::true_velocity` POSTs for a request at `humidity`, captured by a
+/// one-shot loopback server that answers 500.
+#[cfg(feature = "online")]
+fn captured_true_velocity_body(humidity: f64) -> String {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("the client connects");
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        let mut length = 0usize;
+        loop {
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            if line.trim().is_empty() {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+        }
+        let mut body = vec![0u8; length];
+        reader.read_exact(&mut body).unwrap();
+        let mut stream = stream;
+        stream
+            .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        String::from_utf8(body).unwrap()
+    });
+    let client =
+        ballistics_engine::api_client::ApiClient::new(&format!("http://127.0.0.1:{port}"), 5);
+    let _ = client.true_velocity(&true_velocity_request(humidity));
+    server.join().unwrap()
 }
