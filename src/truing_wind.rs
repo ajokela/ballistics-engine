@@ -197,6 +197,9 @@ pub struct WindTruingRequest {
     )]
     pub pressure_inhg: StationReading,
     /// Relative humidity in percent (0 through 100).
+    /// A sensor reading within [`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`] of that range (101.7 in
+    /// fog) flies as the end it reads as; a value beyond it, or one that is not finite, is refused
+    /// through [`crate::RelativeHumidity`], never clamped.
     pub humidity_pct: f64,
     /// Altitude in feet.
     pub altitude_ft: f64,
@@ -213,6 +216,19 @@ pub struct WindTruingRequest {
 }
 
 impl WindTruingRequest {
+    /// This request's station air refused in its own words, or `None` when it flies: the paths
+    /// are the request's own top-level members (`$.humidity_pct`, `$.temperature_f`, ...).
+    /// [`Self::validate`] makes this check before any crosswind is searched for.
+    pub fn air_refusal(&self) -> Option<crate::atmosphere::AirRefusal> {
+        crate::truing::truing_air_refusal(
+            self.temperature_f,
+            self.pressure_inhg,
+            self.humidity_pct,
+            self.altitude_ft,
+            "$",
+        )
+    }
+
     /// Validate the whole request before any (expensive) trajectory work begins.
     ///
     /// Mirrors [`crate::truing::TruingModelInputsV1::validate`] plus the observation-set
@@ -240,21 +256,20 @@ impl WindTruingRequest {
             ("bullet diameter", self.diameter_in),
             ("zero distance", self.zero_distance_yd),
             ("sight height", self.sight_height_in),
-            ("pressure", self.pressure_inhg.value),
             ("twist rate", self.twist.rate_in),
         ] {
             if !value.is_finite() || value <= 0.0 {
                 return Err(format!("{name} must be positive and finite"));
             }
         }
-        if !self.temperature_f.value.is_finite() {
-            return Err("temperature must be finite".to_string());
-        }
-        if !self.humidity_pct.is_finite() || !(0.0..=100.0).contains(&self.humidity_pct) {
-            return Err("humidity must be finite and within 0..=100 percent".to_string());
-        }
-        if !self.altitude_ft.is_finite() {
-            return Err("altitude must be finite".to_string());
+        // The station air, each reading by the one rule the solver applies and named at its own
+        // member in the request's units: the engine's one humidity validator (a percent in
+        // [0, 100], a sensor reading within 5 points of it flown as the end it reads as,
+        // anything farther out refused, never clamped), a finite temperature above absolute
+        // zero, a finite pressure above 0, a finite altitude, and the impossible-air rule,
+        // before any crosswind is searched for.
+        if let Some(refusal) = self.air_refusal() {
+            return Err(refusal.message().to_string());
         }
         if let Some(earth) = self.earth {
             if !earth.latitude_deg.is_finite() || !(-90.0..=90.0).contains(&earth.latitude_deg) {
@@ -1214,6 +1229,48 @@ mod tests {
     /// round-trip tests from a KNOWN wind.
     fn modeled_lateral_m(request: &WindTruingRequest, crosswind_mph: f64, range_m: f64) -> f64 {
         modeled_miss_right_m(request, crosswind_mph, range_m).expect("forward model must solve")
+    }
+
+    /// The request's humidity goes through the engine's one validator,
+    /// `RelativeHumidity::try_percent`, and its field-named error.
+    #[test]
+    fn humidity_is_refused_by_the_one_shared_validator() {
+        let observation = WindObservation {
+            range_m: 457.2,
+            miss_right_m: 0.1,
+            sigma_m: None,
+        };
+        // Beyond the 5-point sensor band (-5 and 100.0001 are readings, flown below).
+        for humidity in [150.0, -5.000_000_1, 105.000_000_1, f64::NAN, f64::INFINITY] {
+            let mut request = base_request(vec![observation]);
+            request.humidity_pct = humidity;
+            let error = request.validate().expect_err("an out-of-range humidity");
+            // The range rule and the finiteness rule alike state the band they enforce.
+            assert!(
+                error.starts_with("humidity_pct = ")
+                    && error.contains(
+                        "percent from 0 to 100 (a sensor reading from -5 to 105 is read as 0 \
+                         or 100)"
+                    ),
+                "RH {humidity}: {error}"
+            );
+        }
+        for humidity in [0.0, 100.0] {
+            let mut request = base_request(vec![observation]);
+            request.humidity_pct = humidity;
+            request.validate().expect("a valid humidity");
+        }
+        // A sensor reading within 5 points of the range is the end it reads as, and the
+        // forward model flies that end to the bit.
+        for (reading, end) in [(100.0001, 100.0), (101.7, 100.0), (-2.0, 0.0), (-5.0, 0.0)] {
+            let at = |humidity: f64| {
+                let mut request = base_request(vec![observation]);
+                request.humidity_pct = humidity;
+                request.validate().expect("a sensor reading");
+                modeled_lateral_m(&request, 10.0, 457.2).to_bits()
+            };
+            assert_eq!(at(reading), at(end), "RH {reading}");
+        }
     }
 
     /// Round trip: take a KNOWN crosswind, read the lateral miss it produces at three

@@ -7,7 +7,7 @@
 use crate::constants::G_ACCEL_MPS2;
 use crate::gravity::Gravity;
 use crate::{
-    atmosphere::{calculate_air_density_cimp, get_local_atmosphere_humid_with_gravity, AtmoSock},
+    atmosphere::{air_at_with_gravity, AtmoSock, KernelAtmosphere, LocalAir},
     bc_estimation::velocity_segment_bc,
     constants::{MPS_TO_FPS, STANDARD_AIR_DENSITY},
     drag::get_drag_coefficient,
@@ -117,58 +117,55 @@ impl FastSolution {
     }
 }
 
-fn direct_atmosphere_values(atmo_params: (f64, f64, f64, f64)) -> Option<(f64, f64)> {
-    let (a, b, c, d) = atmo_params;
-    (a.is_finite() && b.is_finite() && c == 0.0 && d == 0.0 && a > 0.0 && a < 2.0 && b > 200.0)
-        .then_some((a, b))
-}
-
-fn stability_atmosphere_params(atmo_params: (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
-    if let Some((air_density, _)) = direct_atmosphere_values(atmo_params) {
-        // compute_stability_coefficient consumes standard-mode temperature/pressure, whose
-        // Miller correction is rho_ref/rho. At the 15 C reference temperature, scaling pressure
-        // by rho/rho_ref supplies that exact correction without misreading sound speed as temp.
-        (0.0, 15.0, 1013.25 * air_density / STANDARD_AIR_DENSITY, 1.0)
-    } else {
-        atmo_params
+/// The `(altitude, temperature, pressure, ratio)` the Miller stability formula reads (it uses
+/// only the temperature and pressure: the published correction is dry).
+fn stability_atmosphere_params(atmosphere: &KernelAtmosphere) -> (f64, f64, f64, f64) {
+    match atmosphere {
+        KernelAtmosphere::Station(station) => (
+            station.altitude_m(),
+            station.temperature_c(),
+            station.pressure_hpa(),
+            station.density_ratio(),
+        ),
+        KernelAtmosphere::Uniform { density_kg_m3, .. } => {
+            // compute_stability_coefficient consumes standard-mode temperature/pressure, whose
+            // Miller correction is rho_ref/rho. At the 15 C reference temperature, scaling
+            // pressure by rho/rho_ref supplies that exact correction without misreading sound
+            // speed as temperature.
+            (
+                0.0,
+                15.0,
+                1013.25 * density_kg_m3 / STANDARD_AIR_DENSITY,
+                1.0,
+            )
+        }
     }
 }
 
-const MAX_STANDARD_DENSITY_RATIO: f64 = 2.0;
-
-/// True if `atmo_params` can yield a finite, positive air density. `atmo_params` has TWO
-/// modes that `compute_derivatives` distinguishes:
-///   * **Standard**: `(base_alt_m, base_temp_c, base_pressure_hPa, base_density_ratio)` —
-///     positive station pressure. Slot 3 is a density RATIO, not humidity, despite the
-///     `humidity` field it lands in via `build_inputs`. A nonpositive ratio means "not supplied"
-///     and falls back to `1.0`; a supplied ratio must be below `2.0`.
-///   * **Direct**: `(air_density, speed_of_sound, 0.0, 0.0)` — slots 2 and 3 are `0.0`
-///     sentinels, with a real density (< 2.0 kg/m³) and speed of sound (> 200 m/s).
-///
-/// A pressure <= 0 that ISN'T the direct-mode sentinel, an overlarge supplied density ratio, or
-/// any non-finite value would yield a non-physical atmosphere, so it is rejected. (Earlier this
-/// guard also rejected legitimate direct-mode input; the direct-mode allowance below fixes that.)
-fn atmo_is_physical(atmo_params: (f64, f64, f64, f64)) -> bool {
-    let (a, b, c, d) = atmo_params;
-    if !(a.is_finite() && b.is_finite() && c.is_finite() && d.is_finite()) {
-        return false;
+/// The station temperature and pressure the muzzle Litz spin drift's Miller Sg reads, or the
+/// sea-level standard for uniform air (whose Sg density correction is then a no-op).
+fn spin_drift_station(atmosphere: &KernelAtmosphere) -> (f64, f64) {
+    match atmosphere {
+        KernelAtmosphere::Station(station) => (station.temperature_c(), station.pressure_hpa()),
+        KernelAtmosphere::Uniform { .. } => (15.0, 1013.25),
     }
-    // Direct-atmosphere mode: (density, speed_of_sound, 0, 0). Constants mirror
-    // derivatives.rs (MAX_REALISTIC_DENSITY = 2.0 kg/m³, MIN_REALISTIC_SPEED_OF_SOUND = 200 m/s).
-    // Standard mode: positive station pressure (hPa), plus either the documented missing-ratio
-    // sentinel or a supplied ratio below the physical ceiling.
-    direct_atmosphere_values(atmo_params).is_some() || (c > 0.0 && d < MAX_STANDARD_DENSITY_RATIO)
 }
 
-#[derive(Debug, Clone, Copy)]
-enum FastAtmosphere {
-    Direct {
-        air_density: f64,
-        speed_of_sound: f64,
-    },
-    Standard {
-        base_density: f64,
-    },
+/// Copy the station `atmosphere` flies into `inputs`' own station fields, so the two cannot
+/// disagree: the kernel's atmosphere wins, for every field. Uniform air has no station and
+/// leaves them as the caller set them.
+pub(crate) fn station_into_inputs(atmosphere: &KernelAtmosphere, inputs: &mut BallisticInputs) {
+    if let KernelAtmosphere::Station(station) = atmosphere {
+        inputs.altitude = station.altitude_m();
+        inputs.temperature = station.temperature_c();
+        inputs.pressure = station.pressure_hpa();
+        inputs.humidity_percent = station.humidity().percent();
+    }
+}
+
+/// Whether the zones (if any) are valid, the condition for integrating at all.
+fn atmo_sock_is_valid(atmo_sock: Option<&AtmoSock>) -> bool {
+    atmo_sock.is_none_or(|sock| sock.validate().is_ok())
 }
 
 /// Fast trajectory integration parameters
@@ -181,16 +178,18 @@ pub struct FastIntegrationParams {
     /// reads its height above the ground from that datum.
     pub initial_state: [f64; 6],
     pub t_span: (f64, f64),
-    /// Dual-mode atmosphere tuple. Standard mode is
-    /// `(base_alt_m, base_temp_c, base_pressure_hPa, base_density_ratio)` (slot 3 is a density
-    /// RATIO, not humidity; nonpositive means "not supplied" and falls back to `1.0`, while a
-    /// supplied ratio must be below `2.0`). Direct mode is
-    /// `(air_density, speed_of_sound, 0.0, 0.0)`.
-    pub atmo_params: (f64, f64, f64, f64),
-    /// MBA-1137: optional downrange-segmented atmosphere. When `Some`, the per-substep drag
-    /// density samples the base (station-referenced) T/P/H for the zone at the current downrange
-    /// distance before applying the altitude lapse. `None` (default) keeps the single-station
-    /// base and — combined with the MBA-1137 density-freeze fix — varies density with altitude only.
+    /// The air this flight flies: the station, humidity included
+    /// ([`KernelAtmosphere::Station`], from [`crate::StationAir::new`]), lapsed with altitude
+    /// through [`crate::atmosphere::air_at`] at every substep exactly as `TrajectorySolver`
+    /// flies it, or direct mode's uniform air ([`KernelAtmosphere::uniform`]). The station's
+    /// altitude, temperature, pressure and humidity override the inputs' own. A legacy 4-tuple
+    /// converts with [`KernelAtmosphere::from_legacy_params`].
+    pub atmosphere: KernelAtmosphere,
+    /// MBA-1137: optional downrange-segmented atmosphere. When `Some` and non-empty, each
+    /// substep's air uses the zone at the current downrange distance as the base: its T/P and
+    /// its RH, whose water-vapour mole fraction is held at every height for the lapse, the
+    /// density and the sound speed. `None` or an empty sock is the station. A sock that
+    /// [`AtmoSock::validate`] refuses gives a failed solution.
     pub atmo_sock: Option<AtmoSock>,
 }
 
@@ -201,17 +200,21 @@ pub struct FastIntegrationParams {
 /// so the caller rotates that velocity by this offset. Returns 0 when the feature is off or
 /// the inputs are degenerate. Crosswind is taken from `wind_speed`/`wind_angle`
 /// (BallisticInputs convention: 0 = headwind, +PI/2 = from the right). MBA-959, EXPERIMENTAL.
+///
+/// The Miller Sg reads the station temperature and pressure of `atmosphere` (or, for uniform
+/// air, a pressure scaled by its density), as `TrajectorySolver`'s jump does: the published
+/// Miller density correction is dry, so the jump does not depend on the humidity.
 pub fn aerodynamic_jump_launch_offset_rad(
     inputs: &BallisticInputs,
-    atmo_params: (f64, f64, f64, f64),
+    atmosphere: &KernelAtmosphere,
 ) -> f64 {
     let crosswind_from_right_mps = inputs.wind_speed * inputs.wind_angle.sin();
-    aerodynamic_jump_launch_offset_for_crosswind_rad(inputs, atmo_params, crosswind_from_right_mps)
+    aerodynamic_jump_launch_offset_for_crosswind_rad(inputs, atmosphere, crosswind_from_right_mps)
 }
 
 fn aerodynamic_jump_launch_offset_for_crosswind_rad(
     inputs: &BallisticInputs,
-    atmo_params: (f64, f64, f64, f64),
+    atmosphere: &KernelAtmosphere,
     crosswind_from_right_mps: f64,
 ) -> f64 {
     if !inputs.enable_aerodynamic_jump {
@@ -228,7 +231,7 @@ fn aerodynamic_jump_launch_offset_for_crosswind_rad(
     {
         return 0.0;
     }
-    let stability_atmo = stability_atmosphere_params(atmo_params);
+    let stability_atmo = stability_atmosphere_params(atmosphere);
     let sg = crate::stability::compute_stability_coefficient(inputs, stability_atmo);
     if !(sg.is_finite() && sg > 0.0) {
         return 0.0;
@@ -268,15 +271,15 @@ fn rotate_launch_velocity(state: &mut [f64; 6], theta_rad: f64) {
 
 fn launch_state_with_aerodynamic_jump(
     inputs: &BallisticInputs,
-    atmo_params: (f64, f64, f64, f64),
+    atmosphere: &KernelAtmosphere,
     segmented_crosswind_from_right_mps: Option<f64>,
     mut initial_state: [f64; 6],
 ) -> [f64; 6] {
     let offset = match segmented_crosswind_from_right_mps {
         Some(crosswind) => {
-            aerodynamic_jump_launch_offset_for_crosswind_rad(inputs, atmo_params, crosswind)
+            aerodynamic_jump_launch_offset_for_crosswind_rad(inputs, atmosphere, crosswind)
         }
-        None => aerodynamic_jump_launch_offset_rad(inputs, atmo_params),
+        None => aerodynamic_jump_launch_offset_rad(inputs, atmosphere),
     };
     if offset != 0.0 {
         rotate_launch_velocity(&mut initial_state, offset);
@@ -299,9 +302,25 @@ pub(crate) fn fast_integrate_with_gravity(
     params: FastIntegrationParams,
     gravity: Gravity,
 ) -> FastSolution {
-    // Malformed wind or a degenerate atmosphere would otherwise silently stub or poison the run.
-    if wind_sock.validate_segments().is_err() || !atmo_is_physical(params.atmo_params) {
-        return FastSolution::degenerate(&params.initial_state);
+    fast_integrate_flight(inputs, wind_sock, params, gravity).0
+}
+
+/// [`fast_integrate_with_gravity`], with the refusal of air that cannot exist aloft when that is
+/// why the flight failed: a step that fails to a non-finite state ends the flight there, as a
+/// failed solution (`success = false`) holding the states before it, never a NaN state; when the
+/// air within that step's reach falls to absolute zero
+/// ([`crate::atmosphere::air_aloft_refusal`]), the refusal says so. The lean Monte Carlo
+/// reports it; the public entry points report the failed solution.
+pub(crate) fn fast_integrate_flight(
+    inputs: &BallisticInputs,
+    wind_sock: &WindSock,
+    params: FastIntegrationParams,
+    gravity: Gravity,
+) -> (FastSolution, Option<crate::atmosphere::AtmosphereError>) {
+    // Malformed wind or invalid zones would otherwise silently stub or poison the run. The
+    // station is valid by construction (KernelAtmosphere).
+    if wind_sock.validate_segments().is_err() || !atmo_sock_is_valid(params.atmo_sock.as_ref()) {
+        return (FastSolution::degenerate(&params.initial_state), None);
     }
     let mut effective_inputs = inputs.clone();
     // MBA-1415: this is a public entry point that external bindings call directly, bypassing
@@ -309,12 +328,7 @@ pub(crate) fn fast_integrate_with_gravity(
     // caller setting a conditioned field gets no error and no effect. Idempotent, so inputs that
     // already passed through a solver are unaffected.
     effective_inputs.normalize_for_solve();
-    if params.atmo_params.2 > 0.0 {
-        effective_inputs.altitude = params.atmo_params.0;
-        effective_inputs.temperature = params.atmo_params.1;
-        effective_inputs.pressure = params.atmo_params.2;
-        effective_inputs.humidity = params.atmo_params.3;
-    }
+    station_into_inputs(&params.atmosphere, &mut effective_inputs);
     let inputs = &effective_inputs;
     // Extract parameters
     let _mass_kg = inputs.bullet_mass; // SI (kg)
@@ -345,7 +359,7 @@ pub(crate) fn fast_integrate_with_gravity(
     };
     let initial_state = launch_state_with_aerodynamic_jump(
         inputs,
-        params.atmo_params,
+        &params.atmosphere,
         segmented_crosswind_from_right_mps,
         params.initial_state,
     );
@@ -376,24 +390,11 @@ pub(crate) fn fast_integrate_with_gravity(
     times.push(0.0);
     states.push(initial_state);
 
-    // Direct mode supplies a fixed density and speed of sound. Standard mode supplies station
-    // conditions plus base_ratio; its local density/sound speed are lapsed at every substep.
-    // Guard a missing standard-mode ratio by falling back to sea-level density (MBA-1157 owns
-    // stricter validation of that separate contract).
-    let atmosphere =
-        if let Some((air_density, speed_of_sound)) = direct_atmosphere_values(params.atmo_params) {
-            FastAtmosphere::Direct {
-                air_density,
-                speed_of_sound,
-            }
-        } else {
-            let base_density = if params.atmo_params.3 > 0.0 {
-                params.atmo_params.3 * 1.225
-            } else {
-                1.225
-            };
-            FastAtmosphere::Standard { base_density }
-        };
+    // Uniform (direct-mode) air is a fixed density and speed of sound. Station air is lapsed to
+    // every substep's altitude through air_at, the station (or the active zone) giving the base
+    // air, whose water-vapour mole fraction is held at every height for the lapse, the density
+    // and the sound speed alike.
+    let atmosphere = &params.atmosphere;
 
     // MBA-1137: borrow the optional downrange-segmented atmosphere once (queried 4x per step).
     let atmo_sock = params.atmo_sock.as_ref();
@@ -467,6 +468,8 @@ pub(crate) fn fast_integrate_with_gravity(
     // Integration loop
     let mut hit_target = false;
     let mut hit_ground = false;
+    let mut failed = false;
+    let mut refusal = None;
     let mut max_ord_time = None;
     let mut max_ord_y = 0.0;
     let ground_threshold = inputs.ground_threshold;
@@ -579,6 +582,27 @@ pub(crate) fn fast_integrate_with_gravity(
             new_state[j] = state[j] + dt * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j]) / 6.0;
         }
 
+        // A step that fails to a non-finite state ends the flight: a failed solution, never a
+        // NaN state. Every stage it evaluated lies within the step at twice this speed (plus
+        // 10 m/s of slack) of `pos`, which is how far air below absolute zero is looked for.
+        if !new_state.iter().all(|value| value.is_finite()) {
+            failed = true;
+            let speed = (state[3] * state[3] + state[4] * state[4] + state[5] * state[5]).sqrt();
+            refusal = crate::atmosphere::air_aloft_refusal(
+                atmosphere,
+                atmo_sock,
+                pos.x,
+                crate::atmosphere::shot_frame_altitude(
+                    atmosphere.reference_altitude_m(inputs.altitude),
+                    pos.x,
+                    pos.y,
+                    inputs.shooting_angle,
+                ),
+                2.0 * dt * (speed + 10.0),
+            );
+            break;
+        }
+
         if state[0] < params.horiz && new_state[0] >= params.horiz {
             // Keep every terminal metric on the requested target plane. The former top-of-loop
             // check retained this full-step endpoint, biasing time, drop, and velocity past it.
@@ -626,14 +650,9 @@ pub(crate) fn fast_integrate_with_gravity(
     // cli_api::apply_spin_drift and the Monte-Carlo path so all solver families agree; uses
     // the SAME muzzle Sg (spin_drift::effective_sg_from_inputs).
     if inputs.use_enhanced_spin_drift {
-        // Standard-mode atmo_params is (base_alt, temp_c, press_hpa, ratio); direct mode
-        // (density, sound, 0, 0) carries no explicit temp/pressure, so fall back to sea-level
+        // The station temperature and pressure; uniform air carries none, so the sea-level
         // standard (the Sg density correction is a no-op there).
-        let (sd_temp_c, sd_press_hpa) = if params.atmo_params.2 > 0.0 {
-            (params.atmo_params.1, params.atmo_params.2)
-        } else {
-            (15.0, 1013.25)
-        };
+        let (sd_temp_c, sd_press_hpa) = spin_drift_station(&params.atmosphere);
         let sg = crate::spin_drift::effective_sg_from_inputs(inputs, sd_temp_c, sd_press_hpa);
         for (t, state) in times.iter().zip(states.iter_mut()) {
             if *t > 0.0 {
@@ -642,7 +661,9 @@ pub(crate) fn fast_integrate_with_gravity(
         }
     }
 
-    FastSolution::from_trajectory_data(times, states, t_events)
+    let mut solution = FastSolution::from_trajectory_data(times, states, t_events);
+    solution.success = !failed;
+    (solution, refusal)
 }
 
 fn fast_magnus_acceleration(
@@ -786,13 +807,33 @@ fn interpolated_vertical_apex(
         .then_some((previous_time + alpha * dt, apex))
 }
 
-/// Compute derivatives for the state vector
+/// The air one `fast_integrate` substep flies at `position`: [`crate::atmosphere::air_at`] at
+/// the point's world altitude (the station's altitude plus the point's world-vertical height),
+/// with the zone that covers its downrange distance, if any, as the base. Pure, so the per-step
+/// parity tests can probe it.
+pub(crate) fn substep_air(
+    inputs: &BallisticInputs,
+    atmosphere: &KernelAtmosphere,
+    atmo_sock: Option<&AtmoSock>,
+    position: &Vector3<f64>,
+    gravity: Gravity,
+) -> LocalAir {
+    let altitude = crate::atmosphere::shot_frame_altitude(
+        atmosphere.reference_altitude_m(inputs.altitude),
+        position.x,
+        position.y,
+        inputs.shooting_angle,
+    );
+    air_at_with_gravity(atmosphere, atmo_sock, position.x, altitude, gravity)
+}
+
+/// Compute derivatives for the state vector: one `fast_integrate` substep.
 #[allow(clippy::too_many_arguments)]
-fn compute_derivatives_with_gravity(
+pub(crate) fn compute_derivatives_with_gravity(
     state: &[f64; 6],
     inputs: &BallisticInputs,
     wind_sock: &WindSock,
-    atmosphere: FastAtmosphere,
+    atmosphere: &KernelAtmosphere,
     drag_model: &DragModel,
     projectile_shape: crate::transonic_drag::ProjectileShape,
     bc: f64,
@@ -839,58 +880,17 @@ fn compute_derivatives_with_gravity(
         // Calculate drag
         let v_fps = v_mag * MPS_TO_FPS;
 
-        // Resolve LOCAL density and speed of sound. Direct mode uses its supplied fixed values;
-        // standard mode evaluates the substep altitude with the lapse-rate pipeline.
-        // `inputs.temperature`/`inputs.pressure` are the standard-mode base (station) T/P set by
-        // fast_integrate from atmo_params; `base_density` is the station-altitude density, so
-        // `base_density / 1.225` recovers the station base_ratio the lapse pipeline expects.
-        //
-        // MBA-1137 (density-freeze fix): previously ONLY the speed of sound was taken from this
-        // call and `density_scale` used the flight-constant `base_density`, so the fast/MC path
-        // held density frozen for the whole flight (density did NOT vary with altitude — a latent
-        // bug the cli_api/derivatives paths already avoid). Now the LOCAL density is used for
-        // `density_scale` below, so the fast path varies density with altitude too.
-        //
-        // MBA-1137 (zones): when a downrange-segmented atmosphere is present, swap the BASE
-        // (station-referenced) temp/pressure/ratio for the zone at the current downrange distance
-        // (pos.x), recomputing the zone base_ratio via CIPM, BEFORE the altitude lapse — so
-        // downrange-zone selection and the world-vertical lapse compose without double-counting.
-        // `None` keeps the single-station base.
-        //
-        // Humidity is NOT plumbed to this call site: on the fast path (fast_integrate) the
-        // `humidity` FIELD is overwritten with atmo_params.3 (the density RATIO), so
-        // `inputs.humidity` is not a real RH — pass 0.0 (dry) rather than fabricate.
-        let (local_density, speed_of_sound) = match atmosphere {
-            FastAtmosphere::Direct {
-                air_density,
-                speed_of_sound,
-            } => (air_density, speed_of_sound),
-            FastAtmosphere::Standard { base_density } => {
-                let altitude = crate::atmosphere::shot_frame_altitude(
-                    inputs.altitude,
-                    pos.x,
-                    pos.y,
-                    inputs.shooting_angle,
-                );
-                let (base_temp_c, base_press_hpa, base_ratio) = match atmo_sock {
-                    Some(sock) => {
-                        let (zt, zp, zh) = sock.atmo_for_range(pos.x);
-                        (zt, zp, calculate_air_density_cimp(zt, zp, zh) / 1.225)
-                    }
-                    None => (inputs.temperature, inputs.pressure, base_density / 1.225),
-                };
-                get_local_atmosphere_humid_with_gravity(
-                    altitude,
-                    inputs.altitude, // base_alt approximation
-                    base_temp_c,
-                    base_press_hpa,
-                    base_ratio,
-                    0.0, // humidity not available here (see note above)
-                    gravity,
-                )
-            }
-        };
+        // The LOCAL air at this substep, from air_at: uniform air's fixed density and sound
+        // speed, or the station (or the zone at pos.x, MBA-1137) lapsed to this altitude, with
+        // the base air's water-vapour mole fraction held for the lapse, the density and the
+        // sound speed alike, exactly as TrajectorySolver flies it. The local density (not a
+        // flight-constant one, the MBA-1137 density-freeze fix) drives `density_scale` below.
+        let local_air = substep_air(inputs, atmosphere, atmo_sock, &pos, gravity);
+        let (local_density, speed_of_sound) =
+            (local_air.density_kg_m3, local_air.speed_of_sound_mps);
         let mach = v_mag / speed_of_sound;
+        #[cfg(test)]
+        crate::atmosphere::air_trace::record_consumed(local_density, v_mag, mach);
 
         // Get BC value (potentially from segments)
         let bc_current = match (
@@ -999,13 +999,12 @@ pub(crate) fn fast_integrate_with_segments_with_gravity(
     gravity: Gravity,
 ) -> FastSolution {
     // Use the RK45 implementation from trajectory_integration module
-    use crate::trajectory_integration::{
-        integrate_trajectory_from_muzzle_height, TrajectoryParams,
-    };
+    use crate::trajectory_integration::{integrate_trajectory_flight, TrajectoryParams};
 
-    // Malformed wind or a degenerate atmosphere would otherwise silently stub or poison the run.
+    // Malformed wind or invalid zones would otherwise silently stub or poison the run. The
+    // station is valid by construction (KernelAtmosphere).
     if crate::wind::validate_wind_segments(&wind_segments).is_err()
-        || !atmo_is_physical(params.atmo_params)
+        || !atmo_sock_is_valid(params.atmo_sock.as_ref())
     {
         return FastSolution::degenerate(&params.initial_state);
     }
@@ -1029,7 +1028,7 @@ pub(crate) fn fast_integrate_with_segments_with_gravity(
         };
     let initial_state = launch_state_with_aerodynamic_jump(
         inputs,
-        params.atmo_params,
+        &params.atmosphere,
         segmented_crosswind_from_right_mps,
         params.initial_state,
     );
@@ -1065,7 +1064,7 @@ pub(crate) fn fast_integrate_with_segments_with_gravity(
         bc,
         drag_model,
         wind_segments,
-        atmos_params: params.atmo_params,
+        atmosphere: params.atmosphere,
         omega_vector,
         enable_spin_drift: inputs.use_enhanced_spin_drift,
         enable_magnus: inputs.enable_magnus,
@@ -1098,8 +1097,9 @@ pub(crate) fn fast_integrate_with_segments_with_gravity(
 
     // Use RK45 adaptive integration. The launch state's y is measured from the level
     // `muzzle_height` is measured from, as for plain fast_integrate, so the kernel's shear
-    // height starts from the same datum.
-    let trajectory = integrate_trajectory_from_muzzle_height(
+    // height starts from the same datum. A flight into air that cannot exist aloft ends at the
+    // step that reaches it, as a failed solution.
+    let flight = integrate_trajectory_flight(
         initial_state,
         params.t_span,
         traj_params,
@@ -1109,6 +1109,7 @@ pub(crate) fn fast_integrate_with_segments_with_gravity(
         gravity,
         inputs.muzzle_height,
     );
+    let (trajectory, failed_step) = (flight.trajectory, flight.failed_step);
 
     // Convert trajectory to FastSolution format
     let n_points = trajectory.len();
@@ -1195,14 +1196,9 @@ pub(crate) fn fast_integrate_with_segments_with_gravity(
     // its time of flight — matching cli_api::apply_spin_drift and the Monte-Carlo path so all three
     // solver families agree. Uses the SAME muzzle Sg (spin_drift::effective_sg_from_inputs).
     if inputs.use_enhanced_spin_drift {
-        // Standard-mode atmo_params is (base_alt, temp_c, press_hpa, ratio); direct mode
-        // (density, sound, 0, 0) carries no explicit temp/pressure, so fall back to sea-level
+        // The station temperature and pressure; uniform air carries none, so the sea-level
         // standard (the Sg density correction is a no-op there).
-        let (sd_temp_c, sd_press_hpa) = if params.atmo_params.2 > 0.0 {
-            (params.atmo_params.1, params.atmo_params.2)
-        } else {
-            (15.0, 1013.25)
-        };
+        let (sd_temp_c, sd_press_hpa) = spin_drift_station(&params.atmosphere);
         let sg = crate::spin_drift::effective_sg_from_inputs(inputs, sd_temp_c, sd_press_hpa);
         for (t, state) in times.iter().zip(states.iter_mut()) {
             if *t > 0.0 {
@@ -1211,12 +1207,33 @@ pub(crate) fn fast_integrate_with_segments_with_gravity(
         }
     }
 
-    FastSolution::from_trajectory_data(times, states, t_events)
+    // Any step that failed to a non-finite state, for any cause, fails the solution, as it
+    // does `fast_integrate`'s.
+    let mut solution = FastSolution::from_trajectory_data(times, states, t_events);
+    solution.success = !failed_step;
+    solution
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atmosphere::RelativeHumidity;
+
+    /// A legacy `(alt, T, P, ratio)` / `(rho, c, 0, 0)` fixture, as the dry station (or direct
+    /// air) these tests were written for.
+    fn legacy(params: (f64, f64, f64, f64)) -> KernelAtmosphere {
+        KernelAtmosphere::from_legacy_params(params, RelativeHumidity::DRY).unwrap()
+    }
+
+    /// The 0.49.0 standard-mode substep air: `inputs`' own station at density ratio 1, dry.
+    fn standard_air(inputs: &BallisticInputs) -> KernelAtmosphere {
+        legacy((inputs.altitude, inputs.temperature, inputs.pressure, 1.0))
+    }
+
+    /// Direct-mode air.
+    fn direct(density_kg_m3: f64, speed_of_sound_mps: f64) -> KernelAtmosphere {
+        KernelAtmosphere::uniform(density_kg_m3, speed_of_sound_mps).unwrap()
+    }
     use crate::BCSegmentData;
 
     #[test]
@@ -1233,7 +1250,7 @@ mod tests {
             vert: 0.0,
             initial_state: [0.0, 10.0, 0.0, 10.0, 2.0, 0.0],
             t_span: (0.0, 2.0),
-            atmo_params: (1e-12, 340.0, 0.0, 0.0),
+            atmosphere: legacy((1e-12, 340.0, 0.0, 0.0)),
             atmo_sock: None,
         };
         for magnitude in [0.0, 1.62, 9.80665, 20.0] {
@@ -1298,9 +1315,7 @@ mod tests {
             state,
             inputs,
             &WindSock::new(vec![]),
-            FastAtmosphere::Standard {
-                base_density: 1.225,
-            },
+            &standard_air(inputs),
             &inputs.bc_type,
             crate::transonic_drag::ProjectileShape::Spitzer,
             inputs.bc_value,
@@ -1407,9 +1422,7 @@ mod tests {
                 &[0.0, 0.0, 0.0, 600.0, 0.0, 0.0],
                 &inputs,
                 &WindSock::new(vec![]),
-                FastAtmosphere::Standard {
-                    base_density: 1.225,
-                },
+                &standard_air(&inputs),
                 &inputs.bc_type,
                 crate::transonic_drag::ProjectileShape::Spitzer,
                 inputs.bc_value,
@@ -1451,9 +1464,7 @@ mod tests {
                 &[0.0, 0.0, 0.0, 600.0, 0.0, 0.0],
                 inputs,
                 &WindSock::new(vec![]),
-                FastAtmosphere::Standard {
-                    base_density: 1.225,
-                },
+                &standard_air(inputs),
                 &inputs.bc_type,
                 crate::transonic_drag::ProjectileShape::Spitzer,
                 inputs.bc_value,
@@ -1522,9 +1533,7 @@ mod tests {
             ..BallisticInputs::default()
         };
         let wind_sock = WindSock::new(vec![]);
-        let atmosphere = FastAtmosphere::Standard {
-            base_density: 1.225,
-        };
+        let atmosphere = standard_air(&inputs);
         let state_along_slant = [1_000.0, 0.0, 0.0, 600.0, 0.0, 0.0];
         let state_across_slant = [0.0, 500.0 / angle.cos(), 0.0, 600.0, 0.0, 0.0];
 
@@ -1532,7 +1541,7 @@ mod tests {
             &state_along_slant,
             &inputs,
             &wind_sock,
-            atmosphere,
+            &atmosphere,
             &inputs.bc_type,
             crate::transonic_drag::ProjectileShape::Spitzer,
             inputs.bc_value,
@@ -1547,7 +1556,7 @@ mod tests {
             &state_across_slant,
             &inputs,
             &wind_sock,
-            atmosphere,
+            &atmosphere,
             &inputs.bc_type,
             crate::transonic_drag::ProjectileShape::Spitzer,
             inputs.bc_value,
@@ -1584,10 +1593,7 @@ mod tests {
             &state,
             &inputs,
             &WindSock::new(vec![crate::wind::WindSegment::new(360.0, 0.0, 1000.0)]),
-            FastAtmosphere::Direct {
-                air_density: 1.225,
-                speed_of_sound: 340.0,
-            },
+            &direct(1.225, 340.0),
             &inputs.bc_type,
             crate::transonic_drag::ProjectileShape::Spitzer,
             inputs.bc_value,
@@ -1632,10 +1638,7 @@ mod tests {
                     90.0,
                     2_000.0,
                 )]),
-                FastAtmosphere::Direct {
-                    air_density: 1.225,
-                    speed_of_sound: 340.0,
-                },
+                &direct(1.225, 340.0),
                 &inputs.bc_type,
                 crate::transonic_drag::ProjectileShape::Spitzer,
                 inputs.bc_value,
@@ -1705,7 +1708,7 @@ mod tests {
                         0.0,
                     ],
                     t_span: (0.0, 5.0),
-                    atmo_params: (0.0, 15.0, 1013.25, 1.0),
+                    atmosphere: legacy((0.0, 15.0, 1013.25, 1.0)),
                     atmo_sock: None,
                 },
             );
@@ -1763,10 +1766,7 @@ mod tests {
                     90.0,
                     2_000.0,
                 )]),
-                FastAtmosphere::Direct {
-                    air_density: 1.225,
-                    speed_of_sound: 340.0,
-                },
+                &direct(1.225, 340.0),
                 &inputs.bc_type,
                 crate::transonic_drag::ProjectileShape::Spitzer,
                 inputs.bc_value,
@@ -1870,7 +1870,7 @@ mod tests {
                     0.0,
                 ],
                 t_span: (0.0, 3.0),
-                atmo_params: (1.225, 340.0, 0.0, 0.0),
+                atmosphere: legacy((1.225, 340.0, 0.0, 0.0)),
                 atmo_sock: None,
             };
             let wind = vec![crate::wind::WindSegment::new(36.0, 90.0, 2_000.0)];
@@ -1942,7 +1942,7 @@ mod tests {
                     0.0,
                 ],
                 t_span: (0.0, 5.0),
-                atmo_params: (1.225, 340.0, 0.0, 0.0),
+                atmosphere: legacy((1.225, 340.0, 0.0, 0.0)),
                 atmo_sock: None,
             };
             let wind = vec![crate::wind::WindSegment::new(36.0, 90.0, 2_000.0)];
@@ -1988,10 +1988,7 @@ mod tests {
                 &state,
                 &inputs,
                 &WindSock::new(vec![]),
-                FastAtmosphere::Direct {
-                    air_density: 1.225,
-                    speed_of_sound: 340.0,
-                },
+                &direct(1.225, 340.0),
                 &inputs.bc_type,
                 crate::transonic_drag::ProjectileShape::Spitzer,
                 inputs.bc_value,
@@ -2236,7 +2233,7 @@ mod tests {
             vert: 0.0,
             initial_state: [0.0, 0.0, 0.0, 800.0, 50.0, 0.0], // McCoy: vx=downrange
             t_span: (0.0, 5.0),
-            atmo_params: (0.0, 15.0, 1013.25, 1.0),
+            atmosphere: legacy((0.0, 15.0, 1013.25, 1.0)),
             atmo_sock: None,
         };
 
@@ -2291,7 +2288,7 @@ mod tests {
                 t_span: (0.0, 12.0),
                 // Negligible density makes this an analytic constant-gravity arc while retaining
                 // the valid direct-atmosphere sentinel.
-                atmo_params: (1e-12, 340.0, 0.0, 0.0),
+                atmosphere: legacy((1e-12, 340.0, 0.0, 0.0)),
                 atmo_sock: None,
             },
         );
@@ -2341,7 +2338,7 @@ mod tests {
                     vert: 0.0,
                     initial_state,
                     t_span: (0.0, 2.0),
-                    atmo_params: (0.0, 15.0, 1013.25, 1.0),
+                    atmosphere: legacy((0.0, 15.0, 1013.25, 1.0)),
                     atmo_sock: None,
                 },
             )
@@ -2402,7 +2399,7 @@ mod tests {
                 vert: 0.0,
                 initial_state: [0.0, 0.0, 0.0, v * elev.cos(), v * elev.sin(), 0.0],
                 t_span: (0.0, 5.0),
-                atmo_params: (0.0, 15.0, 1013.25, 1.0),
+                atmosphere: legacy((0.0, 15.0, 1013.25, 1.0)),
                 atmo_sock: None,
             };
             let sol = fast_integrate_with_segments(&inputs, vec![], params);
@@ -2453,7 +2450,7 @@ mod tests {
                 vert: 0.0,
                 initial_state: [0.0, 0.0, 0.0, v * elev.cos(), v * elev.sin(), 0.0],
                 t_span: (0.0, 5.0),
-                atmo_params: (0.0, 15.0, 1013.25, 1.0),
+                atmosphere: legacy((0.0, 15.0, 1013.25, 1.0)),
                 atmo_sock: None,
             };
             let sol = fast_integrate_with_segments(&inputs, vec![], params);
@@ -2486,47 +2483,73 @@ mod tests {
         };
         let v = 800.0_f64;
         let e = 0.02_f64;
-        let mk = |atmo: (f64, f64, f64, f64)| FastIntegrationParams {
-            horiz: 500.0,
-            vert: 0.0,
-            initial_state: [0.0, 0.0, 0.0, v * e.cos(), v * e.sin(), 0.0],
-            t_span: (0.0, 5.0),
-            atmo_params: atmo,
-            atmo_sock: None,
-        };
-        // pressure <= 0 -> fail loudly (success=false) instead of a 1-point stub as success.
-        let zero_p = fast_integrate_with_segments(&inputs, vec![], mk((0.0, 15.0, 0.0, 1.0)));
-        assert!(
-            !zero_p.success,
-            "pressure=0 atmosphere must yield success=false"
-        );
-        // non-finite pressure -> also rejected.
-        let nan_p = fast_integrate_with_segments(&inputs, vec![], mk((0.0, 15.0, f64::NAN, 1.0)));
-        assert!(!nan_p.success, "NaN pressure must yield success=false");
-        // A supplied density ratio must imply a physically plausible density in both wrappers.
-        let segmented_too_dense =
-            fast_integrate_with_segments(&inputs, vec![], mk((0.0, 15.0, 1013.25, 50.0)));
-        let plain_too_dense = fast_integrate(
-            &inputs,
-            &WindSock::new(vec![]),
-            mk((0.0, 15.0, 1013.25, 50.0)),
-        );
-        assert!(
-            !segmented_too_dense.success && !plain_too_dense.success,
-            "ratio=50 atmosphere must fail in both wrappers: segmented={}, plain={}",
-            segmented_too_dense.success,
-            plain_too_dense.success
-        );
+        let mk =
+            |atmosphere: KernelAtmosphere, atmo_sock: Option<AtmoSock>| FastIntegrationParams {
+                horiz: 500.0,
+                vert: 0.0,
+                initial_state: [0.0, 0.0, 0.0, v * e.cos(), v * e.sin(), 0.0],
+                t_span: (0.0, 5.0),
+                atmosphere,
+                atmo_sock,
+            };
+        let tuple = |atmo| KernelAtmosphere::from_legacy_params(atmo, RelativeHumidity::DRY);
+        // The degenerate atmospheres the 0.49.0 wrappers refused at run time (success=false)
+        // can no longer reach them: the kernel atmosphere refuses them when it is built.
+        // pressure <= 0, a non-finite pressure, and a density ratio of 50 (no such air).
+        for degenerate in [
+            (0.0, 15.0, 0.0, 1.0),
+            (0.0, 15.0, f64::NAN, 1.0),
+            (0.0, 15.0, 1013.25, 50.0),
+        ] {
+            assert!(
+                tuple(degenerate).is_err(),
+                "{degenerate:?} must be refused before it can fly"
+            );
+        }
         // realistic atmosphere -> success.
-        let good = fast_integrate_with_segments(&inputs, vec![], mk((0.0, 15.0, 1013.25, 1.0)));
+        let good = fast_integrate_with_segments(
+            &inputs,
+            vec![],
+            mk(legacy((0.0, 15.0, 1013.25, 1.0)), None),
+        );
         assert!(good.success, "realistic atmosphere must yield success=true");
         // Direct-atmosphere mode (density, speed_of_sound, 0, 0) is legitimate and must NOT
         // be rejected by the guard (regression: 0.21.2 rejected it via the pressure<=0 check).
-        let direct = fast_integrate_with_segments(&inputs, vec![], mk((1.225, 340.0, 0.0, 0.0)));
+        let direct = fast_integrate_with_segments(
+            &inputs,
+            vec![],
+            mk(legacy((1.225, 340.0, 0.0, 0.0)), None),
+        );
         assert!(
             direct.success,
             "direct-atmosphere mode (pressure=0 sentinel) must yield success=true"
         );
+        // A downrange zone that cannot exist still fails loudly in both wrappers.
+        for zone in [
+            (15.0, 0.0, 50.0, 300.0),
+            (15.0, f64::NAN, 50.0, 300.0),
+            (15.0, 1013.25, 150.0, 300.0),
+            (100.0, 1013.25, 100.0, 300.0),
+            (15.0, 1013.25, 50.0, -1.0),
+        ] {
+            let sock = || Some(AtmoSock::new(vec![zone]));
+            let segmented = fast_integrate_with_segments(
+                &inputs,
+                vec![],
+                mk(legacy((0.0, 15.0, 1013.25, 1.0)), sock()),
+            );
+            let plain = fast_integrate(
+                &inputs,
+                &WindSock::new(vec![]),
+                mk(legacy((0.0, 15.0, 1013.25, 1.0)), sock()),
+            );
+            assert!(
+                !segmented.success && !plain.success,
+                "zone {zone:?} must fail in both wrappers: segmented={}, plain={}",
+                segmented.success,
+                plain.success
+            );
+        }
     }
 
     #[test]
@@ -2542,7 +2565,7 @@ mod tests {
             vert: 0.0,
             initial_state: [0.0, 0.0, 0.0, 800.0, 0.0, 0.0],
             t_span: (0.0, 5.0),
-            atmo_params: (0.0, 15.0, 1013.25, 1.0),
+            atmosphere: legacy((0.0, 15.0, 1013.25, 1.0)),
             atmo_sock: None,
         };
         let invalid = crate::wind::WindSegment::new(10.0, 90.0, f64::NAN);
@@ -2561,6 +2584,7 @@ mod tests {
     #[test]
     fn plain_fast_path_honors_direct_atmosphere_values() {
         fn final_speed(muzzle_velocity: f64, atmo_params: (f64, f64, f64, f64)) -> f64 {
+            let atmosphere = legacy(atmo_params);
             let inputs = BallisticInputs {
                 muzzle_velocity,
                 bc_value: 0.5,
@@ -2578,7 +2602,7 @@ mod tests {
                     vert: 0.0,
                     initial_state: [0.0, 0.0, 0.0, muzzle_velocity, 0.0, 0.0],
                     t_span: (0.0, 0.2),
-                    atmo_params,
+                    atmosphere,
                     atmo_sock: None,
                 },
             );
@@ -2625,7 +2649,7 @@ mod tests {
                     vert: 0.0,
                     initial_state: [0.0, 0.0, 0.0, 800.0, 0.0, 0.0],
                     t_span: (0.0, 5.0),
-                    atmo_params: (0.0, 15.0, 1013.25, base_ratio),
+                    atmosphere: legacy((0.0, 15.0, 1013.25, base_ratio)),
                     atmo_sock: None,
                 },
             );
@@ -2674,7 +2698,7 @@ mod tests {
                 vert: 0.0,
                 initial_state: [0.0, 0.0, 0.0, v * elev.cos(), v * elev.sin(), 0.0],
                 t_span: (0.0, 5.0),
-                atmo_params: (0.0, 15.0, 1013.25, 1.0),
+                atmosphere: legacy((0.0, 15.0, 1013.25, 1.0)),
                 atmo_sock: None,
             };
             fast_integrate_with_segments(&inputs, vec![], params)
@@ -2724,7 +2748,7 @@ mod tests {
                         0.0,
                     ],
                     t_span: (0.0, 5.0),
-                    atmo_params: (0.0, 15.0, 1013.25, 1.0),
+                    atmosphere: legacy((0.0, 15.0, 1013.25, 1.0)),
                     atmo_sock: None,
                 },
             );
@@ -2785,9 +2809,7 @@ mod tests {
             &[0.0, 0.0, 0.0, 700.0, 0.0, 0.0],
             &inputs,
             &WindSock::new(vec![]),
-            FastAtmosphere::Standard {
-                base_density: 1.225,
-            },
+            &standard_air(&inputs),
             &inputs.bc_type,
             crate::transonic_drag::ProjectileShape::Spitzer,
             inputs.bc_value,
@@ -2822,9 +2844,7 @@ mod tests {
             &[0.0, 0.0, 0.0, 700.0, 0.0, 0.0],
             &omitted_inputs,
             &WindSock::new(vec![]),
-            FastAtmosphere::Standard {
-                base_density: 1.225,
-            },
+            &standard_air(&omitted_inputs),
             &omitted_inputs.bc_type,
             crate::transonic_drag::ProjectileShape::Spitzer,
             omitted_inputs.bc_value,
@@ -2880,9 +2900,7 @@ mod tests {
                 &[0.0, 0.0, 0.0, 700.0, 0.0, 0.0],
                 &inputs,
                 &WindSock::new(vec![]),
-                FastAtmosphere::Standard {
-                    base_density: 1.225,
-                },
+                &standard_air(&inputs),
                 &inputs.bc_type,
                 crate::transonic_drag::ProjectileShape::Spitzer,
                 inputs.bc_value,
@@ -2913,7 +2931,7 @@ mod tests {
                 vert: 0.0,
                 initial_state: [0.0, 0.0, 0.0, v * elev.cos(), v * elev.sin(), 0.0],
                 t_span: (0.0, 5.0),
-                atmo_params: (0.0, 15.0, 1013.25, 1.0),
+                atmosphere: legacy((0.0, 15.0, 1013.25, 1.0)),
                 atmo_sock: None,
             },
         );
@@ -3082,7 +3100,7 @@ mod tests {
                     vert: 0.0,
                     initial_state: [0.0, 0.0, 0.0, v, 0.0, 0.0],
                     t_span: (0.0, 5.0),
-                    atmo_params: (0.0, 15.0, 1013.25, 1.0),
+                    atmosphere: legacy((0.0, 15.0, 1013.25, 1.0)),
                     atmo_sock: None,
                 },
             );

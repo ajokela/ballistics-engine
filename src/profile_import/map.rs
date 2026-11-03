@@ -75,6 +75,91 @@ fn click_value_to_profile_string(click: ClickValue) -> String {
         .to_string()
 }
 
+/// Proto3 omits zero-valued scalars. Pressure zero means no station reading in this
+/// format; represent it with the profile's unmarked metric default so each flight
+/// resolves standard pressure at its altitude. Temperature and humidity zero are real
+/// readings and must not receive this pressure-only treatment.
+fn imported_pressure(src: &super::A7pProfile) -> (f64, bool) {
+    if src.air_pressure_hpa == 0.0 {
+        (
+            crate::cli_api::AtmosphericConditions::default().pressure,
+            false,
+        )
+    } else {
+        (src.air_pressure_hpa, true)
+    }
+}
+
+/// The `.a7p` file's zero-day air refused in the file's own field names, or `None` when it
+/// flies: `c_zero_air_humidity = 150: relative humidity must be a percent from 0 to 100 (...)`
+/// beyond the sensor band, `c_zero_air_humidity = 100 at 100 °C and 1013.2 hPa: no such air
+/// exists: ...` for air that cannot exist. The path names the file's field, prefixed `a7p:`
+/// (`a7p:c_zero_air_humidity`), since the file is binary and has no JSON path.
+///
+/// The air checked is exactly the air the imported profile stores and every flight of it flies
+/// (at sea level, with zero pressure treated as absent), so [`map_a7p_to_profile`]
+/// refuses with this, and an import never saves a profile no solve could fly.
+pub fn a7p_air_refusal(doc: &super::A7pDocument) -> Option<crate::atmosphere::AirRefusal> {
+    use crate::atmosphere::{reading_text, RelativeHumidity, StationAtmospherePresence};
+    let src = &doc.profile;
+    let fields = AirSpellingNames::A7P;
+    let (pressure_hpa, pressure_supplied) = imported_pressure(src);
+    let spelling = crate::atmosphere::AirSpelling {
+        humidity: fields[0],
+        temperature: fields[1],
+        pressure: fields[2],
+        altitude: fields[3],
+        humidity_sent: src.air_humidity_pct,
+        temperature_text: reading_text(src.air_temperature_c, "°C"),
+        temperature_unit: crate::atmosphere::TemperatureUnit::Celsius,
+        temperature_origin: crate::atmosphere::StationTemperatureOrigin::Reading,
+        pressure_text: reading_text(pressure_hpa, "hPa"),
+        // A file carries its pressure as a station reading.
+        pressure_origin: crate::atmosphere::StationPressureOrigin::Reading,
+        qnh_text: None,
+        altitude_unit: crate::atmosphere::AltitudeUnit::Meters,
+    };
+    let humidity = match RelativeHumidity::try_percent(src.air_humidity_pct) {
+        Ok(humidity) => humidity,
+        Err(error) => {
+            return Some(error.refusal_in(&spelling, 0.0, src.air_temperature_c, pressure_hpa))
+        }
+    };
+    crate::cli_api::AtmosphericConditions {
+        temperature: src.air_temperature_c,
+        pressure: pressure_hpa,
+        humidity: humidity.percent(),
+        altitude: 0.0,
+    }
+    .air_refusal(
+        StationAtmospherePresence::new(true, pressure_supplied),
+        fields,
+        src.air_humidity_pct,
+        crate::atmosphere::AirUnits::METRIC,
+    )
+}
+
+/// The `.a7p` zero-day air fields, named as the format names them.
+struct AirSpellingNames;
+
+impl AirSpellingNames {
+    const A7P: [crate::atmosphere::AirField<'static>; 4] = [
+        crate::atmosphere::AirField {
+            name: "c_zero_air_humidity",
+            path: "a7p:c_zero_air_humidity",
+        },
+        crate::atmosphere::AirField {
+            name: "c_zero_air_temperature",
+            path: "a7p:c_zero_air_temperature",
+        },
+        crate::atmosphere::AirField {
+            name: "c_zero_air_pressure",
+            path: "a7p:c_zero_air_pressure",
+        },
+        crate::atmosphere::AirField::named("altitude"),
+    ];
+}
+
 pub fn map_a7p_to_profile(
     doc: &super::A7pDocument,
     name_override: Option<&str>,
@@ -279,16 +364,39 @@ pub fn map_a7p_to_profile(
         format!("{:.1} C", src.air_temperature_c),
         "temperature",
     );
+    let (pressure_hpa, pressure_supplied) = imported_pressure(src);
     push(
         "c_zero_air_pressure",
         format!("{:.1} hPa", src.air_pressure_hpa),
-        format!("{:.1} hPa", src.air_pressure_hpa),
-        "pressure",
+        if pressure_supplied {
+            format!("{pressure_hpa:.1} hPa")
+        } else {
+            format!("absent; default {pressure_hpa} hPa (not supplied)")
+        },
+        if pressure_supplied {
+            "pressure"
+        } else {
+            "pressure + pressure_supplied"
+        },
     );
+    // The engine's one humidity validator: a malformed file's humidity is refused at
+    // import, like a malformed CUSTOM curve, rather than saved and refused at every later load.
+    // An ABSENT field is 0 %, not the engine's 50 % default: a proto3 int32 cannot tell absent
+    // from 0, and the format writes 0 % by omitting the field.
+    // A reading within the sensor band (HUMIDITY_SENSOR_TOLERANCE_PERCENT: a meter's
+    // 102 % in fog) is imported as the end it reads as, the value a `profile save` of it stores.
+    // And air that cannot exist is refused too, by the rule every flight of the imported
+    // profile applies, in the file's own words (`a7p_air_refusal`).
+    if let Some(refusal) = a7p_air_refusal(doc) {
+        return Err(refusal.message().to_string());
+    }
+    let humidity_percent = crate::atmosphere::RelativeHumidity::try_percent(src.air_humidity_pct)
+        .map_err(|error| error.at_field("c_zero_air_humidity").to_string())?
+        .percent();
     push(
         "c_zero_air_humidity",
         format!("{:.0} %", src.air_humidity_pct),
-        format!("{:.0} %", src.air_humidity_pct),
+        format!("{:.0} %", humidity_percent),
         "humidity",
     );
     if !src.bullet_name.is_empty() {
@@ -485,12 +593,12 @@ pub fn map_a7p_to_profile(
         zero_distance: src.zero_distance_m,
         units: "metric".to_string(),
         temperature: src.air_temperature_c,
-        pressure: src.air_pressure_hpa,
-        // 0.49.0: the file carries real zero-condition readings and has no concept of an
-        // omitted one, so both are readings and fly as stored, even 15 C / 1013.25 hPa.
+        pressure: pressure_hpa,
+        // Zero Celsius is a reading, even when proto3 omits it. Nonzero pressure is a
+        // reading too; zero pressure carries the unmarked default instead.
         temperature_supplied: true,
-        pressure_supplied: true,
-        humidity: src.air_humidity_pct,
+        pressure_supplied,
+        humidity: humidity_percent,
         altitude: 0.0,
         bullet_name: if src.bullet_name.is_empty() {
             None

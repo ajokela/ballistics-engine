@@ -2,9 +2,86 @@
 //!
 //! This module provides Rust-accelerated implementations of atmospheric calculations
 //! with full ICAO Standard Atmosphere support for improved accuracy at all altitudes.
+//!
+//! # Humid air: one model, one lookup (0.50.0)
+//!
+//! Every solver family flies the same humid air. [`TrajectorySolver`](crate::TrajectorySolver),
+//! the kernels (`compute_derivatives`, `try_integrate_trajectory`, `try_solve_trajectory_rust`,
+//! `fast_integrate*`) and the lean Monte Carlo all take their per-step air from [`air_at`], over
+//! a [`KernelAtmosphere`] that carries the station's relative humidity, so a station's density
+//! and its sound speed cannot disagree about the humidity.
+//!
+//! - **At the station.** [`StationAir::new`] calls [`calculate_atmosphere`]: the CIPM-2007
+//!   moist-air density ([`calculate_air_density_cimp`]: the virial compressibility `Z` and the
+//!   enhancement factor `f`) and the moist speed of sound ([`moist_speed_of_sound`]). Both use
+//!   one water-vapour mole fraction, `x_v = (RH/100) f p_sv / p`, with `p_sv` from the
+//!   Wagner-Pruss saturation-pressure equation over liquid water. The sound speed is first order
+//!   in `x_v`: `gamma = 1.4 (1 - 0.062 x_v)`, `R = 287.0531 (1 + 0.378 x_v)`,
+//!   `c = sqrt(gamma R T)`. At 0 % it is the engine's one dry value, `sqrt(1.4 · 287.0531 · T)`,
+//!   340.294 m/s at 15 °C.
+//! - **Aloft (0.50.0: one vapour model).** The governing air (the station, or the downrange
+//!   [`AtmoSock`] zone that replaces it as the base, each with its own humidity) is well mixed:
+//!   its water-vapour mole fraction `x_v` is held at every height, for all three of the lapse,
+//!   the density and the sound speed. Temperature and pressure start from the governing air's
+//!   own values and follow the ICAO layers' lapse rates in geopotential height, with the
+//!   virtual-temperature (moist) hydrostatic exponent: the dry one scaled by the moist-air
+//!   molar-mass ratio `M_m / M_a = 1 - x_v (1 - M_v / M_a)`, the factor the CIPM-2007 density
+//!   applies, so moist air's pressure falls more slowly with height. The density scales the
+//!   governing air's by `(T_0 · P) / (P_0 · T)`, and the sound speed is the formula above at the
+//!   local temperature and the governing `x_v`. Held aloft, `x_v` exceeds saturation in the colder
+//!   air: at every height above a saturated station, and from about 2.2 km above a 15 °C / 50 %
+//!   station and 0.4 km above a 35 °C / 90 % one. At +3 km it is 1.35 times saturation over the
+//!   first and 2.06 times over the second, and at +10 km 34 and 29 times. Condensation is not
+//!   modelled. At 0 % every term is the dry one, bit for bit. Until 0.50.0 the sound speed held the
+//!   relative humidity instead (re-deriving `x_v` at the local temperature and pressure) and the
+//!   lapse was dry.
+//! - **Units.** [`RelativeHumidity`] stores a percent. Every Rust field and function takes a
+//!   percent (`AtmosphericConditions::humidity`, `BallisticInputs::humidity_percent`, an
+//!   [`AtmoSegment`]'s slot 2); only the SI JSON wire (`relative_humidity`) carries a fraction,
+//!   and it converts through [`RelativeHumidity::try_fraction`].
+//! - **Default.** An omitted humidity is [`DEFAULT_HUMIDITY_PERCENT`], 50 %, unless another reading
+//!   supplies it (a saved profile, the shot day for `--zero-humidity`), with two exceptions: an
+//!   `.a7p` file's absent humidity is 0 % (the format's own meaning), and the bridge's `true.*`
+//!   commands require `humidity_pct`.
+//! - **Validation.** One rule, [`RelativeHumidity::try_percent`] / [`RelativeHumidity::try_fraction`]:
+//!   a reading up to [`HUMIDITY_SENSOR_TOLERANCE_PERCENT`] (5 points) outside 0-100 % is the
+//!   saturated or dry air it measures and flies exactly as 100 % or 0 %; anything farther out,
+//!   NaN or infinite is refused. Air that cannot exist (an uncapped `x_v` of 1 or more) is
+//!   refused by [`StationAir::new`] and [`AtmoSock::validate`], the same test the
+//!   `atmosphere.density_altitude` service applies.
+//!
+//! Two gas constants appear here, one from each standard, each used the same way on every
+//! path: the CIPM-2007 density's `R / M_a = 8.314472 / 0.02896546 = 287.0478` J/(kg·K), inside
+//! its own formula, and the US Standard Atmosphere 1976 dry-air constant `R_AIR = 287.0531`,
+//! for the hydrostatic lapse (divided by `M_m / M_a` for humid air) and the sound speed.
+//!
+//! One deliberate exception: the muzzle Miller stability factor
+//! ([`crate::stability::compute_stability_coefficient`]) keeps Miller's published dry
+//! temperature and pressure correction, so it does not move with humidity.
+//!
+//! A kernel caller builds its atmosphere the way `TrajectorySolver` does (README.md shows the
+//! same code):
+//!
+//! ```
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! use ballistics_engine::{air_at, KernelAtmosphere, RelativeHumidity, StationAir};
+//!
+//! // 15 C, 1013.25 hPa, 50 % at sea level: the same air TrajectorySolver flies.
+//! let station = StationAir::new(0.0, 15.0, 1013.25, RelativeHumidity::try_percent(50.0)?)?;
+//! let atmosphere = KernelAtmosphere::Station(station);
+//! // For TrajectoryParams::atmosphere / FastIntegrationParams::atmosphere. The air 300 m up:
+//! let aloft = air_at(&atmosphere, None, 0.0, 300.0);
+//! println!("{:.3} kg/m3, {:.3} m/s", aloft.density_kg_m3, aloft.speed_of_sound_mps);
+//! assert!(aloft.density_kg_m3 < station.density_kg_m3());
+//! assert_eq!(air_at(&atmosphere, None, 0.0, 0.0).speed_of_sound_mps, station.speed_of_sound_mps());
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::gravity::Gravity;
+use std::borrow::Cow;
 use std::cmp::Ordering;
+use std::fmt;
 
 /// ICAO Standard Atmosphere layer definitions
 #[derive(Debug, Clone)]
@@ -23,15 +100,25 @@ struct AtmosphereLayer {
 // ICAO reference quantities are defined using standard Earth gravity, independently of the
 // acceleration chosen for an internal simulation.
 const G_ACCEL_MPS2: f64 = crate::constants::G_ACCEL_MPS2;
-const R_AIR: f64 = 287.0531; // Specific gas constant for dry air (J/(kg·K))
-const GAMMA: f64 = 1.4; // Heat capacity ratio for air
+/// Specific gas constant for dry air, J/(kg·K), the US Standard Atmosphere 1976 value. With
+/// [`GAMMA`] it is the engine's one dry-air sound-speed constant: `sqrt(GAMMA * R_AIR * T)`. It
+/// also drives the hydrostatic lapse: as is for dry air, divided by the moist-air molar-mass
+/// ratio `M_m / M_a` for humid air (the virtual-temperature lapse). The CIPM-2007 density uses
+/// its own `R / M_A` (287.0478) inside its own formula; each constant is used the same way on
+/// every path.
+pub(crate) const R_AIR: f64 = 287.0531;
+/// Heat-capacity ratio of dry air.
+pub(crate) const GAMMA: f64 = 1.4;
 const GEOPOTENTIAL_EARTH_RADIUS_M: f64 = 6_356_766.0;
 const MIN_GEOMETRIC_ALTITUDE_M: f64 = -5000.0;
 const MAX_GEOMETRIC_ALTITUDE_M: f64 = 84000.0;
 const MIN_STANDARD_GEOPOTENTIAL_HEIGHT_M: f64 = -5000.0;
 const MAX_STANDARD_GEOPOTENTIAL_HEIGHT_M: f64 = 84000.0;
 
-/// CIPM constants for precise air density calculation
+/// CIPM-2007 constants for the moist-air density, [`calculate_air_density_cimp`]. Their ratio
+/// `R / M_A` is 287.0478 J/(kg·K), CIPM's dry-air gas constant; the sound speed and the lapse
+/// use the US-1976 [`R_AIR`] instead. `M_V / M_A` also sets the moist-air molar-mass ratio
+/// (`moist_molar_mass_ratio`) that both the density and the humid lapse aloft apply.
 const R: f64 = 8.314472; // Universal gas constant
 const M_A: f64 = 28.96546e-3; // Molar mass of dry air (kg/mol)
 const M_V: f64 = 18.01528e-3; // Molar mass of water vapor (kg/mol)
@@ -619,9 +706,91 @@ const DA_FT_TO_M: f64 = 0.3048;
 ///
 /// Station pressure, never an altimeter setting (MBA-643): a QNH already corrects to sea
 /// level and would report the pressure altitude of the sea rather than of the firing point.
+///
+/// It is the troposphere's closed form, with the NWS's rounded constants, and that is all it
+/// is anywhere: below -5 km and above 11 km it continues the troposphere's lapse, which the
+/// standard atmosphere does not have above 11 km, so there it is no longer the standard
+/// atmosphere's altitude of the pressure (standard pressure at 20 km, 5474.89 Pa, reads
+/// 18879 m), and it approaches 145366.45 ft (44308 m), where that lapse would reach 0 K, as
+/// the pressure falls to 0. [`pressure_altitude_m`] is this formula inside -5 km to 11 km and
+/// the standard atmosphere's own altitude outside it.
 pub fn nws_pressure_altitude_ft(station_pressure_hpa: f64) -> f64 {
     DA_NWS_PRESSURE_ALT_FT
         * (1.0 - (station_pressure_hpa / DA_NWS_SEA_LEVEL_HPA).powf(DA_NWS_EXPONENT))
+}
+
+/// The pressure altitude of a station pressure, m, wherever it lands: the NWS formula
+/// ([`nws_pressure_altitude_ft`] in metres, to the bit) inside -5 km to 11 km, where it is the
+/// published figure, and outside that band the standard atmosphere's own (geopotential)
+/// altitude of the pressure, walking the same ICAO layers [`air_at`] walks: the troposphere's
+/// lapse below -5 km, isothermal from 11 km, warming from 20 km and 32 km, isothermal again
+/// from 47 km, cooling from 51 km and 71 km, the last layer's lapse continuing above 84 km.
+/// Each layer's base pressure is chained from 101325 Pa by the layer formula, so standard
+/// pressure at any height reads that height.
+///
+/// Every pressure above 0 has a finite pressure altitude, below 178.3 km (where the last
+/// layer's lapse reaches 0 K). At the band's edges the two differ by the few metres the NWS
+/// constants and the ICAO troposphere part by: the NWS formula reads 22615.3 Pa as 11000 m and
+/// the standard atmosphere reads it as 11005 m, so the figure steps up by 5 m there as the
+/// pressure falls, and at the bottom edge (177725 Pa) it steps down by 2 m as the pressure
+/// rises. It never falls as the pressure falls. A NaN pressure gives NaN.
+///
+/// ```
+/// use ballistics_engine::atmosphere::{nws_pressure_altitude_ft, pressure_altitude_m};
+///
+/// // Inside the band, the NWS formula to the bit.
+/// assert_eq!(pressure_altitude_m(850.0).to_bits(), (nws_pressure_altitude_ft(850.0) * 0.3048).to_bits());
+/// // Standard pressure at 20 km reads 20 km.
+/// assert!((pressure_altitude_m(54.7489) - 20_000.0).abs() < 1.0);
+/// // A near vacuum still has an altitude.
+/// assert!(pressure_altitude_m(0.01).is_finite());
+/// ```
+pub fn pressure_altitude_m(station_pressure_hpa: f64) -> f64 {
+    let nws_m = nws_pressure_altitude_ft(station_pressure_hpa) * DA_FT_TO_M;
+    if nws_m.is_nan() || (LOWEST_PRESSURE_ALTITUDE_M..=TROPOSPHERE_TOP_M).contains(&nws_m) {
+        return nws_m;
+    }
+    standard_pressure_altitude_m(station_pressure_hpa * 100.0)
+}
+
+/// The standard atmosphere's geopotential altitude, m, of a pressure in pascals: the ICAO layers
+/// walked from sea level, each base pressure chained by the layer formula, the troposphere's
+/// lapse continued below sea level and the last layer's above 84 km.
+fn standard_pressure_altitude_m(pressure_pa: f64) -> f64 {
+    let sea_level = &ICAO_LAYERS[0];
+    let mut base_pressure = sea_level.base_pressure;
+    for (index, layer) in ICAO_LAYERS.iter().enumerate() {
+        let (base, base_temperature, lapse) = (
+            layer.base_altitude,
+            layer.base_temperature,
+            layer.lapse_rate,
+        );
+        let isothermal = lapse.abs() < 1e-10;
+        let scale_height = R_AIR * base_temperature / G_ACCEL_MPS2;
+        let top = ICAO_LAYERS
+            .get(index + 1)
+            .map_or(f64::INFINITY, |next| next.base_altitude);
+        let top_pressure = if top.is_infinite() {
+            0.0
+        } else if isothermal {
+            base_pressure * (-(top - base) / scale_height).exp()
+        } else {
+            base_pressure
+                * (1.0 + lapse * (top - base) / base_temperature)
+                    .powf(-G_ACCEL_MPS2 / (lapse * R_AIR))
+        };
+        if pressure_pa >= top_pressure || top.is_infinite() {
+            return if isothermal {
+                base + scale_height * (base_pressure / pressure_pa).ln()
+            } else {
+                let temperature = base_temperature
+                    * (pressure_pa / base_pressure).powf(-lapse * R_AIR / G_ACCEL_MPS2);
+                base + (temperature - base_temperature) / lapse
+            };
+        }
+        base_pressure = top_pressure;
+    }
+    unreachable!("the last layer has no top")
 }
 
 /// Density altitude by the FAA rule of thumb, feet: NWS pressure altitude plus 120 ft for
@@ -643,6 +812,11 @@ pub fn nws_pressure_altitude_ft(station_pressure_hpa: f64) -> f64 {
 /// humidity-aware forward could be inverted just as well given the run's humidity, the way
 /// temperature already is; it would change every printed card and what an entered density
 /// altitude resolves to.
+///
+/// Outside the troposphere this still starts from [`nws_pressure_altitude_ft`], not the
+/// layered [`pressure_altitude_m`] reported by the bridge. Both the NWS pressure formula and
+/// this temperature correction continue there, preserving the inverse used for density-altitude
+/// entry. They do not become the standard atmosphere's pressure or density altitude.
 ///
 /// It is not the National Weather Service's density altitude either, despite the NWS pressure
 /// altitude inside it: the NWS calculator uses virtual temperature, so it includes humidity
@@ -708,11 +882,23 @@ const DENSITY_MATCH_REFERENCE_PRESSURE_HPA: f64 = 1013.25;
 ///
 /// # Scope
 ///
-/// The closed-form troposphere, with no geopotential correction — the same plain-height
-/// convention as the FAA-rule figure and the DA entry mode. That covers every shooting
-/// condition on Earth, but the arithmetic does not know where it stops: above 11 km it keeps
-/// answering, wrongly. Callers bound it; the bridge command refuses conditions outside
-/// -5 km..11 km (`crate::atmosphere_service`).
+/// Heights are the standard atmosphere's own (geopotential), with no correction to geometric
+/// height — the same plain-height convention as the FAA-rule figure and the DA entry mode.
+///
+/// Up to 11 km this is the closed-form troposphere above, which covers every shooting condition
+/// on Earth; below sea level it continues the troposphere's lapse, as the standard atmosphere
+/// does. Air thinner than the standard tropopause's (hot air, or a low station pressure) reads
+/// its altitude in the standard atmosphere's upper layers, the ICAO table [`air_at`] walks:
+/// isothermal from 11 km, warming from 20 km and 32 km, isothermal again from 47 km, cooling from
+/// 51 km and 71 km, the last layer's lapse continuing above 84 km. So the figure is the standard
+/// atmosphere's altitude of equal density for any finite positive density: standard air reads
+/// its own altitude in every layer, and it falls steadily as the air thins. Up to 11 km the
+/// result is the closed form above to the bit.
+///
+/// A raw primitive: `humidity_percent` is not validated. A number outside 0-100 is clamped
+/// into it, and a NaN propagates to a NaN result, never to pure steam. Validate a reading with
+/// [`RelativeHumidity::try_percent`] and build the station with [`StationAir::new`], which
+/// refuse what this computes.
 pub fn density_matched_altitude_m(
     temperature_c: f64,
     station_pressure_hpa: f64,
@@ -730,8 +916,60 @@ pub fn density_matched_altitude_m(
         Some(DENSITY_MATCH_REFERENCE_PRESSURE_HPA),
         0.0,
     );
+    let ratio = density / reference;
     let exponent = G_ACCEL_MPS2 / (R_AIR * ISA_LAPSE_K_PER_M) - 1.0;
-    (ISA_SEA_LEVEL_TEMP_K / ISA_LAPSE_K_PER_M) * (1.0 - (density / reference).powf(1.0 / exponent))
+    let troposphere =
+        (ISA_SEA_LEVEL_TEMP_K / ISA_LAPSE_K_PER_M) * (1.0 - ratio.powf(1.0 / exponent));
+    // NaN, and every figure up to the tropopause, is the closed form's, to the bit.
+    if troposphere.is_nan() || troposphere <= TROPOSPHERE_TOP_M {
+        return troposphere;
+    }
+    standard_altitude_above_tropopause_m(ratio, exponent)
+}
+
+/// The standard atmosphere's altitude, m (geopotential), of the density ratio `ratio` (to ICAO
+/// sea level) thinner than the tropopause's: the ICAO layers above the troposphere walked up from
+/// 11 km, the last one's lapse continuing above 84 km, as [`air_at`] walks them.
+/// `troposphere_exponent` is the troposphere's density exponent `g0 / (R L) - 1`, which sets the
+/// tropopause's ratio, `(T(11 km) / T0)^n`. Any ratio from 0 up to the tropopause's has a finite
+/// altitude: the last layer cools to 0 K, and to no density, at 178.3 km.
+fn standard_altitude_above_tropopause_m(ratio: f64, troposphere_exponent: f64) -> f64 {
+    let sea_level = &ICAO_LAYERS[0];
+    let mut base_ratio =
+        (ICAO_LAYERS[1].base_temperature / sea_level.base_temperature).powf(troposphere_exponent);
+    for (index, layer) in ICAO_LAYERS.iter().enumerate().skip(1) {
+        let (base, base_temperature, lapse) = (
+            layer.base_altitude,
+            layer.base_temperature,
+            layer.lapse_rate,
+        );
+        // The density ratio within this layer, relative to its base: isothermal, or the power
+        // law of a lapse.
+        let isothermal = lapse.abs() < 1e-10;
+        let scale_height = R_AIR * base_temperature / G_ACCEL_MPS2;
+        let density_exponent = -G_ACCEL_MPS2 / (R_AIR * lapse) - 1.0;
+        let top = ICAO_LAYERS
+            .get(index + 1)
+            .map_or(f64::INFINITY, |next| next.base_altitude);
+        let top_ratio = if top.is_infinite() {
+            0.0
+        } else if isothermal {
+            base_ratio * (-(top - base) / scale_height).exp()
+        } else {
+            base_ratio * (1.0 + lapse * (top - base) / base_temperature).powf(density_exponent)
+        };
+        if ratio >= top_ratio || top.is_infinite() {
+            return if isothermal {
+                base + scale_height * (base_ratio / ratio).ln()
+            } else {
+                let temperature =
+                    base_temperature * (ratio / base_ratio).powf(1.0 / density_exponent);
+                base + (temperature - base_temperature) / lapse
+            };
+        }
+        base_ratio = top_ratio;
+    }
+    unreachable!("the last layer has no top")
 }
 
 /// Back-solve an ISA-equivalent station altitude/temperature/pressure from a directly-declared
@@ -829,6 +1067,74 @@ pub fn resolve_atmosphere_for_density_altitude(
     (altitude_m, temperature_c, pressure_hpa)
 }
 
+/// The NWS station pressure, hPa, at a pressure altitude in feet, when it is finite and above 0:
+/// the inverse of [`nws_pressure_altitude_ft`], as [`resolve_atmosphere_for_density_altitude`]
+/// evaluates it. `None` at or above 145366.45 ft, where the formula's lapse reaches 0 K, and
+/// where it overflows far below sea level.
+fn nws_station_pressure_hpa(pressure_altitude_ft: f64) -> Option<f64> {
+    let pressure_hpa = DA_NWS_SEA_LEVEL_HPA
+        * (1.0 - pressure_altitude_ft / DA_NWS_PRESSURE_ALT_FT).powf(1.0 / DA_NWS_EXPONENT);
+    (pressure_hpa.is_finite() && pressure_hpa > 0.0).then_some(pressure_hpa)
+}
+
+/// The station a density altitude gives ([`resolve_atmosphere_for_density_altitude`], bit for
+/// bit), or the refusal of a density altitude no air has: the one rule every surface that takes
+/// a density altitude applies. A density altitude flies when it is finite and the station the
+/// FAA rule's inverse gives for it can exist; nothing narrower. The station is checked as any
+/// other is afterwards (its humidity, and air that cannot exist), by [`StationAir::new`].
+///
+/// ```
+/// use ballistics_engine::atmosphere::station_for_density_altitude;
+///
+/// assert!(station_for_density_altitude(-10_000.0, None).is_ok()); // far below sea level
+/// assert!(station_for_density_altitude(40_000.0, None).is_ok()); // far above the troposphere
+/// assert!(station_for_density_altitude(50_000.0, None).is_err()); // below 0 K by the rule
+/// assert!(station_for_density_altitude(50_000.0, Some(40.0)).is_ok()); // hot air that thin
+/// ```
+///
+/// # Errors
+///
+/// - `density_altitude_m` not finite: [`AtmosphereErrorReason::NotFinite`] on
+///   `density_altitude_m`.
+/// - an `explicit_temperature_c` the one temperature rule refuses
+///   ([`check_station_temperature_c`]), on `temperature_c`.
+/// - no air at it: [`AtmosphereErrorReason::NoAirAtDensityAltitude`] on `density_altitude_m`,
+///   whose [`AtmosphereError::altitude_m`] is its pressure altitude by the FAA rule.
+pub fn station_for_density_altitude(
+    density_altitude_m: f64,
+    explicit_temperature_c: Option<f64>,
+) -> Result<(f64, f64, f64), AtmosphereError> {
+    const FIELD: &str = "density_altitude_m";
+    if !density_altitude_m.is_finite() {
+        return Err(AtmosphereError::new(
+            FIELD,
+            density_altitude_m,
+            AtmosphereErrorReason::NotFinite,
+        ));
+    }
+    if let Some(temperature_c) = explicit_temperature_c {
+        check_station_temperature_c(temperature_c)?;
+    }
+    let (altitude_m, temperature_c, pressure_hpa) =
+        resolve_atmosphere_for_density_altitude(density_altitude_m, explicit_temperature_c);
+    let exists = altitude_m.is_finite()
+        && pressure_hpa.is_finite()
+        && pressure_hpa > 0.0
+        && temperature_c.is_finite()
+        && temperature_c > ABSOLUTE_ZERO_C;
+    if !exists {
+        return Err(AtmosphereError {
+            altitude_m: Some(altitude_m),
+            ..AtmosphereError::new(
+                FIELD,
+                density_altitude_m,
+                AtmosphereErrorReason::NoAirAtDensityAltitude,
+            )
+        });
+    }
+    Ok((altitude_m, temperature_c, pressure_hpa))
+}
+
 /// Enhanced atmospheric calculation with ICAO Standard Atmosphere.
 ///
 /// # Arguments
@@ -839,6 +1145,11 @@ pub fn resolve_atmosphere_for_density_altitude(
 ///
 /// # Returns
 /// Tuple of (air_density_kg_m3, speed_of_sound_mps)
+///
+/// A raw primitive: `humidity_percent` is not validated. A number outside 0-100 is clamped
+/// into it, and a NaN propagates to a NaN result, never to pure steam. Validate a reading with
+/// [`RelativeHumidity::try_percent`] and build the station with [`StationAir::new`], which
+/// refuse what this computes.
 pub fn calculate_atmosphere(
     altitude_m: f64,
     temp_override_c: Option<f64>,
@@ -869,20 +1180,24 @@ pub fn calculate_atmosphere(
         (final_temp_k, final_pressure_pa)
     };
 
-    // Humidity clamp shared by the CIPM density and the moist speed of sound.
+    // Humidity clamp shared by the CIPM density and the moist speed of sound: a total-function
+    // guard for this unvalidated public function. Validated callers (StationAir::new) pass a
+    // RelativeHumidity, already in range, so it never moves their value. A NaN passes through
+    // the clamp and gives NaN air (the vapour cap keeps it).
     let humidity_clamped = humidity_percent.clamp(0.0, 100.0);
     let temp_c = temp_k - 273.15;
 
-    // Density: CIPM-2007 is the single canonical humid-air density model. Every solver
-    // (cli_api / monte_carlo / ffi / fast_trajectory) reaches this one formula through
-    // calculate_atmosphere, so there is no second (Arden-Buck ideal-gas) density path to drift.
+    // Density: CIPM-2007 is the engine's one humid-air density model. Every solver's station
+    // density comes from this call, through StationAir::new; a downrange zone's base density
+    // calls calculate_air_density_cimp directly in air_at. There is no second density formula.
     let density = calculate_air_density_cimp(temp_c, pressure_pa / 100.0, humidity_clamped);
 
     // Speed of sound uses an ideal-gas moist-air mixture approximation, first order in the
-    // water-vapor mole fraction. Extracted into `moist_speed_of_sound` so the integrators can
-    // share it; its vapor pressure comes from the SAME IAPWS saturation formula
-    // (`enhanced_saturation_vapor_pressure`) + CIPM enhancement factor that the density above
-    // uses. Only the vapor fraction is shared; the acoustic relation remains ideal-gas.
+    // water-vapor mole fraction. Extracted into `moist_speed_of_sound`, whose formula air_at
+    // also evaluates at every step (at the station's x_v, held aloft); its vapor pressure comes
+    // from the SAME Wagner-Pruss saturation-pressure equation (`enhanced_saturation_vapor_pressure`)
+    // and CIPM enhancement factor that the density above uses. Only the vapor fraction is
+    // shared; the acoustic relation remains ideal-gas.
     let speed_of_sound = moist_speed_of_sound(temp_k, pressure_pa, humidity_clamped);
 
     (density, speed_of_sound)
@@ -891,13 +1206,19 @@ pub fn calculate_atmosphere(
 /// Speed of sound using an ideal-gas moist-air mixture approximation, first order in the
 /// water-vapor mole fraction.
 ///
-/// The water-vapor mole fraction is derived from the SAME IAPWS saturation vapor pressure
-/// (`enhanced_saturation_vapor_pressure`) and CIPM-2007 enhancement factor used by
+/// The water-vapor mole fraction is derived from the SAME Wagner-Pruss saturation vapor
+/// pressure (`enhanced_saturation_vapor_pressure`) and CIPM-2007 enhancement factor used by
 /// [`calculate_air_density_cimp`], so a single vapor formula feeds both density and c. Only the
 /// vapor fraction is shared with the CIPM path; the acoustic relation itself remains ideal-gas.
 /// The mixture applies first-order humidity corrections to the dry-air heat-capacity ratio and
-/// gas constant, then evaluates `sqrt(gamma * R * T)`. It is not Cramer's full real-gas
-/// polynomial and does not include Cramer's pressure or carbon-dioxide terms.
+/// gas constant, `gamma = 1.4 (1 - 0.062 x_v)` and `R = 287.0531 (1 + 0.378 x_v)`, then
+/// evaluates `sqrt(gamma * R * T)`; at 0 % that is the dry `sqrt(1.4 · 287.0531 · T)`. It is
+/// not Cramer's full real-gas polynomial and does not include Cramer's pressure or
+/// carbon-dioxide terms.
+///
+/// It is the station's (and a downrange zone's) sound speed. Aloft, [`air_at`] evaluates the same
+/// formula at the local temperature and the station's (or zone's) own `x_v`, held at every
+/// height, so at the station's height the two agree to the bit.
 ///
 /// # Arguments
 /// * `temp_k` - Temperature in Kelvin
@@ -906,21 +1227,35 @@ pub fn calculate_atmosphere(
 ///
 /// # Returns
 /// Speed of sound in m/s
+///
+/// Its gas constant, `287.0531 (1 + 0.378 x_v)`, is first order in `x_v`: it differs from the exact
+/// `R_AIR / (M_m / M_a)` the lapse uses by -1.1e-5 at 15 °C / 50 % and -1.3e-3 at 45 °C / 100 %
+/// (1013.25 hPa), where the sound speed is 0.24 m/s (0.065 %) below what the lapse's gas constant
+/// gives. The gap grows as the pressure falls: 0.50 m/s at 45 °C / 100 % and 700 hPa.
+///
+/// A raw primitive: `humidity_percent` is not validated. A number outside 0-100 is clamped
+/// into it, and a NaN propagates to a NaN result, never to pure steam. Validate a reading with
+/// [`RelativeHumidity::try_percent`] and build the station with [`StationAir::new`], which
+/// refuse what this computes.
 pub fn moist_speed_of_sound(temp_k: f64, pressure_pa: f64, humidity_percent: f64) -> f64 {
-    let humidity_clamped = humidity_percent.clamp(0.0, 100.0);
-    let temp_c = temp_k - 273.15;
+    // The one CIPM vapour mole fraction (`vapor_mole_fraction`, which the density uses too),
+    // capped at the physical maximum of 1 by the one NaN-keeping cap. Its pressure floor guards
+    // pressure_pa == 0 (a 0 hPa override would otherwise give +Inf -> NaN speed of sound).
+    let mole_fraction_vapor = capped_vapor_mole_fraction(moist_air_vapor_mole_fraction(
+        temp_k,
+        pressure_pa,
+        humidity_percent,
+    ));
 
-    // Water-vapor partial pressure p_v = RH * f * p_sv, matching CIPM's x_v exactly. p_sv is in
-    // hPa (enhanced_saturation_vapor_pressure returns hPa), so convert to Pa before forming the
-    // mole fraction against the Pa total pressure.
-    let p_sv_hpa = enhanced_saturation_vapor_pressure(temp_k);
-    let f = enhanced_enhancement_factor(pressure_pa, temp_c);
-    let vapor_pressure_pa = humidity_clamped / 100.0 * f * p_sv_hpa * 100.0;
+    moist_sound_speed_at_mole_fraction(temp_k, mole_fraction_vapor)
+}
 
-    // Cap the mole fraction at the physical maximum of 1 and guard pressure_pa == 0 (a 0 hPa
-    // override would otherwise give +Inf -> NaN speed of sound).
-    let mole_fraction_vapor = (vapor_pressure_pa / pressure_pa.max(f64::MIN_POSITIVE)).min(1.0);
-
+/// The moist-air sound speed of [`moist_speed_of_sound`] at a GIVEN water-vapour mole fraction:
+/// `sqrt(1.4 (1 - 0.062 x_v) · 287.0531 (1 + 0.378 x_v) · T)`. The station's sound speed
+/// evaluates it at the station's own `x_v`, and [`air_at`] at the governing air's `x_v`, held
+/// aloft; at `x_v = 0` it is the dry `sqrt(1.4 · 287.0531 · T)` to the bit.
+#[inline(always)]
+fn moist_sound_speed_at_mole_fraction(temp_k: f64, mole_fraction_vapor: f64) -> f64 {
     // Heat-capacity ratio and gas constant for moist air (mole-fraction coefficients). 0.378 is
     // the dry-air molecular-weight ratio (0.6078 would belong to specific humidity, not mole
     // fraction).
@@ -928,6 +1263,56 @@ pub fn moist_speed_of_sound(temp_k: f64, pressure_pa: f64, humidity_percent: f64
     let r_moist = R_AIR * (1.0 + 0.378 * mole_fraction_vapor);
 
     (gamma_moist * r_moist * temp_k).sqrt()
+}
+
+/// The moist-air molar-mass ratio `M_m / M_a = 1 - x_v (1 - M_v / M_a)`, where
+/// `M_m = (1 - x_v) M_a + x_v M_v` is the molar mass of air holding a water-vapour mole fraction
+/// `x_v`. The CIPM-2007 density ([`calculate_air_density_cimp`]) multiplies by it, and the
+/// virtual-temperature lapse of [`air_at`] scales the dry hydrostatic exponent by it, so the lapse
+/// and the density carry the same humidity term. Exactly 1 at `x_v = 0`.
+///
+/// The two gas constants still differ a little, dry air included: the lapse's ideal-gas `R_AIR /
+/// (M_m / M_a)` and the `Z R / M_m` the CIPM-2007 density implies (its compressibility `Z`, and its
+/// `R / M_a = 287.0478` against `R_AIR = 287.0531`) differ by 1.2e-4 to 9.0e-4 from -20 to 45 °C,
+/// 700 to 1013.25 hPa and 0 to 100 %.
+#[inline(always)]
+fn moist_molar_mass_ratio(mole_fraction_vapor: f64) -> f64 {
+    1.0 - mole_fraction_vapor * (1.0 - M_V / M_A)
+}
+
+/// The water-vapour mole fraction of the GOVERNING air (the station's, or the active
+/// [`AtmoSock`] zone's) that [`air_at`] holds at every height: the station sound speed's own
+/// `x_v` ([`calculate_atmosphere`]'s kelvin and pascal conversions, then the one
+/// [`vapor_mole_fraction`], capped at 1), so the air at the governing air's height is that air
+/// to the bit. Exactly 0 at 0 %.
+///
+/// The one place this `x_v` is formed. It is evaluated once per base air, when a
+/// [`StationAir`] or an [`AtmoSock`] is built (see [`GoverningAir`]), and per call only by the
+/// legacy `get_local_atmosphere*` wrappers, whose base is a caller's raw tuple.
+#[inline(always)]
+fn governing_vapor_mole_fraction(temp_c: f64, pressure_hpa: f64, humidity_percent: f64) -> f64 {
+    capped_vapor_mole_fraction(moist_air_vapor_mole_fraction(
+        temp_c + 273.15,
+        pressure_hpa * 100.0,
+        humidity_percent,
+    ))
+}
+
+/// The water-vapour mole fraction capped at its physical maximum, 1: `x.min(1.0)` for every
+/// number, to the bit, but a NaN stays a NaN (`f64::min` would return 1.0 for it, pure steam).
+///
+/// Every capped `x_v` in the engine goes through it ([`calculate_air_density_cimp`],
+/// [`moist_speed_of_sound`], the governing air's `x_v` aloft), so a NaN humidity, or air above
+/// water's critical point (647.096 K, where the saturation pressure is undefined), gives NaN
+/// air everywhere instead of steam. A cap is reached only by air
+/// that cannot exist, which every validated boundary refuses before it gets here.
+#[inline(always)]
+fn capped_vapor_mole_fraction(mole_fraction_vapor: f64) -> f64 {
+    if mole_fraction_vapor > 1.0 {
+        1.0
+    } else {
+        mole_fraction_vapor
+    }
 }
 
 /// Enhanced air density calculation using CIPM formula with ICAO atmosphere.
@@ -939,6 +1324,11 @@ pub fn moist_speed_of_sound(temp_k: f64, pressure_pa: f64, humidity_percent: f64
 ///
 /// # Returns
 /// Air density in kg/m³
+///
+/// A raw primitive: `humidity_percent` is not validated. A number outside 0-100 is clamped
+/// into it, and a NaN propagates to a NaN result, never to pure steam. Validate a reading with
+/// [`RelativeHumidity::try_percent`] and build the station with [`StationAir::new`], which
+/// refuse what this computes.
 pub fn calculate_air_density_cimp(temp_c: f64, pressure_hpa: f64, humidity_percent: f64) -> f64 {
     let t_k = temp_c + 273.15;
 
@@ -954,18 +1344,20 @@ pub fn calculate_air_density_cimp(temp_c: f64, pressure_hpa: f64, humidity_perce
     // otherwise make x_v = +Inf -> NaN density. No-op for all valid (>0) pressures.
     let p_pa = pressure_pa.max(f64::MIN_POSITIVE);
 
-    // Mole fraction of water vapor, capped at the physical maximum of 1. The cap is silent:
-    // air whose vapor pressure would exceed its total pressure does not exist, and callers
-    // that must refuse it rather than compute pure steam test
-    // `water_vapor_mole_fraction_uncapped` first (the bridge's `atmosphere.density_altitude`).
-    let x_v = vapor_mole_fraction(p_sv, f, humidity_percent, p_pa).min(1.0);
+    // Mole fraction of water vapor, capped at the physical maximum of 1 (a NaN stays NaN). The
+    // cap is silent: air whose vapor pressure would exceed its total pressure does not exist,
+    // and callers that must refuse it rather than compute pure steam test
+    // `water_vapor_mole_fraction_uncapped` first (StationAir::new, AtmoSock::validate and the
+    // bridge's `atmosphere.density_altitude`).
+    let x_v = capped_vapor_mole_fraction(vapor_mole_fraction(p_sv, f, humidity_percent, p_pa));
 
     // Enhanced compressibility factor. CIPM virial constants use Pa.
     let z = enhanced_compressibility_factor(p_pa, t_k, x_v);
 
-    // Calculate density with enhanced precision
+    // Calculate density with enhanced precision. The last factor is the moist-air molar-mass
+    // ratio M_m / M_a, which the virtual-temperature lapse aloft scales by too.
     // Note: parentheses are important here for correct operator precedence
-    ((p_pa * M_A) / (z * R * t_k)) * (1.0 - x_v * (1.0 - M_V / M_A))
+    ((p_pa * M_A) / (z * R * t_k)) * moist_molar_mass_ratio(x_v)
 }
 
 /// CIPM-2007 mole fraction of water vapor, `x_v = RH * f * p_sv / p`, UNCAPPED: the one
@@ -988,11 +1380,52 @@ pub(crate) fn water_vapor_mole_fraction_uncapped(
     )
 }
 
+/// [`water_vapor_mole_fraction_uncapped`] in the units the sound speed works in: temperature in
+/// kelvin and total pressure in Pa. UNCAPPED; [`moist_speed_of_sound`] caps it at 1.
+///
+/// The enhancement factor reads `temp_k - 273.15`, which is not always the caller's Celsius
+/// value to the last bit, so this is a separate entry rather than a call through the Celsius
+/// one. Both reach the same [`vapor_mole_fraction`].
 #[inline(always)]
-fn vapor_mole_fraction(p_sv_hpa: f64, f: f64, humidity_percent: f64, p_pa: f64) -> f64 {
+fn moist_air_vapor_mole_fraction(temp_k: f64, pressure_pa: f64, humidity_percent: f64) -> f64 {
+    let temp_c = temp_k - 273.15;
+    let p_sv_hpa = enhanced_saturation_vapor_pressure(temp_k);
+    let f = enhanced_enhancement_factor(pressure_pa, temp_c);
+    vapor_mole_fraction(
+        p_sv_hpa,
+        f,
+        humidity_percent,
+        pressure_pa.max(f64::MIN_POSITIVE),
+    )
+}
+
+/// The engine's ONE water-vapour mole fraction, `x_v = (RH/100) * f * p_sv / p`, uncapped.
+///
+/// The CIPM-2007 density ([`calculate_air_density_cimp`]), the moist speed of sound
+/// ([`moist_speed_of_sound`]) and the impossible-air test ([`water_vapor_mole_fraction_uncapped`],
+/// behind [`StationAir::new`] and the density-altitude service) all evaluate it here, in this
+/// operation order, so they cannot drift apart. `p_sv_hpa` is in hPa and `p_pa` in Pa; the
+/// humidity is clamped into `[0, 100]` as a total-function guard for the unvalidated legacy
+/// entry points (validated callers pass a [`RelativeHumidity`], already in range), and a NaN
+/// humidity, or a NaN `p_sv_hpa` above water's critical point at any humidity above 0, gives a
+/// NaN `x_v`, which [`capped_vapor_mole_fraction`] keeps.
+///
+/// Dry air holds no water vapour at any temperature: at 0 % `x_v` is exactly 0 whatever
+/// `p_sv_hpa` is, so dry air above water's critical point (647.096 K, where `p_sv_hpa` is NaN)
+/// is dry air, not air that cannot exist. Wherever `p_sv_hpa` is a number (below that point)
+/// this is the very value the full formula gives, bit for bit: the same zero, with its sign,
+/// and NaN for a NaN temperature or pressure (through `f`).
+#[inline(always)]
+pub(crate) fn vapor_mole_fraction(p_sv_hpa: f64, f: f64, humidity_percent: f64, p_pa: f64) -> f64 {
+    let humidity_percent = humidity_percent.clamp(0.0, 100.0);
+    if humidity_percent == 0.0 {
+        // The full formula without its positive, finite p_sv factor (and the exact factors 100
+        // and 1/100, which move no zero): the same signed zero, or NaN, as ever.
+        return humidity_percent * f / p_pa;
+    }
     // Vapor pressure with clamping. p_sv is in hPa (enhanced_saturation_vapor_pressure
     // returns hPa — its critical-pressure constant is 220640 hPa), so p_v is in hPa too.
-    let p_v = humidity_percent.clamp(0.0, 100.0) / 100.0 * f * p_sv_hpa;
+    let p_v = humidity_percent / 100.0 * f * p_sv_hpa;
 
     // Convert the vapor pressure to Pa BEFORE forming the mole fraction: the divisor below
     // is in Pa. Dividing the hPa p_v by the Pa total made x_v 100x too small, which erased
@@ -1003,11 +1436,20 @@ fn vapor_mole_fraction(p_sv_hpa: f64, f: f64, humidity_percent: f64, p_pa: f64) 
     p_v_pa / p_pa
 }
 
-/// Enhanced saturation vapor pressure calculation.
-/// Uses the IAPWS-IF97 formulation for high precision.
+/// Saturation vapor pressure of water, hPa, over LIQUID water at every temperature (the WMO
+/// convention for relative humidity, also below 0 °C; there is no ice branch).
+///
+/// The Wagner-Pruss saturation-pressure equation, the form of the IAPWS supplementary release
+/// on the saturation properties of ordinary water substance:
+/// `ln(p_sv / p_c) = (T_c / T) (a1 τ + a2 τ^1.5 + a3 τ^3 + a4 τ^3.5 + a5 τ^4 + a6 τ^7.5)` with
+/// `τ = 1 - T / T_c`, `T_c = 647.096 K` and `p_c = 22.064 MPa`. (The industrial IF97
+/// formulation's region-4 saturation equation is a different formula.)
 #[inline(always)]
 fn enhanced_saturation_vapor_pressure(t_k: f64) -> f64 {
-    // IAPWS-IF97 coefficients for better accuracy
+    #[cfg(test)]
+    air_trace::count_saturation_pressure();
+
+    // Wagner-Pruss coefficients a1..a6.
     const A: [f64; 6] = [
         -7.85951783,
         1.84408259,
@@ -1084,7 +1526,16 @@ pub(crate) fn shot_frame_altitude(
     base_altitude_m + downrange_m * shooting_angle_rad.sin() + shot_y_m * shooting_angle_rad.cos()
 }
 
-/// Enhanced local atmospheric calculation with variable lapse rates.
+/// Local DRY air: [`get_local_atmosphere_humid`] at 0 % relative humidity.
+///
+/// Dry by contract, which is why it is deprecated: a flight's air has a humidity, and
+/// [`air_at`] over a [`StationAir`] flies it. The replacement is
+/// `air_at(&KernelAtmosphere::Station(StationAir::new(base_alt, base_temp_c, base_press_hpa,
+/// humidity)?), None, 0.0, altitude_m)`; a caller that holds its own density ratio builds the
+/// station with [`StationAir::with_density_ratio`] instead. The density is the same as every other
+/// path's (the base ratio scaled by the lapse); the sound speed is the engine's one dry value,
+/// `sqrt(1.4 · 287.0531 · T)`, the shared composition at [`RelativeHumidity::DRY`]. Until 0.50.0
+/// this function used a second dry constant, `sqrt(401.874 · T)`, 4.2e-7 slower.
 ///
 /// # Arguments
 /// * `altitude_m` - Query geometric altitude above mean sea level in meters
@@ -1095,6 +1546,10 @@ pub(crate) fn shot_frame_altitude(
 ///
 /// # Returns
 /// Tuple of (air_density_kg_m3, speed_of_sound_mps)
+#[deprecated(
+    since = "0.50.0",
+    note = "dry air by contract; use air_at(&KernelAtmosphere::Station(StationAir::new(..)?), None, 0.0, altitude_m), or StationAir::with_density_ratio for a caller-held density ratio"
+)]
 pub fn get_local_atmosphere(
     altitude_m: f64,
     base_alt: f64,
@@ -1102,27 +1557,28 @@ pub fn get_local_atmosphere(
     base_press_hpa: f64,
     base_ratio: f64,
 ) -> (f64, f64) {
-    let (temp_k, _pressure_pa, density) = local_temp_pressure_density(
+    let air = compose_local_air(
         altitude_m,
         base_alt,
-        base_temp_c,
-        base_press_hpa,
-        base_ratio,
+        &GoverningAir::new(
+            base_temp_c,
+            base_press_hpa,
+            base_ratio,
+            RelativeHumidity::DRY.percent(),
+        ),
+        Gravity::EARTH,
     );
-
-    // Dry speed of sound. 401.874 ~ gamma * R_air; kept exactly for back-compat with existing
-    // callers (get_local_atmosphere_humid uses the precise moist formula instead).
-    let speed_of_sound = (temp_k * 401.874).sqrt();
-
-    (density, speed_of_sound)
+    (air.density_kg_m3, air.speed_of_sound_mps)
 }
 
-/// Humidity-aware companion to [`get_local_atmosphere`]: identical local density, but the speed
-/// of sound is the moist-air value ([`moist_speed_of_sound`]) evaluated at the LOCAL temperature
-/// and pressure.
+/// The local air, unvalidated: the same composition as [`air_at`], from a caller-held base
+/// tuple. The base air's water-vapour mole fraction, from `base_temp_c`, `base_press_hpa` and
+/// `humidity_percent`, is held at every height for the virtual-temperature lapse, the density
+/// and the moist-air speed of sound at the local temperature.
 ///
-/// [`get_local_atmosphere`] is intentionally left unchanged (dry speed of sound) for
-/// API/back-compat; call this variant only where a real relative humidity is available.
+/// A legacy entry point: it clamps an out-of-range humidity instead of refusing it (a NaN
+/// propagates to NaN air, never to steam), and it cannot know whether `base_ratio` was built at
+/// `humidity_percent`. In-crate code calls [`air_at`] with a [`KernelAtmosphere`] instead.
 ///
 /// # Arguments
 /// * `altitude_m` - Query geometric altitude above mean sea level in meters
@@ -1163,23 +1619,2422 @@ pub(crate) fn get_local_atmosphere_humid_with_gravity(
     humidity_percent: f64,
     gravity: Gravity,
 ) -> (f64, f64) {
-    let (temp_k, pressure_pa, density) = local_temp_pressure_density_with_gravity(
+    // The same composition `air_at` uses, without its validation: this legacy entry keeps its
+    // internal clamp of an out-of-range humidity (a NaN gives NaN air), and can never diverge
+    // from `air_at`. Its base is the caller's raw tuple, so it computes the base air's vapour
+    // mole fraction on every call, through the same one formula.
+    let air = compose_local_air(
         altitude_m,
         base_alt,
-        base_temp_c,
-        base_press_hpa,
-        base_ratio,
+        &GoverningAir::new(base_temp_c, base_press_hpa, base_ratio, humidity_percent),
         gravity,
     );
-    (
-        density,
-        moist_speed_of_sound(temp_k, pressure_pa, humidity_percent),
+    (air.density_kg_m3, air.speed_of_sound_mps)
+}
+
+// =================================================================================================
+// The single source of truth for humid air: a validated relative humidity, the station air built
+// from it, the kernel atmosphere that carries it, and the one per-step air lookup.
+// =================================================================================================
+
+/// The relative humidity, in percent, that an omitted humidity means: 50 %.
+///
+/// [`RelativeHumidity::DEFAULT`] holds the same value. `AtmosphericConditions::default` means
+/// it, and solve v1's omitted `relative_humidity` is the same default in the SI wire's unit,
+/// `RelativeHumidity::DEFAULT.fraction()` (exactly 0.5).
+pub const DEFAULT_HUMIDITY_PERCENT: f64 = 50.0;
+
+/// How far, in percentage points, a relative-humidity READING may lie outside 0-100 % and
+/// still be read as the saturated (100 %) or dry (0 %) air it measures: 5.
+///
+/// Weather is an input source, never a gate. The humidity a shooter enters is most often a
+/// sensor's (a Kestrel, a WEATHERmeter, a phone), and relative-humidity sensors are good to
+/// about ±2-3 %: in fog and other condensing air they read above 100 %, where free air is
+/// supersaturated by under 1 %, and in very dry air they can read a little below 0 %. Such a
+/// reading is sensor error around saturated or dry air, not a different atmosphere, and must
+/// not fail a calculation. So [`RelativeHumidity::try_percent`] accepts a percent from -5 to
+/// 105 and stores it clamped into 0..=100 (101.7 is exactly 100, -2 exactly 0), and
+/// [`RelativeHumidity::try_fraction`] does the same with a fraction from -0.05 to 1.05. Every
+/// surface reads humidity through those two constructors, so every surface has this band.
+///
+/// A value farther out is refused, as before: it is not a reading of real air but a wrong unit
+/// (a percent sent as a fraction) or a typo. Air that cannot exist at all (a water-vapour mole
+/// fraction of 1 or more) is a separate rule, [`StationAir::new`]'s, and the band does not
+/// relax it.
+pub const HUMIDITY_SENSOR_TOLERANCE_PERCENT: f64 = 5.0;
+
+/// The percents [`RelativeHumidity::try_percent`] accepts: the sensor band around 0..=100.
+const HUMIDITY_PERCENT_BAND: (f64, f64) = (
+    -HUMIDITY_SENSOR_TOLERANCE_PERCENT,
+    100.0 + HUMIDITY_SENSOR_TOLERANCE_PERCENT,
+);
+
+/// The fractions [`RelativeHumidity::try_fraction`] accepts: the same band in fraction units,
+/// exactly -0.05 and 1.05.
+const HUMIDITY_FRACTION_BAND: (f64, f64) = (
+    -HUMIDITY_SENSOR_TOLERANCE_PERCENT / 100.0,
+    1.0 + HUMIDITY_SENSOR_TOLERANCE_PERCENT / 100.0,
+);
+
+/// Absolute zero in degrees Celsius; a station temperature must lie above it.
+const ABSOLUTE_ZERO_C: f64 = -273.15;
+/// The density ratio `density / 1.225 kg/m³` a station may carry is below this (and above 0).
+/// It is `fast_integrate`'s ceiling for a supplied standard-mode ratio.
+const MAX_STATION_DENSITY_RATIO: f64 = 2.0;
+/// Uniform (direct-mode) air must have a density below this, in kg/m³, and at least 0 (a
+/// vacuum): 0.49.0's `compute_derivatives` direct-mode detection, `density < 2`, which took a
+/// density of exactly 0 as the way to switch drag off.
+const MAX_UNIFORM_DENSITY_KG_M3: f64 = 2.0;
+/// Uniform (direct-mode) air must have a speed of sound above this, in m/s. The same bound the
+/// kernels' direct-mode detection uses today.
+const MIN_UNIFORM_SPEED_OF_SOUND_MPS: f64 = 200.0;
+
+/// A validated relative humidity.
+///
+/// It stores a PERCENT in `[0, 100]`, and [`Self::fraction`] gives the same humidity in
+/// `[0, 1]`. The two constructors name the unit at the call site, and there is deliberately no
+/// `From<f64>`, so a bare number is never read in the wrong unit.
+///
+/// One rule, the sensor band ([`HUMIDITY_SENSOR_TOLERANCE_PERCENT`]): a reading up to 5 points
+/// outside the range is the saturated or dry air it measures, stored as exactly 100 or 0, so it
+/// flies exactly as that end does. Anything farther out, or not finite, is refused with an
+/// [`AtmosphereError`] that reports the value unchanged.
+///
+/// ```
+/// use ballistics_engine::RelativeHumidity;
+///
+/// let from_percent = RelativeHumidity::try_percent(50.0).unwrap();
+/// let from_fraction = RelativeHumidity::try_fraction(0.5).unwrap();
+/// assert_eq!(from_percent, from_fraction);
+/// assert_eq!(from_percent, RelativeHumidity::DEFAULT);
+/// assert_eq!(from_fraction.percent(), 50.0);
+/// assert_eq!(from_percent.fraction(), 0.5);
+///
+/// // A sensor reading in fog, or in very dry air, is that air.
+/// assert_eq!(RelativeHumidity::try_percent(101.7).unwrap().percent(), 100.0);
+/// assert_eq!(RelativeHumidity::try_percent(-2.0).unwrap(), RelativeHumidity::DRY);
+/// assert_eq!(RelativeHumidity::try_fraction(1.03).unwrap().percent(), 100.0);
+///
+/// assert!(RelativeHumidity::try_percent(150.0).is_err());
+/// assert!(RelativeHumidity::try_percent(105.0000001).is_err());
+/// // A percent sent where a fraction belongs is refused, not read as 50 %.
+/// assert!(RelativeHumidity::try_fraction(50.0).is_err());
+/// ```
+///
+/// A bare `f64` does not convert, because it does not say whether 0.5 means 50 % or 0.5 %
+/// (E0277: no `From<f64>`):
+///
+/// ```compile_fail,E0277
+/// use ballistics_engine::RelativeHumidity;
+///
+/// let humidity: RelativeHumidity = 0.5.into();
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RelativeHumidity(f64);
+
+impl RelativeHumidity {
+    /// The default for an omitted humidity: [`DEFAULT_HUMIDITY_PERCENT`], 50 %.
+    pub const DEFAULT: Self = Self(DEFAULT_HUMIDITY_PERCENT);
+
+    /// Dry air, 0 %.
+    pub const DRY: Self = Self(0.0);
+
+    /// The lowest and the highest fraction [`Self::try_fraction`] accepts, both included: the
+    /// sensor band ([`HUMIDITY_SENSOR_TOLERANCE_PERCENT`]) in fraction units, exactly
+    /// `(-0.05, 1.05)`.
+    ///
+    /// For a schema that publishes the bounds the decoder enforces (the MCP server's
+    /// `relative_humidity`), so the band it states is derived from the one number rather than
+    /// written out again.
+    pub const FRACTION_BAND: (f64, f64) = HUMIDITY_FRACTION_BAND;
+
+    /// A relative humidity given in PERCENT.
+    ///
+    /// Accepts a finite `percent` from -5 to 105, both ends included (the sensor band,
+    /// [`HUMIDITY_SENSOR_TOLERANCE_PERCENT`]). A percent in `0.0..=100.0` is stored unchanged,
+    /// one above 100 as exactly 100 and one below 0 (or `-0.0`) as `0.0`. Anything else is
+    /// refused, with field `humidity_percent`, the value unchanged, and reason
+    /// [`AtmosphereErrorReason::NotFinite`] or
+    /// [`AtmosphereErrorReason::HumidityPercentOutOfRange`].
+    pub fn try_percent(percent: f64) -> Result<Self, AtmosphereError> {
+        sensor_band(
+            percent,
+            HUMIDITY_PERCENT_BAND,
+            100.0,
+            "humidity_percent",
+            AtmosphereErrorReason::HumidityPercentOutOfRange,
+        )
+        .map(Self)
+    }
+
+    /// A relative humidity given as a FRACTION, the SI wire's `relative_humidity`.
+    ///
+    /// Accepts a finite `fraction` from -0.05 to 1.05, both ends included (the sensor band in
+    /// fraction units), and stores the fraction snapped into `0.0..=1.0` times 100: an
+    /// in-range fraction is `fraction * 100.0`, exact at 0, 0.5 and 1 and within one ulp of the
+    /// decimal percent elsewhere, one above 1 is exactly 100, one below 0 is 0. Anything else is
+    /// refused, with field `relative_humidity`, the value unchanged, and reason
+    /// [`AtmosphereErrorReason::NotFinite`] or
+    /// [`AtmosphereErrorReason::HumidityFractionOutOfRange`]; so a percent sent by mistake
+    /// (`50.0`) is an error rather than 5000 %.
+    pub fn try_fraction(fraction: f64) -> Result<Self, AtmosphereError> {
+        // The very conversion solve v1 and the density-altitude service apply today, so a
+        // caller moving onto this constructor flies the same bits.
+        Self::snap_fraction(fraction).map(|fraction| Self(fraction * 100.0))
+    }
+
+    /// The fraction [`Self::try_fraction`] accepts, snapped into `0.0..=1.0` in the fraction's
+    /// own unit: an in-range fraction comes back with its bits unchanged (`-0.0` as `0.0`),
+    /// one above 1 as exactly 1 and one below 0 as 0. For a wire that echoes the fraction it
+    /// flies (solve v1's resolved `relative_humidity`); its errors are `try_fraction`'s.
+    pub(crate) fn snap_fraction(fraction: f64) -> Result<f64, AtmosphereError> {
+        sensor_band(
+            fraction,
+            HUMIDITY_FRACTION_BAND,
+            1.0,
+            "relative_humidity",
+            AtmosphereErrorReason::HumidityFractionOutOfRange,
+        )
+    }
+
+    /// Whether `fraction` is a relative humidity in `0.0..=1.0` itself, not merely a sensor
+    /// reading the band reads as one: exactly the fractions [`Self::snap_fraction`] leaves
+    /// where it found them (`-0.0` included, NaN and the infinities not).
+    ///
+    /// For a caller that moves a humidity HYPOTHETICALLY rather than reading one, the
+    /// perturbation layer's central difference: a perturbed 1.001 is not fog read by a sensor,
+    /// and flying it as saturated air would silently halve the derivative at the end.
+    pub(crate) fn is_physical_fraction(fraction: f64) -> bool {
+        matches!(Self::snap_fraction(fraction), Ok(snapped) if snapped == fraction)
+    }
+
+    /// The humidity in percent, `0.0..=100.0`.
+    pub const fn percent(self) -> f64 {
+        self.0
+    }
+
+    /// The humidity as a fraction, `0.0..=1.0` (`percent / 100`).
+    ///
+    /// A `const fn`, so a wire default can be written as the one default in the wire's unit:
+    /// `RelativeHumidity::DEFAULT.fraction()` is exactly `0.5`.
+    pub const fn fraction(self) -> f64 {
+        self.0 / 100.0
+    }
+}
+
+/// The one sensor-band rule, in a unit whose saturated air is `saturated` (100 for a percent,
+/// 1 for a fraction): a finite `value` inside `band` comes back snapped into
+/// `0.0..=saturated` (at or below 0, `-0.0` included, as `+0.0`; above `saturated` as exactly
+/// `saturated`; otherwise unchanged); anything else is refused with `field` and the value
+/// unchanged.
+fn sensor_band(
+    value: f64,
+    (lowest, highest): (f64, f64),
+    saturated: f64,
+    field: &'static str,
+    out_of_band: AtmosphereErrorReason,
+) -> Result<f64, AtmosphereError> {
+    let unit = match out_of_band {
+        AtmosphereErrorReason::HumidityFractionOutOfRange => HumidityUnit::Fraction,
+        _ => HumidityUnit::Percent,
+    };
+    if !value.is_finite() {
+        return Err(
+            AtmosphereError::new(field, value, AtmosphereErrorReason::NotFinite).of_humidity(unit),
+        );
+    }
+    if !(lowest..=highest).contains(&value) {
+        return Err(AtmosphereError::new(field, value, out_of_band).of_humidity(unit));
+    }
+    Ok(if value <= 0.0 {
+        0.0
+    } else if value > saturated {
+        saturated
+    } else {
+        value
+    })
+}
+
+/// The range of a relative humidity PERCENT as every refusal states it, built from
+/// [`HUMIDITY_SENSOR_TOLERANCE_PERCENT`] so the words cannot drift from the band the
+/// constructor enforces: `percent from 0 to 100 (a sensor reading from -5 to 105 is read as 0 or
+/// 100)`.
+fn humidity_percent_range() -> String {
+    format!(
+        "percent from 0 to 100 (a sensor reading from {} to {} is read as 0 or 100)",
+        HUMIDITY_PERCENT_BAND.0, HUMIDITY_PERCENT_BAND.1
     )
 }
 
-/// Shared local temperature / pressure / density computation for [`get_local_atmosphere`] and
-/// [`get_local_atmosphere_humid`]. Returns `(local_temp_k, local_pressure_pa, density_kg_m3)`.
+/// The range of a relative humidity FRACTION (the SI wire's `relative_humidity`) as every
+/// refusal states it, from the same constant: `fraction from 0 to 1 (0.5 = 50 %; a sensor
+/// reading from -0.05 to 1.05 is read as 0 or 1)`.
+fn humidity_fraction_range() -> String {
+    format!(
+        "fraction from 0 to 1 (0.5 = 50 %; a sensor reading from {} to {} is read as 0 or 1)",
+        HUMIDITY_FRACTION_BAND.0, HUMIDITY_FRACTION_BAND.1
+    )
+}
+
+/// Parse a relative-humidity PERCENT typed as text (a terminal or CLI flag's value) through the
+/// one validator, [`RelativeHumidity::try_percent`].
+///
+/// The error is the reason alone, for a caller that names the flag and the value itself (clap
+/// does): `not a number; relative humidity is a percent from 0 to 100 (a sensor reading from -5
+/// to 105 is read as 0 or 100)` for text that is no number, and
+/// [`AtmosphereError::explanation`] for a number the band refuses.
+///
+/// ```
+/// use ballistics_engine::atmosphere::parse_humidity_percent_text;
+///
+/// assert_eq!(parse_humidity_percent_text("101.7").unwrap().percent(), 100.0);
+/// assert!(parse_humidity_percent_text("150")
+///     .unwrap_err()
+///     .starts_with("relative humidity must be a percent from 0 to 100 (a sensor reading"));
+/// assert!(parse_humidity_percent_text("wet").unwrap_err().starts_with("not a number; "));
+/// ```
+pub fn parse_humidity_percent_text(raw: &str) -> Result<RelativeHumidity, String> {
+    let value: f64 = raw.trim().parse().map_err(|_| {
+        format!(
+            "not a number; relative humidity is a {}",
+            humidity_percent_range()
+        )
+    })?;
+    RelativeHumidity::try_percent(value).map_err(|error| error.explanation())
+}
+
+/// Parse a terminal humidity flag's value (`--humidity 37.5`, `--zero-humidity 80`) through the
+/// one validator, [`RelativeHumidity::try_percent`]: a PERCENT, 0 to 100, and a sensor reading
+/// up to [`HUMIDITY_SENSOR_TOLERANCE_PERCENT`] outside it is the end it reads as (`101.7` gives
+/// `100.0`); anything farther out is refused, never clamped. The WASM terminal's hand-written
+/// parser calls it for every humidity flag (the native CLI's clap parser goes through
+/// [`parse_humidity_percent_text`]); its errors name the flag, for example
+/// `"--humidity = 150: relative humidity must be a percent from 0 to 100 (a sensor reading from
+/// -5 to 105 is read as 0 or 100)"`.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn parse_humidity_percent_arg(flag: &str, raw: &str) -> Result<f64, String> {
+    match raw.trim().parse::<f64>() {
+        Ok(value) => RelativeHumidity::try_percent(value)
+            .map(RelativeHumidity::percent)
+            .map_err(|error| error.at_field(flag.to_string()).to_string()),
+        Err(_) => Err(format!(
+            "{flag} = {raw}: {}",
+            parse_humidity_percent_text(raw).expect_err("text that is no number")
+        )),
+    }
+}
+
+/// Why an atmosphere value was refused. Carried by [`AtmosphereError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AtmosphereErrorReason {
+    /// The value is NaN or infinite.
+    NotFinite,
+    /// A relative humidity percent outside `[0, 100]` by more than the sensor band,
+    /// [`HUMIDITY_SENSOR_TOLERANCE_PERCENT`]: below -5 or above 105. It displays the band it
+    /// enforces: "relative humidity must be a percent from 0 to 100 (a sensor reading from -5 to
+    /// 105 is read as 0 or 100)".
+    HumidityPercentOutOfRange,
+    /// A relative humidity fraction outside `[0, 1]` by more than the sensor band: below -0.05
+    /// or above 1.05. It displays the band in fraction units: "relative humidity must be a
+    /// fraction from 0 to 1 (0.5 = 50 %; a sensor reading from -0.05 to 1.05 is read as 0 or 1)".
+    HumidityFractionOutOfRange,
+    /// A temperature at or below absolute zero, -273.15 °C.
+    AtOrBelowAbsoluteZero,
+    /// A pressure at or below zero.
+    NonPositivePressure,
+    /// Air that cannot exist: the stated humidity needs a water-vapour mole fraction of 1 or
+    /// more, that is more vapour pressure than the air's total pressure; or the air is humid
+    /// above water's critical point (647.096 K), where no saturation vapour pressure, and so no
+    /// relative humidity, is defined; or, dry above that point, it is too hot for the CIPM-2007
+    /// density to stay finite and positive; or its pressure is so far beyond any air's (above
+    /// about 4e156 Pa) that the density does not either. Dry air at any lower temperature above
+    /// absolute zero exists. The same refusal the `atmosphere.density_altitude` service makes.
+    ImpossibleAir,
+    /// A station density ratio (density / 1.225 kg/m³) outside `(0, 2)`.
+    DensityRatioOutOfRange,
+    /// A uniform (direct-mode) air density outside `[0, 2)` kg/m³ (0 is a vacuum).
+    UniformDensityOutOfRange,
+    /// A uniform (direct-mode) speed of sound at or below 200 m/s.
+    UniformSpeedOfSoundOutOfRange,
+    /// A downrange atmosphere zone whose `until_distance_m` is not above 0.
+    NonPositiveZoneThreshold,
+    /// Air that cannot exist aloft: from this station (or downrange zone) temperature the
+    /// standard lapse takes the air to absolute zero, at an altitude the flight reaches. Every
+    /// trajectory kernel refuses the flight at the step that gets there, with this reason on the
+    /// temperature ([`AtmosphereError::field`] `temperature_c`, the governing air's temperature);
+    /// [`AtmosphereError::altitude_m`] is where the air reaches 0 K. A flight that stays below
+    /// that height flies.
+    AirAloftBelowAbsoluteZero,
+    /// A density altitude no air has by the FAA rule its entry inverts
+    /// ([`station_for_density_altitude`]): at its pressure altitude by that rule
+    /// ([`AtmosphereError::altitude_m`]) the NWS pressure formula gives no finite pressure above
+    /// 0 (at or above 145366.45 ft, 44308 m), or, with no temperature given, the rule's standard
+    /// temperature is at or below absolute zero (at or above 145286 ft, 44283 m). On the field
+    /// `density_altitude_m`.
+    NoAirAtDensityAltitude,
+}
+
+impl fmt::Display for AtmosphereErrorReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::NotFinite => "must be finite",
+            Self::HumidityPercentOutOfRange => {
+                return write!(
+                    f,
+                    "relative humidity must be a {}",
+                    humidity_percent_range()
+                )
+            }
+            Self::HumidityFractionOutOfRange => {
+                return write!(
+                    f,
+                    "relative humidity must be a {}",
+                    humidity_fraction_range()
+                )
+            }
+            Self::AtOrBelowAbsoluteZero => "temperature must be above absolute zero (-273.15 °C)",
+            Self::NonPositivePressure => "pressure must be greater than 0",
+            Self::ImpossibleAir => {
+                "no such air exists: at this temperature and pressure the humidity needs a \
+                 water-vapour mole fraction of 1 or more (more vapour pressure than the total), \
+                 or the air is humid above water's critical point, or too hot or too dense to \
+                 have a density"
+            }
+            Self::DensityRatioOutOfRange => {
+                "density ratio (density / 1.225 kg/m^3) must be greater than 0 and less than 2"
+            }
+            Self::UniformDensityOutOfRange => {
+                "air density must be at least 0 (a vacuum) and less than 2 kg/m^3"
+            }
+            Self::UniformSpeedOfSoundOutOfRange => "speed of sound must be greater than 200 m/s",
+            Self::NonPositiveZoneThreshold => {
+                "an atmosphere zone's until_distance_m must be greater than 0"
+            }
+            Self::AirAloftBelowAbsoluteZero => "the air aloft would fall below absolute zero",
+            Self::NoAirAtDensityAltitude => "no air has this density altitude by the FAA rule",
+        })
+    }
+}
+
+/// The unit a refused relative humidity was given in, so a refusal that names no range of its
+/// own (a NaN) can still state the one the value had to lie in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HumidityUnit {
+    Percent,
+    Fraction,
+}
+
+/// An atmosphere value refused at a boundary: which field, the value given, and why.
+///
+/// The constructors name their own parameters (`humidity_percent`, `relative_humidity`,
+/// `temperature_c`, `pressure_hpa`, ...). A boundary that knows the caller's path, such as a
+/// JSON pointer, relabels the error with [`Self::at_field`], or states the whole refusal in its
+/// own words with [`Self::refusal_in`]. It displays as `"<field> = <value>: <explanation>"`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AtmosphereError {
+    field: Cow<'static, str>,
+    value: f64,
+    reason: AtmosphereErrorReason,
+    humidity_unit: Option<HumidityUnit>,
+    /// Where air that cannot exist aloft reaches absolute zero, m above mean sea level.
+    altitude_m: Option<f64>,
+}
+
+impl AtmosphereError {
+    /// Find a typed atmosphere refusal through a service's error chain.
+    /// Keep the cause until the boundary can name the reading in its own units.
+    pub fn in_error<'a>(error: &'a (dyn std::error::Error + 'static)) -> Option<&'a Self> {
+        let mut current = Some(error);
+        while let Some(error) = current {
+            if let Some(air) = error.downcast_ref::<Self>() {
+                return Some(air);
+            }
+            current = error.source();
+        }
+        None
+    }
+
+    /// Name a refusal discovered aloft using the same temperature source as the station check.
+    pub fn temperature_refusal(&self, field: AirField<'_>, units: AirUnits) -> AirRefusal {
+        self.temperature_refusal_from(field, units, StationTemperatureOrigin::Reading)
+    }
+
+    /// Like [`Self::temperature_refusal`], retaining a density altitude's derived temperature.
+    pub fn temperature_refusal_from(
+        &self,
+        field: AirField<'_>,
+        units: AirUnits,
+        origin: StationTemperatureOrigin,
+    ) -> AirRefusal {
+        let reading = match origin {
+            StationTemperatureOrigin::Reading => {
+                format!("{} = {}", field.name, units.temperature.text(self.value))
+            }
+            StationTemperatureOrigin::DensityAltitude => format!(
+                "{} gives a station temperature of {}",
+                field.name,
+                units.temperature.text(self.value)
+            ),
+        };
+        AirRefusal {
+            path: field.path.to_string(),
+            message: format!("{reading}: {}", self.explanation_in(units.altitude)),
+            reason: self.reason,
+        }
+    }
+
+    fn new(field: &'static str, value: f64, reason: AtmosphereErrorReason) -> Self {
+        Self {
+            field: Cow::Borrowed(field),
+            value,
+            reason,
+            humidity_unit: None,
+            altitude_m: None,
+        }
+    }
+
+    /// Air that cannot exist aloft: from the governing air's `temperature_c` the standard lapse
+    /// reaches absolute zero at `altitude_m` (geometric, above mean sea level), which the flight
+    /// reaches.
+    fn aloft(temperature_c: f64, altitude_m: f64) -> Self {
+        Self {
+            altitude_m: Some(altitude_m),
+            ..Self::new(
+                "temperature_c",
+                temperature_c,
+                AtmosphereErrorReason::AirAloftBelowAbsoluteZero,
+            )
+        }
+    }
+
+    /// The same error, about a relative humidity given in `unit`.
+    fn of_humidity(mut self, unit: HumidityUnit) -> Self {
+        self.humidity_unit = Some(unit);
+        self
+    }
+
+    /// Why the value was refused, in words: the reason's own text, naming the quantity and the
+    /// range it must lie in where the reason alone would not. A relative humidity that is not
+    /// finite is "relative humidity must be a finite percent from 0 to 100 (a sensor reading
+    /// from -5 to 105 is read as 0 or 100)", not a bare "must be finite"; every other refusal is
+    /// its [`AtmosphereErrorReason`]'s text.
+    ///
+    /// For a caller that names the field itself (a flag parser). Any altitude it quotes is in
+    /// metres; [`Self::explanation_in`] states it in another unit.
+    pub fn explanation(&self) -> String {
+        self.explanation_in(AltitudeUnit::Meters)
+    }
+
+    /// [`Self::explanation`] with any altitude it quotes (where air that cannot exist aloft
+    /// reaches absolute zero) in `altitude_unit`: `"... reaches 0 K at 5049 ft above mean sea
+    /// level ..."` in feet.
+    pub fn explanation_in(&self, altitude_unit: AltitudeUnit) -> String {
+        match (self.reason, self.humidity_unit) {
+            (AtmosphereErrorReason::NotFinite, Some(HumidityUnit::Percent)) => format!(
+                "relative humidity must be a finite {}",
+                humidity_percent_range()
+            ),
+            (AtmosphereErrorReason::NotFinite, Some(HumidityUnit::Fraction)) => format!(
+                "relative humidity must be a finite {}",
+                humidity_fraction_range()
+            ),
+            (reason @ AtmosphereErrorReason::AirAloftBelowAbsoluteZero, _) => {
+                match self.altitude_m {
+                    Some(altitude_m) => format!(
+                        "{reason}: from this temperature the standard lapse reaches 0 K at {} \
+                         above mean sea level, which this flight reaches (check the temperature \
+                         and its unit)",
+                        altitude_unit.text(altitude_m)
+                    ),
+                    None => reason.to_string(),
+                }
+            }
+            (AtmosphereErrorReason::NoAirAtDensityAltitude, _) => match self.altitude_m {
+                Some(pressure_altitude_m) => {
+                    let cause =
+                        if nws_station_pressure_hpa(pressure_altitude_m / DA_FT_TO_M).is_some() {
+                            "the rule's standard temperature is at or below absolute zero"
+                        } else {
+                            "the NWS pressure formula gives no finite pressure above 0"
+                        };
+                    format!(
+                        "no air has this density altitude: at its pressure altitude by the FAA \
+                         rule, {}, {cause} (check the density altitude and its unit)",
+                        altitude_unit.text(pressure_altitude_m)
+                    )
+                }
+                None => AtmosphereErrorReason::NoAirAtDensityAltitude.to_string(),
+            },
+            (reason, _) => reason.to_string(),
+        }
+    }
+
+    /// For air that cannot exist aloft ([`AtmosphereErrorReason::AirAloftBelowAbsoluteZero`]),
+    /// the geometric altitude above mean sea level, m, at which the lapse from the refused
+    /// temperature reaches absolute zero; `None` for every other refusal.
+    pub fn altitude_m(&self) -> Option<f64> {
+        self.altitude_m
+    }
+
+    /// The refused field's name or path.
+    pub fn field(&self) -> &str {
+        &self.field
+    }
+
+    /// The value that was refused, unchanged.
+    pub fn value(&self) -> f64 {
+        self.value
+    }
+
+    /// Why it was refused.
+    pub fn reason(&self) -> AtmosphereErrorReason {
+        self.reason
+    }
+
+    /// The same error under the caller's own name for the field, for example
+    /// `"$.atmosphere.relative_humidity"`.
+    pub fn at_field(mut self, field: impl Into<Cow<'static, str>>) -> Self {
+        self.field = field.into();
+        self
+    }
+}
+
+impl fmt::Display for AtmosphereError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} = {}: {}",
+            self.field,
+            echo_number(self.value),
+            self.explanation()
+        )
+    }
+}
+
+impl std::error::Error for AtmosphereError {}
+
+/// The bottom of the band the NWS pressure-altitude formula is read in, m: the bottom of the
+/// ICAO table.
+pub(crate) const LOWEST_PRESSURE_ALTITUDE_M: f64 = -5_000.0;
+/// The top of the standard atmosphere's troposphere, m, and of the band the NWS
+/// pressure-altitude formula is read in ([`pressure_altitude_m`]). No reading is refused for a
+/// pressure altitude outside the band; it only decides which reading air that cannot exist is
+/// blamed on ([`AtmosphereError::refusal_in`]), since a station pressure there is far likelier a
+/// unit mistake (hPa sent as pascals is 25 km up) than a humidity.
+pub(crate) const TROPOSPHERE_TOP_M: f64 = 11_000.0;
+
+/// The pressure altitude of a station pressure, m ([`pressure_altitude_m`]), when it lies
+/// outside the troposphere's band.
+pub(crate) fn pressure_altitude_outside_troposphere_m(station_pressure_hpa: f64) -> Option<f64> {
+    let nws_m = nws_pressure_altitude_ft(station_pressure_hpa) * DA_FT_TO_M;
+    (!(LOWEST_PRESSURE_ALTITUDE_M..=TROPOSPHERE_TOP_M).contains(&nws_m))
+        .then(|| pressure_altitude_m(station_pressure_hpa))
+}
+
+/// °C to K.
+const KELVIN_OFFSET: f64 = 273.15;
+
+/// Water's critical temperature, K: above it no saturation vapour pressure (and so no relative
+/// humidity) is defined, and only dry air exists.
+const WATER_CRITICAL_TEMPERATURE_K: f64 = 647.096;
+
+/// −100 °C. The engine's saturation-vapour-pressure and CIPM compressibility formulas clamp
+/// their temperature here: below it the humidity terms are extrapolated (evaluated at this
+/// temperature), while the rest of the density is the air's own.
+pub(crate) const HUMID_AIR_MODEL_MIN_K: f64 = 173.15;
+/// 100 °C. Above the boiling point the saturation-vapour-pressure formula stops describing a
+/// stable atmosphere, and above water's critical point (647.096 K) it is not defined at all:
+/// there only dry air exists.
+pub(crate) const HUMID_AIR_MODEL_MAX_K: f64 = 373.15;
+
+/// Whether a station temperature, K, lies outside [`HUMID_AIR_MODEL_MIN_K`] to
+/// [`HUMID_AIR_MODEL_MAX_K`] (both edges inside), where the humid-air terms are extrapolated.
+///
+/// Not a refusal: no surface refuses a temperature for lying outside this range. It only
+/// decides which reading air that cannot exist is blamed on ([`AtmosphereError::refusal_in`]):
+/// outside the range the formulas hold for, the temperature is the likelier mistake (°F typed as
+/// °C, °C sent as kelvin) than the humidity.
+pub(crate) fn outside_humid_air_model_range(temperature_k: f64) -> bool {
+    !(HUMID_AIR_MODEL_MIN_K..=HUMID_AIR_MODEL_MAX_K).contains(&temperature_k)
+}
+
+/// Where the station pressure a solve flies came from, so air that cannot exist at a station
+/// pressure outside the troposphere is blamed on the reading that put it there: the pressure
+/// when it was a station reading, the altitude when the pressure was the altitude's.
+///
+/// Every surface decides it one way, through [`Self::of`] (or [`Self::resolving`], from what a
+/// presence-aware resolution was handed), or, for a station a density altitude gave,
+/// [`Self::DensityAltitude`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StationPressureOrigin {
+    /// A station pressure reading, or a QNH that is itself outside the troposphere (hPa sent as
+    /// pascals): the pressure is to blame.
+    #[default]
+    Reading,
+    /// No pressure was given: the station flies the ICAO standard pressure at its altitude, so
+    /// the altitude is to blame (feet sent as metres).
+    Standard,
+    /// A QNH that is itself a plausible sea-level pressure, reduced to the station altitude: the
+    /// altitude is to blame.
+    Qnh,
+    /// A density altitude's station ([`station_for_density_altitude`]): the density altitude is
+    /// to blame. A surface names the derived pressure by the density altitude's field,
+    /// so the refusal blames [`AirSpelling::pressure`] even if the altitude was overridden.
+    DensityAltitude,
+}
+
+impl StationPressureOrigin {
+    /// The origin of a station pressure from what was given: `given_hpa` is the pressure as
+    /// given (a QNH before its reduction), or `None` when none was given and the station flies
+    /// the standard pressure at its altitude; `mode` says whether a given pressure is a QNH.
+    pub fn of(given_hpa: Option<f64>, mode: PressureReferenceMode) -> Self {
+        match (given_hpa, mode) {
+            (None, _) => Self::Standard,
+            (Some(qnh_hpa), PressureReferenceMode::Qnh)
+                if pressure_altitude_outside_troposphere_m(qnh_hpa).is_none() =>
+            {
+                Self::Qnh
+            }
+            (Some(_), _) => Self::Reading,
+        }
+    }
+
+    /// The origin of the pressure [`resolve_station_conditions_with_presence`] resolves from
+    /// these same inputs: a pressure the presence rule replaces with the ICAO standard at the
+    /// altitude (an omitted sea-level default at a real altitude) is the standard's; any other
+    /// is the given one, a QNH or a reading.
+    pub fn resolving(
+        pressure_hpa: f64,
+        altitude_m: f64,
+        mode: PressureReferenceMode,
+        presence: StationAtmospherePresence,
+    ) -> Self {
+        let given = presence.pressure_supplied
+            || resolve_station_pressure_with_mode(pressure_hpa, altitude_m, mode).is_some();
+        Self::of(given.then_some(pressure_hpa), mode)
+    }
+}
+
+/// Where the station temperature a solve flies came from, so air that cannot exist, blamed on
+/// the temperature, names the reading that carried it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StationTemperatureOrigin {
+    /// A temperature reading, or, when none was given, the ICAO standard temperature at the
+    /// station altitude (which never leaves the range the humid-air formulas hold for, so no
+    /// refusal blames it).
+    #[default]
+    Reading,
+    /// The temperature of a density altitude's station, given no temperature
+    /// ([`station_for_density_altitude`]): the density altitude is to blame. A surface that
+    /// flies one names the temperature by the density altitude's field.
+    DensityAltitude,
+}
+
+/// Where a station's pressure and temperature came from, as a surface that resolved the station
+/// itself states them to a refusal of its air
+/// ([`crate::cli_api::AtmosphericConditions::air_refusal_from`]): the reading to blame, and the
+/// QNH as it was given when the pressure was one, so the refusal quotes what was sent, never the
+/// station pressure reduced from it as if it had been sent.
+///
+/// Build one with [`Self::of`] or [`Self::resolving`] (from the pressure as given, a QNH before
+/// its reduction) or [`Self::density_altitude`].
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct StationOrigin {
+    /// Where the station pressure came from.
+    pub pressure: StationPressureOrigin,
+    /// The QNH, hPa, the station pressure was reduced from, when the pressure was given as one;
+    /// `None` for a station pressure reading, an omitted pressure and a density altitude's.
+    pub qnh_hpa: Option<f64>,
+    /// Where the station temperature came from.
+    pub temperature: StationTemperatureOrigin,
+}
+
+impl StationOrigin {
+    /// [`StationPressureOrigin::of`], keeping `given_hpa` as the QNH when `mode` declares it
+    /// one. The temperature is a reading.
+    pub fn of(given_hpa: Option<f64>, mode: PressureReferenceMode) -> Self {
+        Self {
+            pressure: StationPressureOrigin::of(given_hpa, mode),
+            qnh_hpa: given_hpa.filter(|_| mode == PressureReferenceMode::Qnh),
+            temperature: StationTemperatureOrigin::Reading,
+        }
+    }
+
+    /// [`StationPressureOrigin::resolving`], keeping `pressure_hpa` as the QNH when `mode`
+    /// declares it one (a QNH is always reduced, so always given). The temperature is a reading.
+    pub fn resolving(
+        pressure_hpa: f64,
+        altitude_m: f64,
+        mode: PressureReferenceMode,
+        presence: StationAtmospherePresence,
+    ) -> Self {
+        let pressure = StationPressureOrigin::resolving(pressure_hpa, altitude_m, mode, presence);
+        Self {
+            pressure,
+            qnh_hpa: (mode == PressureReferenceMode::Qnh
+                && pressure != StationPressureOrigin::Standard)
+                .then_some(pressure_hpa),
+            temperature: StationTemperatureOrigin::Reading,
+        }
+    }
+
+    /// A density altitude's station: its pressure (and altitude) are the density altitude's, and
+    /// so is its temperature unless one was given (`temperature_given`).
+    pub fn density_altitude(temperature_given: bool) -> Self {
+        Self {
+            pressure: StationPressureOrigin::DensityAltitude,
+            qnh_hpa: None,
+            temperature: if temperature_given {
+                StationTemperatureOrigin::Reading
+            } else {
+                StationTemperatureOrigin::DensityAltitude
+            },
+        }
+    }
+}
+
+/// One station reading as a surface names it: the `name` its messages use and the `path` its
+/// machine-readable refusal points at. A CLI uses the flag for both (`--humidity`); a JSON
+/// command uses the member's name and its path (`humidity`, `$.humidity`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AirField<'a> {
+    /// The reading's name in a message.
+    pub name: &'a str,
+    /// Where the reading sits in the surface's input: a JSON path, a flag, a file's field.
+    pub path: &'a str,
+}
+
+impl<'a> AirField<'a> {
+    /// A reading whose message name and path are the same text, as a CLI flag's are.
+    pub const fn named(name: &'a str) -> Self {
+        Self { name, path: name }
+    }
+}
+
+/// How one surface spells the station air it was given, so a refusal of that air reads in the
+/// surface's own words: its field names, the humidity in the unit it was sent in, and the
+/// temperature and pressure the solve resolved, in the surface's units with the unit named.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AirSpelling<'a> {
+    /// The relative humidity.
+    pub humidity: AirField<'a>,
+    /// The station temperature.
+    pub temperature: AirField<'a>,
+    /// The station pressure.
+    pub pressure: AirField<'a>,
+    /// The station altitude, or, for a station a density altitude gave, the density altitude
+    /// (a density altitude no air has is refused at this field, in `altitude_unit`).
+    pub altitude: AirField<'a>,
+    /// The humidity as the surface was sent it, in its own unit (a percent, or the SI wire's
+    /// fraction).
+    pub humidity_sent: f64,
+    /// The station temperature the solve flies, with its unit: `"212 °F"`, `"373.15 K"`.
+    pub temperature_text: String,
+    /// The unit the surface states a temperature in: the unit of `temperature_text`, in which a
+    /// refusal of a temperature at or below absolute zero states where absolute zero is, and a
+    /// refusal that blames the temperature states the range the humid-air formulas hold for.
+    pub temperature_unit: TemperatureUnit,
+    /// Where the station temperature came from: a reading, named by `temperature` as the
+    /// reading it is (`temperature = 214 °F`), or a density altitude, named by `temperature` as
+    /// the reading that gave it (`density_altitude gives a station temperature of ...`).
+    pub temperature_origin: StationTemperatureOrigin,
+    /// The station pressure the solve flies, with its unit: `"29.92 inHg"`, `"100000 Pa"`.
+    pub pressure_text: String,
+    /// Where that pressure came from: a reading, the standard pressure at the altitude, a QNH
+    /// reduced there, or a density altitude. It decides whether a station pressure outside the
+    /// troposphere is the pressure's fault, the altitude's or the density altitude's.
+    pub pressure_origin: StationPressureOrigin,
+    /// When the pressure was given as a QNH, the QNH as the surface was sent it, with its unit
+    /// (`"1013.25 Pa"`, `"5 hPa"`); `None` otherwise. A refusal that names the pressure's field
+    /// quotes this, the reading that was sent, and says it was reduced to `pressure_text`, never
+    /// the station pressure as if it had been sent.
+    pub qnh_text: Option<String>,
+    /// The unit the surface states an altitude in: every altitude a refusal quotes (a pressure
+    /// altitude, the troposphere's bounds, the station altitude, where air aloft reaches 0 K).
+    pub altitude_unit: AltitudeUnit,
+}
+
+impl AirSpelling<'_> {
+    /// The pressure's field, said to be a QNH, quoting it as it was sent when the surface gave
+    /// it: `"--pressure is a QNH of 5 hPa"`, or `"--pressure is a QNH"`.
+    fn qnh_named(&self) -> String {
+        match &self.qnh_text {
+            Some(qnh) => format!("{} is a QNH of {qnh}", self.pressure.name),
+            None => format!("{} is a QNH", self.pressure.name),
+        }
+    }
+}
+
+/// The unit a surface states an altitude in, in a refusal of its air: metres (the default, and
+/// every SI surface's), or feet (a terminal run with `--units imperial`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AltitudeUnit {
+    /// Metres: `1539 m`.
+    #[default]
+    Meters,
+    /// Feet: `5049 ft`.
+    Feet,
+}
+
+impl AltitudeUnit {
+    /// An altitude given in metres, stated in this unit to the nearest whole unit: `"1539 m"`,
+    /// `"5049 ft"`; from 10^7 units on, in exponent form to six significant digits
+    /// (`"-3.28813e34 m"`), never dozens of digits.
+    pub fn text(self, altitude_m: f64) -> String {
+        let (value, unit) = match self {
+            Self::Meters => (altitude_m, "m"),
+            Self::Feet => (altitude_m / 0.3048, "ft"),
+        };
+        if value.is_finite() && value.abs() >= EXPONENT_FROM {
+            format!("{} {unit}", exponent_text(value))
+        } else {
+            format!("{value:.0} {unit}")
+        }
+    }
+
+    /// A reading of an altitude given in metres, stated in this unit as a refusal quotes a
+    /// reading ([`reading_text`]): `"200000 ft"`, `"44500 m"`, `"NaN ft"`.
+    pub fn reading(self, altitude_m: f64) -> String {
+        match self {
+            Self::Meters => reading_text(altitude_m, "m"),
+            Self::Feet => reading_text(altitude_m / 0.3048, "ft"),
+        }
+    }
+}
+
+/// The unit a surface states a temperature in, in a refusal of its air.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TemperatureUnit {
+    /// Degrees Celsius: `15 °C`.
+    #[default]
+    Celsius,
+    /// Degrees Fahrenheit: `59 °F`.
+    Fahrenheit,
+    /// Kelvin, as the SI wire states it: `288.15 K`.
+    Kelvin,
+}
+
+impl TemperatureUnit {
+    /// A temperature given in °C, stated in this unit as a refusal quotes a reading
+    /// ([`reading_text`]): `"212 °F"`, `"373.15 K"`.
+    pub fn text(self, temperature_c: f64) -> String {
+        match self {
+            Self::Celsius => reading_text(temperature_c, "°C"),
+            Self::Fahrenheit => reading_text(temperature_c * 9.0 / 5.0 + 32.0, "°F"),
+            Self::Kelvin => reading_text(temperature_c + KELVIN_OFFSET, "K"),
+        }
+    }
+
+    /// Absolute zero in this unit: `"-273.15 °C"`, `"-459.67 °F"`, `"0 K"`.
+    pub fn absolute_zero_text(self) -> &'static str {
+        match self {
+            Self::Celsius => "-273.15 °C",
+            Self::Fahrenheit => "-459.67 °F",
+            Self::Kelvin => "0 K",
+        }
+    }
+}
+
+/// The unit a surface states a pressure in, in a refusal of its air.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PressureUnit {
+    /// Hectopascals: `1013.25 hPa`.
+    #[default]
+    Hectopascals,
+    /// Inches of mercury, `inHg × 33.8639 = hPa`: `29.92 inHg`.
+    InchesOfMercury,
+}
+
+impl PressureUnit {
+    /// A pressure given in hPa, stated in this unit as a refusal quotes a reading
+    /// ([`reading_text`]): `"29.92 inHg"`, `"1013.25 hPa"`, `"1e160 hPa"`. A pressure that is
+    /// not 0 is never stated as 0: one that rounds to 0 at two decimals is written in exponent
+    /// form, `"1e-300 hPa"`. (A pressure converts between units by a factor, never an offset,
+    /// so a pressure that small is a reading, not rounding left over from a conversion.)
+    pub fn text(self, pressure_hpa: f64) -> String {
+        let (value, unit) = match self {
+            Self::Hectopascals => (pressure_hpa, "hPa"),
+            Self::InchesOfMercury => (pressure_hpa / 33.8639, "inHg"),
+        };
+        let text = reading_text(value, unit);
+        if value != 0.0 && value.is_finite() && text == format!("0 {unit}") {
+            format!("{} {unit}", exponent_text(value))
+        } else {
+            text
+        }
+    }
+}
+
+/// The units a surface states its station readings in, in a refusal of its air: the
+/// temperature, the pressure and every altitude the refusal quotes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AirUnits {
+    /// The temperature's unit.
+    pub temperature: TemperatureUnit,
+    /// The pressure's unit.
+    pub pressure: PressureUnit,
+    /// The altitude's unit.
+    pub altitude: AltitudeUnit,
+}
+
+impl AirUnits {
+    /// °C, hPa and metres.
+    pub const METRIC: Self = Self {
+        temperature: TemperatureUnit::Celsius,
+        pressure: PressureUnit::Hectopascals,
+        altitude: AltitudeUnit::Meters,
+    };
+    /// °F, inHg and feet.
+    pub const IMPERIAL: Self = Self {
+        temperature: TemperatureUnit::Fahrenheit,
+        pressure: PressureUnit::InchesOfMercury,
+        altitude: AltitudeUnit::Feet,
+    };
+}
+
+/// A reading in a refusal message: rounded to 2 decimals with the trailing zeros dropped (so a
+/// temperature converted to °C and back reads `212`, not `212.00000000000003`), then its unit.
+/// From a magnitude of 10^7 on it is written in exponent form to six significant digits
+/// (`1e160 hPa`), so an absurd reading reads in a few characters, never hundreds of digits.
+pub fn reading_text(value: f64, unit: &str) -> String {
+    if value.is_finite() && value.abs() >= EXPONENT_FROM {
+        return format!("{} {unit}", exponent_text(value));
+    }
+    let rounded = format!("{value:.2}");
+    let trimmed = if rounded.contains('.') {
+        rounded.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        rounded.as_str()
+    };
+    let trimmed = if trimmed == "-0" { "0" } else { trimmed };
+    format!("{trimmed} {unit}")
+}
+
+/// The magnitude from which a refusal writes a number in exponent form ([`reading_text`],
+/// [`AltitudeUnit::text`], [`echo_number`]): `1e160`, not 161 digits.
+const EXPONENT_FROM: f64 = 1e7;
+
+/// `value` in exponent form to six significant digits, trailing zeros dropped: `1e160`,
+/// `-3.28813e34`, `1e-300`. For a figure a refusal states that is too large (or, for a
+/// pressure, too small) to write out.
+fn exponent_text(value: f64) -> String {
+    let text = format!("{value:.5e}");
+    match text.split_once('e') {
+        Some((mantissa, exponent)) if mantissa.contains('.') => format!(
+            "{}e{exponent}",
+            mantissa.trim_end_matches('0').trim_end_matches('.')
+        ),
+        _ => text,
+    }
+}
+
+/// A number a refusal echoes as it was given: exactly, in its shortest form (`106`, `29.92`,
+/// `-0.5`), or in exponent form when its magnitude is 10^7 or more, or below 0.001 and not 0
+/// (`1e300`, `-1e-300`), so an absurd reading reads in a few characters, never hundreds of
+/// digits. The SI wire's echo (`solve_v1::echo_si`) is this.
+pub fn echo_number(value: f64) -> String {
+    if value == 0.0 || !value.is_finite() || (1e-3..EXPONENT_FROM).contains(&value.abs()) {
+        format!("{value}")
+    } else {
+        format!("{value:e}")
+    }
+}
+
+/// Station air refused in one surface's own words: the field to blame, as that surface locates
+/// it ([`Self::path`]), and the message ([`Self::message`]).
+///
+/// Every surface states a refusal of the same air one way. Air that cannot exist reads
+/// `"<humidity> = <h> at <temperature> and <pressure>: no such air exists: ..."`, naming the
+/// three readings that together are impossible; a humidity outside the sensor band reads
+/// `"<humidity> = <h>: relative humidity must be a percent from 0 to 100 (...)"`. Built by
+/// [`AtmosphereError::refusal_in`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AirRefusal {
+    path: String,
+    message: String,
+    reason: AtmosphereErrorReason,
+}
+
+impl AirRefusal {
+    /// Why the air was refused.
+    pub fn reason(&self) -> AtmosphereErrorReason {
+        self.reason
+    }
+
+    /// Where the reading to blame sits in the surface's input, as the surface's
+    /// [`AirSpelling`] locates it.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// The refusal, in the surface's words.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for AirRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for AirRefusal {}
+
+impl AtmosphereError {
+    /// This refusal of a station's air, stated in a surface's own words.
+    ///
+    /// `spelling` names the surface's readings and carries their values in its units;
+    /// `station_altitude_m`, `station_temperature_c` and `station_pressure_hpa` are the station
+    /// the solve resolved. A refusal for any reason but air that cannot exist blames the reading
+    /// this error names, in the surface's units (a temperature at or below absolute zero states
+    /// absolute zero in [`AirSpelling::temperature_unit`]; a density altitude no air has is the
+    /// field [`AirSpelling::altitude`] names, since a surface that flies one names its altitude by
+    /// it). Air that cannot exist is blamed by one rule on every surface, so every surface
+    /// locates the same air at the same reading:
+    ///
+    /// 1. the temperature, when the air is humid above water's critical point (647.096 K), or
+    ///    the temperature is outside 173.15 K to 373.15 K (-100 °C to 100 °C, where the humid-air
+    ///    formulas hold). Such a temperature is refused by no surface on its own (the humidity
+    ///    terms are extrapolated there); with air that cannot exist it is the likelier mistake.
+    ///    The message names it where it came from ([`AirSpelling::temperature_origin`]): the
+    ///    reading (`; temperature = 214 °F is outside -148 °F to 212 °F, ...: check the
+    ///    temperature and its unit`), or the density altitude that gave it (`; density_altitude
+    ///    gives a station temperature of ...: check the density altitude's unit`);
+    /// 2. when the station pressure's pressure altitude is outside the troposphere, the reading
+    ///    that put it there ([`AirSpelling::pressure_origin`]): the pressure when it was a
+    ///    reading, because a pressure in the wrong unit (hPa sent as pascals) is far likelier
+    ///    than a humidity of 50 % in air 25 km up, and the altitude when the pressure was the
+    ///    standard pressure there or a plausible QNH reduced there (feet sent as metres), the
+    ///    density altitude when a density altitude gave it. The message says which unit to
+    ///    check, and quotes a QNH as it was sent ([`AirSpelling::qnh_text`]), with the station
+    ///    pressure it was reduced to;
+    /// 3. otherwise the humidity.
+    ///
+    /// A QNH the altimeter-setting relation leaves no station pressure for is quoted as it was
+    /// sent too, never as the NaN it reduced to: blamed on the altitude when it is a plausible
+    /// sea-level pressure, on the pressure otherwise.
+    pub fn refusal_in(
+        &self,
+        spelling: &AirSpelling<'_>,
+        station_altitude_m: f64,
+        station_temperature_c: f64,
+        station_pressure_hpa: f64,
+    ) -> AirRefusal {
+        let (path, message) = self.refusal_parts(
+            spelling,
+            station_altitude_m,
+            station_temperature_c,
+            station_pressure_hpa,
+        );
+        AirRefusal {
+            path,
+            message,
+            reason: self.reason,
+        }
+    }
+
+    fn refusal_parts(
+        &self,
+        spelling: &AirSpelling<'_>,
+        station_altitude_m: f64,
+        station_temperature_c: f64,
+        station_pressure_hpa: f64,
+    ) -> (String, String) {
+        let explanation = self.explanation_in(spelling.altitude_unit);
+        let altitude = |altitude_m: f64| spelling.altitude_unit.text(altitude_m);
+        if self.reason == AtmosphereErrorReason::ImpossibleAir {
+            let air = format!(
+                "{} = {} at {} and {}: {explanation}",
+                spelling.humidity.name,
+                echo_number(spelling.humidity_sent),
+                spelling.temperature_text,
+                spelling.pressure_text
+            );
+            // In kelvin, as `atmosphere.density_altitude` compares it. A wire `temperature_k`
+            // between 136.6 K and 546.3 K loses nothing when 273.15 is subtracted (Sterbenz), so
+            // adding it back restores the very float that command compared; farther out no
+            // rounding comes near an edge. The two commands decide every edge alike.
+            if self.field == "temperature_c"
+                || outside_humid_air_model_range(station_temperature_c + KELVIN_OFFSET)
+            {
+                // Named where it came from, as every other blamed reading is. Humid air above
+                // water's critical point, and dry air too hot to have a density, are outside
+                // the range too.
+                let range = format!(
+                    "outside {} to {}, where the humid-air formulas hold",
+                    spelling
+                        .temperature_unit
+                        .text(HUMID_AIR_MODEL_MIN_K - KELVIN_OFFSET),
+                    spelling
+                        .temperature_unit
+                        .text(HUMID_AIR_MODEL_MAX_K - KELVIN_OFFSET)
+                );
+                let blame = match spelling.temperature_origin {
+                    StationTemperatureOrigin::Reading => format!(
+                        "{} = {} is {range}: check the temperature and its unit",
+                        spelling.temperature.name, spelling.temperature_text
+                    ),
+                    StationTemperatureOrigin::DensityAltitude => format!(
+                        "{} gives a station temperature of {}, {range}: check the density \
+                         altitude's unit",
+                        spelling.temperature.name, spelling.temperature_text
+                    ),
+                };
+                return (
+                    spelling.temperature.path.to_string(),
+                    format!("{air}; {blame}"),
+                );
+            }
+            if let Some(altitude_m) = pressure_altitude_outside_troposphere_m(station_pressure_hpa)
+            {
+                let troposphere = format!(
+                    "a pressure altitude of {}, outside the troposphere ({} to {})",
+                    altitude(altitude_m),
+                    altitude(LOWEST_PRESSURE_ALTITUDE_M),
+                    altitude(TROPOSPHERE_TOP_M)
+                );
+                // A QNH is quoted as it was sent, and said to be reduced, never as if the station
+                // pressure reduced from it had been sent.
+                let reduced = |unit: &str| {
+                    format!(
+                        "{air}; {}, and reduced to the station altitude of {} it is a station \
+                         pressure of {}, {troposphere}: check the {unit}'s unit",
+                        spelling.qnh_named(),
+                        altitude(station_altitude_m),
+                        spelling.pressure_text
+                    )
+                };
+                return match spelling.pressure_origin {
+                    StationPressureOrigin::Reading if spelling.qnh_text.is_some() => {
+                        (spelling.pressure.path.to_string(), reduced("pressure"))
+                    }
+                    StationPressureOrigin::Reading => (
+                        spelling.pressure.path.to_string(),
+                        format!(
+                            "{air}; {} = {} is {troposphere}: check the pressure's unit",
+                            spelling.pressure.name, spelling.pressure_text
+                        ),
+                    ),
+                    StationPressureOrigin::Standard => (
+                        spelling.altitude.path.to_string(),
+                        format!(
+                            "{air}; no {} was given, and the standard pressure at the station \
+                             altitude of {} is {troposphere}: check the altitude's unit",
+                            spelling.pressure.name,
+                            altitude(station_altitude_m)
+                        ),
+                    ),
+                    StationPressureOrigin::Qnh => {
+                        (spelling.altitude.path.to_string(), reduced("altitude"))
+                    }
+                    StationPressureOrigin::DensityAltitude => (
+                        spelling.pressure.path.to_string(),
+                        format!(
+                            "{air}; {} gives a station pressure of {}, {troposphere}: check the \
+                             density altitude's unit",
+                            spelling.pressure.name, spelling.pressure_text
+                        ),
+                    ),
+                };
+            }
+            return (spelling.humidity.path.to_string(), air);
+        }
+        // A QNH whose reduction to the station altitude leaves no station pressure (the
+        // altimeter-setting relation has none that high) is quoted as it was sent, never as the
+        // NaN it reduced to: the altitude's fault when the QNH is itself a plausible sea-level
+        // pressure, as on the SI wire, and the pressure's when it is not.
+        if self.field == "pressure_hpa"
+            && matches!(
+                self.reason,
+                AtmosphereErrorReason::NotFinite | AtmosphereErrorReason::NonPositivePressure
+            )
+            && (spelling.pressure_origin == StationPressureOrigin::Qnh
+                || spelling.qnh_text.is_some())
+        {
+            let (path, unit) = if spelling.pressure_origin == StationPressureOrigin::Qnh {
+                (spelling.altitude.path, "altitude")
+            } else {
+                (spelling.pressure.path, "pressure")
+            };
+            return (
+                path.to_string(),
+                format!(
+                    "{}, and reduced to the station altitude of {} it leaves no station \
+                     pressure: the altimeter-setting relation has none that high (check the \
+                     {unit}'s unit)",
+                    spelling.qnh_named(),
+                    altitude(station_altitude_m)
+                ),
+            );
+        }
+        // Absolute zero in the surface's own unit, as its reading is.
+        let explanation = match self.reason {
+            AtmosphereErrorReason::AtOrBelowAbsoluteZero => format!(
+                "temperature must be above absolute zero ({})",
+                spelling.temperature_unit.absolute_zero_text()
+            ),
+            _ => explanation,
+        };
+        let (field, value) = match &*self.field {
+            // A temperature or a pressure a density altitude gave is named as that density
+            // altitude's, never as if it had been sent as the reading.
+            "temperature_c"
+                if spelling.temperature_origin == StationTemperatureOrigin::DensityAltitude =>
+            {
+                return (
+                    spelling.temperature.path.to_string(),
+                    format!(
+                        "{} gives a station temperature of {}: {explanation}",
+                        spelling.temperature.name, spelling.temperature_text
+                    ),
+                );
+            }
+            "pressure_hpa"
+                if spelling.pressure_origin == StationPressureOrigin::DensityAltitude =>
+            {
+                return (
+                    spelling.pressure.path.to_string(),
+                    format!(
+                        "{} gives a station pressure of {}: {explanation}",
+                        spelling.pressure.name, spelling.pressure_text
+                    ),
+                );
+            }
+            "temperature_c" => (spelling.temperature, spelling.temperature_text.clone()),
+            "pressure_hpa" => (spelling.pressure, spelling.pressure_text.clone()),
+            // An altitude is refused only when it is not finite, which needs no unit.
+            "altitude_m" => (spelling.altitude, echo_number(self.value)),
+            // A density altitude flies as the station's altitude, and a surface that flies one
+            // names the altitude by the density altitude's field, in the surface's unit.
+            "density_altitude_m" => (
+                spelling.altitude,
+                spelling.altitude_unit.reading(self.value),
+            ),
+            _ => (spelling.humidity, echo_number(self.value)),
+        };
+        (
+            field.path.to_string(),
+            format!("{} = {value}: {explanation}", field.name),
+        )
+    }
+}
+
+/// The air at the shooter: station altitude, temperature, pressure and relative humidity, with
+/// the density and speed of sound they give.
+///
+/// Every field is private and there is no `Default`, so a station cannot be built without its
+/// humidity, and its density and sound speed cannot disagree about that humidity. Build one with
+/// [`Self::new`]. [`Self::with_density_ratio`] exists only for legacy 4-tuple callers that hold
+/// a density ratio of their own.
+///
+/// ```
+/// use ballistics_engine::{RelativeHumidity, StationAir};
+///
+/// let station = StationAir::new(0.0, 15.0, 1013.25, RelativeHumidity::DEFAULT).unwrap();
+/// assert!(station.density_kg_m3() < 1.225); // moist air is lighter than dry
+/// assert!(station.speed_of_sound_mps() > 340.29); // and carries sound faster
+///
+/// // Air that cannot exist is refused: saturated air at 100 C needs more vapour pressure than
+/// // the 1013.25 hPa the air has.
+/// let saturated = RelativeHumidity::try_percent(100.0).unwrap();
+/// assert!(StationAir::new(0.0, 100.0, 1013.25, saturated).is_err());
+/// ```
+#[derive(Clone, Copy, PartialEq)]
+pub struct StationAir {
+    altitude_m: f64,
+    temperature_c: f64,
+    pressure_hpa: f64,
+    humidity: RelativeHumidity,
+    density_ratio: f64,
+    density_kg_m3: f64,
+    speed_of_sound_mps: f64,
+    /// The station's water-vapour mole fraction, which [`air_at`] holds at every height:
+    /// [`governing_vapor_mole_fraction`] at the fields above, computed once here rather than at
+    /// every step of every flight. A cache of the other fields, not state of
+    /// its own, so `Debug` leaves it out.
+    vapor_mole_fraction: f64,
+}
+
+// The derive's output before the vapour mole fraction was held, field for field: it is a cache.
+impl fmt::Debug for StationAir {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StationAir")
+            .field("altitude_m", &self.altitude_m)
+            .field("temperature_c", &self.temperature_c)
+            .field("pressure_hpa", &self.pressure_hpa)
+            .field("humidity", &self.humidity)
+            .field("density_ratio", &self.density_ratio)
+            .field("density_kg_m3", &self.density_kg_m3)
+            .field("speed_of_sound_mps", &self.speed_of_sound_mps)
+            .finish()
+    }
+}
+
+impl StationAir {
+    /// The station air at `altitude_m` (geometric, above mean sea level), `temperature_c`,
+    /// absolute station pressure `pressure_hpa` and `humidity`.
+    ///
+    /// The density and sound speed are [`calculate_atmosphere`]'s at exactly these inputs, so a
+    /// station built here matches every solver that resolves its air through that function, to
+    /// the bit. The density ratio is `density / 1.225`.
+    ///
+    /// # Errors
+    ///
+    /// - `altitude_m`, `temperature_c` or `pressure_hpa` not finite:
+    ///   [`AtmosphereErrorReason::NotFinite`].
+    /// - `temperature_c <= -273.15`: [`AtmosphereErrorReason::AtOrBelowAbsoluteZero`].
+    /// - `pressure_hpa <= 0`: [`AtmosphereErrorReason::NonPositivePressure`].
+    /// - Impossible air, refused by exactly the `atmosphere.density_altitude` service's test
+    ///   (an uncapped water-vapour mole fraction that is NaN or at least 1):
+    ///   [`AtmosphereErrorReason::ImpossibleAir`], on `humidity_percent`, or on
+    ///   `temperature_c` for humid air above water's critical point (647.096 K), and for dry air
+    ///   there too hot for the CIPM-2007 density to stay positive (about 90,000 K at
+    ///   1013.25 hPa); or on `pressure_hpa` for a pressure so far beyond any air's (above about
+    ///   4e156 Pa) that the density is not finite and positive.
+    ///
+    /// Those are the only temperatures refused ([`check_station_temperature_c`] is the rule on
+    /// its own): outside 173.15-373.15 K (-100 °C to 100 °C) the humidity terms are extrapolated,
+    /// never refused. Below 173.15 K the saturation vapour pressure and the CIPM compressibility
+    /// are evaluated at 173.15 K (they clamp their temperature there), and above 373.15 K they
+    /// are carried past the range they are fitted to. Dry air holds no vapour at any
+    /// temperature, so at 0 % neither term is reached. A station whose lapse takes the air to
+    /// absolute zero aloft is accepted here and refused by the flight that reaches that height
+    /// ([`AtmosphereErrorReason::AirAloftBelowAbsoluteZero`]).
+    pub fn new(
+        altitude_m: f64,
+        temperature_c: f64,
+        pressure_hpa: f64,
+        humidity: RelativeHumidity,
+    ) -> Result<Self, AtmosphereError> {
+        check_station_state(altitude_m, temperature_c, pressure_hpa)?;
+        refuse_impossible_air(temperature_c, pressure_hpa, humidity)?;
+        Ok(Self::from_calculate_atmosphere(
+            altitude_m,
+            temperature_c,
+            pressure_hpa,
+            humidity,
+        ))
+    }
+
+    /// A station that keeps a caller-held `density_ratio` (density / 1.225 kg/m³) verbatim.
+    ///
+    /// For legacy `(altitude, temperature, pressure, ratio)` 4-tuples only, through
+    /// [`KernelAtmosphere::from_legacy_params`]: the caller asserts that the ratio was built at
+    /// this humidity. Everywhere else use [`Self::new`], which cannot pair a density with the
+    /// wrong humidity. The sound speed is the station's own at `humidity`, as in `new`.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`Self::new`], plus a `density_ratio` that is not finite or not in `(0, 2)`.
+    pub fn with_density_ratio(
+        altitude_m: f64,
+        temperature_c: f64,
+        pressure_hpa: f64,
+        density_ratio: f64,
+        humidity: RelativeHumidity,
+    ) -> Result<Self, AtmosphereError> {
+        const FIELD: &str = "density_ratio";
+        check_station_state(altitude_m, temperature_c, pressure_hpa)?;
+        if !density_ratio.is_finite() {
+            return Err(AtmosphereError::new(
+                FIELD,
+                density_ratio,
+                AtmosphereErrorReason::NotFinite,
+            ));
+        }
+        if !(density_ratio > 0.0 && density_ratio < MAX_STATION_DENSITY_RATIO) {
+            return Err(AtmosphereError::new(
+                FIELD,
+                density_ratio,
+                AtmosphereErrorReason::DensityRatioOutOfRange,
+            ));
+        }
+        refuse_impossible_air(temperature_c, pressure_hpa, humidity)?;
+        Ok(Self {
+            altitude_m,
+            temperature_c,
+            pressure_hpa,
+            humidity,
+            density_ratio,
+            density_kg_m3: density_ratio * 1.225,
+            // calculate_atmosphere's own sound speed: its K and Pa conversions, then the moist
+            // formula.
+            speed_of_sound_mps: moist_speed_of_sound(
+                temperature_c + 273.15,
+                pressure_hpa * 100.0,
+                humidity.percent(),
+            ),
+            vapor_mole_fraction: governing_vapor_mole_fraction(
+                temperature_c,
+                pressure_hpa,
+                humidity.percent(),
+            ),
+        })
+    }
+
+    fn from_calculate_atmosphere(
+        altitude_m: f64,
+        temperature_c: f64,
+        pressure_hpa: f64,
+        humidity: RelativeHumidity,
+    ) -> Self {
+        let (density_kg_m3, speed_of_sound_mps) = calculate_atmosphere(
+            altitude_m,
+            Some(temperature_c),
+            Some(pressure_hpa),
+            humidity.percent(),
+        );
+        Self {
+            altitude_m,
+            temperature_c,
+            pressure_hpa,
+            humidity,
+            density_ratio: density_kg_m3 / 1.225,
+            density_kg_m3,
+            speed_of_sound_mps,
+            vapor_mole_fraction: governing_vapor_mole_fraction(
+                temperature_c,
+                pressure_hpa,
+                humidity.percent(),
+            ),
+        }
+    }
+
+    /// The station as the governing air of a point no downrange zone covers.
+    #[inline(always)]
+    fn governing_air(&self) -> GoverningAir {
+        GoverningAir {
+            temperature_c: self.temperature_c,
+            pressure_hpa: self.pressure_hpa,
+            density_ratio: self.density_ratio,
+            vapor_mole_fraction: self.vapor_mole_fraction,
+            #[cfg(test)]
+            humidity_percent: self.humidity.percent(),
+        }
+    }
+
+    /// Station geometric altitude above mean sea level, m. The altitude lapse starts here.
+    pub fn altitude_m(&self) -> f64 {
+        self.altitude_m
+    }
+
+    /// Station temperature, °C.
+    pub fn temperature_c(&self) -> f64 {
+        self.temperature_c
+    }
+
+    /// Absolute station pressure, hPa.
+    pub fn pressure_hpa(&self) -> f64 {
+        self.pressure_hpa
+    }
+
+    /// Station relative humidity.
+    pub fn humidity(&self) -> RelativeHumidity {
+        self.humidity
+    }
+
+    /// Station density over 1.225 kg/m³.
+    pub fn density_ratio(&self) -> f64 {
+        self.density_ratio
+    }
+
+    /// Station air density, kg/m³ (CIPM-2007, humid).
+    pub fn density_kg_m3(&self) -> f64 {
+        self.density_kg_m3
+    }
+
+    /// Station speed of sound, m/s (moist air). The reference for station Mach.
+    pub fn speed_of_sound_mps(&self) -> f64 {
+        self.speed_of_sound_mps
+    }
+}
+
+/// The one rule a station temperature, °C, is held to on its own, on every surface: finite and
+/// above absolute zero (-273.15 °C). Nothing narrower: outside 173.15-373.15 K (-100 °C to
+/// 100 °C) the humidity terms are extrapolated, never refused. [`StationAir::new`] applies it,
+/// and then the impossible-air rule, which is the only other reason a temperature is refused (in
+/// flight too: [`AtmosphereErrorReason::AirAloftBelowAbsoluteZero`]). A surface that checks a
+/// reading as it is typed (a CLI flag, converted to °C) applies this same function, so a reading
+/// is accepted or refused alike everywhere.
+///
+/// ```
+/// use ballistics_engine::atmosphere::check_station_temperature_c;
+///
+/// assert!(check_station_temperature_c(250.0).is_ok()); // extrapolated, not refused
+/// assert!(check_station_temperature_c(-150.0).is_ok());
+/// assert!(check_station_temperature_c(-273.15).is_err()); // absolute zero
+/// assert!(check_station_temperature_c(f64::NAN).is_err());
+/// ```
+///
+/// # Errors
+///
+/// [`AtmosphereErrorReason::NotFinite`] or [`AtmosphereErrorReason::AtOrBelowAbsoluteZero`],
+/// on `temperature_c`.
+pub fn check_station_temperature_c(temperature_c: f64) -> Result<(), AtmosphereError> {
+    if !temperature_c.is_finite() {
+        return Err(AtmosphereError::new(
+            "temperature_c",
+            temperature_c,
+            AtmosphereErrorReason::NotFinite,
+        ));
+    }
+    if temperature_c <= ABSOLUTE_ZERO_C {
+        return Err(AtmosphereError::new(
+            "temperature_c",
+            temperature_c,
+            AtmosphereErrorReason::AtOrBelowAbsoluteZero,
+        ));
+    }
+    Ok(())
+}
+
+/// [`check_station_temperature_c`] for a temperature typed into a flag (`flag`, such as
+/// `--temperature`) in °F (`fahrenheit`) or °C, refused in the flag's own words and unit:
+/// `"--temperature -500 F is at or below absolute zero (-459.67 F)"`, `"--temperature NaN C is
+/// not a finite number"`. The reading is converted to °C exactly as the CLI and the browser
+/// terminal fly it, `(F - 32) · 5 / 9`, so the flag refuses precisely the readings the solve
+/// would.
+///
+/// ```
+/// use ballistics_engine::atmosphere::check_temperature_flag;
+///
+/// assert!(check_temperature_flag("--temperature", 482.0, true).is_ok()); // 250 °C
+/// assert_eq!(
+///     check_temperature_flag("--temperature", -500.0, true).unwrap_err(),
+///     "--temperature -500 F is at or below absolute zero (-459.67 F)"
+/// );
+/// ```
+///
+/// # Errors
+///
+/// The refusal, in the flag's words, of a reading [`check_station_temperature_c`] refuses.
+pub fn check_temperature_flag(flag: &str, value: f64, fahrenheit: bool) -> Result<(), String> {
+    let (celsius, unit, absolute_zero) = if fahrenheit {
+        ((value - 32.0) * 5.0 / 9.0, "F", "-459.67 F")
+    } else {
+        (value, "C", "-273.15 C")
+    };
+    check_station_temperature_c(celsius).map_err(|error| match error.reason() {
+        AtmosphereErrorReason::NotFinite => {
+            format!(
+                "{flag} {} {unit} is not a finite number",
+                echo_number(value)
+            )
+        }
+        _ => format!(
+            "{flag} {} {unit} is at or below absolute zero ({absolute_zero})",
+            echo_number(value)
+        ),
+    })
+}
+
+/// The one rule a station pressure, hPa, is held to on its own, on every surface: finite and
+/// above 0. Nothing narrower: a near vacuum and twice sea level fly. [`StationAir::new`] applies
+/// it, and then the impossible-air rule, which is the only other reason a pressure is refused. A
+/// surface that checks a reading as it is typed applies this same function
+/// ([`check_pressure_flag`]), so a reading is accepted or refused alike everywhere.
+///
+/// ```
+/// use ballistics_engine::atmosphere::check_station_pressure_hpa;
+///
+/// assert!(check_station_pressure_hpa(0.01).is_ok()); // 1 Pa
+/// assert!(check_station_pressure_hpa(2000.0).is_ok());
+/// assert!(check_station_pressure_hpa(0.0).is_err());
+/// assert!(check_station_pressure_hpa(f64::NAN).is_err());
+/// ```
+///
+/// # Errors
+///
+/// [`AtmosphereErrorReason::NotFinite`] or [`AtmosphereErrorReason::NonPositivePressure`], on
+/// `pressure_hpa`.
+pub fn check_station_pressure_hpa(pressure_hpa: f64) -> Result<(), AtmosphereError> {
+    if !pressure_hpa.is_finite() {
+        return Err(AtmosphereError::new(
+            "pressure_hpa",
+            pressure_hpa,
+            AtmosphereErrorReason::NotFinite,
+        ));
+    }
+    if pressure_hpa <= 0.0 {
+        return Err(AtmosphereError::new(
+            "pressure_hpa",
+            pressure_hpa,
+            AtmosphereErrorReason::NonPositivePressure,
+        ));
+    }
+    Ok(())
+}
+
+/// [`check_station_pressure_hpa`] for a pressure typed into a flag (`flag`, such as
+/// `--pressure`) in inHg (`inhg`) or hPa, refused in the flag's own words and unit:
+/// `"--pressure -1 inHg is at or below zero"`, `"--pressure NaN hPa is not a finite number"`.
+/// The reading is converted to hPa exactly as the CLI and the browser terminal fly it
+/// (`inHg × 33.8639`), so the flag refuses precisely the readings the solve would.
+///
+/// ```
+/// use ballistics_engine::atmosphere::check_pressure_flag;
+///
+/// assert!(check_pressure_flag("--pressure", 5.0, true).is_ok()); // the stratosphere
+/// assert_eq!(
+///     check_pressure_flag("--pressure", -1.0, true).unwrap_err(),
+///     "--pressure -1 inHg is at or below zero"
+/// );
+/// ```
+///
+/// # Errors
+///
+/// The refusal, in the flag's words, of a reading [`check_station_pressure_hpa`] refuses.
+pub fn check_pressure_flag(flag: &str, value: f64, inhg: bool) -> Result<(), String> {
+    let (hpa, unit) = if inhg {
+        (value * 33.8639, "inHg")
+    } else {
+        (value, "hPa")
+    };
+    check_station_pressure_hpa(hpa).map_err(|error| match error.reason() {
+        AtmosphereErrorReason::NotFinite => {
+            format!(
+                "{flag} {} {unit} is not a finite number",
+                echo_number(value)
+            )
+        }
+        _ => format!("{flag} {} {unit} is at or below zero", echo_number(value)),
+    })
+}
+
+/// The one rule a station altitude or a density altitude typed into a flag (`flag`, such as
+/// `--altitude`) is held to on its own, in feet (`feet`) or metres: a finite number, refused in
+/// the flag's own words and unit otherwise (`"--altitude NaN ft is not a finite number"`). A
+/// density altitude is held to the rest of its rule where its station is resolved
+/// ([`station_for_density_altitude`]), since that depends on the temperature.
+///
+/// ```
+/// use ballistics_engine::atmosphere::check_altitude_flag;
+///
+/// assert!(check_altitude_flag("--altitude", 300_000.0, true).is_ok());
+/// assert_eq!(
+///     check_altitude_flag("--altitude", f64::NAN, true).unwrap_err(),
+///     "--altitude NaN ft is not a finite number"
+/// );
+/// ```
+///
+/// # Errors
+///
+/// The refusal of a value that is not a finite number once converted to metres.
+pub fn check_altitude_flag(flag: &str, value: f64, feet: bool) -> Result<(), String> {
+    let (metres, unit) = if feet {
+        (value * DA_FT_TO_M, "ft")
+    } else {
+        (value, "m")
+    };
+    if metres.is_finite() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{flag} {} {unit} is not a finite number",
+            echo_number(value)
+        ))
+    }
+}
+
+fn check_station_state(
+    altitude_m: f64,
+    temperature_c: f64,
+    pressure_hpa: f64,
+) -> Result<(), AtmosphereError> {
+    if !altitude_m.is_finite() {
+        return Err(AtmosphereError::new(
+            "altitude_m",
+            altitude_m,
+            AtmosphereErrorReason::NotFinite,
+        ));
+    }
+    check_station_temperature_c(temperature_c)?;
+    check_station_pressure_hpa(pressure_hpa)
+}
+
+/// The impossible-air rule every station and zone is held to (and the `atmosphere.density_altitude`
+/// service through it): an uncapped vapour mole fraction that is NaN (humid air above water's
+/// critical point) or at least 1; and, above that point, where only dry air gets this far, a
+/// CIPM-2007 density that is not finite and positive.
+fn refuse_impossible_air(
+    temperature_c: f64,
+    pressure_hpa: f64,
+    humidity: RelativeHumidity,
+) -> Result<(), AtmosphereError> {
+    let x_v = water_vapor_mole_fraction_uncapped(temperature_c, pressure_hpa, humidity.percent());
+    if x_v.is_nan() {
+        return Err(AtmosphereError::new(
+            "temperature_c",
+            temperature_c,
+            AtmosphereErrorReason::ImpossibleAir,
+        ));
+    }
+    if x_v >= 1.0 {
+        return Err(AtmosphereError::new(
+            "humidity_percent",
+            humidity.percent(),
+            AtmosphereErrorReason::ImpossibleAir,
+        ));
+    }
+    // Air the CIPM-2007 density cannot describe is refused. Dry air above water's critical point
+    // holds no vapour (its mole fraction is exactly 0) and flies, but its compressibility is a
+    // virial fit carried far past its range there, and far enough above it (about 90,000 K at
+    // 1013.25 hPa) it gives no positive density at all: refused at its temperature. At any lower
+    // temperature only a pressure far beyond any air's (above about 4e156 Pa, where the fit's
+    // squared pressure term overflows and the density comes out 0, which a flight would take for
+    // a vacuum) does that: refused at its pressure. For every other station the density is
+    // finite and positive, and the rule is the two tests above.
+    let density = calculate_air_density_cimp(temperature_c, pressure_hpa, humidity.percent());
+    if !(density.is_finite() && density > 0.0) {
+        let hot = temperature_c + KELVIN_OFFSET > WATER_CRITICAL_TEMPERATURE_K;
+        return Err(if hot {
+            AtmosphereError::new(
+                "temperature_c",
+                temperature_c,
+                AtmosphereErrorReason::ImpossibleAir,
+            )
+        } else {
+            AtmosphereError::new(
+                "pressure_hpa",
+                pressure_hpa,
+                AtmosphereErrorReason::ImpossibleAir,
+            )
+        });
+    }
+    Ok(())
+}
+
+/// The air at one point of a flight, from [`air_at`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LocalAir {
+    /// Local air density, kg/m³.
+    pub density_kg_m3: f64,
+    /// Local speed of sound, m/s.
+    pub speed_of_sound_mps: f64,
+    /// Local temperature, K. For [`KernelAtmosphere::Uniform`] it is the dry-air temperature
+    /// that gives the caller's sound speed, `c² / (1.4 · 287.0531)`.
+    pub temperature_k: f64,
+    /// Local pressure, Pa. `0.0` for [`KernelAtmosphere::Uniform`], which does not model it.
+    pub pressure_pa: f64,
+}
+
+/// The atmosphere a trajectory kernel flies.
+///
+/// [`Self::Station`] carries station air, humidity included, and the air varies with altitude
+/// and downrange zones through [`air_at`]. [`Self::Uniform`] is direct mode: one density and
+/// sound speed at every point.
+///
+/// Neither variant can hold unvalidated air. [`StationAir`] has private fields, and `Uniform`
+/// can only be built by [`Self::uniform`] or [`Self::from_legacy_params`] outside this crate.
+/// Match it with `..`:
+///
+/// ```
+/// use ballistics_engine::KernelAtmosphere;
+///
+/// let atmosphere = KernelAtmosphere::uniform(1.1, 330.0).unwrap();
+/// match atmosphere {
+///     KernelAtmosphere::Uniform { density_kg_m3, speed_of_sound_mps, .. } => {
+///         assert_eq!((density_kg_m3, speed_of_sound_mps), (1.1, 330.0));
+///     }
+///     KernelAtmosphere::Station(_) => unreachable!(),
+/// }
+/// ```
+///
+/// ```compile_fail,E0639
+/// use ballistics_engine::KernelAtmosphere;
+///
+/// // Bypassing `uniform`'s validation does not compile (E0639: the variant is
+/// // `#[non_exhaustive]`).
+/// let atmosphere = KernelAtmosphere::Uniform { density_kg_m3: -1.0, speed_of_sound_mps: 0.0 };
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum KernelAtmosphere {
+    /// Station-referenced air, humidity included.
+    Station(StationAir),
+    /// Direct mode: the caller's density and speed of sound, unchanged at every point.
+    #[non_exhaustive]
+    Uniform {
+        /// Air density, kg/m³, in `[0, 2)`; exactly 0 is a vacuum, with no drag at all.
+        density_kg_m3: f64,
+        /// Speed of sound, m/s, above 200.
+        speed_of_sound_mps: f64,
+    },
+}
+
+impl KernelAtmosphere {
+    /// Direct-mode air: one density and speed of sound at every point.
+    ///
+    /// A density of exactly 0 is a vacuum: the flight feels gravity and nothing else, exactly as
+    /// 0.49.0's `compute_derivatives` flew the `(0, c, 0, 0)` tuple. `-0.0`
+    /// is the same vacuum and is stored as `0.0`.
+    ///
+    /// ```
+    /// use ballistics_engine::KernelAtmosphere;
+    ///
+    /// assert!(KernelAtmosphere::uniform(0.0, 340.29).is_ok()); // a vacuum
+    /// assert!(KernelAtmosphere::uniform(-1.0, 340.29).is_err());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A `density_kg_m3` that is not finite or not in `[0, 2)`, or a `speed_of_sound_mps` that
+    /// is not finite or not above 200. The upper density and lower sound-speed bounds are the
+    /// ones 0.49.0's `compute_derivatives` used to recognise direct mode; its other kernels
+    /// differed (`fast_integrate` required a density above 0).
+    pub fn uniform(density_kg_m3: f64, speed_of_sound_mps: f64) -> Result<Self, AtmosphereError> {
+        if !density_kg_m3.is_finite() {
+            return Err(AtmosphereError::new(
+                "density_kg_m3",
+                density_kg_m3,
+                AtmosphereErrorReason::NotFinite,
+            ));
+        }
+        if !(0.0..MAX_UNIFORM_DENSITY_KG_M3).contains(&density_kg_m3) {
+            return Err(AtmosphereError::new(
+                "density_kg_m3",
+                density_kg_m3,
+                AtmosphereErrorReason::UniformDensityOutOfRange,
+            ));
+        }
+        // -0.0 is the same vacuum as 0.0; adding 0.0 stores it as +0.0 and moves no other value.
+        let density_kg_m3 = density_kg_m3 + 0.0;
+        if !speed_of_sound_mps.is_finite() {
+            return Err(AtmosphereError::new(
+                "speed_of_sound_mps",
+                speed_of_sound_mps,
+                AtmosphereErrorReason::NotFinite,
+            ));
+        }
+        if speed_of_sound_mps <= MIN_UNIFORM_SPEED_OF_SOUND_MPS {
+            return Err(AtmosphereError::new(
+                "speed_of_sound_mps",
+                speed_of_sound_mps,
+                AtmosphereErrorReason::UniformSpeedOfSoundOutOfRange,
+            ));
+        }
+        Ok(Self::Uniform {
+            density_kg_m3,
+            speed_of_sound_mps,
+        })
+    }
+
+    /// The one-line migration from the legacy kernel 4-tuple, at the humidity the caller states.
+    ///
+    /// - `(density, speed_of_sound, 0.0, 0.0)`, the direct-mode sentinel, becomes
+    ///   [`Self::uniform`] (which validates it; `humidity` is unused, the caller's sound speed
+    ///   already being given).
+    /// - `(altitude_m, temperature_c, pressure_hpa, density_ratio)`, standard mode, becomes a
+    ///   [`StationAir::with_density_ratio`] at `humidity`. A finite ratio `<= 0` means "not
+    ///   supplied" and becomes `1.0` (MBA-1157); a ratio at or above 2 is refused.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`Self::uniform`] or [`StationAir::with_density_ratio`].
+    pub fn from_legacy_params(
+        params: (f64, f64, f64, f64),
+        humidity: RelativeHumidity,
+    ) -> Result<Self, AtmosphereError> {
+        let (first, second, third, fourth) = params;
+        if third == 0.0 && fourth == 0.0 {
+            return Self::uniform(first, second);
+        }
+        let density_ratio = if fourth.is_finite() && fourth <= 0.0 {
+            1.0
+        } else {
+            fourth
+        };
+        StationAir::with_density_ratio(first, second, third, density_ratio, humidity)
+            .map(Self::Station)
+    }
+
+    /// The altitude a kernel measures a point's height from: the station's own altitude, as
+    /// `TrajectorySolver` does, so a caller's inputs cannot fly a different station; or
+    /// `uniform_fallback` for uniform air, which does not vary with altitude.
+    pub(crate) fn reference_altitude_m(&self, uniform_fallback: f64) -> f64 {
+        match self {
+            Self::Station(station) => station.altitude_m,
+            Self::Uniform { .. } => uniform_fallback,
+        }
+    }
+}
+
+/// The governing (base) air a point of a flight lapses from: the station's, or the active
+/// downrange [`AtmoSock`] zone's. Everything in it is fixed for the whole flight, its
+/// water-vapour mole fraction and density ratio included, so it is computed once, when the
+/// station ([`StationAir`]) or the zones ([`AtmoSock::new`]) are built, and the per-step lookup
+/// only reads it (recomputing the vapour mole fraction, and a zone's CIPM density, at every
+/// step made `fast_integrate`, the lean Monte Carlo and `TrajectorySolver`'s RK4 and RK45
+/// 4-10 % slower than 0.49.0, for no change in any bit).
+#[derive(Debug, Clone, Copy)]
+struct GoverningAir {
+    /// Base temperature, °C.
+    temperature_c: f64,
+    /// Base absolute pressure, hPa.
+    pressure_hpa: f64,
+    /// Base density over 1.225 kg/m³.
+    density_ratio: f64,
+    /// [`governing_vapor_mole_fraction`] at the base temperature, pressure and humidity: the
+    /// `x_v` held at every height.
+    vapor_mole_fraction: f64,
+    /// The relative humidity, percent, that `vapor_mole_fraction` came from, for the test-only
+    /// [`air_trace`]; the composition itself reads only the mole fraction.
+    #[cfg(test)]
+    humidity_percent: f64,
+}
+
+impl GoverningAir {
+    /// Base air at `temperature_c`, `pressure_hpa` and `humidity_percent` (raw: clamped into
+    /// 0-100 by the one vapour formula, a NaN kept), with the caller's `density_ratio`. Its
+    /// vapour mole fraction goes through [`governing_vapor_mole_fraction`], the one place that
+    /// formula lives.
+    #[inline]
+    fn new(
+        temperature_c: f64,
+        pressure_hpa: f64,
+        density_ratio: f64,
+        humidity_percent: f64,
+    ) -> Self {
+        Self {
+            temperature_c,
+            pressure_hpa,
+            density_ratio,
+            vapor_mole_fraction: governing_vapor_mole_fraction(
+                temperature_c,
+                pressure_hpa,
+                humidity_percent,
+            ),
+            #[cfg(test)]
+            humidity_percent,
+        }
+    }
+
+    /// A downrange zone's air: its own temperature, pressure and humidity, with the CIPM-2007
+    /// density ratio at that humidity. Unvalidated, like the zone (see [`AtmoSock::validate`]).
+    fn zone(&(temperature_c, pressure_hpa, humidity_percent, _): &AtmoSegment) -> Self {
+        Self::new(
+            temperature_c,
+            pressure_hpa,
+            calculate_air_density_cimp(temperature_c, pressure_hpa, humidity_percent) / 1.225,
+            humidity_percent,
+        )
+    }
+}
+
+/// The air at one point of a flight: the ONE per-step air computation.
+///
+/// `downrange_m` selects a zone of `zones`; `altitude_m` is the point's geometric altitude above
+/// mean sea level (the world-vertical altitude, not the shot-frame y).
+///
+/// - [`KernelAtmosphere::Uniform`] returns the caller's density and sound speed unchanged at
+///   every point, and ignores `zones`.
+/// - [`KernelAtmosphere::Station`] picks a base: the zone that covers `downrange_m` when
+///   `zones` holds any (its temperature, pressure and humidity, with a CIPM density ratio at
+///   that humidity), otherwise the station itself. An empty zone set means the station. The
+///   lapse always starts at the station altitude. The base air is well mixed: its water-vapour
+///   mole fraction `x_v` (from its own temperature, pressure and humidity) is held at every
+///   height, for all three steps:
+///   1. temperature and pressure follow the ICAO layers in geopotential height, with the
+///      virtual-temperature hydrostatic exponent: the dry one times the moist-air molar-mass
+///      ratio `M_m / M_a = 1 - x_v (1 - M_v / M_a)`;
+///   2. density is the base ratio scaled by `(T_base · P) / (P_base · T)`, the base
+///      composition;
+///   3. the speed of sound is [`moist_speed_of_sound`]'s formula at the local temperature and
+///      the base `x_v`.
+///
+///   The temperature and pressure of steps 1 and 2 are returned too. At the base air's own
+///   height this is that air exactly (the sound speed is [`StationAir::speed_of_sound_mps`] to
+///   the bit); at 0 % every step is the dry one, `sqrt(1.4 · 287.0531 · T)` for the sound
+///   speed.
+///
+///   Held aloft, `x_v` exceeds saturation in the colder air: at every height above a saturated
+///   station, and from about 2.2 km above a 15 °C / 50 % station and 0.4 km above a 35 °C / 90 %
+///   one. At +3 km it is 1.35 times saturation over the first and 2.06 times over the second, and
+///   at +10 km 34 and 29 times. Condensation is not modelled.
+///
+///   The base `x_v`, and a zone's density ratio, are fixed for the flight, so they are computed
+///   once, when the station ([`StationAir::new`]) or the zones ([`AtmoSock::new`]) are built.
+///   This lookup evaluates no saturation pressure; build the station and the zones once per
+///   flight, not per step.
+///
+/// `zones` must already have passed [`AtmoSock::validate`], as every validated kernel entry
+/// checks them once ([`crate::trajectory_integration::try_integrate_trajectory`],
+/// `TrajectorySolver`, `fast_integrate*`). This per-step lookup does not: an unvalidated zone
+/// humidity outside 0-100 is clamped into it, and a NaN one gives NaN air, never steam.
+///
+/// Where the lapse from the base temperature reaches absolute zero (183 km above 15 °C at sea
+/// level, 1.54 km above a 10 K station) there is no air: from that height the result is not
+/// finite. Every trajectory kernel refuses a flight that reaches it, at the step that gets
+/// there, as [`AtmosphereErrorReason::AirAloftBelowAbsoluteZero`] on the temperature.
+pub fn air_at(
+    atmosphere: &KernelAtmosphere,
+    zones: Option<&AtmoSock>,
+    downrange_m: f64,
+    altitude_m: f64,
+) -> LocalAir {
+    air_at_with_gravity(atmosphere, zones, downrange_m, altitude_m, Gravity::EARTH)
+}
+
+/// [`air_at`] in a run's uniform gravity, which sets the hydrostatic lapse.
+pub(crate) fn air_at_with_gravity(
+    atmosphere: &KernelAtmosphere,
+    zones: Option<&AtmoSock>,
+    downrange_m: f64,
+    altitude_m: f64,
+    gravity: Gravity,
+) -> LocalAir {
+    match atmosphere {
+        KernelAtmosphere::Uniform {
+            density_kg_m3,
+            speed_of_sound_mps,
+        } => LocalAir {
+            density_kg_m3: *density_kg_m3,
+            speed_of_sound_mps: *speed_of_sound_mps,
+            temperature_k: speed_of_sound_mps * speed_of_sound_mps / (GAMMA * R_AIR),
+            pressure_pa: 0.0,
+        },
+        KernelAtmosphere::Station(station) => {
+            #[cfg(test)]
+            let saturation_pressures_before = air_trace::saturation_pressures();
+            // The zone that covers this point, else the station: either way air computed when
+            // it was built, so this step evaluates no vapour formula. An empty sock covers
+            // nothing.
+            let base = match zones.and_then(|sock| sock.governing_air_for_range(downrange_m)) {
+                Some(zone) => *zone,
+                None => station.governing_air(),
+            };
+            let air = compose_local_air(altitude_m, station.altitude_m, &base, gravity);
+            #[cfg(test)]
+            air_trace::attribute_lookup_saturation_pressures(saturation_pressures_before);
+            air
+        }
+    }
+}
+
+/// The geometric altitudes above mean sea level, m, between which the lapse from `base_temp_k`
+/// at `base_alt_m` keeps the air above absolute zero: `(floor, ceiling)`, with
+/// `-inf` / `+inf` where it never gets there.
+///
+/// The temperature [`air_at`] flies is piecewise linear in geopotential height, the base
+/// temperature carried through the ICAO lapse rates exactly as [`integrate_local_atmosphere_layers`]
+/// walks them (the last layer's lapse continuing above 84.852 km, the troposphere's below 0 m),
+/// so each edge is where one layer's line reaches 0 K. Every realistic station has a ceiling too:
+/// 15 °C at sea level reaches 0 K about 183 km up.
+fn absolute_zero_altitudes_m(base_temp_k: f64, base_alt_m: f64) -> (f64, f64) {
+    let base = geometric_to_geopotential_height_m(base_alt_m);
+    let to_geometric = |geopotential_m: f64| {
+        if geopotential_m >= GEOPOTENTIAL_EARTH_RADIUS_M {
+            f64::INFINITY
+        } else {
+            GEOPOTENTIAL_EARTH_RADIUS_M * geopotential_m
+                / (GEOPOTENTIAL_EARTH_RADIUS_M - geopotential_m)
+        }
+    };
+
+    // Up: at an exact boundary, ascent starts in the higher layer.
+    let mut ceiling = f64::INFINITY;
+    let (mut height, mut temperature) = (base, base_temp_k);
+    let mut index = ICAO_LAYERS
+        .iter()
+        .rposition(|layer| height >= layer.base_altitude)
+        .unwrap_or(0);
+    loop {
+        let lapse = ICAO_LAYERS[index].lapse_rate;
+        let end = ICAO_LAYERS
+            .get(index + 1)
+            .map_or(f64::INFINITY, |next| next.base_altitude);
+        if lapse < 0.0 {
+            let zero = height + temperature / -lapse;
+            if zero <= end {
+                ceiling = to_geometric(zero);
+                break;
+            }
+        }
+        if end.is_infinite() {
+            break;
+        }
+        temperature += lapse * (end - height);
+        height = end;
+        index += 1;
+    }
+
+    // Down: at an exact boundary, descent starts in the lower layer. The troposphere's lapse
+    // warms the air below its base, so only a warming layer above it (the stratosphere's) can
+    // take a cold enough base to 0 K on the way down.
+    let mut floor = f64::NEG_INFINITY;
+    let (mut height, mut temperature) = (base, base_temp_k);
+    let mut index = ICAO_LAYERS
+        .iter()
+        .rposition(|layer| height > layer.base_altitude)
+        .unwrap_or(0);
+    loop {
+        let lapse = ICAO_LAYERS[index].lapse_rate;
+        let end = if index == 0 {
+            f64::NEG_INFINITY
+        } else {
+            ICAO_LAYERS[index].base_altitude
+        };
+        if lapse > 0.0 {
+            let zero = height - temperature / lapse;
+            if zero >= end {
+                floor = to_geometric(zero);
+                break;
+            }
+        }
+        if index == 0 {
+            break;
+        }
+        temperature -= lapse * (height - end);
+        height = end;
+        index -= 1;
+    }
+    (floor, ceiling)
+}
+
+/// The refusal of a flight that went where its air cannot exist: the step that started at
+/// `downrange_m` and `altitude_m` (the last state a kernel accepted, geometric altitude above
+/// mean sea level) failed to a non-finite state, and the air within `reach_m` of where it started
+/// (the farthest any stage of that step could lie from it) falls to absolute zero, where
+/// [`air_at`] has no air at all.
+///
+/// The governing air is the zone that covers the step (at its start, or as far downrange as it
+/// could reach) or the station. `None` when that air stays above 0 K within the step's reach,
+/// so a step that failed for any other reason keeps its own error, and for uniform air, which
+/// does not lapse. Kernels call this only once a step has failed, so a flight that stays below
+/// the height its air reaches 0 K flies exactly as it did.
+pub(crate) fn air_aloft_refusal(
+    atmosphere: &KernelAtmosphere,
+    zones: Option<&AtmoSock>,
+    downrange_m: f64,
+    altitude_m: f64,
+    reach_m: f64,
+) -> Option<AtmosphereError> {
+    let KernelAtmosphere::Station(station) = atmosphere else {
+        return None;
+    };
+    if !(downrange_m.is_finite() && altitude_m.is_finite() && reach_m.is_finite()) {
+        return None;
+    }
+    let reach_m = reach_m.abs();
+    [downrange_m, downrange_m + reach_m]
+        .into_iter()
+        .find_map(|downrange_m| {
+            let temperature_c = zones
+                .and_then(|sock| sock.governing_air_for_range(downrange_m))
+                .map_or(station.temperature_c, |zone| zone.temperature_c);
+            let (floor, ceiling) =
+                absolute_zero_altitudes_m(temperature_c + KELVIN_OFFSET, station.altitude_m);
+            if altitude_m + reach_m >= ceiling {
+                Some(AtmosphereError::aloft(temperature_c, ceiling))
+            } else if altitude_m - reach_m <= floor {
+                Some(AtmosphereError::aloft(temperature_c, floor))
+            } else {
+                None
+            }
+        })
+}
+
+/// The composition behind [`air_at`] and the legacy `get_local_atmosphere*` wrappers,
+/// unvalidated. The only place the aloft vapour model lives.
+///
+/// The governing (base) air is well mixed: its water-vapour mole fraction `x_v`, from its own
+/// temperature, pressure and humidity, is held at every height, for all three of
+/// - the lapse: the ICAO lapse rates with the virtual-temperature hydrostatic exponent, the dry
+///   one scaled by the moist-air molar-mass ratio `M_m / M_a = 1 - x_v (1 - M_v / M_a)`;
+/// - the density: the base ratio scaled by `(T_0 · P) / (P_0 · T)`, the base composition;
+/// - the sound speed: [`moist_sound_speed_at_mole_fraction`] at the local temperature and that
+///   same `x_v`.
+///
+/// `base` carries that `x_v`, computed once per base air (see [`GoverningAir`]), so the
+/// composition evaluates no saturation pressure. At 0 % `x_v` is 0 and every term is the dry
+/// one to the bit.
 #[inline]
+fn compose_local_air(
+    altitude_m: f64,
+    base_alt: f64,
+    base: &GoverningAir,
+    gravity: Gravity,
+) -> LocalAir {
+    let (temperature_k, pressure_pa, density_kg_m3) = local_temp_pressure_density_with_gravity(
+        altitude_m,
+        base_alt,
+        base.temperature_c,
+        base.pressure_hpa,
+        base.density_ratio,
+        base.vapor_mole_fraction,
+        gravity,
+    );
+    let air = LocalAir {
+        density_kg_m3,
+        speed_of_sound_mps: moist_sound_speed_at_mole_fraction(
+            temperature_k,
+            base.vapor_mole_fraction,
+        ),
+        temperature_k,
+        pressure_pa,
+    };
+    #[cfg(test)]
+    air_trace::record(air_trace::AirTraceEntry {
+        altitude_m,
+        base_alt_m: base_alt,
+        base_temp_c: base.temperature_c,
+        base_press_hpa: base.pressure_hpa,
+        base_ratio: base.density_ratio,
+        humidity_percent: base.humidity_percent,
+        gravity_mps2: gravity.magnitude(),
+        air,
+        lookup_saturation_pressures: None,
+        consumed: None,
+        consumptions: 0,
+    });
+    air
+}
+
+/// Test-only record of every per-step air composition, for the humidity class tests: which base
+/// (station or zone) a path composed from, the base humidity whose water-vapour mole fraction it
+/// held at every height for the lapse, the density and the sound speed, and the air it got.
+/// Compiled out of every non-test build.
+#[cfg(test)]
+pub(crate) mod air_trace {
+    use super::LocalAir;
+    use std::cell::{Cell, RefCell};
+
+    /// One call of the composition behind [`super::air_at`]: its inputs and its result.
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) struct AirTraceEntry {
+        /// The point's geometric altitude, m.
+        pub altitude_m: f64,
+        /// Where the lapse started, m.
+        pub base_alt_m: f64,
+        /// The base temperature, °C: the station's, or the active zone's.
+        pub base_temp_c: f64,
+        /// The base pressure, hPa.
+        pub base_press_hpa: f64,
+        /// The base density ratio (density / 1.225).
+        pub base_ratio: f64,
+        /// The base relative humidity, percent: the one whose vapour mole fraction the
+        /// composition held aloft for the lapse, the density and the sound speed.
+        pub humidity_percent: f64,
+        /// The gravity the lapse used, m/s².
+        pub gravity_mps2: f64,
+        /// What the composition returned.
+        pub air: LocalAir,
+        /// How many Wagner-Pruss saturation pressures the per-step lookup ([`super::air_at`])
+        /// evaluated for this point, from choosing its base to returning its air: every
+        /// humid-air formula (a vapour mole fraction, a CIPM density) goes through one. `None`
+        /// for a composition made outside that lookup (the legacy `get_local_atmosphere*`
+        /// wrappers, which compose from a caller's raw base once per call).
+        pub lookup_saturation_pressures: Option<u64>,
+        /// What the drag computation that followed took from this air ([`record_consumed`]):
+        /// the last one, if any did.
+        pub consumed: Option<ConsumedAir>,
+        /// How many drag computations took this air: 1 for every per-step lookup.
+        pub consumptions: u32,
+    }
+
+    /// What a per-step drag computation (`TrajectorySolver::calculate_acceleration`,
+    /// `compute_derivatives`, the `fast_integrate` substep) took from the air it had just
+    /// composed: the density its drag force used, and the airspeed and Mach its drag
+    /// coefficient was looked up at. The trace's composition records what `air_at` gave; this
+    /// records what the kernel flew, so a kernel that calls `air_at` and then flies something
+    /// else cannot pass the class tests.
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) struct ConsumedAir {
+        /// The air density in the drag force, kg/m³.
+        pub density_kg_m3: f64,
+        /// The airspeed the Mach divides, m/s.
+        pub airspeed_mps: f64,
+        /// The Mach the drag coefficient was looked up at.
+        pub mach: f64,
+    }
+
+    thread_local! {
+        static TRACE: RefCell<Option<Vec<AirTraceEntry>>> = const { RefCell::new(None) };
+        static SATURATION_PRESSURES: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// Count one Wagner-Pruss saturation-pressure evaluation on this thread.
+    #[inline(always)]
+    pub(super) fn count_saturation_pressure() {
+        SATURATION_PRESSURES.with(|count| count.set(count.get() + 1));
+    }
+
+    /// The Wagner-Pruss saturation pressures evaluated on this thread so far, traced or not.
+    pub(crate) fn saturation_pressures() -> u64 {
+        SATURATION_PRESSURES.with(Cell::get)
+    }
+
+    /// Credit the per-step lookup that started when the count stood at `before` with what it
+    /// evaluated, on the composition it just recorded (the trace's last entry), if tracing.
+    pub(super) fn attribute_lookup_saturation_pressures(before: u64) {
+        let evaluated = saturation_pressures() - before;
+        TRACE.with(|trace| {
+            if let Some(last) = trace
+                .borrow_mut()
+                .as_mut()
+                .and_then(|entries| entries.last_mut())
+            {
+                last.lookup_saturation_pressures = Some(evaluated);
+            }
+        });
+    }
+
+    /// Credit the composition this thread just recorded (the trace's last entry) with a drag
+    /// computation that took `density_kg_m3` and looked its drag coefficient up at `mach` for
+    /// `airspeed_mps`, if tracing. Called at each per-step drag site, from the values it flies.
+    pub(crate) fn record_consumed(density_kg_m3: f64, airspeed_mps: f64, mach: f64) {
+        TRACE.with(|trace| {
+            if let Some(last) = trace
+                .borrow_mut()
+                .as_mut()
+                .and_then(|entries| entries.last_mut())
+            {
+                last.consumed = Some(ConsumedAir {
+                    density_kg_m3,
+                    airspeed_mps,
+                    mach,
+                });
+                last.consumptions += 1;
+            }
+        });
+    }
+
+    pub(super) fn record(entry: AirTraceEntry) {
+        TRACE.with(|trace| {
+            if let Some(entries) = trace.borrow_mut().as_mut() {
+                entries.push(entry);
+            }
+        });
+    }
+
+    /// Restores the trace that was active before [`traced`], even if the traced code panics.
+    struct Restore(Option<Vec<AirTraceEntry>>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            TRACE.with(|trace| *trace.borrow_mut() = previous);
+        }
+    }
+
+    /// Run `run` and return its result with every air composition it made on this thread, in
+    /// call order.
+    pub(crate) fn traced<R>(run: impl FnOnce() -> R) -> (R, Vec<AirTraceEntry>) {
+        let restore = Restore(TRACE.with(|trace| trace.borrow_mut().replace(Vec::new())));
+        let result = run();
+        let entries = TRACE
+            .with(|trace| trace.borrow_mut().take())
+            .unwrap_or_default();
+        drop(restore);
+        (result, entries)
+    }
+}
+
+/// The lapse and density of [`compose_local_air`] in Earth gravity, for the tests, for DRY base
+/// air (`x_v = 0`, the dry hydrostatic lapse). Returns
+/// `(local_temp_k, local_pressure_pa, density_kg_m3)`.
+#[cfg(test)]
 fn local_temp_pressure_density(
     altitude_m: f64,
     base_alt: f64,
@@ -1193,16 +4048,23 @@ fn local_temp_pressure_density(
         base_temp_c,
         base_press_hpa,
         base_ratio,
+        0.0,
         Gravity::EARTH,
     )
 }
 
+/// The lapse and density of [`compose_local_air`]: temperature and pressure through the ICAO
+/// layers from the base, with the virtual-temperature hydrostatic exponent for base air holding
+/// the water-vapour mole fraction `vapor_mole_fraction` (its moist gas constant
+/// `R_AIR / (M_m / M_a)`, exactly `R_AIR` at 0), and the density from the base ratio. Returns
+/// `(local_temp_k, local_pressure_pa, density_kg_m3)`.
 fn local_temp_pressure_density_with_gravity(
     altitude_m: f64,
     base_alt: f64,
     base_temp_c: f64,
     base_press_hpa: f64,
     base_ratio: f64,
+    vapor_mole_fraction: f64,
     gravity: Gravity,
 ) -> (f64, f64, f64) {
     let base_temp_k = base_temp_c + 273.15;
@@ -1213,6 +4075,9 @@ fn local_temp_pressure_density_with_gravity(
         return (f64::NAN, f64::NAN, f64::NAN);
     }
 
+    // The virtual-temperature lapse: R_m T = R_AIR T_v with T_v = T / (M_m / M_a). At x_v = 0
+    // the ratio is exactly 1 and this is R_AIR to the bit.
+    let gas_constant = R_AIR / moist_molar_mass_ratio(vapor_mole_fraction);
     let base_geopotential_m = geometric_to_geopotential_height_m(base_alt);
     let target_geopotential_m = geometric_to_geopotential_height_m(altitude_m);
     let (temp_k, pressure_hpa) = integrate_local_atmosphere_layers(
@@ -1220,6 +4085,7 @@ fn local_temp_pressure_density_with_gravity(
         target_geopotential_m,
         base_temp_k,
         base_press_hpa,
+        gas_constant,
         gravity,
     );
 
@@ -1233,11 +4099,14 @@ fn local_temp_pressure_density_with_gravity(
 /// Carry arbitrary station temperature and pressure through each crossed ICAO
 /// layer in geopotential-height coordinates. The layer table supplies lapse rates and boundaries
 /// only; station deviations from the standard atmosphere remain anchored at the converted base.
+/// `gas_constant` (J/(kg·K)) sets the hydrostatic exponent: [`R_AIR`] for dry air, the moist
+/// `R_AIR / (M_m / M_a)` for humid air (the virtual-temperature lapse).
 fn integrate_local_atmosphere_layers(
     base_geopotential_m: f64,
     target_geopotential_m: f64,
     mut temp_k: f64,
     mut pressure_hpa: f64,
+    gas_constant: f64,
     gravity: Gravity,
 ) -> (f64, f64) {
     let mut current_alt = base_geopotential_m;
@@ -1259,6 +4128,7 @@ fn integrate_local_atmosphere_layers(
                 pressure_hpa,
                 segment_end - current_alt,
                 ICAO_LAYERS[layer_index].lapse_rate,
+                gas_constant,
                 gravity,
             );
             current_alt = segment_end;
@@ -1281,6 +4151,7 @@ fn integrate_local_atmosphere_layers(
                 pressure_hpa,
                 segment_end - current_alt,
                 ICAO_LAYERS[layer_index].lapse_rate,
+                gas_constant,
                 gravity,
             );
             current_alt = segment_end;
@@ -1290,20 +4161,24 @@ fn integrate_local_atmosphere_layers(
     (temp_k, pressure_hpa)
 }
 
+/// One layer of the hydrostatic lapse, at the gas constant `gas_constant` (see
+/// [`integrate_local_atmosphere_layers`]).
 #[inline]
 fn integrate_local_atmosphere_segment(
     base_temp_k: f64,
     base_pressure_hpa: f64,
     height_diff: f64,
     lapse_rate: f64,
+    gas_constant: f64,
     gravity: Gravity,
 ) -> (f64, f64) {
     let temp_k = base_temp_k + lapse_rate * height_diff;
     let pressure_hpa = if lapse_rate.abs() < 1e-10 {
-        base_pressure_hpa * (-gravity.magnitude() * height_diff / (R_AIR * base_temp_k)).exp()
+        base_pressure_hpa
+            * (-gravity.magnitude() * height_diff / (gas_constant * base_temp_k)).exp()
     } else {
         let temp_ratio = temp_k / base_temp_k;
-        base_pressure_hpa * temp_ratio.powf(-gravity.magnitude() / (lapse_rate * R_AIR))
+        base_pressure_hpa * temp_ratio.powf(-gravity.magnitude() / (lapse_rate * gas_constant))
     };
 
     (temp_k, pressure_hpa)
@@ -1318,13 +4193,14 @@ mod uniform_gravity_tests {
         for magnitude in [0.0, 1.62, 9.80665, 20.0] {
             let gravity = Gravity::new(magnitude).unwrap();
             let (temperature, pressure) =
-                integrate_local_atmosphere_segment(280.0, 900.0, 100.0, 0.0, gravity);
+                integrate_local_atmosphere_segment(280.0, 900.0, 100.0, 0.0, R_AIR, gravity);
             assert_eq!(temperature, 280.0);
             assert!(
                 (pressure / 900.0 - (-magnitude * 100.0 / (R_AIR * 280.0)).exp()).abs() < 1e-14
             );
-            let station =
-                local_temp_pressure_density_with_gravity(300.0, 300.0, 20.0, 900.0, 0.9, gravity);
+            let station = local_temp_pressure_density_with_gravity(
+                300.0, 300.0, 20.0, 900.0, 0.9, 0.0, gravity,
+            );
             assert_eq!(
                 station,
                 local_temp_pressure_density(300.0, 300.0, 20.0, 900.0, 0.9)
@@ -1337,6 +4213,7 @@ mod uniform_gravity_tests {
             20.0,
             900.0,
             0.9,
+            0.0,
             Gravity::new(0.0).unwrap(),
         );
         assert_eq!(pressure, 90_000.0);
@@ -1370,7 +4247,12 @@ pub fn get_direct_atmosphere(density: f64, speed_of_sound: f64) -> (f64, f64) {
     (density, speed_of_sound)
 }
 
-/// Legacy function name for backwards compatibility
+/// Legacy function name for backwards compatibility: [`calculate_air_density_cimp`].
+///
+/// A raw primitive: `humidity_percent` is not validated. A number outside 0-100 is clamped
+/// into it, and a NaN propagates to a NaN result, never to pure steam. Validate a reading with
+/// [`RelativeHumidity::try_percent`] and build the station with [`StationAir::new`], which
+/// refuse what this computes.
 pub fn calculate_air_density_cipm(temp_c: f64, pressure_hpa: f64, humidity_percent: f64) -> f64 {
     calculate_air_density_cimp(temp_c, pressure_hpa, humidity_percent)
 }
@@ -1394,17 +4276,31 @@ pub type AtmoSegment = (f64, f64, f64, f64);
 /// solver swaps them into the same local-atmosphere altitude-lapse pipeline that a single-station
 /// solve uses, so the downrange (X) zone and the vertical (Y) altitude lapse compose orthogonally
 /// without double-counting (the zone sets the base tuple, the lapse multiplies on top of it).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AtmoSock {
     /// Zones sorted ascending by `until_distance_m` (segment slot 3).
     segments: Vec<AtmoSegment>,
+    /// Each zone's governing air (its density ratio and water-vapour mole fraction), in
+    /// `segments`' order, computed once in [`Self::new`] rather than at every step. A cache of
+    /// `segments`, so `Debug` leaves it out.
+    governing: Vec<GoverningAir>,
+}
+
+// The derive's output before the zones' governing air was held: it is a cache of the zones.
+impl fmt::Debug for AtmoSock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AtmoSock")
+            .field("segments", &self.segments)
+            .finish()
+    }
 }
 
 impl AtmoSock {
     /// Create a new `AtmoSock` from station-referenced atmosphere zones.
     ///
     /// Each segment is `(temp_c, pressure_hpa, humidity_percent, until_distance_m)`. Segments are
-    /// sorted by `until_distance_m`, with NaN thresholds ordered last.
+    /// sorted by `until_distance_m`, with NaN thresholds ordered last. Each zone's density ratio
+    /// and water-vapour mole fraction, fixed for any flight, are computed here once.
     pub fn new(mut segments: Vec<AtmoSegment>) -> Self {
         segments.sort_by(|a, b| match (a.3.is_nan(), b.3.is_nan()) {
             (true, true) => Ordering::Equal,
@@ -1412,12 +4308,56 @@ impl AtmoSock {
             (false, true) => Ordering::Less,
             (false, false) => a.3.partial_cmp(&b.3).unwrap(),
         });
-        AtmoSock { segments }
+        let governing = segments.iter().map(GoverningAir::zone).collect();
+        AtmoSock {
+            segments,
+            governing,
+        }
     }
 
-    /// True when this sock carries no zones (a lookup falls back to sea-level ISA).
+    /// True when this sock carries no zones. [`air_at`] treats an empty sock as no sock: the
+    /// station's own air.
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty()
+    }
+
+    /// Check every zone the way [`StationAir::new`] checks a station, plus its threshold.
+    ///
+    /// A zone needs a finite temperature above -273.15 °C, a finite pressure above 0, a
+    /// relative humidity that [`RelativeHumidity::try_percent`] accepts (finite, 0 to 100, or a
+    /// sensor reading within [`HUMIDITY_SENSOR_TOLERANCE_PERCENT`] of it, which the zone flies
+    /// as the end it reads as), air that can exist (the same impossible-air test), and an
+    /// `until_distance_m` above 0 (`+inf` is allowed, `NaN` is not). An empty sock is valid: it
+    /// means the station.
+    ///
+    /// [`AtmoSock::new`] stays infallible; the checked kernel entries
+    /// (`try_integrate_trajectory`, `fast_integrate*`) call this before integrating.
+    ///
+    /// # Errors
+    ///
+    /// The first bad zone's [`AtmosphereError`], its field named
+    /// `atmo_sock.zones[i].<field>` with `i` the zone's index in threshold order (the order
+    /// [`AtmoSock::new`] sorted them into).
+    pub fn validate(&self) -> Result<(), AtmosphereError> {
+        for (index, &(temperature_c, pressure_hpa, humidity_percent, until_m)) in
+            self.segments.iter().enumerate()
+        {
+            let at = |error: AtmosphereError| {
+                let field = format!("atmo_sock.zones[{index}].{}", error.field());
+                error.at_field(field)
+            };
+            check_station_state(0.0, temperature_c, pressure_hpa).map_err(at)?;
+            let humidity = RelativeHumidity::try_percent(humidity_percent).map_err(at)?;
+            refuse_impossible_air(temperature_c, pressure_hpa, humidity).map_err(at)?;
+            if until_m.is_nan() || until_m <= 0.0 {
+                return Err(at(AtmosphereError::new(
+                    "until_distance_m",
+                    until_m,
+                    AtmosphereErrorReason::NonPositiveZoneThreshold,
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Stateless downrange lookup of the active zone's `(temp_c, pressure_hpa, humidity_percent)`.
@@ -1426,29 +4366,65 @@ impl AtmoSock {
     /// whose `until_distance_m` STRICTLY exceeds `downrange_m` wins (thresholds are upper-exclusive).
     /// Unlike wind — which returns zero past the last threshold — the LAST zone is used for any
     /// distance at or beyond the final threshold (there is no "zero atmosphere"). An empty sock
-    /// returns the sea-level ISA reference `(15 C, 1013.25 hPa, 0% RH)`.
+    /// returns the sea-level ISA reference at the engine's default humidity,
+    /// `(15 C, 1013.25 hPa, DEFAULT_HUMIDITY_PERCENT)`; [`air_at`] never asks it, treating an
+    /// empty sock as the station.
     ///
     /// This is stateless and safe for numerical integration (the same X may be queried repeatedly
     /// or out of order across RK substeps).
     pub fn atmo_for_range(&self, downrange_m: f64) -> (f64, f64, f64) {
-        if self.segments.is_empty() {
-            return (15.0, 1013.25, 0.0); // sea-level ISA fallback
-        }
-        // NaN X can't be ordered; use the first (nearest) zone deterministically.
-        if downrange_m.is_nan() {
-            let s = self.segments[0];
-            return (s.0, s.1, s.2);
-        }
-        for seg in &self.segments {
-            if downrange_m < seg.3 {
-                return (seg.0, seg.1, seg.2);
+        match self.zone_index(downrange_m) {
+            Some(index) => {
+                let (temp_c, pressure_hpa, humidity_percent, _) = self.segments[index];
+                (temp_c, pressure_hpa, humidity_percent)
             }
+            // Sea-level ISA at the one default humidity.
+            None => (15.0, 1013.25, DEFAULT_HUMIDITY_PERCENT),
         }
-        // Beyond the final threshold: hold the last zone (no zeroing).
-        let last = self.segments[self.segments.len() - 1];
-        (last.0, last.1, last.2)
+    }
+
+    /// The governing air of the zone [`Self::atmo_for_range`] selects at `downrange_m`, as
+    /// [`Self::new`] computed it; `None` for an empty sock, which [`air_at`] reads as the
+    /// station.
+    #[inline]
+    fn governing_air_for_range(&self, downrange_m: f64) -> Option<&GoverningAir> {
+        self.zone_index(downrange_m)
+            .map(|index| &self.governing[index])
+    }
+
+    /// The one zone selection behind [`Self::atmo_for_range`] and the per-step lookup: the first
+    /// zone whose `until_distance_m` STRICTLY exceeds `downrange_m`, the last zone at or beyond
+    /// the final threshold (there is no zeroing), and the first (nearest) zone for a NaN
+    /// distance, which cannot be ordered. `None` for an empty sock.
+    #[inline]
+    fn zone_index(&self, downrange_m: f64) -> Option<usize> {
+        let last = self.segments.len().checked_sub(1)?;
+        if downrange_m.is_nan() {
+            return Some(0);
+        }
+        Some(
+            self.segments
+                .iter()
+                .position(|segment| downrange_m < segment.3)
+                .unwrap_or(last),
+        )
     }
 }
+
+#[cfg(test)]
+mod humidity_model_tests;
+
+#[cfg(test)]
+mod aloft_vapour_tests;
+
+#[cfg(test)]
+mod nan_humidity_tests;
+
+#[cfg(test)]
+mod held_vapour_tests;
+
+#[cfg(test)]
+mod temperature_rule_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1569,7 +4545,13 @@ mod tests {
 
     /// rank 9: local-atmosphere reference values (base: 500 m, 10 C, 950 hPa, ratio 1.05).
     /// The 1500 m values include the geometric-to-geopotential height conversion.
+    ///
+    /// Re-baselined in 0.50.0: the dry sound speed is the engine's one dry
+    /// constant, sqrt(1.4 * 287.0531 * T), the moist formula at 0 % RH, instead of a second
+    /// sqrt(401.874 * T). That moves c by +4.23e-7 relative (+1.43e-4 m/s here); the density and
+    /// the tolerance are unchanged.
     #[test]
+    #[allow(deprecated)] // the dry legacy lookup is what is under test
     fn test_mba1136_get_local_atmosphere_reference() {
         let (d0, c0) = get_local_atmosphere(500.0, 500.0, 10.0, 950.0, 1.05);
         assert!(
@@ -1577,7 +4559,7 @@ mod tests {
             "local density@500m drifted: {d0}"
         );
         assert!(
-            (c0 - 337.328657395129).abs() < 1e-9,
+            (c0 - 337.328800091246).abs() < 1e-9,
             "local sos@500m drifted: {c0}"
         );
         let (d1, c1) = get_local_atmosphere(1500.0, 500.0, 10.0, 950.0, 1.05);
@@ -1586,12 +4568,13 @@ mod tests {
             "local density@1500m drifted: {d1}"
         );
         assert!(
-            (c1 - 333.435546617978).abs() < 1e-9,
+            (c1 - 333.435687667240).abs() < 1e-9,
             "local sos@1500m drifted: {c1}"
         );
     }
 
     #[test]
+    #[allow(deprecated)] // the dry legacy lookup is what is under test
     fn fractional_station_altitude_is_not_quantized() {
         let station_altitude_m = 500.25;
         let station_temp_c = 10.0;
@@ -1607,22 +4590,26 @@ mod tests {
         );
 
         let expected_density = station_density_ratio * 1.225;
-        let expected_speed_of_sound = ((station_temp_c + 273.15) * 401.874).sqrt();
+        // The engine's one dry constant (0.50.0; was a second one, 401.874).
+        let expected_speed_of_sound = (GAMMA * R_AIR * (station_temp_c + 273.15)).sqrt();
         assert!((density - expected_density).abs() < 1e-12);
         assert!((speed_of_sound - expected_speed_of_sound).abs() < 1e-12);
     }
 
     /// rank 9: `get_local_atmosphere_humid` returns the SAME density as `get_local_atmosphere`,
-    /// and at 0% RH its speed of sound reduces to the dry value (within the 401.874-vs-gamma*R
-    /// constant rounding). At real humidity the speed of sound exceeds the dry value.
+    /// and at 0% RH its speed of sound IS the dry value, to the bit: since 0.50.0 there is one
+    /// dry constant (the old 401.874 differed from gamma*R by 4.2e-7, which this test used to
+    /// absorb with a 1e-3 tolerance). At real humidity the speed of sound exceeds the dry value.
     #[test]
+    #[allow(deprecated)] // the dry legacy lookup is what is under test
     fn test_mba1136_get_local_atmosphere_humid() {
         let (d_dry, c_dry) = get_local_atmosphere(1500.0, 500.0, 10.0, 950.0, 1.05);
         let (d_h0, c_h0) = get_local_atmosphere_humid(1500.0, 500.0, 10.0, 950.0, 1.05, 0.0);
         assert_eq!(d_dry, d_h0, "humid variant must not change density");
-        assert!(
-            (c_h0 - c_dry).abs() < 1e-3,
-            "0% RH humid sos {c_h0} should match dry sos {c_dry}"
+        assert_eq!(
+            c_h0.to_bits(),
+            c_dry.to_bits(),
+            "0% RH humid sos {c_h0} must be the dry sos {c_dry}"
         );
         let (_, c_h80) = get_local_atmosphere_humid(1500.0, 500.0, 10.0, 950.0, 1.05, 80.0);
         assert!(c_h80 > c_dry, "humid sos {c_h80} should exceed dry {c_dry}");
@@ -1689,6 +4676,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // the dry legacy lookup is one of the paths under test
     fn local_atmosphere_walks_icao_layers_continuously() {
         for altitude_m in [
             10999.0, 11000.0, 11001.0, 11050.0, 19999.0, 20000.0, 20001.0, 25000.0,
@@ -2195,9 +5183,17 @@ mod tests {
     fn test_atmo_sock_empty_falls_back_to_isa() {
         let sock = AtmoSock::new(vec![]);
         assert!(sock.is_empty());
-        // Empty sock returns the sea-level ISA reference regardless of distance.
-        assert_eq!(sock.atmo_for_range(0.0), (15.0, 1013.25, 0.0));
-        assert_eq!(sock.atmo_for_range(500.0), (15.0, 1013.25, 0.0));
+        // Empty sock returns the sea-level ISA reference regardless of distance, at the engine's
+        // one default humidity (50 %, not a 0 % of its own). air_at never asks: to it an empty
+        // sock is the station.
+        assert_eq!(
+            sock.atmo_for_range(0.0),
+            (15.0, 1013.25, DEFAULT_HUMIDITY_PERCENT)
+        );
+        assert_eq!(
+            sock.atmo_for_range(500.0),
+            (15.0, 1013.25, DEFAULT_HUMIDITY_PERCENT)
+        );
     }
 
     #[test]

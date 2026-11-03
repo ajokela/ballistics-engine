@@ -13,11 +13,37 @@
 //! - Monte Carlo simulations for uncertainty analysis
 //! - WebAssembly support for browser-based applications
 //! - FFI bindings for iOS and Android development
+//!
+//! ## Station air on every surface
+//!
+//! A station pressure must be finite and positive, a station altitude finite, and a
+//! temperature finite and above absolute zero. A density altitude must be finite and resolve
+//! to a station that can exist. [`RelativeHumidity`] applies the sensor band; [`StationAir`]
+//! checks the combined air. CLI flags (including the zero day), CSV columns, saved profiles,
+//! the browser terminal, C FFI, bridge cards and truing, solve-json and MCP share these rules.
+//! No surface adds a narrower weather range. A file format can: `profile.export_a7p` keeps
+//! the `.a7p` format's -100..100 °C and 300..1500 hPa bounds.
+//!
+//! [`atmosphere::pressure_altitude_m`] walks the same ICAO layers as [`air_at`] outside
+//! the troposphere band. [`atmosphere::nws_pressure_altitude_ft`] continues the NWS
+//! troposphere formula everywhere, and [`atmosphere::faa_rule_density_altitude_ft`] keeps
+//! that continuation so density-altitude entry remains its inverse. The bridge reports
+//! the layered pressure altitude and both FAA and density-matched altitudes wherever they land.
+//!
+//! [`AtmosphereError::refusal_in`] and [`AtmosphereError::temperature_refusal_from`] let a
+//! boundary name the originating flag, CSV column, profile field or request member in its
+//! own units, including a refusal discovered aloft. [`StationOrigin`] retains independent
+//! temperature and pressure sources; a QNH is quoted as sent with its reduced pressure.
+//! The JSON C bridge carries the request field path. Scalar and struct C APIs keep their
+//! existing NULL, NaN or status failure signals.
 
 // Re-export the main types and functions
 pub use atmosphere::{
-    resolve_station_conditions_with_presence, AtmoSegment, AtmoSock, StationAtmospherePresence,
-    StationReading,
+    air_at, resolve_station_conditions_with_presence, AirField, AirRefusal, AirSpelling,
+    AltitudeUnit, AtmoSegment, AtmoSock, AtmosphereError, AtmosphereErrorReason, KernelAtmosphere,
+    LocalAir, RelativeHumidity, StationAir, StationAtmospherePresence, StationOrigin,
+    StationPressureOrigin, StationReading, StationTemperatureOrigin, DEFAULT_HUMIDITY_PERCENT,
+    HUMIDITY_SENSOR_TOLERANCE_PERCENT,
 };
 pub use cli_api::{
     calculate_zero_angle, calculate_zero_angle_with_conditions,
@@ -140,6 +166,10 @@ pub mod trajectory_observation;
 pub mod wasm;
 #[cfg(test)]
 mod wasm_tests;
+// The 0.50.0 humidity work's byte-identity pins for the pub(crate) gravity-aware entry points,
+// beside the public-API pins in tests/humidity_byte_identity.rs.
+#[cfg(test)]
+mod humidity_byte_identity_tests;
 // MBA-154: Make constants public for ballistics_rust wrapping
 pub mod atmosphere;
 // `atmosphere.density_altitude`: describe an atmosphere the way a solve resolves it.

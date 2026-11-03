@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# Public-repo sensitivity guard for the commit MESSAGE; .githooks/pre-commit
+# guards the staged content and explains why this repo needs a guard at all.
+#
+# Rule: no line of the commit message may match a pattern in the clone's LOCAL
+# private pattern list. Private-app material (internals of the owner's private
+# apps and services, private repo names, local machine paths, session
+# artifacts) reaches a public history through a message as easily as through
+# a file, and its patterns cannot go into the tracked .sensitive-patterns:
+# listing them there would publish them. They live in an UNTRACKED file:
+#
+#     "$(git rev-parse --git-common-dir)/info/private-patterns"
+#
+# that is, .git/info/private-patterns of the main checkout. It is in the
+# clone's common git directory, so every worktree of the clone shares the one
+# list. `git config hooks.privatePatterns <path>` names another file (a ~/
+# path is expanded). One extended regex per line, matched case-insensitively;
+# surrounding whitespace is ignored, as are empty lines and lines starting
+# with #. Text is matched byte for byte whatever the locale, so a line that is
+# not valid UTF-8 is read too, and the case of ASCII letters only is ignored;
+# CDPATH and GREP_OPTIONS in the environment change nothing. A pattern grep
+# cannot compile refuses the commit rather than being skipped. No file means
+# this hook does nothing, so CI and other clones are unaffected; a configured
+# path that does not exist is reported. Matches are printed to this terminal
+# only. NEVER commit the list or copy it into the tree.
+#
+# Lines git itself strips from the message are not read: comment lines when
+# the message is cleaned up in "strip" mode (the default for a message edited
+# in an editor, or commit.cleanup=strip), and everything from the scissors
+# line down in an edited message (the diff `git commit -v` shows). Every other
+# line is read, including a "#" line of a `-m` message, which git keeps. A
+# --cleanup option on the command line is invisible to a hook, so with
+# --cleanup=strip a "#" line of a `-m` message is still read, and with
+# --cleanup=verbatim or whitespace in an editor the comment lines that git
+# then keeps are not.
+#
+# Deliberate override for reviewed exceptions: SENSITIVE_OK=1 git commit ...
+# (it turns off every rule, in both hooks).
+set -euo pipefail
+[ "${SENSITIVE_OK:-0}" = "1" ] && exit 0
+MSG="$1"
+HOOK=commit-msg
+
+# --- BEGIN shared block: the local private pattern list. This block is the
+# --- same in .githooks/pre-commit and .githooks/commit-msg; change both.
+
+# Print the list's path, or nothing when there is none (the check is then off).
+private_patterns_file() {
+    local configured file
+    configured="$(git config --path --get hooks.privatePatterns || true)"
+    if [ -n "$configured" ]; then
+        file="$configured"
+    else
+        # In the main checkout git names the directory by the relative ".git", which cd
+        # would look up through an exported CDPATH (and then print), so CDPATH is cleared.
+        file="$(CDPATH='' cd -- "$(git rev-parse --git-common-dir)" && pwd)/info/private-patterns"
+    fi
+    if [ -f "$file" ]; then
+        printf '%s\n' "$file"
+    elif [ -n "$configured" ]; then
+        echo "$HOOK GUARD: hooks.privatePatterns names '$configured', which does not exist; the private pattern check is off" >&2
+    fi
+}
+
+# Read the list's patterns into PRIVATE_PATTERNS.
+load_private_patterns() {
+    local line
+    PRIVATE_PATTERNS=()
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        case "$line" in ''|'#'*) continue ;; esac
+        PRIVATE_PATTERNS+=("$line")
+    done < "$1"
+}
+
+# For every line of the file $1 that a pattern matches, print "<line number><TAB><pattern>",
+# in line order. Return 1, having said which, if grep cannot compile a pattern.
+# Matching is byte for byte (LC_ALL=C): in a UTF-8 locale the BSD grep of macOS silently
+# skips every line that is not valid UTF-8, such as a Latin-1 one. So -i folds ASCII letters
+# only. GREP_OPTIONS, which that grep obeys (-x, -w, -F, ...), is removed.
+private_pattern_hits() {
+    local pat rc status=0
+    : > "$WORK/hits.unsorted"
+    for pat in "${PRIVATE_PATTERNS[@]}"; do
+        rc=0
+        env -u GREP_OPTIONS LC_ALL=C grep -naiE -e "$pat" -- "$1" > "$WORK/match" 2>/dev/null || rc=$?
+        if [ "$rc" = 0 ]; then
+            PAT="$pat" LC_ALL=C awk -F : '{ print $1 "\t" ENVIRON["PAT"] }' "$WORK/match" >> "$WORK/hits.unsorted"
+        elif [ "$rc" != 1 ]; then
+            echo "$HOOK GUARD: private pattern '$pat' is not a valid extended regular expression" >&2
+            status=1
+        fi
+    done
+    LC_ALL=C sort -s -t "$(printf '\t')" -k1,1n "$WORK/hits.unsorted"
+    return "$status"
+}
+
+# Print one message per hit: "$HOOK GUARD: <where> <what> private pattern '<pattern>'", where
+# line N of the file $2 says where line N of the scanned file came from; at most 50, then a count.
+report_private_hits() {
+    WHAT="$3" HOOK="$HOOK" LC_ALL=C awk -F '\t' '
+        NR == FNR { where[FNR] = $0; next }
+        {
+            hits++
+            if (hits <= 50)
+                printf "%s GUARD: %s %s private pattern '\''%s'\''\n", ENVIRON["HOOK"],
+                    where[$1], ENVIRON["WHAT"], substr($0, length($1) + 2)
+        }
+        END { if (hits > 50) printf "%s GUARD: ... and %d more\n", ENVIRON["HOOK"], hits - 50 }
+    ' "$2" "$1" >&2
+}
+# --- END shared block.
+
+PRIVATE="$(private_patterns_file)"
+[ -n "$PRIVATE" ] || exit 0
+load_private_patterns "$PRIVATE"
+[ "${#PRIVATE_PATTERNS[@]}" -gt 0 ] || exit 0
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/$HOOK-guard.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+
+# Which lines git will strip. git runs this hook with GIT_EDITOR=: when no
+# editor is opened for the message (-m, -F, --no-edit).
+editing=1
+[ "${GIT_EDITOR:-}" = ":" ] && editing=0
+strip=0
+case "$(git config --get commit.cleanup || echo default)" in
+    strip) strip=1 ;;
+    default) strip="$editing" ;;
+esac
+# core.commentString, else core.commentChar, else "#". With "auto" git picks a
+# character per message, which a hook cannot know; "#" is then assumed, so a
+# comment line written with another character is read (never the reverse).
+comment="$(git config --get core.commentString || git config --get core.commentChar || true)"
+case "$comment" in ''|auto) comment='#' ;; esac
+
+# The lines git keeps, one per line of $WORK/kept, and the message line each
+# came from at the same line of $WORK/where.
+: > "$WORK/kept"
+: > "$WORK/where"
+COMMENT="$comment" EDITING="$editing" STRIP="$strip" KEPT="$WORK/kept" WHERE="$WORK/where" \
+    LC_ALL=C awk '
+        BEGIN { comment = ENVIRON["COMMENT"]; cut = comment " ------------------------ >8 ------------------------" }
+        ENVIRON["EDITING"] == 1 && $0 == cut { exit }
+        ENVIRON["STRIP"] == 1 && index($0, comment) == 1 { next }
+        { print > ENVIRON["KEPT"]; print "commit message line " FNR > ENVIRON["WHERE"] }
+    ' "$MSG"
+
+viol=0
+private_pattern_hits "$WORK/kept" > "$WORK/hits" || viol=1
+if [ -s "$WORK/hits" ]; then
+    report_private_hits "$WORK/hits" "$WORK/where" "matches"
+    viol=1
+fi
+
+if [ "$viol" = 1 ]; then
+    echo "commit-msg GUARD: refusing this commit. This is the PUBLIC engine repo;" >&2
+    echo "the flagged material belongs in the private application repo. If this is" >&2
+    echo "a reviewed, deliberate exception: SENSITIVE_OK=1 git commit ..." >&2
+    exit 1
+fi

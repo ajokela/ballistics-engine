@@ -21,11 +21,11 @@ A high-performance ballistics trajectory calculation engine with comprehensive p
 - **Robust Hold Corridors** - Solve a bounded set of NAMED segmented-wind scenarios at once (`hold-corridor --scenarios set.json --ranges 200,400,600 [--target rect:WxH|circle:D]`) and get, at every range, each scenario's hold, the min/max corridor they span, the minimax (Chebyshev-center) hold, the worst-case miss from it, and whether one hold keeps every scenario inside the target — with a versioned `RobustHoldReportV1` JSON form. Caps (≤8 scenarios, ≤64 ranges) and malformed segments are structured errors raised *before* any solving, and reordering scenarios cannot change the answer. No probabilities are assigned anywhere: the corridor is the span of the hypotheses you supplied, not a confidence interval — see [CLI_USAGE.md](CLI_USAGE.md#robust-hold-corridors-hold-corridor--mba-1349)
 - **Moving-Target Lead** - Wind-aware hold tables for targets moving at a constant speed/angle, with iterative intercept-range correction for non-perpendicular motion (`lead` subcommand; public `ballistics_engine::calculate_lead` API) — see [CLI_USAGE.md](CLI_USAGE.md#moving-target-lead)
 - **Mover Ring** - Field-tested alternative for engaging movers: a per-point ring radius (`target_speed × time-of-flight`) falls out of an already-solved trajectory with no second command or re-entered ballistic data (`trajectory --target-speed`, additive across table/JSON/CSV output); `lead` also gained `trajectory`'s powder-temperature flags for muzzle-velocity parity between the two — see [CLI_USAGE.md](CLI_USAGE.md#mover-ring---target-speed)
-- **Side-by-Side Load Comparison** - Compare 2-8 loads at identical conditions with per-load independent zeroing (`compare --load "NAME:DRAG:BC:MASS:VELOCITY[:DIAMETER]"`, mixable with saved profiles); JSON/CSV output carries per-row deltas against the first load — see [CLI_USAGE.md](CLI_USAGE.md#load-comparison-compare)
+- **Side-by-Side Load Comparison** - Compare 2-8 loads with per-load independent zeroing (`compare --load "NAME:DRAG:BC:MASS:VELOCITY[:DIAMETER]"`, mixable with saved profiles, each of which flies its stored weather unless the station flags are typed); JSON/CSV output carries per-row deltas against the first load — see [CLI_USAGE.md](CLI_USAGE.md#load-comparison-compare)
 - **Powder Temperature Command** - Resolve the temperature-adjusted muzzle velocity standalone, without a trajectory solve (`powder` subcommand): linear fps-per-degree model or a measured temperature→velocity curve, optional `--sweep` velocity ladder and muzzle energy; shares the solvers' exact resolution code (public `resolve_powder_adjusted_velocity` API) — see [CLI_USAGE.md](CLI_USAGE.md#powder-temperature-velocity-powder)
 - **Unit Conversion** - Seamless switching between Imperial (default) and Metric units
 - **BC Segmentation** - Velocity-dependent ballistic coefficient modeling with automatic estimation, or your own velocity-keyed ladder (`--bc-segment VMIN:VMAX:BC`, repeatable, keyed on airspeed with smoothstep-blended band edges — see [CLI_USAGE.md](CLI_USAGE.md#manual-bc-segments---bc-segment)); over the JSON bridge the same ladder rides inline as solve-json's `projectile.bc_segments`, in m/s and listed fastest first, measured against `drag_model`'s curve or, beside a `reference`-kind `projectile.drag_table` such as an airgun pellet law, against that table's curve — see [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#projectilebc_segments-mba-1598)
-- **Atmospheric Modeling** - Temperature, pressure, humidity, and altitude effects with ICAO standard atmosphere; also accepts a single **density altitude** reading (`trajectory --density-altitude`, feet imperial / meters metric) as a direct alternative to entering altitude/pressure/temperature separately — back-solves an ISA-equivalent atmosphere (preserving Mach/lapse-rate/segmented-atmosphere behavior, not a density-only shortcut) and supersedes `--altitude`/`--pressure`/`--pressure-type` entirely, with an explicit `--temperature` still honored for correct powder-temperature sensitivity — see [CLI_USAGE.md](CLI_USAGE.md#density-altitude-as-a-direct-input---density-altitude). An explicit station pressure that cannot be a reading at the given altitude, such as a sea-level placeholder or a weather report's QNH sent as station pressure, is flown as given with a warning (solve-json `station_pressure_implausible_for_altitude`, or a stderr line from `trajectory` and `zero`)
+- **Atmospheric Modeling** - Temperature, pressure, humidity, and altitude effects with ICAO standard atmosphere; also accepts a single **density altitude** reading (`trajectory --density-altitude`, feet imperial / meters metric) as a direct alternative to entering altitude/pressure/temperature separately — back-solves an ISA-equivalent atmosphere (preserving Mach/lapse-rate/segmented-atmosphere behavior, not a density-only shortcut) and supersedes `--altitude`/`--pressure`/`--pressure-type` entirely, with an explicit `--temperature` still honored for correct powder-temperature sensitivity — see [CLI_USAGE.md](CLI_USAGE.md#density-altitude-as-a-direct-input---density-altitude). An explicit station pressure that cannot be a reading at the given altitude, such as a sea-level placeholder or a weather report's QNH sent as station pressure, is flown as given with a warning (solve-json `station_pressure_implausible_for_altitude`, or a stderr line from `trajectory` and `zero`). Humidity is one model on every solver path (0.50.0): the CIPM-2007 moist-air density and a moist speed of sound, both from one water-vapour mole fraction, which the air holds at every height (with a virtual-temperature pressure lapse), through the one per-step air lookup `atmosphere::air_at`. It is a percent (default 50) on every `--humidity` flag, Rust field and app surface, and a fraction in the SI JSON's `relative_humidity` and in the request-file axes that follow it (`error-budget --sigma relative-humidity=`, `tolerance --domain relative-humidity=`, the perturbation API's `InputAxis::RelativeHumidity`); a sensor reading up to 5 points outside 0-100 % (101.7 % in fog) flies as 100 % or 0 %, and anything farther out is refused — see [CLI_USAGE.md](CLI_USAGE.md#humidity-units-defaults-and-validation)
 - **Density Altitude for Apps** - The `atmosphere.density_altitude` bridge command resolves a solve-json atmosphere exactly as a solve does and reports pressure altitude, the solver's CIPM-2007 air density, and density altitude under both of its field definitions by name — `faa_rule` (NWS pressure altitude plus the FAA 120 ft/°C rule, humidity-free, the same formula as the DOPE card header) and `density_matched` (ISA altitude of equal actual density, humidity included) — refusing air that cannot exist, which is what a unit mistake looks like; see [docs/ATMOSPHERE_DENSITY_ALTITUDE.md](docs/ATMOSPHERE_DENSITY_ALTITUDE.md)
 - **Clock-Position Wind Entry** - Enter wind direction as the dominant field convention: marked clock positions (`--wind-direction 3oc`, `10h30`, or `10:30`; 12 o'clock = headwind, minutes count 0.5°) alongside plain degrees on every wind-direction flag and the WASM terminal; inside `--wind-segment` the colon-free forms apply (`10:3oc:400`) while `10:30:400` keeps its numeric SPEED:ANGLE:DIST meaning; bare numbers stay degrees everywhere — see [CLI_USAGE.md](CLI_USAGE.md#wind-direction-entry-degrees-clock-positions--mba-1367)
 - **Earth-Fixed Compass Wind Bearings** - Store wind as absolute compass bearings and let the solver re-reference them against the shot azimuth (`--wind-ref compass` + `--shot-direction` on `trajectory`/`monte-carlo`; covers the single direction, location-CSV WIND_DIR, and every `--wind-segment` angle; Monte Carlo converts before dispersion sampling; solve-json `wind.wind_reference`; WASM builder `setWindReference`/`setShotDirection`; wind FROM north on a shot due north = pure headwind, pinned) — see [CLI_USAGE.md](CLI_USAGE.md#earth-fixed-compass-bearings---wind-ref-compass--mba-1368)
@@ -42,6 +42,7 @@ A high-performance ballistics trajectory calculation engine with comprehensive p
   - **Form Factor Corrections**: Bullet-specific drag adjustments
 - **Multiple Output Formats** - JSON, CSV, formatted tables, and printable PDF dope cards
 - **Terminal Chart** - Inline drop, drift, velocity, and energy vs. range charts right in the terminal (`trajectory --plot`, Unicode braille-dot canvas by default, `--plot ascii` fallback); pure Rust, zero new dependencies, no ANSI colors — see [CLI_USAGE.md](CLI_USAGE.md#terminal-chart---plot)
+- **Saved profiles fly their weather everywhere** - Every command that takes a saved profile (`--saved-profile` or `--profile`) flies its stored temperature, pressure and pressure type, humidity, altitude and density altitude, field by field: a typed flag wins, then the stored value, then the command's default (0.50.0; before, only `trajectory`, `plan-truing` and `dsf` did) — see [CLI_USAGE.md](CLI_USAGE.md#a-saved-profiles-weather-0500)
 - **Profile import**: `ballistics profile import file.a7p` — imports ArcherBC2 `.a7p` profiles (rifle, bullet, atmosphere, zero) with a full mapping report; `--dry-run` previews without saving
 - **Online Reverse Solvers** - Optional `login` + `recommend-powder`/`recommend-twist`/`recommend-col`/`calibrate-bc` subcommands query the hosted service for load, twist, cartridge-overall-length, and BC suggestions using a CLI access token saved from your ballisticsinsight.com account (`BALLISTICS_API_TOKEN` env var, or `~/.ballistics/credentials.toml`); all local subcommands work offline with no token — see [CLI_USAGE.md](CLI_USAGE.md#online-reverse-solvers)
 - **Solution Diff Attribution** — explain why two resolved solutions differ, attributed by input group with an explicit interaction remainder (`explain`) — see [CLI_USAGE.md](CLI_USAGE.md#solution-diff-attribution-explain--mba-1345)
@@ -1108,6 +1109,61 @@ The zero, Monte Carlo, BC-fit, lead, hold-curve and truing entry points have the
 `*_with_station_presence` twins, and `atmosphere::resolve_station_conditions_with_presence`
 returns the pair a solve will fly.
 
+### One rule for station air
+
+Every surface accepts the same station air: station pressure must be finite and positive,
+station altitude finite, and temperature finite and above absolute zero. A density altitude
+must be finite and resolve to a station that can exist. Humidity follows the sensor-band rule below;
+the combined air must be physically possible. CLI and zero-day flags, location CSVs, saved
+profiles, the browser terminal, C FFI, bridge cards and truing, solve-json and MCP use this
+rule. The former per-surface pressure, altitude and density-altitude bounds are gone.
+
+The `atmosphere.density_altitude` readout answers beyond the troposphere by walking the same
+ICAO layers as `air_at`. Standard pressure at 20 km reports 20000 m; the unchanged
+`nws_pressure_altitude_ft` formula continued there reports 18879 m. `faa_rule` keeps the
+NWS/FAA continuation so the density-altitude input remains its inverse; `density_matched`
+uses equal density in the standard layers. See the [engine-measured examples](docs/ATMOSPHERE_DENSITY_ALTITUDE.md#outside-the-troposphere).
+
+Refusals name the flag, zero-day flag, CSV column, profile field or request member that
+supplied the reading, in that surface's units, even when the failure is discovered in flight.
+A QNH is quoted as sent alongside its reduced station pressure. The JSON C bridge includes
+the request field path; scalar and struct C calls retain their NULL, NaN or status signals.
+
+A file format can impose its own limits: `profile.export_a7p` keeps the `.a7p` format's
+-100..100 °C and 300..1500 hPa bounds. Import treats absent or zero pressure as an omitted
+reading and absent humidity as dry air. These are format rules, not narrower solve rules.
+See [CLI_USAGE.md](CLI_USAGE.md#one-rule-for-each-station-pressure-altitude-and-density-altitude)
+for commands, real refusal output and format examples.
+
+### Humidity in the library
+
+`AtmosphericConditions::humidity` and `BallisticInputs::humidity_percent` are percents (default
+50), and a `TrajectorySolver` flies its atmosphere's humidity. A solve refuses a humidity more
+than 5 points outside 0-100 (`HUMIDITY_SENSOR_TOLERANCE_PERCENT`) and air that cannot exist; a
+reading from 100 to 105 % flies as exactly 100 %, and one from -5 to 0 % as exactly 0 %.
+`RelativeHumidity` is the one validated value, built from either unit:
+`RelativeHumidity::try_percent(50.0)` or, for the SI JSON's `relative_humidity` fraction,
+`RelativeHumidity::try_fraction(0.5)`.
+
+The trajectory kernels (`compute_derivatives`, `try_integrate_trajectory`,
+`try_solve_trajectory_rust`, `fast_integrate*`) take a `KernelAtmosphere` that carries the
+humidity, so the density and the speed of sound they fly cannot disagree about it (0.50.0
+replaced their `(altitude, temperature, pressure, density ratio)` tuples):
+
+```rust
+use ballistics_engine::{air_at, KernelAtmosphere, RelativeHumidity, StationAir};
+
+// 15 C, 1013.25 hPa, 50 % at sea level: the same air TrajectorySolver flies.
+let station = StationAir::new(0.0, 15.0, 1013.25, RelativeHumidity::try_percent(50.0)?)?;
+let atmosphere = KernelAtmosphere::Station(station);
+// For TrajectoryParams::atmosphere / FastIntegrationParams::atmosphere. The air 300 m up:
+let aloft = air_at(&atmosphere, None, 0.0, 300.0);
+println!("{:.3} kg/m3, {:.3} m/s", aloft.density_kg_m3, aloft.speed_of_sound_mps);
+```
+
+A caller holding an old tuple converts it with `KernelAtmosphere::from_legacy_params(tuple,
+humidity)`. See [CHANGELOG.md](CHANGELOG.md) for the 0.50.0 migration.
+
 ## Performance
 
 Optimized Rust implementation provides:
@@ -1115,6 +1171,12 @@ Optimized Rust implementation provides:
 - Monte Carlo (1000 runs): ~500ms  
 - BC estimation: ~50ms
 - Zero calculation: ~10ms
+
+A humid flight costs what a dry one does. The air's water-vapour mole fraction, and a downrange
+zone's density ratio, are computed once when the `StationAir` or `AtmoSock` is built, never per
+step. `cargo bench --bench humidity_air_bench` times `fast_integrate`, a lean Monte Carlo trial
+and `TrajectorySolver` RK4 and RK45 at 0 % and 50 % relative humidity, side by side;
+`benches/trajectory_bench.rs` holds the trajectory and zero benchmarks.
 
 ## Common Ballistic Coefficients
 

@@ -93,7 +93,10 @@ use crate::adjustment::{
     adjustment_display, adjustment_unit_label, parse_click_value, windage_adjustment_display,
     AdjustmentUnit, ClickValue,
 };
-use crate::atmosphere::StationAtmospherePresence;
+use crate::atmosphere::{
+    AirField, AirRefusal, AirUnits, AltitudeUnit, PressureUnit, RelativeHumidity,
+    StationAtmospherePresence, TemperatureUnit, DEFAULT_HUMIDITY_PERCENT,
+};
 use crate::hold_curve::{
     card_sample_max_range_m, range_not_sampled_message, run_sampled_flight_with_station_presence,
     sample_at_range, CardTruncation, SampledFlight, CARD_SAMPLE_INTERVAL_M,
@@ -333,7 +336,11 @@ pub struct CardRequestV1 {
     /// Station pressure, in `pressure_unit`.
     #[serde(default)]
     pub pressure: Option<f64>,
-    /// Relative humidity, percent. Dimensionless, so no unit field governs it.
+    /// Relative humidity, PERCENT, 0 to 100 (50 = 50 %). Dimensionless, so no unit field governs
+    /// it. Omitted means [`DEFAULT_HUMIDITY_PERCENT`]. A sensor reading within
+    /// [`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`] (5 points) of 0 to 100 (101.7 in fog, -2 in
+    /// very dry air) is the saturated or dry air it reads and flies exactly as 100 or 0; a value
+    /// beyond that band (or not finite) is refused as an invalid request, never clamped.
     #[serde(default = "default_humidity")]
     pub humidity: f64,
     /// Site elevation, in `altitude_unit` — which defaults to METRES whatever `units` says.
@@ -609,7 +616,7 @@ fn sight_height_unset() -> f64 {
     f64::NAN
 }
 fn default_humidity() -> f64 {
-    50.0
+    DEFAULT_HUMIDITY_PERCENT
 }
 fn default_cf() -> f64 {
     1.0
@@ -764,6 +771,9 @@ impl From<CardTruncationV1> for CardTruncation {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CardServiceError {
+    /// Air refused during the zero or sampled flight; retain its typed cause for the caller.
+    #[error("{0}")]
+    Atmosphere(#[source] crate::atmosphere::AtmosphereError),
     #[error("invalid request: {0}")]
     InvalidRequest(String),
     #[error("zero solve failed: {0}")]
@@ -1152,6 +1162,9 @@ struct Resolved {
     sight_offset_lateral_m: f64,
     temperature_c: f64,
     pressure_hpa: f64,
+    /// The request's `humidity`, validated by [`RelativeHumidity`]: the percent every solve of
+    /// the card flies.
+    humidity_percent: f64,
     /// Which of `temperature` / `pressure` the request carried (0.49.0). A field the request
     /// carried is a reading and flies as given; an absent one is the default above, resolved
     /// by the legacy rule (ICAO standard air at a real altitude).
@@ -1193,6 +1206,95 @@ fn resolve_axes_only(req: &CardRequestV1) -> Result<Resolved, CardServiceError> 
     resolve_inner(req, false)
 }
 
+/// The card request's station air refused in the card's own words, or `None` when it flies:
+/// `humidity = 106: relative humidity must be a percent from 0 to 100 (...)` for a humidity
+/// beyond the sensor band, `humidity = 100 at 212 °F and 29.92 inHg: no such air exists: ...`
+/// for air that cannot exist, `pressure = -1 inHg: pressure must be greater than 0` and
+/// `temperature = -500 °F: temperature must be above absolute zero (-459.67 °F)` for a reading no
+/// air has. The temperature and pressure are the station values every solve of the card flies,
+/// and every altitude is stated, in the request's own units; the path is the member to blame in
+/// the request (`$.humidity`, `$.temperature`, `$.pressure`, `$.altitude`).
+///
+/// Every card command checks this before it solves anything, and the bridge reports it in
+/// `error.details` when it is the refusal the service made.
+/// A card's station refusal, or a typed refusal discovered during its flight.
+pub fn air_refusal_for_error(
+    req: &CardRequestV1,
+    error: Option<&crate::atmosphere::AtmosphereError>,
+) -> Option<AirRefusal> {
+    if let Some(error) = error {
+        let units = Units::resolve(req);
+        return Some(error.temperature_refusal(
+            AirField {
+                name: "temperature",
+                path: "$.temperature",
+            },
+            AirUnits {
+                temperature: match units.temperature {
+                    CardTemperatureUnit::Fahrenheit => TemperatureUnit::Fahrenheit,
+                    CardTemperatureUnit::Celsius => TemperatureUnit::Celsius,
+                },
+                altitude: match units.altitude {
+                    CardAltitudeUnit::Feet => AltitudeUnit::Feet,
+                    CardAltitudeUnit::Meters => AltitudeUnit::Meters,
+                },
+                ..AirUnits::default()
+            },
+        ));
+    }
+    air_refusal(req)
+}
+
+pub fn air_refusal(req: &CardRequestV1) -> Option<AirRefusal> {
+    let u = Units::resolve(req);
+    let station_presence =
+        StationAtmospherePresence::new(req.temperature.is_some(), req.pressure.is_some());
+    let temperature = req.temperature.unwrap_or_else(|| u.default_temperature());
+    let pressure = req.pressure.unwrap_or_else(|| u.default_pressure());
+    AtmosphericConditions {
+        temperature: u.temperature_to_metric(temperature),
+        pressure: u.pressure_to_metric(pressure),
+        humidity: req.humidity,
+        altitude: u.altitude_to_metric(req.altitude),
+    }
+    .air_refusal(
+        station_presence,
+        [
+            AirField {
+                name: "humidity",
+                path: "$.humidity",
+            },
+            AirField {
+                name: "temperature",
+                path: "$.temperature",
+            },
+            AirField {
+                name: "pressure",
+                path: "$.pressure",
+            },
+            AirField {
+                name: "altitude",
+                path: "$.altitude",
+            },
+        ],
+        req.humidity,
+        AirUnits {
+            temperature: match u.temperature {
+                CardTemperatureUnit::Fahrenheit => TemperatureUnit::Fahrenheit,
+                CardTemperatureUnit::Celsius => TemperatureUnit::Celsius,
+            },
+            pressure: match u.pressure {
+                CardPressureUnit::InHg => PressureUnit::InchesOfMercury,
+                CardPressureUnit::HPa => PressureUnit::Hectopascals,
+            },
+            altitude: match u.altitude {
+                CardAltitudeUnit::Feet => AltitudeUnit::Feet,
+                CardAltitudeUnit::Meters => AltitudeUnit::Meters,
+            },
+        },
+    )
+}
+
 fn resolve_inner(
     req: &CardRequestV1,
     load_bc_schedule: bool,
@@ -1225,6 +1327,20 @@ fn resolve_inner(
             "tracking correction factors must lie in (0.5, 1.5)".into(),
         ));
     }
+    // The station air: the engine's one humidity validator (a percent in
+    // [0, 100], a sensor reading within 5 points of it read as the end, anything farther
+    // out refused and never clamped; 0.49.0 flew 150 as 100 % here) and the solver's one
+    // impossible-air rule, refused here in the card's words before any solve, so a card of air
+    // that cannot exist names that air rather than a failed zero solve. The bridge reports the
+    // same refusal in `error.details`.
+    if let Some(refusal) = air_refusal(req) {
+        return Err(CardServiceError::InvalidRequest(
+            refusal.message().to_string(),
+        ));
+    }
+    let humidity = RelativeHumidity::try_percent(req.humidity).map_err(|error| {
+        CardServiceError::InvalidRequest(error.at_field("humidity").to_string())
+    })?;
 
     // Each of these three defaults is itself denominated, so it is taken from the dimension
     // that governs the field rather than from the preset (`Units` restates the CLI's own
@@ -1287,6 +1403,7 @@ fn resolve_inner(
         sight_offset_lateral_m: u.sight_height_to_metric(req.sight_offset_lateral),
         temperature_c: u.temperature_to_metric(temperature),
         pressure_hpa: u.pressure_to_metric(pressure),
+        humidity_percent: humidity.percent(),
         station_presence,
         altitude_m: u.altitude_to_metric(req.altitude),
         end_m: u.distance_to_metric(req.end),
@@ -1467,7 +1584,7 @@ fn reject_overlapping_bc_segments(
     Ok(())
 }
 
-fn solve_zero(req: &CardRequestV1, r: &Resolved) -> Result<f64, CardServiceError> {
+fn solve_zero(r: &Resolved) -> Result<f64, CardServiceError> {
     let zero_inputs = BallisticInputs {
         bc_value: r.bc_for_solve,
         bc_type: r.drag_model,
@@ -1490,7 +1607,7 @@ fn solve_zero(req: &CardRequestV1, r: &Resolved) -> Result<f64, CardServiceError
     let atmosphere = AtmosphericConditions {
         temperature: r.temperature_c,
         pressure: r.pressure_hpa,
-        humidity: req.humidity,
+        humidity: r.humidity_percent,
         altitude: r.altitude_m,
     };
     crate::calculate_zero_angle_with_station_presence(
@@ -1501,12 +1618,14 @@ fn solve_zero(req: &CardRequestV1, r: &Resolved) -> Result<f64, CardServiceError
         atmosphere,
         r.station_presence,
     )
-    .map_err(|e| CardServiceError::ZeroSolve(e.to_string()))
+    .map_err(|e| match e.atmosphere_error() {
+        Some(air) => CardServiceError::Atmosphere(air.clone()),
+        None => CardServiceError::ZeroSolve(e.to_string()),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
 fn sampled(
-    req: &CardRequestV1,
     r: &Resolved,
     wind_speed_m: f64,
     wind_direction_deg: f64,
@@ -1521,7 +1640,7 @@ fn sampled(
         r.sight_height_m,
         r.temperature_c,
         r.pressure_hpa,
-        req.humidity,
+        r.humidity_percent,
         r.altitude_m,
         wind_speed_m,
         wind_direction_deg,
@@ -1542,7 +1661,12 @@ fn sampled(
         Some(r.zero_distance_m),
         r.station_presence,
     )
-    .map_err(|e| CardServiceError::Trajectory(e.to_string()))
+    .map_err(
+        |e| match crate::atmosphere::AtmosphereError::in_error(&*e) {
+            Some(air) => CardServiceError::Atmosphere(air.clone()),
+            None => CardServiceError::Trajectory(e.to_string()),
+        },
+    )
 }
 
 /// Read one card row's sample off a solved flight, or `None` when the flight does not span it
@@ -1604,9 +1728,8 @@ fn units_block(req: &CardRequestV1, u: &Units, windage_unit: AdjustmentUnit) -> 
 /// Mirrors the CLI's `come-ups` command row-for-row.
 pub fn come_ups_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardServiceError> {
     let r = resolve(req)?;
-    let zero_angle = solve_zero(req, &r)?;
+    let zero_angle = solve_zero(&r)?;
     let flight = sampled(
-        req,
         &r,
         r.u.wind_to_metric(req.wind_speed),
         req.wind_direction_deg,
@@ -1699,15 +1822,14 @@ fn range_table_rows(
     lead_target_speed: Option<f64>,
 ) -> Result<(CardResponseV1, Vec<Option<f64>>, f64), CardServiceError> {
     let r = resolve(req)?;
-    let zero_angle = solve_zero(req, &r)?;
+    let zero_angle = solve_zero(&r)?;
     let wind_flight = sampled(
-        req,
         &r,
         r.u.wind_to_metric(req.wind_speed),
         req.wind_direction_deg,
         zero_angle,
     )?;
-    let no_wind_flight = sampled(req, &r, 0.0, 0.0, zero_angle)?;
+    let no_wind_flight = sampled(&r, 0.0, 0.0, zero_angle)?;
     // Both flights feed every row, so the card can only run as far as the shorter of them.
     let reach_m = wind_flight.reach_m.min(no_wind_flight.reach_m);
     let lead_speed_mps = lead_target_speed.map(|speed| r.u.wind_to_metric(speed));
@@ -1816,7 +1938,7 @@ pub fn wind_card_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardServiceEr
         ));
     }
     let r = resolve(req)?;
-    let zero_angle = solve_zero(req, &r)?;
+    let zero_angle = solve_zero(&r)?;
 
     let angles: Vec<f64> = if req.wind_angles_deg.is_empty() {
         vec![90.0]
@@ -1841,7 +1963,7 @@ pub fn wind_card_v1(req: &CardRequestV1) -> Result<CardResponseV1, CardServiceEr
     for &angle_deg in &angles {
         let mut all_drifts: Vec<Vec<f64>> = vec![Vec::new(); ranges.len()];
         for &ws in &req.wind_speeds {
-            let flight = sampled(req, &r, r.u.wind_to_metric(ws), angle_deg, zero_angle)?;
+            let flight = sampled(&r, r.u.wind_to_metric(ws), angle_deg, zero_angle)?;
             reach_m = reach_m.min(flight.reach_m);
             for (ri, &range_display) in ranges.iter().enumerate().take(reachable) {
                 let range_m = r.u.distance_to_metric(range_display);

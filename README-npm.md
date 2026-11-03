@@ -155,6 +155,13 @@ see **Size** under Caveats).
     .setZeroRange(100).ignoreGroundImpact(true)
     .calculateTrajectory(1000);          // reaches 1000 yd
   ```
+- **Failures throw.** A command that fails throws its message; since 0.50.0 that includes a
+  failed `trajectory`, `zero` or `monte-carlo` solve, which used to come back as an
+  `Error: ...` string, so `-o json` output is always JSON. `Calculator.setHumidity` takes a
+  percent and throws for one beyond the sensor band (`setHumidity = 150: relative humidity must
+  be a percent from 0 to 100 (a sensor reading from -5 to 105 is read as 0 or 100)`), and
+  `calculateTrajectory` / `getFullTrajectory` throw for air that cannot exist, naming the
+  setters: `setHumidity = 100 at 212 °F and 29.92 inHg: no such air exists: ...`.
 - Full API surface (including the `Calculator` builder class) is documented in the bundled
   `.d.ts`; the full CLI flag reference `runCommand` accepts is documented in the source repo's
   `CLI_USAGE.md`.

@@ -5,6 +5,27 @@ use crate::InternalBallisticInputs as BallisticInputs;
 /// This function uses the Miller stability formula. An SG value greater than 1.5
 /// is generally considered to indicate adequate stability.
 ///
+/// # Humidity: a deliberate exception (0.50.0)
+///
+/// Every solver flies humid air, but this muzzle Sg keeps Miller's published DRY atmospheric
+/// correction, `(T / 288.15 K) · (1013.25 hPa / P)` (Miller's `(T_F + 460) / 519 · 29.92 / P`),
+/// so it does not move with humidity. That is on purpose, for parity: Miller's rule and Litz's
+/// spin-drift fit `1.25 (Sg + 1.2) t^1.83` were both published with this correction, and so is
+/// every Miller calculator a shooter checks a twist against. The Sg here feeds the reported
+/// stability, Litz spin drift and the Litz aerodynamic jump on every surface, so all of them stay
+/// on the published numbers.
+///
+/// What a humid correction would change, measured with the engine (0.50.0): the factor
+/// `ρ_dry / ρ_moist` (CIPM-2007, same T and P, 1013.25 hPa) would multiply Sg by 1.0032 at
+/// 15 °C / 50 %, 1.0064 at 15 °C / 100 %, 1.0080 at 30 °C / 50 % and 1.0192 at 35 °C / 90 %.
+/// For a .308 175 gr at 2600 fps (1:10, 1.24 in; Sg 2.398 at 15 °C) that moves Litz spin
+/// drift at 1000 yd from 13.04 to 13.07 in at 15 °C / 50 % and from 12.83 to 13.00 in at
+/// 35 °C / 90 %, and the aerodynamic jump in a 10 mph crosswind from 0.4631 to 0.4639 MOA and
+/// from 0.4797 to 0.4846 MOA.
+///
+/// The in-flight dynamic stability (Magnus yaw of repose) is not this function: it reads each
+/// step's local, humid density.
+///
 /// # Arguments
 /// * `inputs` - Ballistic input parameters
 /// * `atmo_params` - Atmospheric parameters (altitude, temp_c, pressure_hpa, density_ratio)

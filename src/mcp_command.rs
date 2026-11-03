@@ -543,10 +543,27 @@ fn solve_input_schema() -> Value {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
+                    // The rule a solve applies to each station reading, and nothing narrower:
+                    // any finite altitude, a temperature and a pressure above 0.
                     "altitude_m": {"type": "number"},
-                    "temperature_k": {"type": "number"},
-                    "pressure_pa": {"type": "number"},
-                    "relative_humidity": {"type": "number"},
+                    "temperature_k": {"type": "number", "exclusiveMinimum": 0},
+                    "pressure_pa": {"type": "number", "exclusiveMinimum": 0},
+                    "relative_humidity": {
+                        "type": "number",
+                        // The sensor band the decoder accepts, taken from the one rule
+                        // (HUMIDITY_SENSOR_TOLERANCE_PERCENT, in the wire's fraction), never
+                        // written out again here: -0.05 and 1.05.
+                        "minimum": crate::RelativeHumidity::FRACTION_BAND.0,
+                        "maximum": crate::RelativeHumidity::FRACTION_BAND.1,
+                        "description": format!(
+                            "relative humidity as a FRACTION 0-1 (0.5 = 50%); a sensor reading \
+                             within {} ({} points) of that range is read as saturated (1) or \
+                             dry (0) air; omitted means {}",
+                            -crate::RelativeHumidity::FRACTION_BAND.0,
+                            ballistics_engine::HUMIDITY_SENSOR_TOLERANCE_PERCENT,
+                            crate::RelativeHumidity::DEFAULT.fraction()
+                        )
+                    },
                     "latitude_rad": {"type": "number"}
                 }
             },
@@ -772,6 +789,202 @@ mod effect_schema_parity {
             published, accepted,
             "the MCP effects schema and the solve-json effects allowlist have diverged"
         );
+    }
+}
+
+#[cfg(test)]
+mod humidity_schema {
+    use super::*;
+
+    /// The one FRACTION on the SI wire says so in the schema an MCP client reads, with the
+    /// bounds the decoder enforces (the sensor band around 0-1). A bare `number` let a model send
+    /// `50` meaning 50 % and learn its unit only from the refusal.
+    #[test]
+    fn relative_humidity_publishes_its_unit_and_bounds() {
+        let schema = solve_input_schema();
+        let humidity = &schema["properties"]["atmosphere"]["properties"]["relative_humidity"];
+        assert_eq!(humidity["type"], "number");
+        // The bounds are the sensor band the decoder
+        // accepts, 0.05 either side of [0, 1], and the description says what a value in the
+        // band means.
+        assert_eq!(humidity["minimum"], -0.05);
+        assert_eq!(humidity["maximum"], 1.05);
+        let description = humidity["description"].as_str().unwrap_or_default();
+        assert!(
+            description.contains("FRACTION") && description.contains("0.5 = 50%"),
+            "the description names the unit: {description:?}"
+        );
+        assert!(
+            description.contains("within 0.05 (5 points) of that range")
+                && description.contains("saturated (1) or dry (0) air"),
+            "the description explains the band: {description:?}"
+        );
+        // The bounds are the one rule's edges: each is accepted, and the next double out is
+        // refused.
+        let (minimum, maximum) = (
+            humidity["minimum"].as_f64().unwrap(),
+            humidity["maximum"].as_f64().unwrap(),
+        );
+        assert!(crate::RelativeHumidity::try_fraction(minimum).is_ok());
+        assert!(crate::RelativeHumidity::try_fraction(maximum).is_ok());
+        let below = f64::from_bits(minimum.to_bits() + 1);
+        let above = f64::from_bits(maximum.to_bits() + 1);
+        assert!(below < minimum && above > maximum);
+        assert!(crate::RelativeHumidity::try_fraction(below).is_err());
+        assert!(crate::RelativeHumidity::try_fraction(above).is_err());
+        assert_eq!(
+            ballistics_engine::HUMIDITY_SENSOR_TOLERANCE_PERCENT,
+            5.0,
+            "the description's 0.05 (5 points) is the tolerance"
+        );
+        // The stated default is the one default, in the wire's unit, with its 0.49.0 bytes.
+        assert!(
+            description.ends_with("omitted means 0.5"),
+            "the description names the default: {description:?}"
+        );
+        assert!(
+            description.ends_with(&format!(
+                "omitted means {}",
+                crate::RelativeHumidity::DEFAULT.fraction()
+            )),
+            "the stated default is RelativeHumidity::DEFAULT: {description:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod humidity_wire {
+    use super::*;
+    use ballistics_engine::solve_json::{ResolvedSolveRequestV1, SolveRequestV1};
+
+    /// A solve-json v1 request in warm, thin air, with `relative_humidity` when given.
+    fn arguments(relative_humidity: Option<f64>) -> Value {
+        let mut atmosphere = json!({"temperature_k": 300.0, "pressure_pa": 95_000.0});
+        if let Some(fraction) = relative_humidity {
+            atmosphere["relative_humidity"] = json!(fraction);
+        }
+        json!({
+            "schema_version": 1,
+            "projectile": {"mass_kg": 0.01134, "diameter_m": 0.00782, "length_m": 0.031,
+                           "drag_model": "G7", "ballistic_coefficient": 0.243},
+            "rifle": {"muzzle_velocity_mps": 823.0},
+            "shot": {"max_range_m": 600.0, "zero_distance_m": 100.0},
+            "atmosphere": atmosphere,
+            "wind": {}, "solver": {}, "effects": {}, "sampling": {"interval_m": 100.0}
+        })
+    }
+
+    /// The `solve` tool's answer to `arguments`: whether it is an error, and its JSON text.
+    fn solve_tool(arguments: Value) -> (bool, Value) {
+        let line = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "solve", "arguments": arguments}
+        });
+        let mut initialized = true;
+        let response = dispatch_line(&line.to_string(), &mut initialized).expect("a response");
+        let result = &response["result"];
+        let text = result["content"][0]["text"].as_str().expect("text content");
+        (
+            result["isError"] == true,
+            serde_json::from_str(text).expect("the text is JSON"),
+        )
+    }
+
+    /// The MCP `solve` tool is the SI wire, so its one
+    /// humidity is the fraction `relative_humidity`. The fraction sent is the fraction echoed
+    /// and flown (the library's own answer, byte for byte), the echo sent back flies the same
+    /// bits, a sensor reading within 0.05 of 0-1 flies as the end, and anything beyond the band
+    /// is refused at its path.
+    #[test]
+    fn the_solve_tool_round_trips_the_wire_fraction() {
+        for fraction in [0.0, 0.3, 0.5, 0.123_456_789_012_345_6, 1.0] {
+            let (is_error, answer) = solve_tool(arguments(Some(fraction)));
+            assert!(!is_error, "{fraction}: {answer}");
+            let echoed = answer["resolved_request"]["atmosphere"]["relative_humidity"]
+                .as_f64()
+                .unwrap();
+            assert_eq!(
+                echoed.to_bits(),
+                f64::to_bits(fraction),
+                "echo of {fraction}"
+            );
+
+            let library = ballistics_engine::solve_v1(
+                decode_solve_request_v1(&arguments(Some(fraction)).to_string()).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                answer,
+                serde_json::to_value(&library).unwrap(),
+                "the tool is the library at {fraction}"
+            );
+
+            // The resolved echo, rebuilt as a request and sent back through the tool.
+            let resolved: ResolvedSolveRequestV1 =
+                serde_json::from_value(answer["resolved_request"].clone()).unwrap();
+            let rebuilt = serde_json::to_value(SolveRequestV1::from(&resolved)).unwrap();
+            let (is_error, again) = solve_tool(rebuilt);
+            assert!(!is_error, "{again}");
+            for key in ["resolved_request", "summary", "samples"] {
+                assert_eq!(again[key], answer[key], "{key} of the echo of {fraction}");
+            }
+        }
+        for (reading, end) in [(1.03, 1.0), (1.05, 1.0), (-0.02, 0.0)] {
+            let (is_error, answer) = solve_tool(arguments(Some(reading)));
+            assert!(!is_error, "a reading of {reading} flies: {answer}");
+            assert_eq!(
+                answer,
+                solve_tool(arguments(Some(end))).1,
+                "{reading} as {end}"
+            );
+        }
+        for fraction in [50.0, 1.5, -0.1, 1.050_000_1] {
+            let (is_error, answer) = solve_tool(arguments(Some(fraction)));
+            assert!(is_error, "{fraction} must be refused: {answer}");
+            assert_eq!(answer["error"]["code"], "invalid_value", "{answer}");
+            assert_eq!(
+                answer["error"]["path"], "$.atmosphere.relative_humidity",
+                "{answer}"
+            );
+        }
+        let (_, omitted) = solve_tool(arguments(None));
+        let (_, default) = solve_tool(arguments(Some(0.5)));
+        for key in ["resolved_request", "summary", "samples"] {
+            assert_eq!(omitted[key], default[key], "omitted is 0.5: {key}");
+        }
+    }
+
+    /// The schema states the rule the solve applies to each station reading, and nothing
+    /// narrower: no bound on the altitude (any finite altitude flies), and a temperature and a
+    /// pressure above 0, so a client that checks the schema refuses exactly what the tool
+    /// refuses at that path. 0.49.0's decoder refused an altitude outside -5000..84000 m that
+    /// the schema did not state.
+    #[test]
+    fn the_schema_states_the_solves_rule_for_each_station_reading() {
+        let schema = solve_input_schema();
+        let atmosphere = &schema["properties"]["atmosphere"]["properties"];
+        assert_eq!(atmosphere["altitude_m"], json!({"type": "number"}));
+        for field in ["temperature_k", "pressure_pa"] {
+            assert_eq!(
+                atmosphere[field],
+                json!({"type": "number", "exclusiveMinimum": 0}),
+                "{field}"
+            );
+        }
+        let at = |field: &str, value: f64| {
+            let mut request = arguments(Some(0.0));
+            request["atmosphere"][field] = json!(value);
+            solve_tool(request)
+        };
+        for field in ["temperature_k", "pressure_pa"] {
+            let (is_error, answer) = at(field, 0.0);
+            assert!(is_error, "{field} = 0 is refused: {answer}");
+            assert_eq!(answer["error"]["path"], format!("$.atmosphere.{field}"));
+        }
+        for altitude_m in [-1000.0, 20_000.0, 90_000.0] {
+            let (is_error, answer) = at("altitude_m", altitude_m);
+            assert!(!is_error, "altitude_m = {altitude_m} flies: {answer}");
+        }
     }
 }
 

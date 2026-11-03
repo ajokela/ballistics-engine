@@ -81,17 +81,21 @@ pub const GRAINS_PER_GRAM: f64 = 1.0 / GRAMS_PER_GRAIN;
 /// Air density at sea level (kg/m³)
 pub const AIR_DENSITY_SEA_LEVEL: f64 = 1.225;
 
-/// Speed of sound at sea level, standard atmospheric conditions
+/// Speed of sound at sea level, standard atmospheric conditions: a FIXED reference value.
 ///
 /// Value: 340.29 m/s (1116.44 ft/s)
 /// Conditions: 15°C (59°F), 1013.25 hPa, dry air
 ///
-/// Temperature dependence: c = 331.3 * sqrt(T_kelvin / 273.15)
-///
-/// Note: Some calculations use 343.0 m/s (20°C reference) - ensure consistency
-/// in Mach number calculations. This value follows ICAO Standard Atmosphere.
-///
 /// Source: International Standard Atmosphere (ISO 2533)
+///
+/// No trajectory flies this constant. Every solver takes its local sound speed from
+/// [`crate::atmosphere::air_at`]: the moist-air
+/// [`crate::atmosphere::moist_speed_of_sound`] formula at the local temperature and the
+/// station's (or zone's) own water-vapour mole fraction, held aloft, which at 0 % is the
+/// engine's one dry value `sqrt(1.4 · 287.0531 · T)`, 340.294 m/s at 15 °C (and 340.748 m/s at
+/// the default 50 %). The constant serves only the
+/// fixed-Mach estimates the `tests/humidity_guard.rs` allowlist names (for example the legacy
+/// aerodynamic-jump estimator and `bc-convert`'s default sound speed).
 pub const SPEED_OF_SOUND_MPS: f64 = 340.29;
 
 // Numerical stability constants

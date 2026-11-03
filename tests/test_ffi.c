@@ -344,6 +344,92 @@ static int test_station_presence(const FFIBallisticInputs* base) {
     return 0;
 }
 
+// 0.50.0: a relative humidity is a PERCENT from 0 to 100, and a
+// value beyond the 5-point sensor band around it is REFUSED, never clamped. 0.49.0 flew 150 as
+// 100 %. The single solve and the Monte Carlo return NULL, the zero angle NaN; 0 and 100 still
+// fly. A sensor reading within the band (101.7 in fog, -2 in desert air) is the saturated or
+// dry air it reads, and flies that end to the bit.
+static int test_humidity_validation(const FFIBallisticInputs* base) {
+    FFIBallisticInputs inputs = *base;
+    inputs.enable_wind_shear = 0;
+    const double bad[] = {150.0, -5.0000001, 105.0000001, NAN};
+    const double good[] = {0.0, 100.0};
+    const double readings[][2] = {{100.0001, 100.0}, {101.7, 100.0}, {105.0, 100.0},
+                                  {-2.0, 0.0}, {-5.0, 0.0}};
+    FFIMonteCarloParams params = {
+        .num_simulations = 3,
+        .velocity_std_dev = 0.0,
+        .angle_std_dev = 0.0,
+        .bc_std_dev = 0.0,
+        .wind_speed_std_dev = 0.0,
+        .target_distance = 100.0,
+        .base_wind_speed = 0.0,
+        .base_wind_direction = 0.0,
+        .azimuth_std_dev = 0.0
+    };
+
+    printf("Humidity validation (0.50.0):\n");
+    printf("-----------------------------\n");
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        FFIAtmosphericConditions atmosphere = {
+            .temperature = 15.0, .pressure = 1013.25, .humidity = bad[i], .altitude = 0.0
+        };
+        FFITrajectoryResult* result = ballistics_calculate_trajectory(
+            &inputs, NULL, &atmosphere, 300.0, 1.0);
+        double zero = ballistics_calculate_zero_angle(&inputs, NULL, &atmosphere, 100.0);
+        FFIMonteCarloResults* mc = ballistics_monte_carlo(&inputs, &atmosphere, &params);
+        int refused = result == NULL && isnan(zero) && mc == NULL;
+        ballistics_free_trajectory_result(result);
+        ballistics_free_monte_carlo_results(mc);
+        if (!refused) {
+            printf("FATAL: humidity %g %% was not refused\n", bad[i]);
+            return 1;
+        }
+    }
+    for (size_t i = 0; i < sizeof good / sizeof good[0]; i++) {
+        FFIAtmosphericConditions atmosphere = {
+            .temperature = 15.0, .pressure = 1013.25, .humidity = good[i], .altitude = 0.0
+        };
+        FFITrajectoryResult* result = ballistics_calculate_trajectory(
+            &inputs, NULL, &atmosphere, 300.0, 1.0);
+        int flew = result != NULL;
+        ballistics_free_trajectory_result(result);
+        if (!flew) {
+            printf("FATAL: humidity %g %% is valid and must fly\n", good[i]);
+            return 1;
+        }
+    }
+    for (size_t i = 0; i < sizeof readings / sizeof readings[0]; i++) {
+        FFIAtmosphericConditions at_reading = {
+            .temperature = 15.0, .pressure = 1013.25, .humidity = readings[i][0], .altitude = 0.0
+        };
+        FFIAtmosphericConditions at_end = at_reading;
+        at_end.humidity = readings[i][1];
+        FFITrajectoryResult* reading = ballistics_calculate_trajectory(
+            &inputs, NULL, &at_reading, 300.0, 1.0);
+        FFITrajectoryResult* end = ballistics_calculate_trajectory(
+            &inputs, NULL, &at_end, 300.0, 1.0);
+        double zero_reading = ballistics_calculate_zero_angle(&inputs, NULL, &at_reading, 100.0);
+        double zero_end = ballistics_calculate_zero_angle(&inputs, NULL, &at_end, 100.0);
+        FFIMonteCarloResults* mc = ballistics_monte_carlo(&inputs, &at_reading, &params);
+        int same = reading != NULL && end != NULL && mc != NULL &&
+                   reading->impact_velocity == end->impact_velocity &&
+                   reading->max_height == end->max_height &&
+                   reading->time_of_flight == end->time_of_flight &&
+                   zero_reading == zero_end;
+        ballistics_free_trajectory_result(reading);
+        ballistics_free_trajectory_result(end);
+        ballistics_free_monte_carlo_results(mc);
+        if (!same) {
+            printf("FATAL: humidity %.10g %% must fly as %.10g %%\n", readings[i][0], readings[i][1]);
+            return 1;
+        }
+    }
+    printf("150, -5.0000001, 105.0000001 and NaN %% refused; 0 and 100 %% fly; "
+           "101.7 flies as 100 %% and -2 as 0 %%\n\n");
+    return 0;
+}
+
 int main() {
     printf("Testing Ballistics Engine FFI with Advanced Features\n");
     printf("====================================================\n\n");
@@ -492,6 +578,9 @@ int main() {
         return 1;
     }
     if (test_station_presence(&inputs) != 0) {
+        return 1;
+    }
+    if (test_humidity_validation(&inputs) != 0) {
         return 1;
     }
 

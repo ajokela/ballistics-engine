@@ -366,23 +366,26 @@ warning: station pressure 29.92 inHg is 1.202 times the ICAO standard pressure a
   `--pressure-type qnh` (most reduce the default, `estimate-bc` never does).
 - **Saved profiles.** `profile save` records which of the two you typed
   (`temperature_supplied` / `pressure_supplied` in the file, written only when true), and
-  `.a7p` import marks both. A profile saved before 0.49.0 carries neither, so its stored
+  `.a7p` import marks temperature and nonzero pressure; an absent or zero pressure stays
+  unmarked and uses the default. A profile saved before 0.49.0 carries neither, so its stored
   59 °F / 29.92 inHg keeps the old meaning, standard air at a real altitude; re-save it with
-  `--temperature` / `--pressure` to mark a real reading. On `plan-truing --profile` and
-  `dsf --saved-profile`, a profile's pressure flown as a QNH is a reading even without the
-  marker, unless it is the 29.92 inHg / 1013.25 hPa that `profile save` stores when
-  `--pressure` is omitted, which stays omitted.
+  `--temperature` / `--pressure` to mark a real reading. On every command that takes a saved
+  profile, a stored pressure flown as a QNH (its stored type, or a typed `--pressure-type qnh`)
+  is a reading even without the marker, unless it is the 29.92 inHg / 1013.25 hPa that
+  `profile save` stores when `--pressure` is omitted, which stays omitted. That stored default
+  is no reading in either unit system, so the run flies its own default in its place (see
+  [A saved profile's weather](#a-saved-profiles-weather-0500)).
 - **Density altitude.** The pressure is derived from the density altitude, never a reading,
   and an explicit temperature wins over the ISA one. Explicit means any supplied source: the
   flag, a `--location` CSV cell, a `--profile` CSV `ZERO_TEMP` cell or a marked saved profile.
   An unmarked (pre-0.49.0) profile's temperature is not explicit.
-- **A stored density altitude** is honoured by `plan-truing --profile` and
-  `dsf --saved-profile`, as `trajectory --saved-profile` already did, when the run supplies no
-  pressure or altitude of its own.
+- **A stored density altitude** is honoured by every command that takes a saved profile (since
+  0.50.0; `plan-truing --profile` and `dsf --saved-profile` since 0.49.0, `trajectory
+  --saved-profile` before), when the run supplies no pressure or altitude of its own.
 - **The zero day.** A `--zero-*` value you give is a reading; a value the zero day inherits
   from the shot day keeps the shot day's status.
-- **Typed defaults.** On `trajectory`, a typed `--altitude 0` or `--humidity 50` beats a
-  `--location` CSV or saved-profile value.
+- **Typed defaults.** A typed `--altitude 0` or `--humidity 50` beats a saved-profile value on
+  every command that takes one, and on `trajectory` a `--location` CSV value too.
 - **`--online`.** A typed value is sent with `temperature_supplied` / `pressure_supplied` set
   to `true`, and a declared QNH is sent as its station pressure. The online service flies a
   marked value as typed once it supports those fields; until then it still replaces an
@@ -390,6 +393,330 @@ warning: station pressure 29.92 inHg is 1.202 times the ICAO standard pressure a
   unchanged.
 - **`stability`** keeps its own rule: an omitted pressure there is the sea-level value itself,
   as before.
+
+#### A saved profile's weather (0.50.0)
+
+`profile save` stores a temperature, a pressure and its type (`--pressure-type`), a humidity, an
+altitude and, if you give one, a density altitude. **Every command that takes a saved profile flies
+that weather**: `trajectory --saved-profile`, `dsf --saved-profile`, and the `--profile` of
+`plan-truing`, `come-ups`, `range-table`, `wind-card`, `mpbr`, `lead`, `compare`, `hold-corridor`,
+`mark-to-range`, `bdc-match`, `optimal-zero`, `adaptive-card`, `reticle hold` and `stability`. Each
+station field follows one rule:
+
+1. A typed flag wins, and replaces only its own field. A typed value equal to the default
+   (`--temperature 59`, `--humidity 50`, `--altitude 0`) wins too.
+2. Otherwise the profile's stored value flies. On `trajectory` a `--location` CSV cell, or a
+   `--profile` CSV `ZERO_TEMP` / `ZERO_ALT` cell, comes before it.
+3. Otherwise the command's documented default flies, the one it flies with no profile.
+
+The qualifiers travel with the value they describe:
+
+- **The stored pressure type** applies to the stored pressure only. With a typed `--pressure` it
+  is ignored; a typed `--pressure-type` replaces it.
+- **A stored density altitude** flies its derived station unless the run gives a pressure or an
+  altitude of its own (a flag, or on `trajectory` a CSV cell or `--density-altitude`).
+- **A stored temperature or pressure** keeps its presence marker, so one typed when the profile
+  was saved flies as typed. The 59 °F / 29.92 inHg `profile save` stores for an omitted flag is
+  no reading, so the run flies its own default instead: a profile saved in imperial with no
+  weather flies 1013.25 hPa in a metric run, as no profile does.
+- **The zero** is solved in the same air. `trajectory --auto-zero` inherits the resolved shot
+  day for every `--zero-*` flag left out; the other commands zero in the air they fly.
+- **`stability`** reads the stored temperature, pressure, altitude and density altitude. Its
+  Miller correction is dry, so it never reads the humidity.
+- **`compare`** flies each `--profile` load in its own stored weather and each `--load` spec in
+  the typed flags or the defaults. When the loads fly different air it says so on stderr, and
+  in `-o json` each load that flies other air than the first carries an `air` object
+  (`temperature`, `pressure`, `humidity`, `altitude`). Type the flags to fly one air for every
+  load.
+
+A stored value is checked where it flies. A stored humidity outside the sensor band is refused,
+naming the field and the file: `profile 'p' field humidity = 106: relative humidity must be a
+percent from 0 to 100 (a sensor reading from -5 to 105 is read as 0 or 100); edit the humidity
+stored in the profile (the profile is stored at ...)`. Stored air that cannot exist is refused
+naming the profile field that put it there. A run that never reads the field does not refuse it:
+one that types `--humidity`, `stability`, `dial-plan`, or `reticle hold --drop-mil`.
+
+Before 0.50.0, only `trajectory --saved-profile`, `plan-truing --profile` and `dsf --saved-profile`
+flew the stored weather. The other commands loaded the profile's bullet and zero and flew the
+flags' defaults, with nothing said, and still refused a stored humidity they never flew. Engine
+output for a profile saved with `-v 2700 -b 0.475 -m 168 -d 0.308 --zero-distance 100
+--temperature 95 --humidity 100`, from `come-ups --profile hot --zero-distance 100` at 1000 yd:
+0.49.0 flew 59 °F and 50 % (1199.56 fps, a 10.83 mil come-up); 0.50.0 flies the stored 95 °F and
+100 % (1273.61 fps, 10.27 mil), as `trajectory --saved-profile hot` already did.
+
+#### Humidity: units, defaults and validation
+
+Every `--humidity` and `--zero-humidity` is a relative humidity in **percent**, 0 to 100. Leave
+it out and the run flies **50 %**, the same default on every command, in the browser terminal,
+over the bridge and through the C ABI, unless another reading supplies it (a saved profile, the
+shot day for `--zero-humidity`), with two exceptions: an `.a7p` file's absent humidity is 0 %
+(the format's own meaning), and the bridge's `true.*` commands require `humidity_pct`. The one
+CLI humidity that is not a percent is the request-file axis of `error-budget --sigma` and
+`tolerance --domain`: those commands read a solve-json request, whose humidity is a fraction,
+and their axes take the request's own units. A percent typed there (`--sigma
+relative-humidity=5`, `--domain relative-humidity=20:80`) is refused with the unit named; there
+is no percent alias.
+
+| Where | Field | Unit | Omitted |
+|---|---|---|---|
+| `trajectory`, `zero`, `come-ups`, `range-table`, `wind-card`, `compare`, `mpbr`, `lead`, `hold-corridor`, `mark-to-range`, `bdc-match`, `optimal-zero`, `adaptive-card`, `estimate-bc`, `true-velocity`, `true-wind`, `plan-truing`, `reticle hold`, `profile save`, and `monte-carlo` (since 0.50.0) | `--humidity` | percent | 50 |
+| `trajectory --auto-zero` | `--zero-humidity` | percent | the shot day's |
+| `--location` CSV | `HUMIDITY` column | percent | a saved profile's, then 50 (a typed `--humidity` beats the CSV) |
+| Saved profile: `trajectory --saved-profile`, `dsf --saved-profile`, and the --profile flag of `plan-truing`, `come-ups`, `range-table`, `wind-card`, `compare`, `mpbr`, `lead`, `hold-corridor`, `mark-to-range`, `bdc-match`, `optimal-zero`, `adaptive-card` and `reticle hold` (every saved-profile command that flies a humidity) | `humidity` | percent | 50 (a typed `--humidity` beats it, and on `trajectory` a `--location` CSV cell) |
+| `.a7p` import | the file's air-humidity field, `c_zero_air_humidity` | whole percent | 0 (the format cannot tell an absent field from 0) |
+| `solve-json`, the `explain` / `error-budget` / `tolerance` request files, the MCP `solve` tool | `atmosphere.relative_humidity` | **fraction**, 0 to 1 (0.5 = 50 %) | 0.5 |
+| `error-budget --sigma relative-humidity=S`, `tolerance --domain relative-humidity=LO:HI` | the request file's humidity axis | **fraction**, like the request: a sigma below 1 (0.05 = 5 percentage points), a domain within 0 to 1 | required |
+| Bridge commands | per command; see the table in `include/ballistics_bridge.h` | | |
+
+`stability` takes no humidity: its Miller factor is dry by design (see below).
+
+**One validation rule.** Every surface reads a humidity through the same check
+(`RelativeHumidity` in the library):
+
+- 0 to 100 % flies as given.
+- A reading up to 5 points outside the range (`HUMIDITY_SENSOR_TOLERANCE_PERCENT`), so -5 to
+  105 %, is the dry or saturated air it measures and flies exactly as 0 % or 100 %. Weather
+  meters and phone sensors are good to about ±2-3 % and read above 100 % in fog, where free air
+  is supersaturated by under 1 %. In a request file the band is -0.05 to 1.05.
+- Anything farther out, NaN or infinite, is refused with an error that names the flag or field
+  and states the band it enforces. It is never clamped:
+
+  ```
+  $ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 600 --auto-zero 100 --humidity 106
+  error: invalid value '106' for '--humidity <HUMIDITY>': relative humidity must be a percent from 0 to 100 (a sensor reading from -5 to 105 is read as 0 or 100)
+  ```
+
+  A NaN says "relative humidity must be a finite percent from 0 to 100 (...)", and text that is
+  no number says "not a number; relative humidity is a percent from 0 to 100 (...)". A request
+  file states the same band in its own unit: `relative_humidity = 1.06: relative humidity must
+  be a fraction from 0 to 1 (0.5 = 50 %; a sensor reading from -0.05 to 1.05 is read as 0 or 1)`.
+- Air that cannot exist is refused as well: a humidity that needs more water-vapour pressure
+  than the air has in total, for example saturated air at 101 °C and 1013.25 hPa. This is the
+  same test the bridge's `atmosphere.density_altitude` makes. Every command refuses it before it
+  does any work, so the first line is the cause, and it names the reading the way you gave it:
+  the flag (`--humidity`, or `--zero-humidity` when `trajectory --auto-zero`'s zero day has a
+  humidity of its own; one it inherits keeps the shot day's name), the `--location` CSV
+  column, or the saved profile's field, with the station temperature and pressure the run
+  would have flown:
+
+  ```
+  $ ballistics trajectory -u metric -v 823 -b 0.475 -m 10.9 -d 7.82 --max-range 300 --temperature 101 --humidity 100
+  Error: --humidity = 100 at 101 °C and 1013.25 hPa: no such air exists: at this temperature and pressure the humidity needs a water-vapour mole fraction of 1 or more (more vapour pressure than the total), or the air is humid above water's critical point, or too hot or too dense to have a density; --temperature = 101 °C is outside -100 °C to 100 °C, where the humid-air formulas hold: check the temperature and its unit
+  ```
+
+  Outside -100 °C to 100 °C (-148 °F to 212 °F), where the humid-air formulas hold, a
+  temperature is the likelier mistake (°F typed as °C), so the refusal ends by naming it where
+  it came from, as above, or as `profile 'p' field temperature`, `--location CSV column TEMP` or
+  `--zero-temperature`. A temperature a density altitude gave is named by the density altitude:
+  `; --density-altitude gives a station temperature of -458.65 °F, outside -148 °F to 212 °F,
+  where the humid-air formulas hold: check the density altitude's unit`.
+
+  A command that solves many rows or candidates (`lead`, `plan-truing`, `optimal-zero`,
+  `adaptive-card`, `hold-corridor`, `compare`, `estimate-bc`, ...) exits 1 with this line rather
+  than printing a table of failed rows or blaming a range, a flag or a fitted zero. `profile
+  save` and `profile import` refuse to store such air, and `profile show` still displays a
+  profile whose stored humidity a flight would refuse, with the refusal printed as a `warning:`.
+- A `--pressure-type qnh` setting is quoted as you typed it, with the station pressure it was
+  reduced to, never the reduced pressure as if you had typed it. One that is no sea-level
+  pressure at all is blamed on the pressure: `--pressure is a QNH of 5 hPa, and reduced to the
+  station altitude of 1500 m it is a station pressure of 2.99 hPa, a pressure altitude of 39443
+  m, outside the troposphere (-5000 m to 11000 m): check the pressure's unit`. One the
+  altimeter-setting relation leaves no station pressure for is refused the same way:
+  `--pressure is a QNH of 5 hPa, and reduced to the station altitude of 20000 m it leaves no
+  station pressure: the altimeter-setting relation has none that high (check the pressure's
+  unit)`. Every command, the zero day's `--zero-pressure`, a `--location` column and a saved
+  profile's stored QNH say it alike (since 0.50.0).
+- When no `--pressure` was given (or a plausible `--pressure-type qnh` setting was reduced to
+  the station), air that cannot exist at a station so high that its pressure is outside the
+  troposphere is blamed on the altitude, with the unit to check:
+  `no --pressure was given, and the standard pressure at the station altitude of 20000 m is a
+  pressure altitude of ... m, outside the troposphere (-5000 m to 11000 m): check the
+  altitude's unit`. Under `--units imperial` every altitude in it is in feet (`... the station
+  altitude of 65617 ft is a pressure altitude of ... ft, outside the troposphere (-16404 ft to
+  36089 ft) ...`, since 0.50.0). The bridge and the browser terminal blame the same reading.
+- **One echo rule for a reading in the band (0.50.0).** What reports the air a run FLIES states
+  the end it flies as: `trajectory`'s stderr `Effective values` line says `humidity=100.0%` for
+  a `--humidity 102`, a `--location` CSV cell of 102 or a saved profile storing 102, and
+  `compare -o json` echoes 100. What displays STORED data shows the value as stored and, when
+  that is outside 0 to 100, says what it flies as: `profile show` prints `Humidity: 102.0%`
+  and a `flies as: 100.0%` line beneath it, and the bridge's `profile.validate` and
+  `profile.normalize` echo the stored 102 and add `"flown_humidity": 100`. A value saved from a
+  reading is stored as its end (`profile save --humidity 102` stores 100, as does `dsf`'s
+  re-save of a profile it trues).
+- The online paths (`true-velocity` without `--offline`, `trajectory --online` or `--compare`)
+  apply the same rule before sending anything: a reading in the band is sent as its end, and a
+  humidity beyond the band, or air that cannot exist, is refused without contacting the service.
+
+Every error a command reports on stderr is its message, after `Error: `, with exit status 1.
+Before 0.50.0 an error that reached the top of the CLI printed as a Rust value instead, such as
+`Error: BallisticsError { message: "..." }` or a quoted and escaped `Error: "..."`. A flag that
+fails to parse is clap's own `error: invalid value ...`, with exit status 2. `solve-json` and
+the `mcp` server answer with their JSON error envelopes, as before.
+
+Before 0.50.0 the commands disagreed. Most refused anything outside 0 to 100 at the flag, so a
+reading of 101.7 failed. `wind-card`, `compare` and a `--location` CSV flew any value clamped
+into 0 to 100, so 150 flew as 100. `monte-carlo` had no `--humidity` and always flew 50 %. A
+value from 0 to 100 is read exactly as 0.49.0 read it on every command. One model change does
+move the flight at a humidity above 0, on every command: the air aloft (below). It moves flat
+fire by under 0.1 mm at 1000 m, and high-angle fire by up to a few metres (3.5 m on a 30° lob
+from a 1500 m station at 35 °C / 90 %; see the CHANGELOG).
+
+**The humid-air model**, the same on every solver path:
+
+- **Density:** the CIPM-2007 moist-air density, with its virial compressibility and enhancement
+  factor. The saturation vapour pressure is the Wagner-Pruss equation over liquid water.
+- **Speed of sound:** an ideal-gas moist-air mixture, first order in the water-vapour mole
+  fraction `x_v`: `gamma = 1.4 (1 - 0.062 x_v)`, `R = 287.0531 (1 + 0.378 x_v)` J/(kg·K),
+  `c = sqrt(gamma R T)`. At 15 °C and 1013.25 hPa that is 340.294 m/s dry and 340.748 m/s at 50 %.
+- **Aloft:** the station's air is well mixed: its water-vapour mole fraction `x_v` is held at
+  every height, for the pressure lapse, the density and the sound speed alike. Temperature and
+  pressure start from the station's own values and follow the ICAO lapse rates, with the moist
+  (virtual-temperature) hydrostatic exponent: the dry one times the moist-air molar-mass ratio
+  `M_m / M_a = 1 - x_v (1 - M_v / M_a)`, so humid air's pressure falls a little more slowly
+  with height. The density keeps the station's composition, and the sound speed is the formula
+  above at the local temperature and the station's `x_v`. A downrange atmosphere zone is the
+  governing air inside its stretch of range, with its own `x_v`. Held aloft, `x_v` exceeds
+  saturation in the colder air: at every height above a saturated station, and from about 2.2 km
+  above a 15 °C / 50 % station and 0.4 km above a 35 °C / 90 % one. At +3 km it is 1.35 times
+  saturation over the first and 2.06 times over the second, and at +10 km 34 and 29 times.
+  Condensation is not modelled. At 0 % this is exactly the dry model. Before 0.50.0 the sound speed
+  kept the station's relative humidity instead, re-deriving `x_v` at the local temperature and
+  pressure, and the lapse was dry; see the CHANGELOG for what that moves (mostly high-angle fire).
+
+Humid air is lighter than dry air, so it gives less drag. It also carries sound faster, which
+lowers the Mach number at a given speed and so moves the drag coefficient along the drag curve.
+
+**One deliberate exception: the Miller stability factor.** `stability`, the reported Sg, the Litz
+spin drift and the Litz aerodynamic jump all use Miller's published dry correction,
+(T / 288.15 K) · (1013.25 hPa / P), with no humidity term. That keeps them on the numbers Miller's
+rule, Litz's spin-drift fit and the published Miller calculators give. A humid correction would
+multiply Sg by 1.0032 at 15 °C / 50 %, 1.0080 at 30 °C / 50 % and 1.0192 at 35 °C / 90 %. For a
+.308 175 gr at 2600 fps (1:10 twist), spin drift at 1000 yd would move from 13.04 to 13.07 in at
+15 °C / 50 %, and from 12.83 to 13.00 in at 35 °C / 90 %.
+
+#### Temperature: one rule on every command (0.50.0)
+
+A station temperature is held to one rule wherever it comes from: `--temperature`,
+`--zero-temperature`, a `--location` CSV cell, a saved profile, a request file, the bridge and the
+browser terminal. It must be a finite number above absolute zero, and the air it describes must
+be able to exist (the humidity rule above). Nothing narrower: the same reading flies, or is
+refused, alike everywhere. Before 0.50.0 `--temperature` refused readings outside -148..392 °F
+(-100..200 °C) on most commands and on the browser terminal's `true-velocity` and `true-wind`,
+while `--zero-temperature`, a CSV cell, `estimate-bc` and the terminal's other commands flew them,
+and the bridge's `atmosphere.density_altitude` refused anything outside 173.15-373.15 K. That
+command now answers for every temperature a solve flies, wherever its density altitudes land.
+
+- **Outside -100 °C to 100 °C the humidity terms are extrapolated.** Below -100 °C the saturation
+  vapour pressure and the CIPM compressibility are evaluated at -100 °C (they clamp their
+  temperature there); above 100 °C they are carried past the range they are fitted to. Dry air
+  holds no vapour at any temperature, so it flies even above water's critical point (374 °C),
+  until the CIPM compressibility gives no positive density (about 90,000 K at 1013.25 hPa).
+  Humid air above the critical point cannot exist and is refused at the temperature.
+
+  ```
+  $ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --temperature 482 --humidity 0 | grep Impact
+  ║ Impact Velocity:    2350.18 fps       ║
+  ║ Impact Energy:      2060.04 ft-lb     ║
+  $ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --temperature=-500
+  Error: --temperature -500 F is at or below absolute zero (-459.67 F)
+  ```
+
+  A NaN or infinite reading says `--temperature NaN F is not a finite number`. Write a negative
+  reading as `--temperature=-40`, so it is not read as a flag.
+- **Air that cannot exist aloft.** The air a flight meets above the station follows the standard
+  lapse from the station's temperature (6.5 K per km in the troposphere). From a cold enough
+  station it reaches absolute zero within reach of a flight: 10 K (-263.15 °C) at sea level
+  reaches 0 K 1539 m up. A flight that climbs there is refused at the step that reaches it,
+  naming the temperature by its flag in the run's units, never as a failed integration or a
+  trajectory of NaN. (`trajectory` names a reading from a saved profile, a `--location` CSV or a
+  density altitude by its field, column or flag, as its other refusals of the air do, and the
+  zero day's own temperature as `--zero-temperature`.) A zero search whose steeper trials would climb there is refused the
+  same way:
+
+  ```
+  $ ballistics trajectory -u metric -v 823 -b 1.05 -m 48.6 -d 12.7 --drag-model g1 --max-range 20000 --angle 40 --temperature=-263.15 --pressure 250 --humidity 0
+  Error: --temperature = -263.15 °C: the air aloft would fall below absolute zero: from this temperature the standard lapse reaches 0 K at 1539 m above mean sea level, which this flight reaches (check the temperature and its unit)
+  ```
+
+  Under `--units imperial` the same refusal reads `--temperature = -441.67 °F: ... at 5049 ft
+  above mean sea level ...`.
+
+  The same station flies a flat shot (`--angle 1`: 693 m, apex 6.1 m) as it always did. Over a
+  realistic station the air reaches 0 K only far above any flight: 183 km above 15 °C at sea
+  level.
+
+#### One Rule for Each Station Pressure, Altitude and Density Altitude
+
+Every flag, CSV cell and stored value that sets a station reading is held to the one rule that
+reading has on every surface (since 0.50.0), so a reading flies, or is refused, alike wherever
+it enters: a pressure finite and above 0, an altitude finite, and a density altitude finite with
+a station that can exist. Beyond that a reading is refused only when the air it describes cannot
+exist. Before 0.50.0 `--pressure` refused readings outside 8..33 inHg (250..1100 hPa) that a
+`--location` CSV cell, `--zero-pressure` and `estimate-bc` flew, and `--density-altitude` and
+`--zero-density-altitude` refused anything outside -5000..120000 that a CSV `DA` cell or a saved
+profile flew.
+
+```
+$ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --pressure 5 | grep "Impact Vel"
+║ Impact Velocity:    2605.18 fps       ║
+$ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --pressure=-1
+Error: --pressure -1 inHg is at or below zero
+$ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --density-altitude 200000
+Error: --density-altitude = 200000 ft: no air has this density altitude: at its pressure altitude by the FAA rule, 200000 ft, the NWS pressure formula gives no finite pressure above 0 (check the density altitude and its unit)
+```
+
+The removed density-altitude bounds apply to the shot day and the zero day alike. These
+runs are dry where the density altitude is entered; actual stdout impact lines:
+
+```text
+$ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --density-altitude=-60000 --humidity 0 | grep "Impact Vel"
+║ Impact Velocity:    1088.15 fps       ║
+$ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --auto-zero 100 --zero-density-altitude=-60000 --zero-humidity 0 | grep "Impact Vel"
+║ Impact Velocity:    2153.92 fps       ║
+```
+
+`atmosphere.density_altitude` also accepts every station the solve flies. Its pressure
+altitude uses the NWS formula within the troposphere band and the ICAO layers outside it;
+`faa_rule` continues the NWS/FAA approximation, while `density_matched` finds equal density
+in the standard layers. See the [measured table](docs/ATMOSPHERE_DENSITY_ALTITUDE.md#outside-the-troposphere).
+
+A NaN or infinite reading says `--pressure NaN inHg is not a finite number`, `--altitude NaN ft
+is not a finite number`. With no temperature a density altitude flies up to a pressure altitude
+of 145286 ft (44283 m), where the FAA rule's standard temperature reaches 0 K; with one, up to
+145366 ft (44308 m), where the NWS pressure formula reaches 0 hPa.
+
+**Every refusal names the reading where it came from**, on every command, in the run's units: the
+flag (the zero day's own, on `trajectory --auto-zero`), the `--location` or `--profile` CSV column,
+the saved profile's field, or the density altitude that gave the reading:
+
+```
+Error: --location CSV column PRESSURE = -1 inHg: pressure must be greater than 0
+Error: profile 'p' field temperature = -500 °F: temperature must be above absolute zero (-459.67 °F)
+Error: profile 'p' field density_altitude = 200000 ft: no air has this density altitude: ...
+```
+
+The source stays attached if the flight later reaches air below absolute zero. A temperature
+inherited from a profile still names that profile; a zero-day override changes only its own
+quantity's source. A density-altitude-derived temperature is described as a derived station
+temperature, in temperature units. A QNH refusal quotes the QNH sent and identifies the
+reduced station pressure separately. The bridge's `card.*` and `true.*` commands and
+`ballistics_bridge_call` do the same with the request field, units and error path. The scalar
+and struct C APIs retain their existing NULL, NaN or status failure signals.
+
+**File-format exception.** `profile.export_a7p` keeps the `.a7p` format's -100..100 °C and
+300..1500 hPa bounds. The engine accepts dry air on both sides of those format bounds;
+export refuses it because the recipient's format validator cannot accept the stored integer.
+Actual bridge `error.message` values, with dry metric profiles and only the named field changed:
+
+```text
+temperature: -101 C is outside what .a7p accepts: the format stores C x 1 and the ecosystem's validator requires that integer to be between -100 and 100 (this would be -101)
+temperature: 101 C is outside what .a7p accepts: the format stores C x 1 and the ecosystem's validator requires that integer to be between -100 and 100 (this would be 101)
+pressure: 299 hPa is outside what .a7p accepts: the format stores hPa x 10 and the ecosystem's validator requires that integer to be between 3000 and 15000 (this would be 2990)
+pressure: 1501 hPa is outside what .a7p accepts: the format stores hPa x 10 and the ecosystem's validator requires that integer to be between 3000 and 15000 (this would be 15010)
+```
+
+Regenerate these examples and the accepted-input tables with
+`cargo test --locked --all-features --test station_reading_rule station_rule_documentation -- --nocapture`.
 
 #### Pressure Reference: Absolute vs. QNH (`--pressure-type`)
 
@@ -429,7 +756,7 @@ warning: station pressure 30.50 inHg is 1.532 times the ICAO standard pressure a
 
 solve-json carries the same check as the `station_pressure_implausible_for_altitude` warning; see [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#atmosphere).
 
-Available on **every subcommand that accepts `--pressure`** (MBA-1416): `trajectory` (`--pressure-type`, plus an independent `--zero-pressure-type` for the `--auto-zero` zero-day override — it defaults to the shot-day `--pressure-type` when not given, matching the existing "omitting all `--zero-*` flags reuses the shot-day values" contract), `zero`, `estimate-bc`, `true-velocity`, `true-wind`, `plan-truing`, `mpbr`, `come-ups`, `lead`, `wind-card`, `stability`, `range-table`, `compare`, `mark-to-range`, `bdc-match`, `optimal-zero`, `adaptive-card`, `hold-corridor`, `reticle hold`, and `profile save`. On the calculator subcommands the mode reduces `--pressure` against that command's own `--altitude`, so `qnh` means the same thing everywhere; omitting it is exactly `absolute`, leaving every existing invocation byte-identical. **`profile save` records the mode, and since MBA-1417 `--saved-profile` applies it — but only to the pressure it describes.** The profile's atmosphere (temperature, pressure, humidity, altitude, pressure mode, density altitude) now loads as a SET. Precedence per value is: an explicit CLI flag beats the profile, which beats the built-in standard. The stored MODE, however, is honored only when the profile's stored pressure VALUE is the one in use — supply `--pressure` yourself, or a `--location` CSV pressure, and the stored mode is ignored because it describes a different reading. That pairing is the point: applying a mode saved on another day to a pressure you just typed was a measured 77 fps error at 300 yd. A stored `density_altitude` is stricter still, since it supersedes altitude and pressure outright: it applies only when the run supplies no pressure or altitude of its own. Profiles saved before these flags existed omit the keys and load as `absolute` with no density altitude, unchanged.
+Available on **every subcommand that accepts `--pressure`** (MBA-1416): `trajectory` (`--pressure-type`, plus an independent `--zero-pressure-type` for the `--auto-zero` zero-day override — it defaults to the shot-day `--pressure-type` when not given, matching the existing "omitting all `--zero-*` flags reuses the shot-day values" contract), `zero`, `estimate-bc`, `true-velocity`, `true-wind`, `plan-truing`, `mpbr`, `come-ups`, `lead`, `wind-card`, `stability`, `range-table`, `compare`, `mark-to-range`, `bdc-match`, `optimal-zero`, `adaptive-card`, `hold-corridor`, `reticle hold`, and `profile save`. On the calculator subcommands the mode reduces `--pressure` against that command's own `--altitude`, so `qnh` means the same thing everywhere; omitting it is exactly `absolute`, leaving every existing invocation byte-identical. **`profile save` records the mode, and every command that takes a saved profile applies it — but only to the pressure it describes** (`trajectory --saved-profile` since MBA-1417, `plan-truing` and `dsf` since 0.49.0, every other `--profile` command since 0.50.0). The profile's atmosphere (temperature, pressure, humidity, altitude, pressure mode, density altitude) loads as a SET. Precedence per value is: an explicit CLI flag beats the profile, which beats the built-in standard (see [A saved profile's weather](#a-saved-profiles-weather-0500)). The stored MODE, however, is honored only when the profile's stored pressure VALUE is the one in use — supply `--pressure` yourself, or a `--location` CSV pressure, and the stored mode is ignored because it describes a different reading. That pairing is the point: applying a mode saved on another day to a pressure you just typed was a measured 77 fps error at 300 yd. A stored `density_altitude` is stricter still, since it supersedes altitude and pressure outright: it applies only when the run supplies no pressure or altitude of its own. Profiles saved before these flags existed omit the keys and load as `absolute` with no density altitude, unchanged.
 
 **Which pressure the mode describes (MBA-1421).** A `--pressure-type` you type on the command
 line describes **whatever pressure that run actually uses**, including one supplied by a
@@ -491,11 +818,11 @@ solved for `station_hpa` given a target density altitude and a station temperatu
 
 **BC reference standard (MBA-1365) interaction:** independent. `--bc-reference` converts the BC value itself (`inputs.bc_value`); `--density-altitude` resolves the atmosphere (`AtmosphericConditions`/`BallisticInputs.altitude`/`.temperature`/`.pressure`). Neither reads the other's fields, so any combination of the two flags composes exactly as if applied separately.
 
-Available on `trajectory` (CLI flag + `--location`/CSV `DA`/`DENSITY_ALTITUDE` columns) and `profile save --density-altitude`, stored alongside the profile's `temperature`/`pressure`/`altitude`/`humidity`. `trajectory --saved-profile` reads the stored atmosphere as a set (MBA-1417), and since 0.49.0 `plan-truing --profile` and `dsf --saved-profile` honour a stored density altitude too, whenever the run supplies no pressure or altitude of its own. `zero` takes `--density-altitude` too. **Not yet available** on the other subcommands (`estimate-bc`, `true-velocity`, `true-wind`, `plan-truing` apart from a stored profile value, `mpbr`, `come-ups`, `lead`, `wind-card`, `stability`, `range-table`, `compare` and the reticle and card commands); a tracked follow-up.
+Available on `trajectory` (CLI flag + `--location`/CSV `DA`/`DENSITY_ALTITUDE` columns) and `profile save --density-altitude`, stored alongside the profile's `temperature`/`pressure`/`altitude`/`humidity`. `trajectory --saved-profile` reads the stored atmosphere as a set (MBA-1417), and every other command that takes a saved profile honours a stored density altitude too (`plan-truing --profile` and `dsf --saved-profile` since 0.49.0, the rest since 0.50.0), whenever the run supplies no pressure or altitude of its own. `zero` takes `--density-altitude` too. **The flag is not yet available** on the other subcommands (`estimate-bc`, `true-velocity`, `true-wind`, `plan-truing`, `mpbr`, `come-ups`, `lead`, `wind-card`, `stability`, `range-table`, `compare` and the reticle and card commands), which fly a density altitude only from a saved profile; a tracked follow-up.
 
 **WASM:** pass `--density-altitude <value>` as a terminal argument to `trajectory`; behavior matches native exactly (same back-solve, flown authoritatively — including when `--density-altitude` is combined with `--pressure-type`). A typed `--temperature` is the explicit temperature, whatever its value; the zero day that inherits the density-altitude air keeps that temperature as a reading and the derived pressure as derived.
 
-**FFI:** `FFIAtmosphericConditions` is the same ABI-frozen `repr(C)` struct as above, with no new field. A density-altitude-aware FFI caller calls three standalone conversions once — `ballistics_density_altitude_altitude_m`, `ballistics_density_altitude_temperature_c`, `ballistics_density_altitude_pressure_hpa` (all `(density_altitude_m, explicit_temperature_c)`, where `explicit_temperature_c = NAN` means the ISA-at-DA default) — and writes the three results into `FFIAtmosphericConditions.altitude`/`.temperature`/`.pressure`. Pass them to one of the `*_with_station_presence` exports with `BALLISTICS_STATION_PRESSURE_SUPPLIED` set, and `BALLISTICS_STATION_TEMPERATURE_SUPPLIED` too when you gave an explicit temperature, so the derived air flies as given. The older struct exports keep the pre-0.49.0 rule and replace an explicit 15 °C at altitude with the ICAO temperature (DA 1000 m with 15 °C: a 600 m zero of 0.0061035 rad through them, against 0.0060688 rad through the presence export).
+**FFI:** `FFIAtmosphericConditions` is the same ABI-frozen `repr(C)` struct as above, with no new field. A density-altitude-aware FFI caller calls three standalone conversions once — `ballistics_density_altitude_altitude_m`, `ballistics_density_altitude_temperature_c`, `ballistics_density_altitude_pressure_hpa` (all `(density_altitude_m, explicit_temperature_c)`, where `explicit_temperature_c = NAN` means the ISA-at-DA default) — and writes the three results into `FFIAtmosphericConditions.altitude`/`.temperature`/`.pressure`. Pass them to one of the `*_with_station_presence` exports with `BALLISTICS_STATION_PRESSURE_SUPPLIED` set, and `BALLISTICS_STATION_TEMPERATURE_SUPPLIED` too when you gave an explicit temperature, so the derived air flies as given. The three conversions apply the one density-altitude rule every surface applies: all three return NaN, "no station", for a density altitude the CLI refuses ("no air has this density altitude", past a pressure altitude of 145286 ft with no temperature, 145366 ft with one) or that is not finite, and for an explicit temperature that is not finite or not above absolute zero. The older struct exports keep the pre-0.49.0 rule and replace an explicit 15 °C at altitude with the ICAO temperature (DA 1000 m with 15 °C: a 600 m zero of 0.0061035 rad through them, against 0.0060688 rad through the presence export).
 
 #### BC5D Correction Tables
 
@@ -594,6 +921,17 @@ A `DA` or `DENSITY_ALTITUDE` column is also recognized (MBA-1366) and, when pres
 
 Note which flag wins here: an explicit `--density-altitude` overrides the CSV `DA` column (CLI beats CSV, as everywhere else), but `--altitude` and `--pressure` do **not** — density altitude supersedes altitude and pressure whichever source it came from, because it is the stronger specification. A run combining a CSV `DA` row with `--altitude`/`--pressure` prints a note saying so.
 
+**Every numeric cell is read one way (0.50.0).** A cell is trimmed, so ` 70` is 70, as it is on a flag. An empty cell, or one holding only spaces, is absent, and the value falls back to the next source (a saved profile, then the default). Any other cell that is not a finite number stops the run with an error naming the column and quoting the cell. Before 0.50.0 such a cell was read as absent, so `65%` in a `HUMIDITY` column silently flew 50 %. The rule covers every numeric column `trajectory` reads: `TARGET_TEMP`/`TEMPERATURE`/`TEMP`, `PRESSURE`, `ALTITUDE`/`ALT`, `HUMIDITY`, `DA`/`DENSITY_ALTITUDE` and `WIND_DIR`/`WIND_DIRECTION` in a location row; `VELOCITY`/`MV`/`MUZZLE_VELOCITY`, `VELOCITY_ADJ`/`VEL_ADJ`, `BC`, `BC_ADJ`/`BC_ADJUSTMENT`, `ZERO_TEMP`, `ZERO_ALT`, `ZERO_RANGE`/`ZERO_DISTANCE`/`ZERO`, `V_OFFSET_MIL`, `H_OFFSET_MIL` and `BULLET_LENGTH` in a profile row. Every cell is read before any is used, so a bad cell stops the run even when a flag overrides its column. A `HUMIDITY` cell goes through the humidity rule below, and the stderr `Effective values` line reports the humidity the run flies:
+
+```
+$ ballistics trajectory -v 2822 -b 0.270 --drag-model g7 -m 140 -d 0.264 --max-range 1000 --location locations.csv --site Home_Range
+Error: --location CSV column HUMIDITY = '65%': not a number; relative humidity is a percent from 0 to 100 (a sensor reading from -5 to 105 is read as 0 or 100)
+
+# with the cell " 65" instead, the run flies 65 % and says so on stderr:
+Effective values: velocity=2822.0 (trued=2822.0), BC=0.270 (trued=0.2700)
+                  altitude=500, temp=70.0, pressure=29.92, humidity=65.0%
+```
+
 **Usage:**
 ```bash
 # Load from profile CSV
@@ -640,6 +978,17 @@ profiles are stored in metric units and can be recalled by name with
 and `range-table`) or `--saved-profile <name>` on `trajectory`, which
 reserves `--profile` for CSV gun-profile files.
 
+**Absent weather fields.** Proto3 reads an omitted scalar as zero. An absent or explicitly
+zero `c_zero_air_pressure` (0 hPa) means no pressure reading: the imported profile stores
+the metric default, 1013.25 hPa, without a `pressure_supplied` marker. Its flight uses the
+documented default pressure at the station altitude. The mapping report labels this as
+absent, not as a measured vacuum. Nonzero pressure remains a supplied reading and is checked
+by the same physical-air rule as a flight; impossible air is refused with the file's field
+name and units. An absent `c_zero_air_temperature` remains a supplied 0 °C reading, and an
+absent `c_zero_air_humidity` remains 0 % humidity. Export writes the default pressure into
+the format's pressure field, with its normal quantization; re-import reads that nonzero
+pressure as supplied. The export's `not_carried` report names the lost omission marker.
+
 **Multi-BC and CUSTOM drag curves (MBA-1323 Phase 2).** A `.a7p` file with
 more than one G1/G7 coefficient row imports ALL rows as a velocity-banded BC
 schedule (`bc_segments` in the saved profile JSON), not just the fastest
@@ -678,6 +1027,17 @@ unchanged — `profile save` has no flags of its own to express DSF points, so s
 dropping them on every unrelated edit would be hostile. `trajectory --saved-profile` and
 `come-ups --profile` automatically apply a profile's DSF table to the solved drop and
 print a table-output-only note; see [DSF Truing](#dsf-drop-scale-factor-truing).
+
+**A re-save never silently loses stored data (0.50.0).** The carry-forward reads the stored
+file even when a load would refuse one of its values. For example, a stored humidity beyond
+the sensor band around 0 to 100 % (more than 5 points outside it) fails to load, and the error
+names the file to edit. A re-save replaces that
+humidity with its own `--humidity` and keeps the DSF table, zero POI, tracking CFs, zero
+sets, reticle, click graduations and turret fields. Before 0.50.0, a profile that failed to
+load looked absent to the re-save, which then dropped all of them. Two cases now refuse the
+save instead, and leave the file as it was: a stored profile that cannot be read or parsed
+(repair it, or `profile delete` it first), and a stored `elevation_cf`/`windage_cf` outside
+its band (edit it first, because every load would refuse it).
 
 **Turret click graduations (MBA-1355).** `profile save` also accepts
 `--elevation-click <SIZE><UNIT>` and `--windage-click <SIZE><UNIT>` (e.g. `0.1mil` or
@@ -1891,9 +2251,13 @@ for a high-BC load) at the loose end of that range.
 
 ### Load Comparison (`compare`)
 
-Run several loads through identical conditions and see them side by side. Each load is
-zeroed independently at the shared `--zero-distance`, then solved twice (a no-wind pass
-for pure drop, a wind pass for drift), exactly like `range-table`:
+Run several loads side by side. Each load is zeroed independently at the shared
+`--zero-distance`, then solved twice (a no-wind pass for pure drop, a wind pass for drift),
+exactly like `range-table`. A `--load` spec flies the typed `--temperature`, `--pressure`,
+`--humidity` and `--altitude`, or their defaults; a `--profile` load flies the profile's stored
+weather for each one not typed (0.50.0; see
+[A saved profile's weather](#a-saved-profiles-weather-0500)), so type them to fly every load in
+one air:
 
 ```bash
 # Two loads by inline spec: NAME:DRAG:BC:MASS:VELOCITY[:DIAMETER]
@@ -2170,8 +2534,16 @@ Statistical analysis with parameter variations:
   --angle-std 0.5      # Angle std dev
   --bc-std 0.01        # BC std dev
   --wind-std 2         # Wind std dev
+  --humidity 80        # Relative humidity, percent 0-100, a reading up to 5 outside read as 0 or 100 (default 50)
   --target-distance 600 # For hit probability
 ```
+
+`--humidity` (0.50.0) is the relative humidity every simulated shot flies, in percent from
+0 to 100 (default 50, the same default as every other command). It reaches the fixed-count
+run, `--adaptive` and `--wez` alike; the rest of the air is the 15 °C / 1013.25 hPa sea-level
+standard. Before 0.50.0 `monte-carlo` had no `--humidity` and always flew 50 %. As on every
+command, a sensor reading up to 5 points outside 0 to 100 (101.7 in fog, -2 in very dry air) is
+read as 100 or 0 and flies exactly as that end; a value farther out is refused, never clamped.
 
 ### Confidence-Controlled Sampling (`--adaptive`) — MBA-1352
 
@@ -3753,7 +4125,9 @@ difference `scheme` (the table names it only when it is not the ordinary central
 **Units.** Two conventions are in play in the example above: `--target` follows `--units`
 (inches under imperial, cm under metric -- matching `tolerance --target` below), while `--ranges`
 and every `--sigma` value are always in solve-json v1's own SI unit (meters, m/s, radians, ...),
-regardless of `--units`.
+regardless of `--units`. The relative humidity is the request's fraction too:
+`--sigma relative-humidity=0.05` is 5 percentage points. A sigma of 1 or more is refused (it is
+as wide as the whole range of a humidity), with the unit named.
 
 **Honest limits**, carried in the report's own `assumptions` field: declared sources are treated
 as independent, with no correlation between them modelled; propagation is first-order
@@ -3819,12 +4193,27 @@ impact at your true, fixed `--range`, exactly what an inaccurate rangefinder doe
 
 **Units.** The same mixed convention as `error-budget` above: `--target` follows `--units`
 (inches under imperial, cm under metric), while `--range` and every `--domain` bound are always
-in solve-json v1's own SI unit (meters, m/s, radians, ...), regardless of `--units`.
+in solve-json v1's own SI unit (meters, m/s, radians, ...), regardless of `--units`. The relative
+humidity's domain is a fraction within 0 to 1 (`--domain relative-humidity=0.2:0.8` for 20-80 %),
+and the table prints its nominal as one (`nominal 0.500000 fraction`). A domain reaching outside
+an axis's physical range (a humidity outside 0 to 1, a negative wind speed) is refused for that,
+naming the unit, before anything is solved.
+
+**A saturated or dry humidity, or a calm wind (0.50.0).** Every 100-105 % (or -5-0 %) sensor
+reading resolves to a humidity of exactly 1 (or 0), the edge of the axis, and a calm wind sits
+at 0 m/s. Such a nominal may sit on its domain's matching bound (`relative-humidity=0.5:1` at
+saturation, `wind-speed=0:20` in calm air). Only the other direction is searched; the closed
+side reads `not searched -- the nominal is at the axis's physical boundary (nothing lies past
+it)`, never a bound or "no effect". Any other nominal on a bound is still refused, since that
+direction would be a zero-width probe. Before 0.50.0 every domain was refused for these
+nominals, while `error-budget` answered them with a one-sided difference.
 
 `-o json` carries the identical numbers as a versioned `ToleranceReportV1` (`schema_version`,
 `method`, `assumptions`, `range_m`, `axes[]` with each axis's `nominal`, `near_bound`/`far_bound`,
-`near_limiting_boundary`/`far_limiting_boundary`, `unbounded_in_domain`, and the
-`near_has_no_effect`/`far_has_no_effect` flags) and `unavailable_axes[].code`/`.reason`.
+`near_limiting_boundary`/`far_limiting_boundary`, `unbounded_in_domain`, the
+`near_has_no_effect`/`far_has_no_effect` flags and, since 0.50.0, the
+`near_at_physical_boundary`/`far_at_physical_boundary` flags) and
+`unavailable_axes[].code`/`.reason`.
 
 **Honest limits**, carried in the report's own `assumptions` field: each bound holds ONE input at
 its limit while every other input stays at its nominal value -- bounds from different axes may
@@ -4863,10 +5252,17 @@ back to another curve:
 ### Atmospheric Modeling
 - **Temperature Effects**: Affects air density and speed of sound
 - **Pressure Effects**: Direct impact on air density (drag)
-- **Humidity Effects**: 
-  - Humid air is less dense (reduces drag)
-  - Increases speed of sound slightly
-  - Uses Arden Buck equations for vapor pressure
+- **Humidity Effects** (one model on every solver path; see
+  [Humidity: units, defaults and validation](#humidity-units-defaults-and-validation)):
+  - Humid air is less dense (reduces drag): the CIPM-2007 moist-air density
+  - Increases speed of sound slightly: an ideal-gas moist mixture, first order in the vapour
+    mole fraction (coefficients 0.062 and 0.378), 340.294 m/s dry and 340.748 m/s at 50 % at
+    15 °C
+  - Saturation vapour pressure from the Wagner-Pruss equation over liquid water
+  - Percent 0-100 on every `--humidity` flag, default 50; a reading up to 5 points outside
+    flies as 0 or 100, and anything farther out is refused. The request-file axes of
+    `error-budget --sigma` and `tolerance --domain` are fractions, like the request itself
+  - The Miller stability factor stays dry by design
 - **Altitude Effects**: Automatic pressure/density reduction with elevation
 - **ICAO Standard Atmosphere**: Full implementation up to 84km
 - **CIPM Formula**: Precise air density calculations with humidity
@@ -4875,8 +5271,13 @@ back to another curve:
 
 These subcommands call the hosted service at `https://api.ballistics.7.62x51mm.sh` (override
 with `--api-url`) instead of computing locally. They require a CLI access token — create one at
-`ballisticsinsight.com/account` and save it with `login`. Every other subcommand is fully local
-and needs no token or network access.
+`ballisticsinsight.com/account` and save it with `login`. Two more paths call the hosted
+service: `true-velocity`, whose single-observation calculation is online unless `--offline` is
+given, and `trajectory --online` or `--compare`. Every other
+subcommand, and every other mode of those two, is fully local and needs no token or network
+access. Before any online request is sent, the client applies the same humidity rule a local
+solve does: a reading in the sensor band is sent as its end, and a humidity beyond the band, or
+air that cannot exist (`--humidity 100` at 214 °F), is refused without contacting the service.
 
 ```bash
 # Save your CLI access token (or run `login` with no --token to be prompted)

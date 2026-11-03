@@ -153,7 +153,10 @@ pub struct CorridorLoad {
     pub sight_height_m: f64,
     pub temperature_c: f64,
     pub pressure_hpa: f64,
-    /// Relative humidity, percent (0 through 100).
+    /// Relative humidity, PERCENT, 0 through 100 (50 = 50 %). A sensor reading within
+    /// [`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`] of that range flies as the end it reads as;
+    /// a value beyond it, or one that is not finite, is refused as
+    /// [`WindScenarioError::InvalidHumidity`], never clamped.
     pub humidity_pct: f64,
     pub altitude_m: f64,
     /// Which of `temperature_c` / `pressure_hpa` were supplied (0.49.0). A supplied value flies
@@ -174,9 +177,11 @@ pub struct RobustHoldRequest {
 }
 
 /// Why a robust-hold run was rejected. Typed, and every variant is raised BEFORE any
-/// trajectory is solved except [`Self::SolveFailed`].
+/// trajectory is solved except [`Self::ZeroFailed`] and [`Self::SolveFailed`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum WindScenarioError {
+    /// A typed air refusal discovered by a zero trial or scenario flight.
+    Atmosphere(crate::atmosphere::AtmosphereError),
     /// The set declared a version this build does not implement.
     UnsupportedVersion { version: u32, expected: u32 },
     /// No scenarios at all.
@@ -214,8 +219,16 @@ pub enum WindScenarioError {
     InvalidTarget { message: String },
     /// A load or atmosphere value was not usable.
     InvalidLoad { field: &'static str, value: f64 },
+    /// The load's humidity is not a relative humidity percent from 0 to 100, nor a sensor
+    /// reading within [`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`] of that range (or it is not
+    /// finite), refused by the engine's one validator, [`crate::atmosphere::RelativeHumidity`].
+    InvalidHumidity(crate::atmosphere::AtmosphereError),
     /// The scenario set could not be decoded at all.
     MalformedDocument { message: String },
+    /// The load's zero could not be solved, so no scenario was flown. Before 0.50.0 this was a
+    /// [`Self::SolveFailed`] of a scenario named `<zero>`, a placeholder no scenario set
+    /// contains.
+    ZeroFailed { message: String },
     /// A scenario's trajectory could not be solved, or did not reach a requested range.
     SolveFailed { scenario: String, message: String },
 }
@@ -273,8 +286,17 @@ impl fmt::Display for WindScenarioError {
             WindScenarioError::InvalidLoad { field, value } => {
                 write!(f, "{field} ({value}) must be finite and greater than zero")
             }
+            WindScenarioError::InvalidHumidity(error) | WindScenarioError::Atmosphere(error) => {
+                write!(f, "{error}")
+            }
             WindScenarioError::MalformedDocument { message } => {
                 write!(f, "malformed wind scenario set: {message}")
+            }
+            WindScenarioError::ZeroFailed { message } => {
+                write!(
+                    f,
+                    "{message}; the zero solve failed, so no scenario was flown"
+                )
             }
             WindScenarioError::SolveFailed { scenario, message } => {
                 write!(f, "scenario '{scenario}' could not be solved: {message}")
@@ -283,7 +305,14 @@ impl fmt::Display for WindScenarioError {
     }
 }
 
-impl Error for WindScenarioError {}
+impl Error for WindScenarioError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Atmosphere(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 /// One scenario's hold at one range.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -602,13 +631,16 @@ impl RobustHoldRequest {
             ("sight height", load.sight_height_m),
             ("temperature", load.temperature_c),
             ("pressure", load.pressure_hpa),
-            ("humidity", load.humidity_pct),
             ("altitude", load.altitude_m),
         ] {
             if !value.is_finite() {
                 return Err(WindScenarioError::InvalidLoad { field, value });
             }
         }
+        // The documented 0-100 percent and its sensor band, enforced by the one validator;
+        // 0.49.0 checked only finiteness and flew 150 as 100 %.
+        crate::atmosphere::RelativeHumidity::try_percent(load.humidity_pct)
+            .map_err(|error| WindScenarioError::InvalidHumidity(error.at_field("humidity_pct")))?;
         Ok(())
     }
 }
@@ -660,9 +692,11 @@ pub fn solve_robust_hold(
         atmosphere.clone(),
         load.station_presence,
     )
-    .map_err(|e| WindScenarioError::SolveFailed {
-        scenario: "<zero>".to_string(),
-        message: e.to_string(),
+    .map_err(|e| match e.atmosphere_error() {
+        Some(air) => WindScenarioError::Atmosphere(air.clone()),
+        None => WindScenarioError::ZeroFailed {
+            message: e.to_string(),
+        },
     })?;
 
     let furthest_m = request
@@ -688,9 +722,12 @@ pub fn solve_robust_hold(
         solver.set_max_range(max_range_m);
         solver.set_time_step(0.001);
         solver.set_wind_segments(scenario.segments.clone());
-        let result = solver.solve().map_err(|e| WindScenarioError::SolveFailed {
-            scenario: scenario.name.clone(),
-            message: e.to_string(),
+        let result = solver.solve().map_err(|e| match e.atmosphere_error() {
+            Some(air) => WindScenarioError::Atmosphere(air.clone()),
+            None => WindScenarioError::SolveFailed {
+                scenario: scenario.name.clone(),
+                message: e.to_string(),
+            },
         })?;
         let samples = result.sampled_points.unwrap_or_default();
         if samples.len() < 2 {

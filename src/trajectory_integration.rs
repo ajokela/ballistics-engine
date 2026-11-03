@@ -10,10 +10,23 @@ use crate::gravity::Gravity;
 use nalgebra::{Vector3, Vector6};
 use std::collections::HashMap;
 
+use crate::atmosphere::{AtmosphereError, KernelAtmosphere};
 use crate::derivatives::compute_derivatives_with_gravity;
 use crate::wind::{WindSegment, WindSegmentError};
 use crate::BallisticInputs;
 use crate::DragModel;
+
+/// Why [`try_integrate_trajectory`] refused its input before producing any trajectory point.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum KernelInputError {
+    /// A malformed wind segment (MBA-1338).
+    #[error(transparent)]
+    Wind(#[from] WindSegmentError),
+    /// A downrange atmosphere zone that [`crate::AtmoSock::validate`] refuses.
+    #[error(transparent)]
+    Atmosphere(#[from] AtmosphereError),
+}
 
 const RK45_MIN_STEP: f64 = 1e-6;
 const RK45_DEFAULT_TOLERANCE: f64 = 1e-6;
@@ -276,12 +289,12 @@ pub struct TrajectoryParams {
     pub drag_model: DragModel,
     /// Downrange wind zones, normalized by `until_distance_m` when integration begins.
     pub wind_segments: Vec<WindSegment>,
-    /// Dual-mode atmosphere tuple consumed by `compute_derivatives`:
-    /// **Standard** `(base_alt_m, base_temp_c, base_pressure_hPa, base_density_ratio)` — note
-    /// slot 3 is a density RATIO, NOT humidity, even though it rides in the `humidity` field;
-    /// or **Direct** `(air_density, speed_of_sound, 0.0, 0.0)` — slots 2 and 3 are zero
-    /// sentinels. A pressure of 0 that is not the direct-mode sentinel disables drag.
-    pub atmos_params: (f64, f64, f64, f64),
+    /// The air this kernel flies: the station, humidity included
+    /// ([`KernelAtmosphere::Station`], from [`crate::StationAir::new`]), lapsed with altitude
+    /// through [`crate::atmosphere::air_at`] exactly as `TrajectorySolver` flies it, or direct
+    /// mode's uniform air ([`KernelAtmosphere::uniform`]). A legacy 4-tuple converts with
+    /// [`KernelAtmosphere::from_legacy_params`].
+    pub atmosphere: KernelAtmosphere,
     /// Earth rotation in level downrange/up/lateral axes. The derivative kernel projects it into
     /// the inclined shot frame using `shooting_angle` before applying Coriolis acceleration.
     pub omega_vector: Option<Vector3<f64>>,
@@ -328,9 +341,12 @@ pub struct TrajectoryParams {
     /// MBA-954: altitude (m, relative to launch) below which integration stops. -1000.0 is the
     /// historical default — effectively "no early ground impact" for normal flat-fire shots.
     pub ground_threshold: f64,
-    /// MBA-1137: optional downrange-segmented atmosphere. When `Some`, `compute_derivatives`
-    /// swaps the standard-mode base T/P/H for the zone selected by downrange distance before the
-    /// altitude lapse. `None` (default) is byte-identical to pre-feature behavior.
+    /// MBA-1137: optional downrange-segmented atmosphere. When `Some` and non-empty,
+    /// `compute_derivatives` swaps the station base for the zone selected by downrange distance:
+    /// its T/P and its RH, whose water-vapour mole fraction is held at every height for the
+    /// lapse, the density and the sound speed. `None` or an empty sock is the station; uniform air
+    /// ignores it. [`try_integrate_trajectory`] refuses a sock that [`crate::AtmoSock::validate`]
+    /// refuses.
     pub atmo_sock: Option<crate::atmosphere::AtmoSock>,
 }
 
@@ -339,7 +355,27 @@ pub struct TrajectoryParams {
 /// clones) on every derivative evaluation (4x per RK4 step, 7x per RK45 step). The launch-speed
 /// magnitude supplies the muzzle-set Magnus spin; every other field depends only on `params`, so
 /// the struct is constant for the whole integration.
-fn build_inputs(params: &TrajectoryParams, muzzle_velocity_mps: f64) -> BallisticInputs {
+pub(crate) fn build_inputs(params: &TrajectoryParams, muzzle_velocity_mps: f64) -> BallisticInputs {
+    // The station the kernel flies, so every station field of the derivative inputs agrees with
+    // `params.atmosphere` (the per-step air itself comes from `params.atmosphere`), the humidity
+    // as its percent. Uniform air has no station, so these keep BallisticInputs' defaults.
+    let (altitude, temperature, pressure, humidity) = match &params.atmosphere {
+        KernelAtmosphere::Station(station) => (
+            station.altitude_m(),
+            station.temperature_c(),
+            station.pressure_hpa(),
+            station.humidity().percent(),
+        ),
+        _ => {
+            let defaults = BallisticInputs::default();
+            (
+                defaults.altitude,
+                defaults.temperature,
+                defaults.pressure,
+                defaults.humidity_percent,
+            )
+        }
+    };
     let mut inputs = BallisticInputs {
         bc_value: params.bc,
         bc_type: params.drag_model,
@@ -362,10 +398,10 @@ fn build_inputs(params: &TrajectoryParams, muzzle_velocity_mps: f64) -> Ballisti
             || params.enable_coriolis,
         enable_magnus: params.enable_magnus,
         enable_coriolis: params.enable_coriolis,
-        altitude: params.atmos_params.0,
-        temperature: params.atmos_params.1,
-        pressure: params.atmos_params.2,
-        humidity: params.atmos_params.3,
+        altitude,
+        temperature,
+        pressure,
+        humidity_percent: humidity,
         tipoff_yaw: 0.0,
         cd_delta2: 7.5,
         target_distance: 1000.0, // default
@@ -458,7 +494,7 @@ fn build_inputs(params: &TrajectoryParams, muzzle_velocity_mps: f64) -> Ballisti
 }
 
 /// Convert state to Vector6 and call compute_derivatives
-fn compute_derivatives_vec_with_gravity(
+pub(crate) fn compute_derivatives_vec_with_gravity(
     state: &Vector6<f64>,
     t: f64,
     params: &TrajectoryParams,
@@ -496,7 +532,7 @@ fn compute_derivatives_vec_with_gravity(
         vel,
         inputs,
         wind_vector,
-        params.atmos_params,
+        &params.atmosphere,
         params.bc,
         params.omega_vector,
         t,
@@ -537,10 +573,17 @@ fn interpolate_target_crossing(
 }
 
 /// Checked sibling of [`integrate_trajectory`] (MBA-1338): rejects malformed wind
-/// segments with a typed [`WindSegmentError`] **before** sorting, vector precomputation,
-/// or producing any trajectory points, so a caller can never receive a poisoned
-/// trajectory from non-finite segment fields. The error's `index` refers to the
-/// caller's own segment ordering.
+/// segments ([`KernelInputError::Wind`]) and invalid downrange atmosphere zones
+/// ([`KernelInputError::Atmosphere`], from [`crate::AtmoSock::validate`]) **before** sorting,
+/// vector precomputation, or producing any trajectory points, so a caller can never receive a
+/// poisoned trajectory. A wind error's `index` refers to the caller's own segment ordering.
+/// The station itself is valid by construction ([`KernelAtmosphere`]).
+///
+/// A flight that reaches air that cannot exist aloft (the station's, or a zone's, lapse takes
+/// it to absolute zero at a height the flight gets to) is refused too, at the step that gets
+/// there: [`KernelInputError::Atmosphere`] with
+/// [`crate::AtmosphereErrorReason::AirAloftBelowAbsoluteZero`] on the temperature. A flight that
+/// stays below that height is [`integrate_trajectory`]'s, bit for bit.
 pub fn try_integrate_trajectory(
     initial_state: [f64; 6],
     t_span: (f64, f64),
@@ -548,24 +591,38 @@ pub fn try_integrate_trajectory(
     method: &str,
     tolerance: f64,
     max_step: f64,
-) -> Result<Vec<(f64, Vector6<f64>)>, WindSegmentError> {
+) -> Result<Vec<(f64, Vector6<f64>)>, KernelInputError> {
     crate::wind::validate_wind_segments(&params.wind_segments)?;
-    Ok(integrate_trajectory(
+    if let Some(sock) = &params.atmo_sock {
+        sock.validate()?;
+    }
+    let flight = integrate_trajectory_flight(
         initial_state,
         t_span,
         params,
         method,
         tolerance,
         max_step,
-    ))
+        Gravity::EARTH,
+        0.0,
+    );
+    match flight.refusal {
+        Some(refusal) => Err(KernelInputError::Atmosphere(refusal)),
+        None => Ok(flight.trajectory),
+    }
 }
 
 /// Main trajectory integration function
 ///
 /// **Legacy/unchecked entry point** (MBA-1338): wind segments are sorted and consumed
-/// without validation, so non-finite fields silently poison the returned trajectory.
-/// Prefer [`try_integrate_trajectory`], which rejects malformed segments with a typed
-/// error before any integration work.
+/// without validation, so non-finite fields silently poison the returned trajectory, and so
+/// is `params.atmo_sock`: an unvalidated zone humidity outside 0-100 is clamped, and a NaN one
+/// flies NaN air, never steam. Prefer [`try_integrate_trajectory`], which rejects
+/// malformed segments and zones with a typed error before any integration work.
+///
+/// A step that fails to a non-finite state (the RK4 method's; RK45 never accepts one) ends the
+/// trajectory at the state before it, as RK45 always did, so no NaN state is returned; when that
+/// is air that cannot exist aloft, [`try_integrate_trajectory`] says so.
 pub fn integrate_trajectory(
     initial_state: [f64; 6],
     t_span: (f64, f64),
@@ -620,13 +677,53 @@ pub(crate) fn integrate_trajectory_with_gravity(
 pub(crate) fn integrate_trajectory_from_muzzle_height(
     initial_state: [f64; 6],
     t_span: (f64, f64),
-    mut params: TrajectoryParams,
+    params: TrajectoryParams,
     method: &str,
     tolerance: f64,
     max_step: f64,
     gravity: Gravity,
     muzzle_height_m: f64,
 ) -> Vec<(f64, Vector6<f64>)> {
+    integrate_trajectory_flight(
+        initial_state,
+        t_span,
+        params,
+        method,
+        tolerance,
+        max_step,
+        gravity,
+        muzzle_height_m,
+    )
+    .trajectory
+}
+
+/// A flight from [`integrate_trajectory_flight`]: the trajectory it flew, and how it ended when a
+/// step failed.
+pub(crate) struct Flight {
+    /// The accepted states, never a non-finite one.
+    pub(crate) trajectory: Vec<(f64, Vector6<f64>)>,
+    /// Whether a step failed to a non-finite state, ending the flight before it, for any cause.
+    pub(crate) failed_step: bool,
+    /// When that step failed because it reached air that cannot exist aloft, its refusal.
+    pub(crate) refusal: Option<AtmosphereError>,
+}
+
+/// The flight behind [`integrate_trajectory_from_muzzle_height`], with how it ended when a step
+/// failed to a non-finite state ([`Flight::failed_step`], for any cause), and the refusal of air
+/// that cannot exist aloft when that is why: the step's start, and every stage it evaluated,
+/// within twice its span at the start's speed (plus 10 m/s), are where
+/// [`crate::atmosphere::air_aloft_refusal`] looks for air at absolute zero.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn integrate_trajectory_flight(
+    initial_state: [f64; 6],
+    t_span: (f64, f64),
+    mut params: TrajectoryParams,
+    method: &str,
+    tolerance: f64,
+    max_step: f64,
+    gravity: Gravity,
+    muzzle_height_m: f64,
+) -> Flight {
     // Normalize once before build_inputs reads the first zone and before any RK stage performs a
     // first-match lookup. Callers may supply zones in any order.
     crate::wind::sort_wind_segments_by_distance(&mut params.wind_segments);
@@ -647,7 +744,11 @@ pub(crate) fn integrate_trajectory_from_muzzle_height(
     let mut trajectory = Vec::with_capacity(10000);
     trajectory.push((t, state));
     if state[0] >= params.target_distance_m {
-        return trajectory;
+        return Flight {
+            trajectory,
+            failed_step: false,
+            refusal: None,
+        };
     }
 
     // Build the (loop-invariant) derivative inputs once for the whole integration, instead of
@@ -660,6 +761,27 @@ pub(crate) fn integrate_trajectory_from_muzzle_height(
     // shear height in compute_derivatives_vec_with_gravity reads it.
     inputs.muzzle_height = muzzle_height_m;
 
+    // The refusal of a step from `state` over `dt` that failed: air below absolute zero within
+    // its reach, at the altitude the derivative kernel measures (the station plus the state's
+    // world-vertical height).
+    let aloft_refusal = |state: &Vector6<f64>, dt: f64| {
+        let speed = Vector3::new(state[3], state[4], state[5]).norm();
+        crate::atmosphere::air_aloft_refusal(
+            &params.atmosphere,
+            params.atmo_sock.as_ref(),
+            state[0],
+            crate::atmosphere::shot_frame_altitude(
+                params.atmosphere.reference_altitude_m(inputs.altitude),
+                state[0],
+                state[1],
+                inputs.shooting_angle,
+            ),
+            2.0 * dt * (speed + 10.0),
+        )
+    };
+    let mut refusal = None;
+    let mut failed_step = false;
+
     match method {
         "RK4" => {
             // Fixed step RK4 with target detection
@@ -671,6 +793,14 @@ pub(crate) fn integrate_trajectory_from_muzzle_height(
                 }
 
                 let new_state = rk4_step_with_gravity(&state, t, dt, &params, &inputs, gravity);
+
+                // A step that failed to a non-finite state ends the trajectory before it, as
+                // RK45's does; never a NaN state.
+                if !new_state.iter().all(|value| value.is_finite()) {
+                    failed_step = true;
+                    refusal = aloft_refusal(&state, dt);
+                    break;
+                }
 
                 // Check if we're about to pass the target (X is downrange, McCoy)
                 if state[0] < params.target_distance_m && new_state[0] >= params.target_distance_m {
@@ -728,7 +858,11 @@ pub(crate) fn integrate_trajectory_from_muzzle_height(
                 };
             if !effective_max_step.is_finite() || effective_max_step <= 0.0 {
                 eprintln!("WARNING: RK45 max_step must be finite and positive");
-                return trajectory;
+                return Flight {
+                    trajectory,
+                    failed_step: false,
+                    refusal: None,
+                };
             }
             let min_step = RK45_MIN_STEP.min(effective_max_step);
 
@@ -757,8 +891,14 @@ pub(crate) fn integrate_trajectory_from_muzzle_height(
                     Ok(accepted) => accepted,
                     Err(trials) => {
                         iteration_count += trials;
+                        // Short of the trial budget, no finite step was found even at the
+                        // minimum step: a failed step.
                         if iteration_count < max_iterations {
-                            eprintln!("WARNING: RK45 minimum-step trial was non-finite");
+                            failed_step = true;
+                            refusal = aloft_refusal(&state, dt);
+                            if refusal.is_none() {
+                                eprintln!("WARNING: RK45 minimum-step trial was non-finite");
+                            }
                         }
                         break;
                     }
@@ -826,7 +966,11 @@ pub(crate) fn integrate_trajectory_from_muzzle_height(
         }
     }
 
-    trajectory
+    Flight {
+        trajectory,
+        failed_step,
+        refusal,
+    }
 }
 
 /// Checked sibling of [`solve_trajectory_rust`] (MBA-1338): rejects malformed wind
@@ -841,7 +985,7 @@ pub fn try_solve_trajectory_rust(
     bc: f64,
     drag_model: DragModel,
     wind_segments: Vec<WindSegment>,
-    atmos_params: (f64, f64, f64, f64),
+    atmosphere: KernelAtmosphere,
     omega_vector: Option<Vec<f64>>,
     enable_spin_drift: bool,
     enable_magnus: bool,
@@ -859,7 +1003,7 @@ pub fn try_solve_trajectory_rust(
         bc,
         drag_model,
         wind_segments,
-        atmos_params,
+        atmosphere,
         omega_vector,
         enable_spin_drift,
         enable_magnus,
@@ -883,7 +1027,7 @@ pub fn solve_trajectory_rust(
     bc: f64,
     drag_model: DragModel,
     wind_segments: Vec<WindSegment>,
-    atmos_params: (f64, f64, f64, f64),
+    atmosphere: KernelAtmosphere,
     omega_vector: Option<Vec<f64>>,
     enable_spin_drift: bool,
     enable_magnus: bool,
@@ -900,7 +1044,7 @@ pub fn solve_trajectory_rust(
         bc,
         drag_model,
         wind_segments,
-        atmos_params,
+        atmosphere,
         omega_vector: omega_vec,
         enable_spin_drift,
         enable_magnus,
@@ -949,6 +1093,13 @@ pub fn solve_trajectory_rust(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atmosphere::{RelativeHumidity, StationAir};
+
+    /// A legacy `(alt, T, P, ratio)` / `(rho, c, 0, 0)` fixture, as the dry station (or direct
+    /// air) these tests were written for.
+    fn legacy(params: (f64, f64, f64, f64)) -> KernelAtmosphere {
+        KernelAtmosphere::from_legacy_params(params, RelativeHumidity::DRY).unwrap()
+    }
 
     #[test]
     fn uniform_gravity_integrators_match_a_ball_in_near_vacuum() {
@@ -959,7 +1110,7 @@ mod tests {
                 params.mass_kg = 0.0459;
                 params.bullet_diameter = 0.0427;
                 params.bullet_length = 0.0427;
-                params.atmos_params = (1e-12, 340.0, 0.0, 0.0);
+                params.atmosphere = legacy((1e-12, 340.0, 0.0, 0.0));
                 let result = integrate_trajectory_with_gravity(
                     initial,
                     (0.0, 2.0),
@@ -988,7 +1139,7 @@ mod tests {
             twist_rate: 10.0,
             drag_model: DragModel::G7,
             wind_segments: vec![],
-            atmos_params: (0.0, 15.0, 1013.25, 1.0),
+            atmosphere: legacy((0.0, 15.0, 1013.25, 1.0)),
             omega_vector: None,
             enable_spin_drift: false,
             enable_magnus: false,
@@ -1049,11 +1200,83 @@ mod tests {
             0.001,
         )
         .unwrap_err();
+        let KernelInputError::Wind(err) = err else {
+            panic!("expected a wind-segment error, got {err:?}");
+        };
         assert_eq!(err.index, 1);
         assert_eq!(err.field, crate::wind::WindSegmentField::UntilM);
         assert_eq!(
             err.to_string(),
             "wind.segments[1].until_m must be finite and greater than zero"
+        );
+    }
+
+    #[test]
+    fn try_integrate_trajectory_rejects_an_invalid_zone_before_any_points() {
+        // A downrange zone that cannot exist (RH 150 %, never clamped) is refused with the
+        // atmosphere's typed error and no trajectory, like a malformed wind segment.
+        let mut params = create_test_params(300.0);
+        params.atmo_sock = Some(crate::atmosphere::AtmoSock::new(vec![(
+            15.0, 1013.25, 150.0, 1_000.0,
+        )]));
+        let err = try_integrate_trajectory(
+            [0.0, 0.0, 0.0, 800.0, 0.0, 0.0],
+            (0.0, 2.0),
+            params,
+            "RK4",
+            1e-6,
+            0.001,
+        )
+        .unwrap_err();
+        let KernelInputError::Atmosphere(err) = err else {
+            panic!("expected an atmosphere error, got {err:?}");
+        };
+        assert_eq!(err.field(), "atmo_sock.zones[0].humidity_percent");
+        assert_eq!(err.value(), 150.0);
+    }
+
+    #[test]
+    fn build_inputs_mirrors_the_station_it_flies_never_a_density_ratio() {
+        // The derivative inputs' station fields are the kernel atmosphere's own station, the
+        // humidity as its PERCENT (0.49.0 wrote the density ratio into the humidity field).
+        // Uniform air has no station, so the fields keep BallisticInputs' defaults.
+        let mut params = create_test_params(300.0);
+        params.atmosphere = KernelAtmosphere::Station(
+            StationAir::new(
+                1_500.0,
+                25.0,
+                830.0,
+                RelativeHumidity::try_percent(30.0).unwrap(),
+            )
+            .unwrap(),
+        );
+        let inputs = build_inputs(&params, 800.0);
+        assert_eq!(
+            [
+                inputs.altitude,
+                inputs.temperature,
+                inputs.pressure,
+                inputs.humidity_percent
+            ],
+            [1_500.0, 25.0, 830.0, 30.0]
+        );
+
+        params.atmosphere = KernelAtmosphere::uniform(1.1, 335.0).unwrap();
+        let inputs = build_inputs(&params, 800.0);
+        let defaults = BallisticInputs::default();
+        assert_eq!(
+            [
+                inputs.altitude,
+                inputs.temperature,
+                inputs.pressure,
+                inputs.humidity_percent
+            ],
+            [
+                defaults.altitude,
+                defaults.temperature,
+                defaults.pressure,
+                defaults.humidity_percent
+            ]
         );
     }
 
@@ -1095,7 +1318,7 @@ mod tests {
             0.442,
             DragModel::G7,
             bad,
-            (0.0, 15.0, 1013.25, 1.0),
+            legacy((0.0, 15.0, 1013.25, 1.0)),
             None,
             false,
             false,
@@ -1123,7 +1346,7 @@ mod tests {
             0.442,
             DragModel::G7,
             vec![WindSegment::new(16.0934, 90.0, 500.0)],
-            (0.0, 15.0, 1013.25, 1.0),
+            legacy((0.0, 15.0, 1013.25, 1.0)),
             None,
             false,
             false,
@@ -1477,7 +1700,7 @@ mod tests {
             twist_rate: 10.0,
             drag_model: DragModel::G7,
             wind_segments: vec![WindSegment::new(0.0, 90.0, 914.4)],
-            atmos_params: (0.0, 15.0, 1013.25, 1.0),
+            atmosphere: legacy((0.0, 15.0, 1013.25, 1.0)),
             omega_vector: None,
             enable_spin_drift: false,
             enable_magnus: false,
@@ -1698,7 +1921,7 @@ mod tests {
             DragModel::G7, // drag_model
             vec![],        // wind_segments
             // Standard atmosphere: altitude m, temperature C, pressure hPa, density ratio.
-            (0.0, 15.0, 1013.25, 1.0),
+            legacy((0.0, 15.0, 1013.25, 1.0)),
             None,               // omega_vector
             false,              // enable_spin_drift
             false,              // enable_magnus

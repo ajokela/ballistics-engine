@@ -89,13 +89,23 @@ jobs:
             git diff --check HEAD^ HEAD
           fi
 
-      # Build the feature-complete named binary before integration tests. A few legacy PDF tests
-      # execute target/debug/ballistics directly instead of CARGO_BIN_EXE_ballistics.
+      # Build every target with every feature before the tests run, so a compile error reads as one.
+      # Every integration test runs the binary through CARGO_BIN_EXE_ballistics, never a hand-built
+      # target/debug path; tests/cli_binary_path_guard.rs keeps it that way.
       - name: Build all targets and features
         run: cargo build --locked --all-targets --all-features
 
       - name: Test all targets and features
         run: cargo test --locked --all-targets --all-features
+
+      - name: Doctests, with each compile_fail held to its error code
+        # `--all-targets` does not run doctests, so without this step none ran in CI. The
+        # compile_fail doctests (`RelativeHumidity` has no `From<f64>`, E0277; a
+        # `KernelAtmosphere::Uniform` literal cannot bypass `uniform`'s validation, E0639) each
+        # name the error they exist to show. Stable rustdoc ignores that code and accepts ANY
+        # compile error, so a rename that breaks the snippet's import (E0432) would pass in
+        # silence; rustdoc checks the code only as nightly, hence RUSTC_BOOTSTRAP.
+        run: RUSTC_BOOTSTRAP=1 cargo test --locked --doc --all-features
 
       - name: Strict Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings

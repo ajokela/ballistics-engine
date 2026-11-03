@@ -14,7 +14,7 @@
 //! one with a non-default value today. It is a stand-in for the class: if a future step is added
 //! to `normalize_for_solve` and one entry point stops calling it, these tests fail.
 
-use ballistics_engine::atmosphere::{calculate_atmosphere, resolve_station_conditions};
+use ballistics_engine::atmosphere::resolve_station_conditions;
 use ballistics_engine::fast_trajectory::{
     fast_integrate, fast_integrate_with_segments, FastIntegrationParams,
 };
@@ -23,16 +23,21 @@ use ballistics_engine::{
     AtmosphericConditions, BallisticInputs, BcReferenceStandard, DragModel, TrajectorySolver,
     WindConditions,
 };
+use ballistics_engine::{KernelAtmosphere, RelativeHumidity, StationAir};
 
 const TARGET_M: f64 = 457.2; // 500 yd
 
-/// Parity tolerance, m/s. Chosen from measurement, not taste: at this range the two integrator
-/// families differ by 0.14 m/s on identical inputs, while skipping the BC reference conversion
-/// moves impact velocity by 4.15 m/s. 1.0 sits an order of magnitude above the former and well
-/// below the latter, so the test tolerates integrator differences and nothing else. The
-/// companion test below asserts that separation still holds, so this number cannot silently
-/// become too loose to catch the bug it exists for.
-const PARITY_TOL_MPS: f64 = 1.0;
+/// Parity tolerance, m/s. Chosen from measurement, not taste. At this range, on identical inputs,
+/// the solver and the fast path differ by 7.5e-4 m/s (`fast_integrate`) and 1.3e-4 m/s
+/// (`fast_integrate_with_segments`) in 0.50.0: the integrators alone, since every family
+/// flies the same air. Skipping the BC reference conversion moves impact velocity by 4.15 m/s.
+/// 0.01 sits about 13x above the integrator gap and far below the skipped conversion, so the
+/// test tolerates integrator differences and nothing else. It also catches a fast path that
+/// flies the station's sound speed dry: 0.49.0's did, and missed by 0.14 m/s, which the 1.0 m/s
+/// this constant held before (and the old claim that 0.14 m/s was the integrators' difference)
+/// let through. The companion test below asserts the separation from a skipped conversion still
+/// holds, so this number cannot silently become too loose to catch the bug it exists for.
+const PARITY_TOL_MPS: f64 = 0.01;
 
 fn asm_inputs() -> BallisticInputs {
     BallisticInputs {
@@ -52,12 +57,15 @@ fn asm_inputs() -> BallisticInputs {
 fn fast_impact_velocity(i: &BallisticInputs, segmented: bool) -> f64 {
     let (resolved_temp_c, resolved_pressure_hpa) =
         resolve_station_conditions(i.temperature, i.pressure, i.altitude);
-    let (air_density, _) = calculate_atmosphere(
+    // The station at the inputs' own humidity (a percent), as the lean Monte Carlo builds it:
+    // its density ratio AND its sound speed carry that humidity.
+    let station = StationAir::new(
         i.altitude,
-        Some(resolved_temp_c),
-        Some(resolved_pressure_hpa),
-        i.humidity_percent(),
-    );
+        resolved_temp_c,
+        resolved_pressure_hpa,
+        RelativeHumidity::try_percent(i.humidity_percent).expect("valid humidity"),
+    )
+    .expect("valid station");
     let v = i.muzzle_velocity;
     let a = i.muzzle_angle;
     let params = FastIntegrationParams {
@@ -65,12 +73,7 @@ fn fast_impact_velocity(i: &BallisticInputs, segmented: bool) -> f64 {
         t_span: (0.0, 30.0),
         horiz: TARGET_M,
         vert: i.muzzle_height + i.sight_height,
-        atmo_params: (
-            i.altitude,
-            resolved_temp_c,
-            resolved_pressure_hpa,
-            air_density / 1.225,
-        ),
+        atmosphere: KernelAtmosphere::Station(station),
         atmo_sock: None,
     };
     let sol = if segmented {
@@ -144,13 +147,15 @@ fn every_entry_point_applies_the_same_conditioning() {
     let via_fast_segments = fast_impact_velocity(&inputs, true);
 
     // These are different integrators, so they are not expected to agree bit-for-bit; the
-    // failure this guards against is one path never converting the BC at all, which moves the
-    // impact velocity far more than integrator differences do.
+    // failures this guards against are one path never converting the BC at all, or flying
+    // other air than the solver (a dry sound speed), each of which moves the impact velocity
+    // far more than integrator differences do.
     let tol = PARITY_TOL_MPS;
     assert!(
         (via_solver - via_fast).abs() < tol,
         "fast_integrate disagrees with the solver: {via_solver} vs {via_fast} m/s — \
-         the fast path is probably not applying the BC reference conversion"
+         the fast path is probably not applying the BC reference conversion, or not flying \
+         the solver's air"
     );
     assert!(
         (via_solver - via_fast_segments).abs() < tol,

@@ -1068,6 +1068,9 @@ pub struct TruingModelInputsV1 {
     )]
     pub pressure_inhg: StationReading,
     /// Relative humidity in percent (0 through 100).
+    /// A sensor reading within [`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`] of that range (101.7 in
+    /// fog) flies as the end it reads as; a value beyond it, or one that is not finite, is refused
+    /// through [`crate::RelativeHumidity`], never clamped.
     pub humidity_pct: f64,
     /// Altitude in feet.
     pub altitude_ft: f64,
@@ -1107,7 +1110,67 @@ pub(crate) fn deserialize_truing_pressure_inhg<'de, D: serde::Deserializer<'de>>
     )
 }
 
+/// A truing request's station air refused in its own words, or `None` when it flies: the
+/// imperial model every `true.*` command shares (`temperature_f`, `pressure_inhg`,
+/// `humidity_pct`, `altitude_ft`, each at `at` + `.` + its name in the caller's request),
+/// resolved exactly as the truing forward model resolves it.
+///
+/// `humidity_pct = 150: relative humidity must be a percent from 0 to 100 (...)` beyond the
+/// sensor band; `humidity_pct = 100 at 212 °F and 29.92 inHg: no such air exists: ...` for air
+/// that cannot exist; `pressure_inhg = -1 inHg: pressure must be greater than 0` and
+/// `temperature_f = -500 °F: temperature must be above absolute zero (-459.67 °F)` for a reading
+/// no air has, and every reading that is not finite, each at its own member.
+pub(crate) fn truing_air_refusal(
+    temperature_f: StationReading,
+    pressure_inhg: StationReading,
+    humidity_pct: f64,
+    altitude_ft: f64,
+    at: &str,
+) -> Option<crate::atmosphere::AirRefusal> {
+    use crate::atmosphere::AirField;
+    let paths = [
+        "humidity_pct",
+        "temperature_f",
+        "pressure_inhg",
+        "altitude_ft",
+    ]
+    .map(|name| (name, format!("{at}.{name}")));
+    let [humidity, temperature, pressure, altitude] = [0, 1, 2, 3].map(|i| AirField {
+        name: paths[i].0,
+        path: &paths[i].1,
+    });
+    // The forward model's own conversions (`solve_trajectory_sample`).
+    AtmosphericConditions {
+        temperature: (temperature_f.value - 32.0) * 5.0 / 9.0,
+        pressure: pressure_inhg.value * 33.8639,
+        humidity: humidity_pct,
+        altitude: altitude_ft * 0.3048,
+    }
+    .air_refusal(
+        StationAtmospherePresence::from_readings(temperature_f, pressure_inhg),
+        [humidity, temperature, pressure, altitude],
+        humidity_pct,
+        crate::atmosphere::AirUnits::IMPERIAL,
+    )
+}
+
 impl TruingModelInputsV1 {
+    /// This model's station air refused in its own words, or `None` when it flies. `at` is
+    /// where the model sits in the caller's request (`"$.model"` on the bridge), so the
+    /// refusal's path names the member to blame there: `$.model.humidity_pct`.
+    ///
+    /// [`Self::validate`] makes this check, so every `true.*` command that reads a model refuses
+    /// such air before it solves anything.
+    pub fn air_refusal(&self, at: &str) -> Option<crate::atmosphere::AirRefusal> {
+        truing_air_refusal(
+            self.temperature_f,
+            self.pressure_inhg,
+            self.humidity_pct,
+            self.altitude_ft,
+            at,
+        )
+    }
+
     /// Validate the scalar-BC model before an expensive design or uncertainty
     /// calculation.  These bounds mirror the existing truing solver where
     /// applicable, while rejecting NaN/infinity at the library boundary.
@@ -1131,20 +1194,20 @@ impl TruingModelInputsV1 {
             ("bullet diameter", self.diameter_in),
             ("zero distance", self.zero_distance_yd),
             ("sight height", self.sight_height_in),
-            ("pressure", self.pressure_inhg.value),
         ] {
             if !value.is_finite() || value <= 0.0 {
                 return Err(format!("{name} must be positive and finite"));
             }
         }
-        if !self.temperature_f.value.is_finite() {
-            return Err("temperature must be finite".to_string());
-        }
-        if !self.humidity_pct.is_finite() || !(0.0..=100.0).contains(&self.humidity_pct) {
-            return Err("humidity must be finite and within 0..=100 percent".to_string());
-        }
-        if !self.altitude_ft.is_finite() {
-            return Err("altitude must be finite".to_string());
+        // The station air, each reading by the one rule the solver applies and named at its own
+        // member in the model's units: the engine's one humidity validator (a percent in
+        // [0, 100], a sensor reading within 5 points of it flown as the end it reads as,
+        // anything farther out refused, never clamped), a finite temperature above absolute
+        // zero, a finite pressure above 0, a finite altitude, and the impossible-air rule, so
+        // air that cannot exist is refused as bad input before any forward model runs, never
+        // reported as a forward-model failure or a shortage of reachable ranges.
+        if let Some(refusal) = self.air_refusal("$") {
+            return Err(refusal.message().to_string());
         }
         Ok(())
     }
@@ -2475,11 +2538,15 @@ mod station_presence_tests {
     /// sea-level output.
     #[test]
     fn a_metric_sourced_omitted_reading_flies_its_own_value_at_sea_level() {
+        // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the
+        // station's water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
+        // 4.4299666258599775 -> 4.429966468756218 mil and 4.429966625855552 ->
+        // 4.429966468751798 mil (both -3.5e-8).
         for (altitude_ft, pinned) in [
             // captured at ab4eb0c
-            (0.0, 0x4011b8492bd1c2a2_u64),
+            (0.0, 0x4011b8492146bcfe_u64),
             // captured at ab4eb0c (0.5 m)
-            (0.5 / 0.3048, 0x4011b8492bd1af2b_u64),
+            (0.5 / 0.3048, 0x4011b8492146a98d_u64),
         ] {
             let predict = |reading| {
                 model(reading, altitude_ft)
@@ -2511,9 +2578,12 @@ mod station_presence_tests {
     /// the chrono solve.
     #[test]
     fn an_omitted_reading_at_altitude_flies_the_legacy_air_on_every_truing_path() {
-        // captured at ab4eb0c, 59 °F / 29.92 inHg
-        const DROP_175_FT: u64 = 0x4011ad497c60a9fe; // 4.419225638770966 mil at 600 yd
-        const CHRONO_7135_FT: u64 = 0x40a4c30ea2569385; // 2657.5285822920873 fps
+        // captured at ab4eb0c, 59 °F / 29.92 inHg; re-captured in 0.50.0 (the
+        // default 50 % RH aloft now holds the station's water-vapour mole fraction, with a
+        // virtual-temperature lapse), old -> new: the drop 4.419225638770966 -> 4.419225485334243
+        // mil (-3.5e-8), the chrono velocity 2657.5285822920873 -> 2657.528582291956 fps (-4.9e-14).
+        const DROP_175_FT: u64 = 0x4011ad497214a426; // 4.419225485334243 mil at 600 yd
+        const CHRONO_7135_FT: u64 = 0x40a4c30ea2569264; // 2657.528582291956 fps
         let (single, batched) =
             model(StationReading::omitted(29.92), 175.0).with_forward_model(DropUnit::Mil, |fm| {
                 (

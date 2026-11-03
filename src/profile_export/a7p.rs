@@ -737,7 +737,31 @@ pub fn export_a7p(profile: &ProfileData) -> Result<A7pExport, A7pExportError> {
         )?,
         &mut body,
     );
-    let humidity_raw = lossy.quantize("humidity", profile.humidity, 1.0, "%", BOUND_HUMIDITY)?;
+    // The stored air by the humidity rules every flight of this profile applies: a
+    // humidity beyond the sensor band, or air that cannot exist, is refused in the engine's own
+    // words before the format's humidity bound is consulted (the temperature and pressure
+    // have passed the format's own bounds above). A file of air no solve could fly is no
+    // export.
+    if let Some(refusal) = profile.air_refusal() {
+        return Err(A7pExportError::Field {
+            field: match refusal.path() {
+                "$.temperature" => "temperature",
+                "$.pressure" => "pressure",
+                "$.altitude" => "altitude",
+                _ => "humidity",
+            },
+            message: refusal.message().to_string(),
+        });
+    }
+    // A stored humidity within 5 points of 0-100 % (a sensor's reading in fog, or in very dry
+    // air) is the saturated or dry air it reads: the engine flies it as that end and `.a7p`
+    // import reads such a file as that end, so the file records that end too. A value beyond
+    // the band is no reading of real air, and was refused just above.
+    let humidity = match crate::atmosphere::RelativeHumidity::try_percent(profile.humidity) {
+        Ok(reading) => reading.percent(),
+        Err(_) => profile.humidity,
+    };
+    let humidity_raw = lossy.quantize("humidity", humidity, 1.0, "%", BOUND_HUMIDITY)?;
     if humidity_raw != 0 {
         write_i32_field(F_AIR_HUMIDITY, humidity_raw, &mut body);
     }
@@ -857,8 +881,8 @@ fn not_carried_for(p: &ProfileData) -> Vec<NotCarried> {
         "the file's pressure field declares no reference, so it is written as-is; a QNH \
          profile therefore travels as if it were station pressure",
     );
-    // 0.49.0: the file has no notion of an omitted reading, and an import marks its
-    // temperature and pressure as typed. A value the profile did NOT mark as typed therefore
+    // Export writes temperature and nonzero pressure, and import marks these as typed.
+    // A value the profile did NOT mark as typed therefore
     // arrives as a reading. That changes what flies wherever the old rule reads the unmarked
     // value as omitted: inside its band (15 ± 0.1 °C, 1013.25 ± 0.5 hPa), at any altitude above
     // 1 m. The file carries no altitude, and a run supplies its own with `--altitude` (the
@@ -890,8 +914,8 @@ fn not_carried_for(p: &ProfileData) -> Vec<NotCarried> {
     push(
         "pressure_supplied",
         pressure_lost.then(|| "false".to_string()),
-        "the file has no concept of an omitted reading and an import marks its pressure as \
-         typed station pressure, so an unmarked stored 1013.25 hPa / 29.92 inHg (within the old \
+        "export writes a nonzero pressure and import marks it as typed station pressure, \
+         so an unmarked stored 1013.25 hPa / 29.92 inHg (within the old \
          rule's 0.5 hPa band), which flies ICAO air at any altitude above 1 m, the profile's or \
          a run's --altitude (a QNH there reduces to about the same), travels as a reading and \
          flies as typed there — see `altitude` and `pressure_reference`",

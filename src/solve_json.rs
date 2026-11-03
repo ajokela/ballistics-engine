@@ -749,6 +749,14 @@ pub struct AtmosphereV1 {
         deserialize_with = "deserialize_present"
     )]
     pub pressure_reference: Option<PressureReferenceV1>,
+    /// Relative humidity as a FRACTION, 0 to 1 (0.5 = 50 %), the SI wire's dimensionless form
+    /// and its only humidity field: there is no percent alias, so a percent sent by mistake
+    /// (`50`) is refused rather than flown as 5000 % or guessed at. A sensor reading within
+    /// 0.05 of the range ([`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`], 5 points) is the
+    /// saturated or dry air it reads, and resolves to exactly 1 or 0; anything farther out is
+    /// an `invalid_value` at `$.atmosphere.relative_humidity`. Converted to the percent the
+    /// engine flies by [`crate::RelativeHumidity::try_fraction`]. `None` means
+    /// [`crate::RelativeHumidity::DEFAULT`], 0.5, and is announced in `assumptions`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1143,6 +1151,9 @@ pub struct ResolvedAtmosphereV1 {
     pub altitude_m: f64,
     pub temperature_k: f64,
     pub pressure_pa: f64,
+    /// The relative humidity flown, as a FRACTION in `[0, 1]`: the request's own value with
+    /// its bits unchanged, a sensor reading within the band as the end it reads as, or the
+    /// default 0.5. Sending this echo back (see `SolveRequestV1::from`) flies the same air.
     pub relative_humidity: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latitude_rad: Option<f64>,
@@ -1602,6 +1613,26 @@ pub enum SolveErrorCodeV1 {
     SolveFailed,
     IoError,
     InternalError,
+}
+
+/// The code by its wire name (`invalid_value`, `solve_failed`, ...), the name a solve-json
+/// reader branches on, so a message that quotes a code quotes that name and never the Rust
+/// variant (`InvalidValue`).
+impl fmt::Display for SolveErrorCodeV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::InvalidJson => "invalid_json",
+            Self::UnsupportedSchemaVersion => "unsupported_schema_version",
+            Self::UnknownField => "unknown_field",
+            Self::MissingField => "missing_field",
+            Self::InvalidValue => "invalid_value",
+            Self::ConflictingFields => "conflicting_fields",
+            Self::ResourceLimit => "resource_limit",
+            Self::SolveFailed => "solve_failed",
+            Self::IoError => "io_error",
+            Self::InternalError => "internal_error",
+        })
+    }
 }
 
 /// Decode and structurally validate one solve-json v1 request.

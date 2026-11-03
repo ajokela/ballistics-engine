@@ -195,15 +195,21 @@ mod import {
     /// The same synthetic 6.5 CM G7 export as `tests/a7p_import_cli.rs`, plus an unknown
     /// future field (number 63) the report must surface.
     fn synthetic_a7p() -> Vec<u8> {
+        synthetic_a7p_with_air([Some(15), Some(10132), Some(50)])
+    }
+
+    fn synthetic_a7p_with_air(air: [Option<i64>; 3]) -> Vec<u8> {
         let mut p = Vec::new();
         enc_str(1, "BRIDGE 6.5CM", &mut p);
         enc_str(3, "140 ELD-M", &mut p);
         enc_i32(9, 50, &mut p); // 50 mm sight height
         enc_i32(10, 800, &mut p); // 8.00 in twist
         enc_i32(11, 8230, &mut p); // 823.0 m/s
-        enc_i32(15, 15, &mut p);
-        enc_i32(16, 10132, &mut p); // 1013.2 hPa
-        enc_i32(17, 50, &mut p);
+        for (field, value) in [15, 16, 17].into_iter().zip(air) {
+            if let Some(value) = value {
+                enc_i32(field, value, &mut p);
+            }
+        }
         enc_i32(20, 264, &mut p); // 0.264 in
         enc_i32(21, 1400, &mut p); // 140 gr
         enc_i32(22, 1360, &mut p); // 1.36 in
@@ -309,6 +315,147 @@ mod import {
         assert_eq!(validated["result"]["valid"], true, "{validated}");
     }
 
+    /// Proto3 cannot distinguish an omitted pressure from an encoded zero. Both import
+    /// as an unmarked default; zero temperature and humidity remain real readings.
+    #[test]
+    fn absent_or_zero_pressure_imports_with_the_unsupplied_default() {
+        for air in [
+            [Some(15), None, Some(50)],
+            [Some(15), Some(0), Some(50)],
+            [None, None, None],
+            [Some(0), Some(0), Some(0)],
+        ] {
+            let file = synthetic_a7p_with_air(air);
+            let out = call(json!({
+                "api_version": BRIDGE_API_VERSION,
+                "command": "profile.import_a7p",
+                "request": {"a7p_base64": to_base64(&file), "strict": true},
+            }));
+            assert_eq!(out["ok"], true, "air={air:?}: {out}");
+            let profile = &out["result"]["profile"];
+            assert_eq!(profile["pressure"], 1013.25, "{out}");
+            assert!(profile.get("pressure_supplied").is_none(), "{out}");
+            assert_eq!(profile["temperature"], air[0].unwrap_or(0) as f64);
+            assert_eq!(profile["temperature_supplied"], true);
+            assert_eq!(profile["humidity"], air[2].unwrap_or(0) as f64);
+            let row = out["result"]["mapped"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row[0] == "c_zero_air_pressure")
+                .unwrap();
+            assert_eq!(row[1], "0.0 hPa");
+            assert_eq!(row[2], "absent; default 1013.25 hPa (not supplied)");
+            assert_eq!(row[3], "pressure + pressure_supplied");
+
+            let validated = call(json!({
+                "api_version": BRIDGE_API_VERSION,
+                "command": "profile.validate",
+                "request": profile,
+            }));
+            assert_eq!(validated["result"]["valid"], true, "{validated}");
+            let doc = ballistics_engine::profile_import::parse_a7p(&file).unwrap();
+            let mapped =
+                ballistics_engine::profile_import::map_a7p_to_profile(&doc, None, None).unwrap();
+            assert!(!mapped.profile.pressure_supplied);
+            assert_eq!(mapped.profile.pressure, 1013.25);
+            assert!(ballistics_engine::profile_import::a7p_air_refusal(&doc).is_none());
+        }
+    }
+
+    #[test]
+    fn absent_pressure_does_not_hide_impossible_air_or_nonzero_pressure() {
+        for (air, path, message) in [
+            (
+                [Some(15), Some(-10), Some(50)],
+                "a7p:c_zero_air_pressure",
+                "c_zero_air_pressure = -1 hPa: pressure must be greater than 0",
+            ),
+            (
+                [Some(-274), None, None],
+                "a7p:c_zero_air_temperature",
+                "c_zero_air_temperature = -274 °C",
+            ),
+            (
+                [Some(15), None, Some(150)],
+                "a7p:c_zero_air_humidity",
+                "c_zero_air_humidity = 150",
+            ),
+            (
+                [Some(101), None, Some(100)],
+                "a7p:c_zero_air_temperature",
+                "1013.25 hPa",
+            ),
+        ] {
+            let out = call(json!({
+                "api_version": BRIDGE_API_VERSION,
+                "command": "profile.import_a7p",
+                "request": {"a7p_base64": to_base64(&synthetic_a7p_with_air(air))},
+            }));
+            assert_eq!(out["ok"], false, "{out}");
+            let error = &out["error"]["details"]["error"];
+            assert_eq!(error["code"], "invalid_value", "{out}");
+            assert_eq!(error["path"], path, "{out}");
+            assert!(
+                error["message"].as_str().unwrap().contains(message),
+                "{out}"
+            );
+        }
+    }
+
+    #[cfg(feature = "profile-export")]
+    #[test]
+    fn absent_air_fields_survive_export_then_import_with_format_quantization() {
+        let imported = call(json!({
+            "api_version": BRIDGE_API_VERSION,
+            "command": "profile.import_a7p",
+            "request": {"a7p_base64": to_base64(&synthetic_a7p_with_air([None; 3]))},
+        }));
+        assert_eq!(imported["ok"], true, "{imported}");
+        let exported = call(json!({
+            "api_version": BRIDGE_API_VERSION,
+            "command": "profile.export_a7p",
+            "request": imported["result"]["profile"],
+        }));
+        assert_eq!(exported["ok"], true, "{exported}");
+        assert!(
+            exported["result"]["not_carried"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["field"] == "pressure_supplied" && item["value"] == "false"),
+            "{exported}"
+        );
+        let pressure_loss = exported["result"]["not_carried"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["field"] == "pressure_supplied")
+            .unwrap();
+        assert_eq!(pressure_loss["populated"], true, "{exported}");
+        assert!(
+            pressure_loss["reason"]
+                .as_str()
+                .unwrap()
+                .starts_with("export writes a nonzero pressure"),
+            "{pressure_loss}"
+        );
+        let roundtrip = call(json!({
+            "api_version": BRIDGE_API_VERSION,
+            "command": "profile.import_a7p",
+            "request": {"a7p_base64": exported["result"]["a7p_base64"], "strict": true},
+        }));
+        assert_eq!(roundtrip["ok"], true, "{roundtrip}");
+        let profile = &roundtrip["result"]["profile"];
+        assert_eq!(profile["temperature"], 0.0);
+        assert_eq!(profile["humidity"], 0.0);
+        assert_eq!(profile["temperature_supplied"], true);
+        // Export materializes the default in the format's deci-hPa field, and reports
+        // the lost omission marker. Import must read that nonzero pressure as supplied.
+        assert_eq!(profile["pressure"], 1013.3);
+        assert_eq!(profile["pressure_supplied"], true);
+    }
+
     #[test]
     fn zero_click_is_honored_like_the_cli_flag() {
         // Zeroing state: zero_x = -20_000 (20 clicks RIGHT after upstream's negation),
@@ -319,6 +466,8 @@ mod import {
         enc_i32(7, -20_000, &mut p);
         enc_i32(8, 10_000, &mut p);
         enc_i32(11, 7920, &mut p);
+        // A supplied station pressure.
+        enc_i32(16, 10132, &mut p);
         enc_i32(20, 338, &mut p);
         enc_i32(21, 3000, &mut p);
         enc_i32(24, 0, &mut p);

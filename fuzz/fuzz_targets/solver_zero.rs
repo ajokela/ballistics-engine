@@ -1,9 +1,7 @@
 #![no_main]
 use arbitrary::Unstructured;
-use ballistics_engine::{
-    calculate_zero_angle, AtmosphericConditions, TrajectorySolver, WindConditions,
-};
-use ballistics_engine_fuzz::domain::valid_inputs;
+use ballistics_engine::{calculate_zero_angle_with_conditions, TrajectorySolver, WindConditions};
+use ballistics_engine_fuzz::domain::{station_air, valid_inputs};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -16,7 +14,16 @@ fuzz_target!(|data: &[u8]| {
 
     // The solver must either cleanly report "un-zeroable" (Err) or return a FINITE,
     // physically-plausible launch angle. NaN/Inf/absurd angle = bug.
-    match calculate_zero_angle(inputs.clone(), target_distance, target_height) {
+    // The zero search and its round trip fly the drawn air, humidity included (the default-air
+    // `calculate_zero_angle` would discard it).
+    let air = station_air(&inputs);
+    match calculate_zero_angle_with_conditions(
+        inputs.clone(),
+        target_distance,
+        target_height,
+        WindConditions::default(),
+        air.clone(),
+    ) {
         Err(_) => { /* clean rejection is acceptable */ }
         Ok(angle) => {
             assert!(angle.is_finite(), "zero angle not finite: {angle}");
@@ -34,11 +41,7 @@ fuzz_target!(|data: &[u8]| {
             let mut z = inputs.clone();
             z.muzzle_angle = angle;
             z.enable_aerodynamic_jump = false;
-            let mut solver = TrajectorySolver::new(
-                z,
-                WindConditions::default(),
-                AtmosphericConditions::default(),
-            );
+            let mut solver = TrajectorySolver::new(z, WindConditions::default(), air);
             solver.set_max_range(target_distance * 2.0);
             solver.set_time_step(0.001);
             if let Ok(r) = solver.solve() {

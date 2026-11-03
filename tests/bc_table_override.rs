@@ -6,8 +6,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-fn get_cli_binary() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/ballistics")
+/// The binary cargo built for this test run. A path built by hand under `target/` ignores
+/// `CARGO_TARGET_DIR` and can run a stale build (tests/cli_binary_path_guard.rs).
+fn get_cli_binary() -> &'static str {
+    env!("CARGO_BIN_EXE_ballistics")
 }
 
 fn unique_temp_dir() -> PathBuf {

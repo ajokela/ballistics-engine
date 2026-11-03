@@ -1,5 +1,8 @@
 // CLI API module - provides simplified interfaces for command-line tool
-use crate::atmosphere::{PressureReferenceMode, StationAtmospherePresence};
+use crate::atmosphere::{
+    AtmosphereError, KernelAtmosphere, PressureReferenceMode, RelativeHumidity, StationAir,
+    StationAtmospherePresence, StationOrigin, StationPressureOrigin, DEFAULT_HUMIDITY_PERCENT,
+};
 use crate::cluster_bc::ClusterBCDegradation;
 use crate::gravity::Gravity;
 use crate::mc_stats::{wilson_interval, BernoulliConfidenceSequence, ConfidenceLevel, Welford};
@@ -88,6 +91,46 @@ pub const BC_REFERENCE_STANDARD_INERT_WARNING: &str =
 #[derive(Debug)]
 pub struct BallisticsError {
     message: String,
+    atmosphere: Option<crate::atmosphere::AtmosphereError>,
+}
+
+impl BallisticsError {
+    /// The atmosphere refusal behind this error, when a solve refused its air: today, air that
+    /// cannot exist aloft ([`crate::AtmosphereErrorReason::AirAloftBelowAbsoluteZero`]), which a
+    /// trajectory kernel finds only in flight. A surface that names its readings states it in its
+    /// own words with [`crate::AtmosphereError::refusal_in`]; the message is its `Display`.
+    pub fn atmosphere_error(&self) -> Option<&crate::atmosphere::AtmosphereError> {
+        self.atmosphere.as_ref()
+    }
+
+    /// This error as a terminal (the native CLI, the browser terminal) states it, as it states
+    /// every refusal of its air ([`AtmosphericConditions::air_refusal_named`]): a refusal of air
+    /// that cannot exist aloft names the temperature by `temperature_label` (the flag, saved
+    /// profile field or CSV column it came from), in the run's `units`, with the height in feet
+    /// or metres:
+    ///
+    /// ```text
+    /// --temperature = -441.67 °F: the air aloft would fall below absolute zero: from this
+    /// temperature the standard lapse reaches 0 K at 5049 ft above mean sea level, which this
+    /// flight reaches (check the temperature and its unit)
+    /// ```
+    ///
+    /// Any other error, and one already stated in a terminal's words, is returned unchanged;
+    /// [`Self::atmosphere_error`] still carries the refusal.
+    pub fn in_terminal_words(mut self, units: UnitSystem, temperature_label: &str) -> Self {
+        if let Some(error) = &self.atmosphere {
+            if error.reason() == crate::AtmosphereErrorReason::AirAloftBelowAbsoluteZero
+                && self.message == error.to_string()
+            {
+                self.message = format!(
+                    "{temperature_label} = {}: {}",
+                    terminal_temperature_text(error.value(), units),
+                    error.explanation_in(terminal_altitude_unit(units))
+                );
+            }
+        }
+        self
+    }
 }
 
 impl fmt::Display for BallisticsError {
@@ -96,11 +139,20 @@ impl fmt::Display for BallisticsError {
     }
 }
 
-impl Error for BallisticsError {}
+impl Error for BallisticsError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.atmosphere
+            .as_ref()
+            .map(|error| error as &(dyn Error + 'static))
+    }
+}
 
 impl From<String> for BallisticsError {
     fn from(msg: String) -> Self {
-        BallisticsError { message: msg }
+        BallisticsError {
+            message: msg,
+            atmosphere: None,
+        }
     }
 }
 
@@ -108,6 +160,16 @@ impl From<&str> for BallisticsError {
     fn from(msg: &str) -> Self {
         BallisticsError {
             message: msg.to_string(),
+            atmosphere: None,
+        }
+    }
+}
+
+impl From<crate::atmosphere::AtmosphereError> for BallisticsError {
+    fn from(error: crate::atmosphere::AtmosphereError) -> Self {
+        BallisticsError {
+            message: error.to_string(),
+            atmosphere: Some(error),
         }
     }
 }
@@ -201,11 +263,20 @@ pub struct BallisticInputs {
     pub altitude: f64,    // meters
     pub temperature: f64, // Celsius
     pub pressure: f64,    // millibars/hPa
-    /// Relative humidity as a FRACTION in `[0, 1]` (e.g. 0.5 = 50%). NOTE the scale
-    /// differs from [`AtmosphericConditions::humidity`], which is a PERCENT in `[0, 100]`.
-    /// The atmosphere helpers (`calculate_air_density_*`) expect percent, so convert via
-    /// [`BallisticInputs::humidity_percent`] before passing this value to them (MBA-722).
-    pub humidity: f64,
+    /// Relative humidity, PERCENT, `0..=100` (50.0 = 50 %): the unit of
+    /// [`AtmosphericConditions::humidity`] and of every atmosphere function, so it passes
+    /// between them unconverted. Default [`DEFAULT_HUMIDITY_PERCENT`]. A sensor reading within
+    /// [`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`] of the range flies as the end it reads as.
+    ///
+    /// A [`TrajectorySolver`] flies its [`AtmosphericConditions`] and sets this field from it.
+    /// The entry points that take inputs alone (the `run_monte_carlo*` family and
+    /// [`crate::monte_carlo::solve_trajectory_for_monte_carlo`]) fly this value.
+    ///
+    /// 0.50.0 renamed it from `humidity`, a 0-1 FRACTION. The `humidity_percent()` accessor
+    /// that converted that fraction is kept for one release, deprecated, and returns this field.
+    /// To migrate, write the percent, or convert a fraction with
+    /// [`crate::RelativeHumidity::try_fraction`].
+    pub humidity_percent: f64,
     pub latitude: Option<f64>, // degrees
 
     // Wind conditions
@@ -343,12 +414,20 @@ pub struct BallisticInputs {
 }
 
 impl BallisticInputs {
-    /// `humidity` as a PERCENT in `[0, 100]`, clamped — the scale the atmosphere
-    /// density helpers expect. Centralizes the 0–1 → 0–100 conversion so callers don't
-    /// re-derive it (and can't accidentally feed the raw 0–1 fraction as a percentage).
-    /// See the field doc on [`BallisticInputs::humidity`] (MBA-722).
+    /// The humidity as a percent: 0.49.0's accessor, which converted the 0-1 fraction field
+    /// `humidity` to a percent. Since 0.50.0 the `humidity_percent` field is that percent, so
+    /// this returns the field unchanged, and a caller that only read the accessor still compiles,
+    /// for one release.
+    ///
+    /// 0.49.0's accessor also clamped into 0-100. 0.50.0 clamps a humidity nowhere: a value
+    /// beyond the sensor band ([`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`]) is returned as
+    /// stored, and the solve refuses it. From 0 to 100 the two accessors return the same percent.
+    #[deprecated(
+        since = "0.50.0",
+        note = "read the `humidity_percent` field, which is the percent itself since 0.50.0"
+    )]
     pub fn humidity_percent(&self) -> f64 {
-        (self.humidity * 100.0).clamp(0.0, 100.0)
+        self.humidity_percent
     }
 
     /// Azimuth bias (radians) a zero solved at `zero_distance_m` applies to the launch
@@ -578,7 +657,7 @@ impl Default for BallisticInputs {
             altitude: 0.0,
             temperature: 15.0,
             pressure: 1013.25, // Standard sea level pressure (millibars)
-            humidity: 0.5,     // 50% relative humidity
+            humidity_percent: DEFAULT_HUMIDITY_PERCENT,
             latitude: None,
 
             // Wind conditions
@@ -792,11 +871,262 @@ impl Default for WindConditions {
 pub struct AtmosphericConditions {
     pub temperature: f64, // Celsius
     pub pressure: f64,    // hPa
-    /// Relative humidity as a PERCENT in `[0, 100]`. NOTE: [`BallisticInputs::humidity`]
-    /// uses a 0–1 FRACTION instead — convert with `BallisticInputs::humidity_percent` when
-    /// crossing between them (MBA-722).
+    /// Relative humidity, PERCENT, `0..=100`, the same unit as
+    /// [`BallisticInputs::humidity_percent`]. Default [`DEFAULT_HUMIDITY_PERCENT`]. A sensor
+    /// reading within [`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`] of the range (101.7 in fog)
+    /// flies as the end it reads as; a value beyond that is refused by the solve.
     pub humidity: f64,
     pub altitude: f64, // meters
+}
+
+impl AtmosphericConditions {
+    /// The station temperature (°C) and absolute pressure (hPa) a solve of these conditions
+    /// flies, after the presence rule: a reading `presence` marks as supplied flies as given,
+    /// an omitted default at a real altitude flies the ICAO standard value there.
+    pub fn resolved_station(&self, presence: StationAtmospherePresence) -> (f64, f64) {
+        crate::atmosphere::resolve_station_conditions_with_presence(
+            self.temperature,
+            self.pressure,
+            self.altitude,
+            PressureReferenceMode::Absolute,
+            presence,
+        )
+    }
+
+    /// The station air a solve of these conditions flies, built exactly as
+    /// [`TrajectorySolver`] builds it: the humidity through [`RelativeHumidity::try_percent`],
+    /// the temperature and pressure through [`Self::resolved_station`], the air through
+    /// [`StationAir::new`].
+    ///
+    /// For a surface that refuses air up front, before any work, in its own words
+    /// ([`AtmosphereError::refusal_in`]): whatever this refuses, every solve of these
+    /// conditions refuses, and whatever it accepts, a solve flies.
+    pub fn station_air(
+        &self,
+        presence: StationAtmospherePresence,
+    ) -> Result<StationAir, AtmosphereError> {
+        let humidity = RelativeHumidity::try_percent(self.humidity)?;
+        let (temperature_c, pressure_hpa) = self.resolved_station(presence);
+        StationAir::new(self.altitude, temperature_c, pressure_hpa, humidity)
+    }
+
+    /// Where the station pressure a solve of these conditions flies comes from, by the
+    /// presence rule [`Self::resolved_station`] applies: the standard pressure at the altitude
+    /// when `presence` marks the pressure omitted and it is the sea-level default at a real
+    /// altitude, the reading otherwise ([`StationOrigin::resolving`]). These conditions hold a
+    /// station pressure, never a QNH, and the temperature is a reading: a caller that reduced a
+    /// QNH or flies a density altitude's station states its own origin to
+    /// [`Self::air_refusal_from`].
+    pub fn station_origin(&self, presence: StationAtmospherePresence) -> StationOrigin {
+        StationOrigin::resolving(
+            self.pressure,
+            self.altitude,
+            PressureReferenceMode::Absolute,
+            presence,
+        )
+    }
+
+    /// [`Self::air_refusal`] for a terminal (the native CLI, the browser terminal): every reading
+    /// is named by its flag, which is also its path (`labels`: humidity, temperature, pressure,
+    /// altitude, e.g. `["--humidity", "--temperature", "--pressure", "--altitude"]`, or where a
+    /// reading came from: `--location CSV column TEMP`, `profile 'p' field pressure`), the
+    /// humidity is the percent the command flies, and the station temperature, pressure and
+    /// every altitude are stated in the run's `units` (°F, inHg and ft, or °C, hPa and m):
+    /// `--humidity = 100 at 212 °F and 29.92 inHg: no such air exists: ...`,
+    /// `profile 'p' field pressure = -1 inHg: pressure must be greater than 0`.
+    pub fn air_refusal_named(
+        &self,
+        presence: StationAtmospherePresence,
+        units: UnitSystem,
+        labels: [&str; 4],
+    ) -> Option<crate::atmosphere::AirRefusal> {
+        self.air_refusal_named_from(presence, self.station_origin(presence), units, labels)
+    }
+
+    /// [`Self::air_refusal_named`] for a terminal that resolved the station itself (a QNH
+    /// reduced, a density altitude's derived triple) and so knows where its readings came from
+    /// better than `presence` can say: `origin`, which decides whether a station pressure outside
+    /// the troposphere is blamed on the pressure, the altitude or a density altitude, carries the
+    /// QNH as it was typed, and says whether a density altitude gave the temperature.
+    pub fn air_refusal_named_from(
+        &self,
+        presence: StationAtmospherePresence,
+        origin: StationOrigin,
+        units: UnitSystem,
+        labels: [&str; 4],
+    ) -> Option<crate::atmosphere::AirRefusal> {
+        self.air_refusal_from(
+            presence,
+            origin,
+            labels.map(crate::atmosphere::AirField::named),
+            self.humidity,
+            terminal_air_units(units),
+        )
+    }
+
+    /// The station a density altitude gives, as a terminal flies it, or its refusal in the
+    /// terminal's words ([`crate::atmosphere::station_for_density_altitude`], the one rule):
+    /// `--density-altitude = 200000 ft: no air has this density altitude: ...`.
+    ///
+    /// `labels` name the readings as [`Self::air_refusal_named`]'s do; a terminal that flies a
+    /// density altitude names its altitude (and its pressure) by the density altitude's own
+    /// label, and its temperature too unless one was given (`explicit_temperature_c`, °C, the
+    /// temperature the density altitude is re-solved around). `humidity` is the percent the
+    /// station flies; the result is checked as any station is afterwards.
+    pub fn for_density_altitude_named(
+        density_altitude_m: f64,
+        explicit_temperature_c: Option<f64>,
+        humidity: f64,
+        units: UnitSystem,
+        labels: [&str; 4],
+    ) -> Result<Self, crate::atmosphere::AirRefusal> {
+        match crate::atmosphere::station_for_density_altitude(
+            density_altitude_m,
+            explicit_temperature_c,
+        ) {
+            Ok((altitude, temperature, pressure)) => Ok(Self {
+                temperature,
+                pressure,
+                humidity,
+                altitude,
+            }),
+            Err(error) => {
+                let units = terminal_air_units(units);
+                let [humidity_field, temperature, pressure, altitude] =
+                    labels.map(crate::atmosphere::AirField::named);
+                let temperature_c = explicit_temperature_c.unwrap_or(f64::NAN);
+                Err(error.refusal_in(
+                    &crate::atmosphere::AirSpelling {
+                        humidity: humidity_field,
+                        temperature,
+                        pressure,
+                        altitude,
+                        humidity_sent: humidity,
+                        temperature_text: units.temperature.text(temperature_c),
+                        temperature_unit: units.temperature,
+                        temperature_origin: StationOrigin::density_altitude(
+                            explicit_temperature_c.is_some(),
+                        )
+                        .temperature,
+                        pressure_text: String::new(),
+                        pressure_origin: StationPressureOrigin::DensityAltitude,
+                        qnh_text: None,
+                        altitude_unit: units.altitude,
+                    },
+                    density_altitude_m,
+                    temperature_c,
+                    f64::NAN,
+                ))
+            }
+        }
+    }
+
+    /// [`Self::station_air`] refused in a surface's words, or `None` when the air flies: every
+    /// reason a station is refused for (a humidity outside the sensor band, a temperature at or
+    /// below absolute zero, a pressure at or below 0, a reading that is not finite, air that
+    /// cannot exist), each at the reading to blame.
+    ///
+    /// `fields` name the surface's readings (humidity, temperature, pressure, altitude);
+    /// `humidity_sent` is the humidity as it was given there; `units` are the units the surface
+    /// states the resolved station temperature (°C), pressure (hPa) and every altitude in. Where
+    /// the pressure came from is [`Self::station_origin`].
+    pub fn air_refusal(
+        &self,
+        presence: StationAtmospherePresence,
+        fields: [crate::atmosphere::AirField<'_>; 4],
+        humidity_sent: f64,
+        units: crate::atmosphere::AirUnits,
+    ) -> Option<crate::atmosphere::AirRefusal> {
+        self.air_refusal_from(
+            presence,
+            self.station_origin(presence),
+            fields,
+            humidity_sent,
+            units,
+        )
+    }
+
+    /// [`Self::air_refusal`] with the readings' `origin` stated by a caller that resolved the
+    /// station itself (a QNH reduced, or a density altitude's station, before these conditions
+    /// were built): a refusal names the QNH as it was given ([`StationOrigin::qnh_hpa`], in
+    /// `units`), never the station pressure reduced from it as if it had been given, and a
+    /// temperature a density altitude gave as that density altitude's.
+    ///
+    /// A QNH that is itself no pressure (not finite, or at or below 0) is refused as the
+    /// reading it is, `pressure = -1 inHg: pressure must be greater than 0`, rather than as the
+    /// NaN it reduces to.
+    pub fn air_refusal_from(
+        &self,
+        presence: StationAtmospherePresence,
+        origin: StationOrigin,
+        fields: [crate::atmosphere::AirField<'_>; 4],
+        humidity_sent: f64,
+        units: crate::atmosphere::AirUnits,
+    ) -> Option<crate::atmosphere::AirRefusal> {
+        let error = self.station_air(presence).err()?;
+        let (temperature_c, pressure_hpa) = self.resolved_station(presence);
+        let [humidity, temperature, pressure, altitude] = fields;
+        let spelling = crate::atmosphere::AirSpelling {
+            humidity,
+            temperature,
+            pressure,
+            altitude,
+            humidity_sent,
+            temperature_text: units.temperature.text(temperature_c),
+            temperature_unit: units.temperature,
+            temperature_origin: origin.temperature,
+            pressure_text: units.pressure.text(pressure_hpa),
+            pressure_origin: origin.pressure,
+            qnh_text: origin.qnh_hpa.map(|qnh_hpa| units.pressure.text(qnh_hpa)),
+            altitude_unit: units.altitude,
+        };
+        // The pressure the station refuses is the QNH's reduction: a QNH that is no pressure is
+        // refused as the reading it is.
+        if let (Some(qnh_hpa), "pressure_hpa") = (origin.qnh_hpa, error.field()) {
+            if let Err(qnh_error) = crate::atmosphere::check_station_pressure_hpa(qnh_hpa) {
+                return Some(qnh_error.refusal_in(
+                    &crate::atmosphere::AirSpelling {
+                        pressure_text: units.pressure.text(qnh_hpa),
+                        pressure_origin: StationPressureOrigin::Reading,
+                        qnh_text: None,
+                        ..spelling
+                    },
+                    self.altitude,
+                    temperature_c,
+                    qnh_hpa,
+                ));
+            }
+        }
+        Some(error.refusal_in(&spelling, self.altitude, temperature_c, pressure_hpa))
+    }
+}
+
+/// The units a terminal (the native CLI, the browser terminal) states its station air in, by
+/// the run's `units`: °F, inHg and feet, or °C, hPa and metres.
+fn terminal_air_units(units: UnitSystem) -> crate::atmosphere::AirUnits {
+    match units {
+        UnitSystem::Imperial => crate::atmosphere::AirUnits::IMPERIAL,
+        UnitSystem::Metric => crate::atmosphere::AirUnits::METRIC,
+    }
+}
+
+/// A station temperature, °C, as a terminal (the native CLI, the browser terminal) states it in
+/// a refusal: in °F or °C by the run's `units`, `"-441.67 °F"`.
+fn terminal_temperature_text(temperature_c: f64, units: UnitSystem) -> String {
+    match units {
+        UnitSystem::Imperial => {
+            crate::atmosphere::reading_text(temperature_c * 9.0 / 5.0 + 32.0, "°F")
+        }
+        UnitSystem::Metric => crate::atmosphere::reading_text(temperature_c, "°C"),
+    }
+}
+
+/// The unit a terminal states an altitude in, by the run's `units`: feet, or metres.
+fn terminal_altitude_unit(units: UnitSystem) -> crate::atmosphere::AltitudeUnit {
+    match units {
+        UnitSystem::Imperial => crate::atmosphere::AltitudeUnit::Feet,
+        UnitSystem::Metric => crate::atmosphere::AltitudeUnit::Meters,
+    }
 }
 
 impl Default for AtmosphericConditions {
@@ -804,7 +1134,7 @@ impl Default for AtmosphericConditions {
         Self {
             temperature: 15.0,
             pressure: 1013.25,
-            humidity: 50.0,
+            humidity: DEFAULT_HUMIDITY_PERCENT,
             altitude: 0.0,
         }
     }
@@ -1178,6 +1508,9 @@ impl TrajectorySolver {
         // point: conditioning that lives only here is invisible to the external bindings that
         // call the fast path directly.
         inputs.normalize_for_solve();
+        // The atmosphere is what a solve flies, so its humidity wins and the inputs then say
+        // the same thing. Copied as given; an out-of-range value is the solve's to judge.
+        inputs.humidity_percent = atmosphere.humidity;
 
         // Initialize cluster BC if enabled
         let cluster_bc = if inputs.use_cluster_bc {
@@ -1290,6 +1623,10 @@ impl TrajectorySolver {
                     // bracket in the same steps the undershoot branch raises the top, down to
                     // 45 degrees. A trial that ends short of the target distance (the ground
                     // stop) is below the target too, exactly as the bisection below treats it.
+                    //
+                    // A trial that flies into air that cannot exist aloft ends the search with
+                    // that refusal: no zero exists in air that exists that way, and "the target
+                    // is below the trajectory" would name the wrong cause.
                     let mut expanded = false;
                     for multiplier in [1.0, 2.0, 3.0, 4.0] {
                         let new_low = (-0.2_f64 * multiplier).max(-0.785);
@@ -1301,6 +1638,7 @@ impl TrajectorySolver {
                                 expanded = true;
                                 break;
                             }
+                            Err(error) if error.atmosphere_error().is_some() => return Err(error),
                             Err(_) => {}
                         }
                     }
@@ -1309,17 +1647,19 @@ impl TrajectorySolver {
                     }
                 } else if low_error < 0.0 && high_error < 0.0 {
                     // Both angles undershoot. Preserve the historical expansion up to 45 degrees.
+                    // A steeper trial that climbs into air that cannot exist aloft ends the
+                    // search with that refusal, not "beyond effective range".
                     let mut expanded = false;
                     for multiplier in [2.0, 3.0, 4.0] {
                         let new_high = (high_angle * multiplier).min(0.785);
-                        if let Ok(Some(height)) =
-                            self.zero_trial_height_at(new_high, target_distance_m, frame)
-                        {
-                            if height - target_height_m > 0.0 {
+                        match self.zero_trial_height_at(new_high, target_distance_m, frame) {
+                            Ok(Some(height)) if height - target_height_m > 0.0 => {
                                 high_angle = new_high;
                                 expanded = true;
                                 break;
                             }
+                            Err(error) if error.atmosphere_error().is_some() => return Err(error),
+                            _ => {}
                         }
                         if new_high >= 0.785 {
                             break;
@@ -1764,8 +2104,18 @@ impl TrajectorySolver {
 
         require_finite("atmosphere.temperature", self.atmosphere.temperature)?;
         require_finite("atmosphere.pressure", self.atmosphere.pressure)?;
-        require_finite("atmosphere.humidity", self.atmosphere.humidity)?;
         require_finite("atmosphere.altitude", self.atmosphere.altitude)?;
+        // One validator and one impossible-air rule. The station RH
+        // goes through `RelativeHumidity` (a percent in [0, 100], a sensor reading within 5
+        // points of it flown as the end it reads as, anything farther out refused and never
+        // clamped),
+        // the resolved station must be air that exists (`StationAir::new`, the predicate
+        // `atmosphere.density_altitude` applies), and so must every downrange zone.
+        self.station_air()?;
+        if let Some(sock) = &self.atmo_sock {
+            sock.validate()
+                .map_err(|error| BallisticsError::from(error.to_string()))?;
+        }
 
         require_positive("max_range", self.max_range)?;
         // Adaptive RK45 owns its step size; the caller-provided fixed step is used only by Euler
@@ -2007,6 +2357,49 @@ impl TrajectorySolver {
         Ok(())
     }
 
+    /// The refusal of a step that failed to a non-finite state because it flew into air that
+    /// cannot exist: from the station's (or the covering zone's) temperature the lapse reaches
+    /// absolute zero within the step's reach of `step_start`, where there is no air at all
+    /// ([`crate::atmosphere::air_aloft_refusal`]). Any other failure is `error`, unchanged.
+    ///
+    /// The step's reach is `step_s` at the speed budget ([`Self::speed_budget`] at `end_time`),
+    /// at least twice any speed the flight can have, so it covers every stage the step
+    /// evaluated. Called only once a step has failed: a flight that stays below that height flies
+    /// exactly as it did.
+    #[allow(clippy::too_many_arguments)]
+    fn refusal_of_failed_step(
+        &self,
+        error: BallisticsError,
+        station: &StationAir,
+        step_start: &Vector3<f64>,
+        position: &Vector3<f64>,
+        velocity: &Vector3<f64>,
+        step_s: f64,
+        end_time: f64,
+    ) -> BallisticsError {
+        if position
+            .iter()
+            .chain(velocity.iter())
+            .all(|value| value.is_finite())
+        {
+            return error;
+        }
+        let altitude_m = crate::atmosphere::shot_frame_altitude(
+            self.atmosphere.altitude,
+            step_start.x,
+            step_start.y,
+            self.inputs.shooting_angle,
+        );
+        crate::atmosphere::air_aloft_refusal(
+            &KernelAtmosphere::Station(*station),
+            self.atmo_sock.as_ref(),
+            step_start.x,
+            altitude_m,
+            step_s * self.speed_budget(end_time),
+        )
+        .map_or(error, BallisticsError::from)
+    }
+
     /// Ceiling on ground-frame speed a physical trajectory can reach by time `t` (see
     /// [`Self::validate_integration_state`]). The factor-2 slack absorbs boundary-layer
     /// wind-shear amplification and integrator transients; genuine divergence clears the
@@ -2078,10 +2471,10 @@ impl TrajectorySolver {
     /// `(temp_c, pressure_hpa, humidity_percent, until_distance_m)`, defined at the shooter base
     /// altitude; the per-substep local-atmosphere recompute selects the active zone by downrange
     /// distance (first zone whose `until_distance_m` exceeds it; the last zone is held beyond the
-    /// final threshold). The zone's base conditions are composed with the vertical altitude lapse
-    /// via `get_local_atmosphere_humid`, so a steeply-arcing shot still sees the y-lapse on top of
-    /// the zone base. An empty list clears segmented atmosphere (reverts to the resolved
-    /// single-station conditions).
+    /// final threshold). The zone's base conditions, its humidity included, are composed with the
+    /// vertical altitude lapse by [`crate::atmosphere::air_at`], so a steeply-arcing shot still
+    /// sees the y-lapse on top of the zone base. An empty list clears segmented atmosphere
+    /// (reverts to the resolved single-station conditions).
     pub fn set_atmo_segments(&mut self, segments: Vec<crate::atmosphere::AtmoSegment>) {
         self.atmo_sock = if segments.is_empty() {
             None
@@ -2157,7 +2550,7 @@ impl TrajectorySolver {
         }
 
         // Engine's own gyroscopic (Miller) stability factor — same Sg shown elsewhere.
-        let (_, _, temp_c, pressure_hpa) = self.resolved_atmosphere();
+        let (temp_c, pressure_hpa) = self.resolved_station_conditions();
         let sg = crate::stability::compute_stability_coefficient(
             &self.inputs,
             (self.atmosphere.altitude, temp_c, pressure_hpa, 0.0),
@@ -2202,22 +2595,57 @@ impl TrajectorySolver {
         })
     }
 
-    fn resolved_atmosphere(&self) -> (f64, f64, f64, f64) {
+    /// Station temperature (°C) and absolute pressure (hPa) after presence resolution.
+    fn resolved_station_conditions(&self) -> (f64, f64) {
         // NEITHER is the old legacy-sentinel arm exactly, BOTH the old authoritative arm.
-        let (temp_c, pressure_hpa) = crate::atmosphere::resolve_station_conditions_with_presence(
-            self.atmosphere.temperature,
-            self.atmosphere.pressure,
-            self.atmosphere.altitude,
-            PressureReferenceMode::Absolute,
-            self.station_presence,
-        );
-        let (density, speed_of_sound) = crate::atmosphere::calculate_atmosphere(
-            self.atmosphere.altitude,
-            Some(temp_c),
-            Some(pressure_hpa),
-            self.atmosphere.humidity,
-        );
-        (density, speed_of_sound, temp_c, pressure_hpa)
+        self.atmosphere.resolved_station(self.station_presence)
+    }
+
+    /// The station air this solve flies: built once per solve, it seeds every per-step
+    /// [`crate::atmosphere::air_at_with_gravity`] lookup and is the reference for station Mach.
+    ///
+    /// Its density and sound speed are `calculate_atmosphere` at the resolved station, as they
+    /// always were, through [`StationAir::new`]: so an RH within
+    /// [`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`] (5 points) of [0, 100] is a sensor reading
+    /// that flies exactly as 100 or 0, an RH beyond that band (or not finite) is refused, never
+    /// clamped, and so is air that cannot exist or a resolved station pressure at or below 0.
+    /// `validate_for_solve` runs this before any integration. It is
+    /// [`AtmosphericConditions::station_air`] at this solver's presence, and its refusal is
+    /// stated in the `atmosphere.*` fields' words: air that cannot exist names the humidity
+    /// with the RESOLVED station temperature (°C) and pressure (hPa) it is impossible in.
+    fn station_air(&self) -> Result<StationAir, BallisticsError> {
+        self.atmosphere
+            .station_air(self.station_presence)
+            .map_err(|_| {
+                let refusal = self
+                    .atmosphere
+                    .air_refusal(
+                        self.station_presence,
+                        [
+                            crate::atmosphere::AirField::named("atmosphere.humidity"),
+                            crate::atmosphere::AirField::named("atmosphere.temperature"),
+                            crate::atmosphere::AirField::named("atmosphere.pressure"),
+                            crate::atmosphere::AirField::named("atmosphere.altitude"),
+                        ],
+                        self.atmosphere.humidity,
+                        crate::atmosphere::AirUnits::METRIC,
+                    )
+                    .expect("the station refused this air");
+                BallisticsError::from(refusal.message().to_string())
+            })
+    }
+
+    /// `(density, speed_of_sound, temp_c, pressure_hpa)` of [`Self::station_air`], the shape the
+    /// tests were written against.
+    #[cfg(test)]
+    fn resolved_atmosphere(&self) -> (f64, f64, f64, f64) {
+        let station = self.station_air().expect("test atmospheres are valid");
+        (
+            station.density_kg_m3(),
+            station.speed_of_sound_mps(),
+            station.temperature_c(),
+            station.pressure_hpa(),
+        )
     }
 
     fn precession_nutation_params(
@@ -2493,7 +2921,7 @@ impl TrajectorySolver {
     /// the fast / Monte-Carlo path uses — both go through
     /// [`crate::spin_drift::effective_sg_from_inputs`] with the resolved muzzle atmosphere.
     fn effective_spin_drift_sg(&self) -> f64 {
-        let (_, _, temp_c, press_hpa) = self.resolved_atmosphere();
+        let (temp_c, press_hpa) = self.resolved_station_conditions();
         crate::spin_drift::effective_sg_from_inputs(&self.inputs, temp_c, press_hpa)
     }
 
@@ -2661,13 +3089,13 @@ impl TrajectorySolver {
         let mut max_precession_angle = 0.0;
 
         // Calculate air density
-        let (air_density, speed_of_sound, resolved_temp_c, resolved_press_hpa) =
-            self.resolved_atmosphere();
-        // MBA-1136 (rank 30): base density RATIO for the local-altitude atmosphere recompute done
-        // per-substep inside calculate_acceleration. The `air_density` / `speed_of_sound` above
-        // stay the frozen station values, still used for the Mach-transition, pitch-damping and
-        // precession/nutation diagnostics (which are intentionally referenced to station Mach).
-        let base_ratio = air_density / 1.225;
+        // The station air, resolved once per solve. It seeds the per-substep local-altitude
+        // air lookup inside calculate_acceleration (MBA-1136), and its frozen density and sound
+        // speed below are the station values the Mach-transition, pitch-damping and
+        // precession/nutation diagnostics are intentionally referenced to (station Mach).
+        let station = self.station_air()?;
+        let air_density = station.density_kg_m3();
+        let speed_of_sound = station.speed_of_sound_mps();
 
         // Wind vector (McCoy): X=downrange (head/tail wind), Y=0, Z=lateral (crosswind)
         // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
@@ -2781,18 +3209,26 @@ impl TrajectorySolver {
             // BC-retardation RK4/RK45 path), and also omitted the Magnus/Coriolis terms.
             // calculate_acceleration applies BC-retardation drag, gravity, Coriolis, Magnus, wind
             // shear, and the zero-relative-velocity gravity-only guard.
-            let acceleration = self.calculate_acceleration(
-                &position,
-                &velocity,
-                &wind_vector,
-                (resolved_temp_c, resolved_press_hpa, base_ratio),
-            );
+            let acceleration =
+                self.calculate_acceleration(&position, &velocity, &wind_vector, &station);
 
             // Update state
+            let step_start = position;
             velocity += acceleration * self.time_step;
             position += velocity * self.time_step;
             time += self.time_step;
-            self.validate_integration_state(&position, &velocity, time)?;
+            self.validate_integration_state(&position, &velocity, time)
+                .map_err(|error| {
+                    self.refusal_of_failed_step(
+                        error,
+                        &station,
+                        &step_start,
+                        &position,
+                        &velocity,
+                        self.time_step,
+                        time,
+                    )
+                })?;
         }
 
         let termination = self.append_terminal_endpoint(
@@ -2905,13 +3341,13 @@ impl TrajectorySolver {
         let mut max_precession_angle = 0.0;
 
         // Calculate air density
-        let (air_density, speed_of_sound, resolved_temp_c, resolved_press_hpa) =
-            self.resolved_atmosphere();
-        // MBA-1136 (rank 30): base density RATIO for the local-altitude atmosphere recompute done
-        // per-substep inside calculate_acceleration. The `air_density` / `speed_of_sound` above
-        // stay the frozen station values, still used for the Mach-transition, pitch-damping and
-        // precession/nutation diagnostics (which are intentionally referenced to station Mach).
-        let base_ratio = air_density / 1.225;
+        // The station air, resolved once per solve. It seeds the per-substep local-altitude
+        // air lookup inside calculate_acceleration (MBA-1136), and its frozen density and sound
+        // speed below are the station values the Mach-transition, pitch-damping and
+        // precession/nutation diagnostics are intentionally referenced to (station Mach).
+        let station = self.station_air()?;
+        let air_density = station.density_kg_m3();
+        let speed_of_sound = station.speed_of_sound_mps();
 
         // Wind vector (McCoy): X=downrange (head/tail wind), Y=0, Z=lateral (crosswind)
         // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
@@ -3022,48 +3458,40 @@ impl TrajectorySolver {
             let dt = self.time_step;
 
             // k1
-            let acc1 = self.calculate_acceleration(
-                &position,
-                &velocity,
-                &wind_vector,
-                (resolved_temp_c, resolved_press_hpa, base_ratio),
-            );
+            let acc1 = self.calculate_acceleration(&position, &velocity, &wind_vector, &station);
 
             // k2
             let pos2 = position + velocity * (dt * 0.5);
             let vel2 = velocity + acc1 * (dt * 0.5);
-            let acc2 = self.calculate_acceleration(
-                &pos2,
-                &vel2,
-                &wind_vector,
-                (resolved_temp_c, resolved_press_hpa, base_ratio),
-            );
+            let acc2 = self.calculate_acceleration(&pos2, &vel2, &wind_vector, &station);
 
             // k3
             let pos3 = position + vel2 * (dt * 0.5);
             let vel3 = velocity + acc2 * (dt * 0.5);
-            let acc3 = self.calculate_acceleration(
-                &pos3,
-                &vel3,
-                &wind_vector,
-                (resolved_temp_c, resolved_press_hpa, base_ratio),
-            );
+            let acc3 = self.calculate_acceleration(&pos3, &vel3, &wind_vector, &station);
 
             // k4
             let pos4 = position + vel3 * dt;
             let vel4 = velocity + acc3 * dt;
-            let acc4 = self.calculate_acceleration(
-                &pos4,
-                &vel4,
-                &wind_vector,
-                (resolved_temp_c, resolved_press_hpa, base_ratio),
-            );
+            let acc4 = self.calculate_acceleration(&pos4, &vel4, &wind_vector, &station);
 
             // Update position and velocity
+            let step_start = position;
             position += (velocity + vel2 * 2.0 + vel3 * 2.0 + vel4) * (dt / 6.0);
             velocity += (acc1 + acc2 * 2.0 + acc3 * 2.0 + acc4) * (dt / 6.0);
             time += dt;
-            self.validate_integration_state(&position, &velocity, time)?;
+            self.validate_integration_state(&position, &velocity, time)
+                .map_err(|error| {
+                    self.refusal_of_failed_step(
+                        error,
+                        &station,
+                        &step_start,
+                        &position,
+                        &velocity,
+                        dt,
+                        time,
+                    )
+                })?;
         }
 
         let termination = self.append_terminal_endpoint(
@@ -3154,13 +3582,13 @@ impl TrajectorySolver {
 
         // Air density and wind are constant for the whole solve (self.atmosphere / self.wind
         // are immutable); compute once instead of every iteration (mirrors solve_rk4).
-        let (air_density, speed_of_sound, resolved_temp_c, resolved_press_hpa) =
-            self.resolved_atmosphere();
-        // MBA-1136 (rank 30): base density RATIO for the local-altitude atmosphere recompute done
-        // per-substep inside calculate_acceleration. The `air_density` / `speed_of_sound` above
-        // stay the frozen station values, still used for the Mach-transition, pitch-damping and
-        // precession/nutation diagnostics (which are intentionally referenced to station Mach).
-        let base_ratio = air_density / 1.225;
+        // The station air, resolved once per solve. It seeds the per-substep local-altitude
+        // air lookup inside calculate_acceleration (MBA-1136), and its frozen density and sound
+        // speed below are the station values the Mach-transition, pitch-damping and
+        // precession/nutation diagnostics are intentionally referenced to (station Mach).
+        let station = self.station_air()?;
+        let air_density = station.density_kg_m3();
+        let speed_of_sound = station.speed_of_sound_mps();
         // 0deg = headwind, 90deg = from the right (McCoy wind-FROM convention, matching
         // WindSock); wind enters drag via velocity - wind. Used when no segmented wind.
         // MBA-728: no shear/no segments here, so vertical_speed passes straight through
@@ -3253,13 +3681,8 @@ impl TrajectorySolver {
 
             // Retry the same state until the embedded error estimate accepts the
             // candidate. No trajectory or angular state advances on rejection.
-            let accepted_step = self.adaptive_rk45_step(
-                &position,
-                &velocity,
-                dt,
-                &wind_vector,
-                (resolved_temp_c, resolved_press_hpa, base_ratio),
-            );
+            let accepted_step =
+                self.adaptive_rk45_step(&position, &velocity, dt, &wind_vector, &station);
             debug_assert!(
                 accepted_step.error <= RK45_TOLERANCE || accepted_step.used_dt <= RK45_MIN_DT
             );
@@ -3292,10 +3715,22 @@ impl TrajectorySolver {
                 }
             }
 
+            let step_start = position;
             position = accepted_step.position;
             velocity = accepted_step.velocity;
             time += accepted_step.used_dt;
-            self.validate_integration_state(&position, &velocity, time)?;
+            self.validate_integration_state(&position, &velocity, time)
+                .map_err(|error| {
+                    self.refusal_of_failed_step(
+                        error,
+                        &station,
+                        &step_start,
+                        &position,
+                        &velocity,
+                        accepted_step.used_dt,
+                        time,
+                    )
+                })?;
 
             // Adapt the step size for the NEXT iteration.
             dt = accepted_step.next_dt;
@@ -3367,7 +3802,7 @@ impl TrajectorySolver {
         velocity: &Vector3<f64>,
         initial_dt: f64,
         wind_vector: &Vector3<f64>,
-        resolved_atmo: (f64, f64, f64),
+        station: &StationAir,
     ) -> Rk45AcceptedStep {
         let mut trial_dt = initial_dt;
 
@@ -3378,7 +3813,7 @@ impl TrajectorySolver {
                 trial_dt,
                 wind_vector,
                 RK45_TOLERANCE,
-                resolved_atmo,
+                station,
             );
             // A finite-but-extreme input or malformed optional curve can overflow an embedded
             // trial. Do not let a NaN suggested step poison `trial_dt` and retry forever: shrink
@@ -3411,7 +3846,7 @@ impl TrajectorySolver {
         dt: f64,
         wind_vector: &Vector3<f64>,
         tolerance: f64,
-        resolved_atmo: (f64, f64, f64), // (base_temp_c, base_press_hpa, base_ratio)
+        station: &StationAir,
     ) -> Rk45Trial {
         // Dormand-Prince coefficients
         const A21: f64 = 1.0 / 5.0;
@@ -3451,37 +3886,37 @@ impl TrajectorySolver {
         const B7_ERR: f64 = 1.0 / 40.0;
 
         // Compute RK45 stages
-        let k1_v = self.calculate_acceleration(position, velocity, wind_vector, resolved_atmo);
+        let k1_v = self.calculate_acceleration(position, velocity, wind_vector, station);
         let k1_p = *velocity;
 
         let p2 = position + dt * A21 * k1_p;
         let v2 = velocity + dt * A21 * k1_v;
-        let k2_v = self.calculate_acceleration(&p2, &v2, wind_vector, resolved_atmo);
+        let k2_v = self.calculate_acceleration(&p2, &v2, wind_vector, station);
         let k2_p = v2;
 
         let p3 = position + dt * (A31 * k1_p + A32 * k2_p);
         let v3 = velocity + dt * (A31 * k1_v + A32 * k2_v);
-        let k3_v = self.calculate_acceleration(&p3, &v3, wind_vector, resolved_atmo);
+        let k3_v = self.calculate_acceleration(&p3, &v3, wind_vector, station);
         let k3_p = v3;
 
         let p4 = position + dt * (A41 * k1_p + A42 * k2_p + A43 * k3_p);
         let v4 = velocity + dt * (A41 * k1_v + A42 * k2_v + A43 * k3_v);
-        let k4_v = self.calculate_acceleration(&p4, &v4, wind_vector, resolved_atmo);
+        let k4_v = self.calculate_acceleration(&p4, &v4, wind_vector, station);
         let k4_p = v4;
 
         let p5 = position + dt * (A51 * k1_p + A52 * k2_p + A53 * k3_p + A54 * k4_p);
         let v5 = velocity + dt * (A51 * k1_v + A52 * k2_v + A53 * k3_v + A54 * k4_v);
-        let k5_v = self.calculate_acceleration(&p5, &v5, wind_vector, resolved_atmo);
+        let k5_v = self.calculate_acceleration(&p5, &v5, wind_vector, station);
         let k5_p = v5;
 
         let p6 = position + dt * (A61 * k1_p + A62 * k2_p + A63 * k3_p + A64 * k4_p + A65 * k5_p);
         let v6 = velocity + dt * (A61 * k1_v + A62 * k2_v + A63 * k3_v + A64 * k4_v + A65 * k5_v);
-        let k6_v = self.calculate_acceleration(&p6, &v6, wind_vector, resolved_atmo);
+        let k6_v = self.calculate_acceleration(&p6, &v6, wind_vector, station);
         let k6_p = v6;
 
         let p7 = position + dt * (A71 * k1_p + A73 * k3_p + A74 * k4_p + A75 * k5_p + A76 * k6_p);
         let v7 = velocity + dt * (A71 * k1_v + A73 * k3_v + A74 * k4_v + A75 * k5_v + A76 * k6_v);
-        let k7_v = self.calculate_acceleration(&p7, &v7, wind_vector, resolved_atmo);
+        let k7_v = self.calculate_acceleration(&p7, &v7, wind_vector, station);
         let k7_p = v7;
 
         // 5th order solution
@@ -3541,7 +3976,7 @@ impl TrajectorySolver {
         position: &Vector3<f64>,
         velocity: &Vector3<f64>,
         wind_vector: &Vector3<f64>,
-        resolved_atmo: (f64, f64, f64), // (base_temp_c, base_press_hpa, base_ratio) hoisted per-solve
+        station: &StationAir,
     ) -> Vector3<f64> {
         // Resolve the wind at this point. Downrange-segmented wind (when supplied)
         // takes precedence and is sampled by downrange distance (position.x) per
@@ -3568,62 +4003,47 @@ impl TrajectorySolver {
             return self.gravity_acceleration();
         }
 
-        // MBA-1136 (rank 30): recompute the atmosphere at the LOCAL substep altitude instead of
-        // holding the frozen station scalars for the whole flight. This mirrors what
-        // derivatives.rs / fast_trajectory.rs already do, so all three solver families vary air
-        // density AND speed of sound with altitude (matters on elevated / long-range shots; a
-        // no-op at the shooter altitude, where the ratio-based density recovers the station value
-        // exactly). base_* were resolved once per solve via resolved_atmosphere().
+        // MBA-1136 (rank 30): the air at the LOCAL substep altitude, not the frozen station
+        // scalars, so density AND speed of sound vary with altitude (matters on elevated /
+        // long-range shots; a no-op at the shooter altitude, where the ratio-based density
+        // recovers the station value exactly). `station` was resolved once per solve by
+        // station_air().
         //
-        // `base_temp_c` / `base_press_hpa` are the STATION conditions that seed the local
-        // atmosphere calculation below. Magnus dynamic stability consumes the resulting local
+        // MBA-1137: with downrange-segmented atmosphere, the zone selected by downrange distance
+        // (position.x) replaces the station as the BASE (its T/P/RH, and a CIPM density ratio at
+        // its RH), and the world-vertical altitude lapse multiplies on top of it, so the two
+        // compose without double-counting. Magnus dynamic stability consumes the resulting local
         // density rather than freezing a launch-density correction.
-        let (base_temp_c, base_press_hpa, station_ratio) = resolved_atmo;
-
-        // MBA-1137: downrange-segmented atmosphere. When an AtmoSock is present, swap the BASE
-        // (station-referenced) T/P/H tuple for the active zone selected by downrange distance
-        // (position.x), recomputing the per-zone base density ratio via CIPM. That swapped base
-        // then flows through the SAME altitude-lapse pipeline, so downrange zone selection and the
-        // world-vertical altitude lapse compose — the zone sets the base density/humidity, and the
-        // lapse multiplies on top of it (no double-count). When None, this is the resolved
-        // single-station base.
-        let (drag_base_temp_c, drag_base_press_hpa, drag_base_ratio, drag_humidity_percent) =
-            if let Some(ref sock) = self.atmo_sock {
-                let (zone_temp_c, zone_press_hpa, zone_humidity) = sock.atmo_for_range(position.x);
-                let zone_base_ratio = crate::atmosphere::calculate_air_density_cimp(
-                    zone_temp_c,
-                    zone_press_hpa,
-                    zone_humidity,
-                ) / 1.225;
-                (zone_temp_c, zone_press_hpa, zone_base_ratio, zone_humidity)
-            } else {
-                (
-                    base_temp_c,
-                    base_press_hpa,
-                    station_ratio,
-                    self.atmosphere.humidity,
-                )
-            };
+        //
+        // air_at_with_gravity is the engine's ONE per-step air lookup; every kernel family
+        // (compute_derivatives, fast_integrate, the lean Monte Carlo) calls it too.
         let local_alt = crate::atmosphere::shot_frame_altitude(
             self.atmosphere.altitude,
             position.x,
             position.y,
             self.inputs.shooting_angle,
         );
-        let (air_density, speed_of_sound) =
-            crate::atmosphere::get_local_atmosphere_humid_with_gravity(
-                local_alt,
-                self.atmosphere.altitude,
-                drag_base_temp_c,
-                drag_base_press_hpa,
-                drag_base_ratio,
-                drag_humidity_percent,
-                self.gravity,
-            );
+        let local_air = crate::atmosphere::air_at_with_gravity(
+            &KernelAtmosphere::Station(*station),
+            self.atmo_sock.as_ref(),
+            position.x,
+            local_alt,
+            self.gravity,
+        );
+        let (air_density, speed_of_sound) = (local_air.density_kg_m3, local_air.speed_of_sound_mps);
+        // The Mach `drag_terms` looks the Cd up at (`calculate_drag_coefficient`'s
+        // `velocity / speed_of_sound`), from the values passed to it below.
+        #[cfg(test)]
+        crate::atmosphere::air_trace::record_consumed(
+            air_density,
+            velocity_magnitude,
+            velocity_magnitude / speed_of_sound,
+        );
 
-        // Resolve the Cd and the retardation denominator through the shared resolver. MBA-1423
-        // reports a per-point Cd derived from these same two values, so the number a consumer
-        // charts cannot drift from the number actually flown here.
+        // Resolve the Cd and the retardation denominator through the shared resolver. MBA-1423's
+        // per-point Cd goes through this same resolver (annotate_drag_coefficients), so the two
+        // cannot drift apart; it is evaluated at the station speed of sound the result reports
+        // Mach against, not at this step's local sound speed.
         let (cd, retard_denom) = self.drag_terms(velocity_magnitude, speed_of_sound);
 
         // Convert velocity to fps (still used below outside the BC lookup).
@@ -4269,7 +4689,7 @@ impl MonteCarloTrialSampler {
         let atmosphere = AtmosphericConditions {
             temperature: base_inputs.temperature,
             pressure: base_inputs.pressure,
-            humidity: base_inputs.humidity_percent(),
+            humidity: base_inputs.humidity_percent,
             altitude: base_inputs.altitude,
         };
         let target_hint = params
@@ -5259,6 +5679,9 @@ pub fn estimate_bc_fit(
 /// [`estimate_bc_fit`] knowing which of `atmosphere`'s temperature and pressure the caller
 /// supplied (0.49.0): a supplied value is the air the data was shot in, whatever its value.
 /// [`StationAtmospherePresence::NEITHER`] is bit-identical to [`estimate_bc_fit`].
+///
+/// An out-of-range humidity, or air that cannot exist, is refused before the search with the
+/// solver's own field-named error (0.50.0), not reported as data no BC fits.
 #[allow(clippy::too_many_arguments)] // Mirrors estimate_bc_fit plus the presence.
 pub fn estimate_bc_fit_with_station_presence(
     velocity: f64,
@@ -5277,6 +5700,17 @@ pub fn estimate_bc_fit_with_station_presence(
             "No data points provided for BC estimation.".to_string(),
         ));
     }
+    // The fit's air goes through the solver's own station check once, up front. The sweep below
+    // drops every trial that fails, so without this an out-of-range
+    // humidity or air that cannot exist would come back as "Unable to estimate BC from provided
+    // data", which blames the data for the air.
+    TrajectorySolver::new_with_station_presence(
+        BallisticInputs::default(),
+        WindConditions::default(),
+        atmosphere.clone(),
+        station_presence,
+    )
+    .station_air()?;
     let max_dist = points.iter().map(|(d, _)| *d).fold(0.0_f64, f64::max);
     // For a zeroed drop fit, drop is below the horizontal LOS which sits `sight_height`
     // above the bore at the muzzle: drop = sight_height - y. Bore-referenced fits use 0.
@@ -5287,7 +5721,7 @@ pub fn estimate_bc_fit_with_station_presence(
     };
 
     // Sum of squared residuals for a trial BC; None unless the solve reaches ALL data points.
-    let sse = |bc_value: f64| -> Option<f64> {
+    let sse = |bc_value: f64| -> Result<Option<f64>, BallisticsError> {
         let mut inputs = BallisticInputs {
             muzzle_velocity: velocity,
             bc_value,
@@ -5312,8 +5746,7 @@ pub fn estimate_bc_fit_with_station_presence(
                 WindConditions::default(),
                 atmosphere.clone(),
                 station_presence,
-            )
-            .ok()?;
+            )?;
             inputs.muzzle_angle = za;
         }
         let mut solver = TrajectorySolver::new_with_station_presence(
@@ -5323,8 +5756,8 @@ pub fn estimate_bc_fit_with_station_presence(
             station_presence,
         );
         solver.set_max_range(max_dist * 1.5);
-        let result = solver.solve().ok()?;
-        fit_residual_sse(&result.points, points, mode, drop_offset)
+        let result = solver.solve()?;
+        Ok(fit_residual_sse(&result.points, points, mode, drop_offset))
     };
 
     // Physical BC search range, per drag model. Real G7 BCs top out well under 0.5 (0.7 is
@@ -5338,17 +5771,27 @@ pub fn estimate_bc_fit_with_station_presence(
     // Coarse sweep across the physical range.
     let mut best_bc = f64::NAN;
     let mut best_sse = f64::MAX;
+    let mut air_refusal = None;
     let mut bc = bc_min;
     while bc <= bc_max + 1e-9 {
-        if let Some(s) = sse(bc) {
-            if s < best_sse {
+        match sse(bc) {
+            Ok(Some(s)) if s < best_sse => {
                 best_sse = s;
                 best_bc = bc;
             }
+            Err(error) if error.atmosphere_error().is_some() => {
+                air_refusal.get_or_insert(error);
+            }
+            _ => {}
         }
         bc += 0.01;
     }
     if !best_bc.is_finite() {
+        // A failed trial does not disqualify a successful fit. If none succeeded, keep the
+        // actual air refusal so the caller can name the station reading it supplied.
+        if let Some(error) = air_refusal {
+            return Err(error);
+        }
         return Err(BallisticsError::from(
             "Unable to estimate BC from provided data. Check that the values and units are correct."
                 .to_string(),
@@ -5360,7 +5803,7 @@ pub fn estimate_bc_fit_with_station_presence(
     let hi = (best_bc + 0.01).min(bc_max);
     let mut bc = lo;
     while bc <= hi + 1e-9 {
-        if let Some(s) = sse(bc) {
+        if let Ok(Some(s)) = sse(bc) {
             if s < best_sse {
                 best_sse = s;
                 best_bc = bc;
@@ -6001,13 +6444,9 @@ mod uniform_gravity_tests {
             StationAtmospherePresence::BOTH,
             gravity,
         );
-        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
-        solver.calculate_acceleration(
-            &position,
-            &velocity,
-            &Vector3::zeros(),
-            (temp_c, pressure_hpa, density / 1.225),
-        ) - solver.gravity_acceleration()
+        let station = solver.station_air().unwrap();
+        solver.calculate_acceleration(&position, &velocity, &Vector3::zeros(), &station)
+            - solver.gravity_acceleration()
     }
 
     #[test]
@@ -6607,22 +7046,28 @@ mod station_presence_twin_tests {
     fn zero_twins_reproduce_ab4eb0c_with_neither_and_fly_a_supplied_reading() {
         // (temperature, pressure, altitude, zero angle, near crossing, far crossing for a
         // 0.002 rad bore angle), all captured at ab4eb0c.
+        // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the
+        // station's water-vapour mole fraction, with a virtual-temperature lapse), old -> new: the
+        // zero angles did not move (the bisection's 1e-7 rad step hides it); the crossings near
+        // 20.667807586483896 -> 20.66780758664646 m (+7.9e-12) and far 224.33240698998765 ->
+        // 224.33240545071135 m (-6.9e-9) at 150 m, and near 20.665489730827762 -> 20.66548973089652
+        // m (+3.3e-12) and far 227.33514089305447 -> 227.33514021685897 m (-3.0e-9) at 1500 m.
         let cases = [
             (
                 20.0,
                 1013.0,
                 150.0,
                 f64::from_bits(0x3f65f73333333333),
-                f64::from_bits(0x4034aaf5701ff812),
-                f64::from_bits(0x406c0aa313fbdeae),
+                f64::from_bits(0x4034aaf57020aad0),
+                f64::from_bits(0x406c0aa310c17a28),
             ),
             (
                 15.0,
                 850.0,
                 1500.0,
                 f64::from_bits(0x3f6594ccccccccce),
-                f64::from_bits(0x4034aa5d88f5baa5),
-                f64::from_bits(0x406c6ab97964e714),
+                f64::from_bits(0x4034aa5d88f6063f),
+                f64::from_bits(0x406c6ab977f9df7a),
             ),
         ];
         for (t, p, alt, zero, near, far) in cases {
@@ -6792,13 +7237,15 @@ mod station_presence_twin_tests {
             results.hit_probability(DEFAULT_HIT_RADIUS_M).to_bits(),
             0.14_f64.to_bits()
         );
-        let expected_ranges: [f64; 3] = [1907.972891143359, 1936.408435469319, 1912.8150447617645];
+        // The legacy seeded pins of `monte_carlo_seeded_tests`, re-captured with them for the
+        // aloft change.
+        let expected_ranges: [f64; 3] = [1907.9716332174821, 1936.4071333440454, 1912.81384414182];
         let expected_velocities: [f64; 3] =
-            [238.6187151542299, 239.91923651600106, 243.14112455427164];
+            [238.6179931921287, 239.9185187950357, 243.14025219104838];
         let expected_positions: [(f64, f64); 3] = [
-            (-0.0643556039548101, 0.7344970252014579),
-            (0.5769422971539162, 0.27227201756386726),
-            (-0.7440425792472842, 0.1541804446282822),
+            (-0.06435559190712015, 0.7344970251956466),
+            (0.5769422272471794, 0.2722720177468328),
+            (-0.7440424901848259, 0.15418044529361857),
         ];
         for i in 0..3 {
             assert_eq!(results.ranges[i].to_bits(), expected_ranges[i].to_bits());
@@ -6835,18 +7282,24 @@ mod station_presence_twin_tests {
             ..MonteCarloParams::default()
         };
         // captured at ab4eb0c: (range, impact velocity) of the first three trials
+        // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the
+        // station's water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
+        // ranges 1933.7023025926699 -> 1933.7006673718802, 1962.5974312446554 -> 1962.5957266568341
+        // and 1938.055244658578 -> 1938.0537040308395 m (-8.0e-7 to -8.7e-7); velocities
+        // 243.03343313165846 -> 243.0324000563029, 244.31973944033203 -> 244.3187166797008 and
+        // 247.59724147726604 -> 247.596028157198 m/s (-4.2e-6 to -4.9e-6).
         let pinned = [
             (
-                f64::from_bits(0x409e36cf28692da7),
-                f64::from_bits(0x406e6111e25be26e),
+                f64::from_bits(0x409e36cd7bbf5e66),
+                f64::from_bits(0x406e61096bd7c6b4),
             ),
             (
-                f64::from_bits(0x409eaa63c504259d),
-                f64::from_bits(0x406e8a3b4e34eef5),
+                f64::from_bits(0x409eaa62062b31d5),
+                f64::from_bits(0x406e8a32ed528026),
             ),
             (
-                f64::from_bits(0x409e4838920e477c),
-                f64::from_bits(0x406ef31c9a289584),
+                f64::from_bits(0x409e4836fe30807a),
+                f64::from_bits(0x406ef312a9a45523),
             ),
         ];
         let seeded = run_monte_carlo_with_wind_and_direction_std_dev_seeded(
@@ -6933,15 +7386,20 @@ mod station_presence_twin_tests {
             assert_eq!(report.samples, 80);
             assert_eq!(report.attempts, 80);
             // captured at ab4eb0c
+            // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the
+            // station's water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
+            // the hit probability did not move; the mean impact velocity 244.8044668331616 ->
+            // 244.80335002519013 m/s (-4.6e-6) and the mean drop at the target 0.00242533056417438
+            // -> 0.002425330711117544 m (+6.1e-8).
             assert_eq!(
                 report.hit_probability.to_bits(),
                 f64::from_bits(0x3fef99999999999a).to_bits()
             );
             assert_eq!(
                 report.mean_impact_velocity_mps.to_bits(),
-                0x406e99be313a64aa
+                0x406e99b50b1cadd6
             );
-            assert_eq!(report.mean_drop_at_target_m.to_bits(), 0x3f63de496e905406);
+            assert_eq!(report.mean_drop_at_target_m.to_bits(), 0x3f63de4982c26e62);
         }
         let both = run_monte_carlo_adaptive_seeded_with_station_presence(
             &in_band_mc_inputs(),
@@ -6953,7 +7411,7 @@ mod station_presence_twin_tests {
             StationAtmospherePresence::BOTH,
         )
         .unwrap();
-        assert_ne!(both.mean_impact_velocity_mps.to_bits(), 0x406e99be313a64aa);
+        assert_ne!(both.mean_impact_velocity_mps.to_bits(), 0x406e99b50b1cadd6);
     }
 
     /// Every trial's impact position is its deviation from the baseline solve, so the baseline
@@ -7130,9 +7588,17 @@ mod station_presence_twin_tests {
             crate::monte_carlo::solve_trajectory_for_monte_carlo(&kernel_inputs(1013.0)).unwrap();
         let neither = solve(1013.0, StationAtmospherePresence::NEITHER);
         for output in [&legacy, &neither] {
-            // captured at ab4eb0c
-            assert_eq!(output.drop.to_bits(), 0x40039eddd41bdb44);
-            assert_eq!(output.velocity.to_bits(), 0x4080fe7009642434);
+            // Captured at ab4eb0c (drop 0x40039eddd41bdb44, velocity 0x4080fe7009642434) when
+            // this kernel flew the default 50 % RH in its density but 0 % in its sound speed.
+            // Re-captured in 0.50.0, where it flies 50 % in both, exactly
+            // as TrajectorySolver does: the drop is 0.61 mm longer and the speed
+            // 0.19 m/s lower at 500 m.
+            // Re-captured again with the aloft change (the aloft air now holds the station's
+            // water-vapour mole fraction, with a virtual-temperature lapse): drop 2.453183461133607
+            // -> 2.4531833213074137 m (-0.14 um), velocity 543.6188052770763 -> 543.6189355048916
+            // m/s (+0.13 mm/s).
+            assert_eq!(output.drop.to_bits(), 0x4003a01e93c0dd30);
+            assert_eq!(output.velocity.to_bits(), 0x4080fcf394753ebe);
         }
         let low = solve(1012.0, StationAtmospherePresence::NEITHER).velocity;
         let high = solve(1014.0, StationAtmospherePresence::NEITHER).velocity;
@@ -7258,13 +7724,24 @@ mod monte_carlo_seeded_tests {
             results.hit_probability(DEFAULT_HIT_RADIUS_M)
         );
 
-        let expected_ranges: [f64; 3] = [1907.972891143359, 1936.408435469319, 1912.8150447617645];
+        // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the
+        // station's water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
+        // ranges 1907.972891143359 -> 1907.9716332174821, 1936.408435469319 -> 1936.4071333440454
+        // and 1912.8150447617645 -> 1912.81384414182 m (-6.3e-7 to -6.7e-7); velocities
+        // 238.6187151542299 -> 238.6179931921287, 239.91923651600106 -> 239.9185187950357 and
+        // 243.14112455427164 -> 243.14025219104838 m/s (-3.0e-6 to -3.6e-6); the impact positions
+        // by at most 0.12 um (-0.0643556039548101 -> -0.06435559190712015, 0.7344970252014579 ->
+        // 0.7344970251956466, 0.5769422971539162 -> 0.5769422272471794, 0.27227201756386726 ->
+        // 0.2722720177468328, -0.7440425792472842 -> -0.7440424901848259, 0.1541804446282822 ->
+        // 0.15418044529361857). The hit count did not move.
+
+        let expected_ranges: [f64; 3] = [1907.9716332174821, 1936.4071333440454, 1912.81384414182];
         let expected_velocities: [f64; 3] =
-            [238.6187151542299, 239.91923651600106, 243.14112455427164];
+            [238.6179931921287, 239.9185187950357, 243.14025219104838];
         let expected_positions: [(f64, f64, f64); 3] = [
-            (0.0, -0.0643556039548101, 0.7344970252014579),
-            (0.0, 0.5769422971539162, 0.27227201756386726),
-            (0.0, -0.7440425792472842, 0.1541804446282822),
+            (0.0, -0.06435559190712015, 0.7344970251956466),
+            (0.0, 0.5769422272471794, 0.2722720177468328),
+            (0.0, -0.7440424901848259, 0.15418044529361857),
         ];
 
         for (i, expected) in expected_ranges.iter().enumerate() {
@@ -7971,6 +8448,38 @@ mod monte_carlo_wind_sampling_tests {
 mod bc_fit_objective_tests {
     use super::*;
 
+    #[test]
+    fn all_trials_refused_in_flight_preserve_the_atmosphere_cause() {
+        let temperature = -273.1435;
+        let error = estimate_bc_fit_with_station_presence(
+            823.0,
+            0.0109,
+            0.00782,
+            &[(800.0, 0.1), (900.0, 0.3)],
+            DragModel::G7,
+            BcFitMode::Drop,
+            AtmosphericConditions {
+                temperature,
+                pressure: 0.0187,
+                humidity: 0.0,
+                ..Default::default()
+            },
+            Some(600.0),
+            0.05,
+            StationAtmospherePresence::BOTH,
+        )
+        .unwrap_err();
+        let cause = error
+            .atmosphere_error()
+            .expect("the refused flight's cause");
+        assert_eq!(cause.field(), "temperature_c");
+        assert_eq!(cause.value().to_bits(), temperature.to_bits());
+        assert_eq!(
+            cause.reason(),
+            crate::AtmosphereErrorReason::AirAloftBelowAbsoluteZero
+        );
+    }
+
     fn velocity_point(range_m: f64, velocity_mps: f64) -> TrajectoryPoint {
         TrajectoryPoint {
             time: 0.0,
@@ -8016,13 +8525,8 @@ mod cluster_bc_reference_space_tests {
         );
         let position = Vector3::zeros();
         let velocity = Vector3::new(1100.0 / 3.28084, 0.0, 0.0);
-        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
-        solver.calculate_acceleration(
-            &position,
-            &velocity,
-            &Vector3::zeros(),
-            (temp_c, pressure_hpa, density / 1.225),
-        )
+        let station = solver.station_air().unwrap();
+        solver.calculate_acceleration(&position, &velocity, &Vector3::zeros(), &station)
     }
 
     #[test]
@@ -8128,12 +8632,12 @@ mod velocity_bc_flag_tests {
             WindConditions::default(),
             AtmosphericConditions::default(),
         );
-        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
+        let station = solver.station_air().unwrap();
         solver.calculate_acceleration(
             &Vector3::zeros(),
             &Vector3::new(600.0, 0.0, 0.0),
             &Vector3::zeros(),
-            (temp_c, pressure_hpa, density / 1.225),
+            &station,
         )
     }
 
@@ -8220,19 +8724,20 @@ mod mach_bc_segment_tests {
             segmented_solver.atmosphere.humidity,
         );
         let velocity = Vector3::new(1.5 * local_speed_of_sound, 0.0, 0.0);
-        let resolved_atmo = (temp_c, pressure_hpa, density / 1.225);
+        // Both solvers fly the same default atmosphere, so they share one station.
+        let station = segmented_solver.station_air().unwrap();
 
         let segmented_acceleration = segmented_solver.calculate_acceleration(
             &position,
             &velocity,
             &Vector3::zeros(),
-            resolved_atmo,
+            &station,
         );
         let expected_acceleration = expected_solver.calculate_acceleration(
             &position,
             &velocity,
             &Vector3::zeros(),
-            resolved_atmo,
+            &station,
         );
 
         assert!(
@@ -8526,7 +9031,7 @@ mod cd_scale_tests {
                 nalgebra::Vector3::new(700.0, 0.0, 0.0),
                 &inputs,
                 nalgebra::Vector3::zeros(),
-                (1.225, 340.0, 0.0, 0.0),
+                &KernelAtmosphere::uniform(1.225, 340.0).unwrap(),
                 inputs.bc_value,
                 None,
                 0.0,
@@ -8550,7 +9055,11 @@ mod cd_scale_tests {
                 vert: 0.0,
                 initial_state: [0.0, 0.0, 0.0, 850.0, 0.0, 0.0],
                 t_span: (0.0, 5.0),
-                atmo_params: (0.0, 15.0, 1013.25, 1.0),
+                atmosphere: KernelAtmosphere::from_legacy_params(
+                    (0.0, 15.0, 1013.25, 1.0),
+                    crate::atmosphere::RelativeHumidity::DRY,
+                )
+                .unwrap(),
                 atmo_sock: None,
             };
             let solution = crate::fast_trajectory::fast_integrate(&inputs, &wind_sock, params);
@@ -8841,11 +9350,23 @@ mod humid_local_mach_tests {
     }
 
     fn acceleration(solver: &TrajectorySolver, base_ratio: f64) -> Vector3<f64> {
+        // The solver's own 30 C / 1013.25 hPa station and humidity, with a density ratio the
+        // test holds fixed so that only the sound speed can respond to the humidity.
+        let humidity =
+            crate::atmosphere::RelativeHumidity::try_percent(solver.atmosphere.humidity).unwrap();
+        let station = StationAir::with_density_ratio(
+            solver.atmosphere.altitude,
+            30.0,
+            1013.25,
+            base_ratio,
+            humidity,
+        )
+        .unwrap();
         solver.calculate_acceleration(
             &Vector3::zeros(),
             &Vector3::new(350.0, 0.0, 0.0),
             &Vector3::zeros(),
-            (30.0, 1013.25, base_ratio),
+            &station,
         )
     }
 
@@ -8906,24 +9427,14 @@ mod inclined_atmosphere_frame_tests {
             ..AtmosphericConditions::default()
         };
         let solver = TrajectorySolver::new(inputs, WindConditions::default(), atmosphere);
-        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
-        let resolved_atmo = (temp_c, pressure_hpa, density / 1.225);
+        let station = solver.station_air().unwrap();
         let velocity = Vector3::new(600.0, 0.0, 0.0);
         let along_slant = Vector3::new(1_000.0, 0.0, 0.0);
         let across_slant = Vector3::new(0.0, 500.0 / angle.cos(), 0.0);
 
-        let a = solver.calculate_acceleration(
-            &along_slant,
-            &velocity,
-            &Vector3::zeros(),
-            resolved_atmo,
-        );
-        let b = solver.calculate_acceleration(
-            &across_slant,
-            &velocity,
-            &Vector3::zeros(),
-            resolved_atmo,
-        );
+        let a = solver.calculate_acceleration(&along_slant, &velocity, &Vector3::zeros(), &station);
+        let b =
+            solver.calculate_acceleration(&across_slant, &velocity, &Vector3::zeros(), &station);
 
         assert!(
             (a - b).norm() < 1e-10,
@@ -8945,13 +9456,9 @@ mod inclined_atmosphere_frame_tests {
         );
         let level_headwind = Vector3::new(-100.0, 0.0, 0.0);
         let velocity = expected_shot_frame_vector(level_headwind, angle);
-        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
-        let actual = solver.calculate_acceleration(
-            &Vector3::zeros(),
-            &velocity,
-            &level_headwind,
-            (temp_c, pressure_hpa, density / 1.225),
-        );
+        let station = solver.station_air().unwrap();
+        let actual =
+            solver.calculate_acceleration(&Vector3::zeros(), &velocity, &level_headwind, &station);
 
         assert!(
             (actual - solver.gravity_acceleration()).norm() < 1e-12,
@@ -8979,13 +9486,8 @@ mod inclined_atmosphere_frame_tests {
                 WindConditions::default(),
                 AtmosphericConditions::default(),
             );
-            let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
-            solver.calculate_acceleration(
-                &Vector3::zeros(),
-                &velocity,
-                &Vector3::zeros(),
-                (temp_c, pressure_hpa, density / 1.225),
-            )
+            let station = solver.station_air().unwrap();
+            solver.calculate_acceleration(&Vector3::zeros(), &velocity, &Vector3::zeros(), &station)
         };
 
         let omega_earth = 7.2921159e-5_f64;
@@ -9351,12 +9853,12 @@ mod form_factor_drag_tests {
             WindConditions::default(),
             AtmosphericConditions::default(),
         );
-        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
+        let station = solver.station_air().unwrap();
         solver.calculate_acceleration(
             &Vector3::zeros(),
             &Vector3::new(600.0, 0.0, 0.0),
             &Vector3::zeros(),
-            (temp_c, pressure_hpa, density / 1.225),
+            &station,
         )
     }
 
@@ -9420,8 +9922,7 @@ mod rk45_adaptivity_tests {
         let solver = discontinuous_wind_solver();
         let position = Vector3::new(0.0, solver.inputs.muzzle_height, 0.0);
         let velocity = Vector3::new(solver.inputs.muzzle_velocity, 0.0, 0.0);
-        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
-        let resolved_atmo = (temp_c, pressure_hpa, density / 1.225);
+        let station = solver.station_air().unwrap();
         let dt = 0.01;
 
         let rejected_trial = solver.rk45_step(
@@ -9430,7 +9931,7 @@ mod rk45_adaptivity_tests {
             dt,
             &Vector3::zeros(),
             RK45_TOLERANCE,
-            resolved_atmo,
+            &station,
         );
         assert!(
             rejected_trial.error > RK45_TOLERANCE,
@@ -9439,7 +9940,7 @@ mod rk45_adaptivity_tests {
         );
 
         let accepted =
-            solver.adaptive_rk45_step(&position, &velocity, dt, &Vector3::zeros(), resolved_atmo);
+            solver.adaptive_rk45_step(&position, &velocity, dt, &Vector3::zeros(), &station);
         assert!(accepted.used_dt < dt, "oversized trial was not retried");
         assert!(
             accepted.error <= RK45_TOLERANCE || accepted.used_dt <= RK45_MIN_DT,
@@ -9454,7 +9955,7 @@ mod rk45_adaptivity_tests {
             accepted.used_dt,
             &Vector3::zeros(),
             RK45_TOLERANCE,
-            resolved_atmo,
+            &station,
         );
         assert_eq!(accepted.position, accepted_trial.position);
         assert_eq!(accepted.velocity, accepted_trial.velocity);
@@ -9603,12 +10104,12 @@ mod magnus_stability_tests {
                 WindConditions::default(),
                 AtmosphericConditions::default(),
             );
-            let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
+            let station = solver.station_air().unwrap();
             solver.calculate_acceleration(
                 &Vector3::zeros(),
                 &Vector3::new(822.96, 0.0, 0.0),
                 &Vector3::zeros(),
-                (temp_c, pressure_hpa, density / 1.225),
+                &station,
             )
         };
 
@@ -9655,12 +10156,12 @@ mod magnus_stability_tests {
             "velocity-corrected Sg must be below the gate, got {canonical_sg}"
         );
 
-        let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
+        let station = solver.station_air().unwrap();
         let acceleration = solver.calculate_acceleration(
             &Vector3::zeros(),
             &Vector3::new(muzzle_velocity, 0.0, 0.0),
             &Vector3::zeros(),
-            (temp_c, pressure_hpa, density / 1.225),
+            &station,
         );
         let mut baseline_inputs = inputs;
         baseline_inputs.enable_magnus = false;
@@ -9673,7 +10174,7 @@ mod magnus_stability_tests {
             &Vector3::zeros(),
             &Vector3::new(muzzle_velocity, 0.0, 0.0),
             &Vector3::zeros(),
-            (temp_c, pressure_hpa, density / 1.225),
+            &station,
         );
 
         assert_eq!(
@@ -9703,13 +10204,13 @@ mod magnus_stability_tests {
                     WindConditions::default(),
                     AtmosphericConditions::default(),
                 );
-                let (density, _, temp_c, pressure_hpa) = solver.resolved_atmosphere();
+                let station = solver.station_air().unwrap();
                 solver
                     .calculate_acceleration(
                         &Vector3::zeros(),
                         &Vector3::new(speed_mps, 0.0, 0.0),
                         &Vector3::zeros(),
-                        (temp_c, pressure_hpa, density / 1.225),
+                        &station,
                     )
                     .y
             };
@@ -9900,19 +10401,41 @@ mod coriolis_direction_tests {
     }
 
     #[test]
-    fn humidity_percent_converts_and_clamps() {
-        // MBA-722: BallisticInputs.humidity is a 0-1 fraction; the helper yields 0-100 percent.
-        let mut i = BallisticInputs {
-            humidity: 0.5,
-            ..BallisticInputs::default()
-        };
-        assert!((i.humidity_percent() - 50.0).abs() < 1e-9, "0.5 -> 50%");
-        i.humidity = 0.0;
-        assert_eq!(i.humidity_percent(), 0.0);
-        i.humidity = 1.0;
-        assert_eq!(i.humidity_percent(), 100.0);
-        i.humidity = 1.5; // out of range -> clamped, never > 100
-        assert_eq!(i.humidity_percent(), 100.0);
+    fn humidity_percent_is_a_percent_field_that_relative_humidity_validates_never_clamps() {
+        // 0.50.0: the field is a PERCENT with the engine's one default, and the clamping
+        // 0-1 -> 0-100 helper is gone. RelativeHumidity::try_percent is its validator: it keeps
+        // 0..=100 bit for bit, reads a sensor reading within 5 points of it as its end, and
+        // refuses anything farther out. 0.49.0's helper clamped 1.5 to 100 %.
+        let inputs = BallisticInputs::default();
+        assert_eq!(
+            inputs.humidity_percent.to_bits(),
+            DEFAULT_HUMIDITY_PERCENT.to_bits()
+        );
+        assert_eq!(
+            inputs.humidity_percent.to_bits(),
+            AtmosphericConditions::default().humidity.to_bits()
+        );
+        for percent in [0.0, 7.0, 50.0, 55.0, 100.0] {
+            let validated = crate::RelativeHumidity::try_percent(percent).expect("in range");
+            assert_eq!(validated.percent().to_bits(), percent.to_bits());
+        }
+        for percent in [150.0, -5.000_000_1, 105.000_000_1, f64::NAN, f64::INFINITY] {
+            assert!(
+                crate::RelativeHumidity::try_percent(percent).is_err(),
+                "{percent} must be refused, not clamped"
+            );
+        }
+        // A sensor reading within 5 points of the range is the end it reads as.
+        for (percent, end) in [(-5.0, 0.0), (100.0001, 100.0)] {
+            assert_eq!(
+                crate::RelativeHumidity::try_percent(percent)
+                    .expect("a reading in the band")
+                    .percent()
+                    .to_bits(),
+                f64::to_bits(end),
+                "{percent}"
+            );
+        }
     }
 
     /// Vertical position (m) at a given downrange `range_m`, for a shot fired along
@@ -9983,27 +10506,34 @@ mod coriolis_direction_tests {
     #[test]
     fn labeled_mach_crossings_match_pinned_pre_change_flat_vec_across_solvers() {
         // (solver_name, use_rk4, use_adaptive_rk45, expected mach_1_2, expected mach_1_0)
+        // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the
+        // station's water-vapour mole fraction, with a virtual-temperature lapse), old -> new: Mach
+        // 1.2 at 670.9878683238721 -> 670.9870968186207, 671.7257336844475 -> 671.7249603175201 and
+        // 672.4905711917901 -> 672.4897951903022 m; Mach 1.0 at 805.5274119916264 ->
+        // 805.5261199258687, 805.933409072171 -> 805.9321158082175 and 806.5709746782849 ->
+        // 806.5696791258861 m (Euler, RK4, RK45; -0.77 to -1.30 mm): this shot climbs above the
+        // station, where the held vapour gives a faster sound speed, so Mach falls sooner.
         let cases = [
             (
                 "Euler",
                 false,
                 false,
-                670.9878683238721_f64,
-                805.5274119916264_f64,
+                670.9870968186207_f64,
+                805.5261199258687_f64,
             ),
             (
                 "RK4",
                 true,
                 false,
-                671.7257336844475_f64,
-                805.933409072171_f64,
+                671.7249603175201_f64,
+                805.9321158082175_f64,
             ),
             (
                 "RK45",
                 true,
                 true,
-                672.4905711917901_f64,
-                806.5709746782849_f64,
+                672.4897951903022_f64,
+                806.5696791258861_f64,
             ),
         ];
 
@@ -10028,12 +10558,14 @@ mod coriolis_direction_tests {
             assert_eq!(
                 result.mach_1_2_distance_m,
                 Some(expected_1_2),
-                "{solver_name}: mach_1_2_distance_m must match the pinned pre-change flat-Vec value"
+                "{solver_name}: mach_1_2_distance_m must match its pin (the pre-change flat-Vec \
+                 capture, re-captured for 0.50.0's aloft vapour model)"
             );
             assert_eq!(
                 result.mach_1_0_distance_m,
                 Some(expected_1_0),
-                "{solver_name}: mach_1_0_distance_m must match the pinned pre-change flat-Vec value"
+                "{solver_name}: mach_1_0_distance_m must match its pin (the pre-change flat-Vec \
+                 capture, re-captured for 0.50.0's aloft vapour model)"
             );
 
             let mach_1_2 = result.mach_1_2_distance_m.expect("crosses 1.2");
@@ -10987,16 +11519,15 @@ mod boundary_layer_shear_height_tests {
             wind.clone(),
             AtmosphericConditions::default(),
         );
-        let (density, _, temp_c, pressure_hpa) = sheared.resolved_atmosphere();
-        let resolved_atmo = (temp_c, pressure_hpa, density / 1.225);
+        let station = sheared.station_air().unwrap();
         let velocity = Vector3::new(700.0, 5.0, 0.0);
         let scaled_wind =
             crate::wind::wind_vector(wind.speed, wind.direction, 0.0) * expected_ratio;
 
         let with_shear =
-            sheared.calculate_acceleration(&position, &velocity, &Vector3::zeros(), resolved_atmo);
+            sheared.calculate_acceleration(&position, &velocity, &Vector3::zeros(), &station);
         let with_scaled_wind =
-            uniform.calculate_acceleration(&position, &velocity, &scaled_wind, resolved_atmo);
+            uniform.calculate_acceleration(&position, &velocity, &scaled_wind, &station);
         assert!(
             (with_shear - with_scaled_wind).norm() <= 1e-12,
             "{model}, muzzle_height {muzzle_height} m, shooting angle {shooting_angle} rad, \
@@ -11161,3 +11692,214 @@ mod boundary_layer_shear_height_tests {
         assert_eq!(with_model("typo").z.to_bits(), power_law.z.to_bits());
     }
 }
+
+#[cfg(test)]
+mod station_air_tests {
+    //! TrajectorySolver's station air comes from `StationAir`, and its per-step air from
+    //! `atmosphere::air_at_with_gravity`. The end-to-end bits are pinned by the byte-identity
+    //! byte-identity files; these check the station itself, that a humidity beyond the sensor
+    //! band is refused, never clamped, and that a reading within it flies as its end.
+    use super::*;
+    use crate::atmosphere::{calculate_atmosphere, resolve_station_conditions_with_presence};
+
+    fn solver(
+        atmosphere: AtmosphericConditions,
+        presence: StationAtmospherePresence,
+    ) -> TrajectorySolver {
+        TrajectorySolver::new_with_station_presence(
+            BallisticInputs::default(),
+            WindConditions::default(),
+            atmosphere,
+            presence,
+        )
+    }
+
+    #[test]
+    fn station_air_is_calculate_atmosphere_at_the_resolved_station() {
+        let atmospheres = [
+            (0.0, 15.0, 1013.25, 0.0),
+            (0.0, 15.0, 1013.25, 50.0),
+            (1_500.0, 25.0, 830.0, 100.0),
+            // The legacy omission sentinels at altitude: NEITHER flies ICAO here, BOTH flies
+            // the typed values, and the station must follow whichever was resolved.
+            (1_500.0, 15.0, 1013.25, 37.5),
+            (2_000.0, 15.0, 1013.25, 50.0),
+        ];
+        for presence in [
+            StationAtmospherePresence::NEITHER,
+            StationAtmospherePresence::BOTH,
+        ] {
+            for (altitude, temperature, pressure, humidity) in atmospheres {
+                let solver = solver(
+                    AtmosphericConditions {
+                        temperature,
+                        pressure,
+                        humidity,
+                        altitude,
+                    },
+                    presence,
+                );
+                let station = solver.station_air().expect("valid station");
+                let (temp_c, pressure_hpa) = resolve_station_conditions_with_presence(
+                    temperature,
+                    pressure,
+                    altitude,
+                    PressureReferenceMode::Absolute,
+                    presence,
+                );
+                let (density, sound) =
+                    calculate_atmosphere(altitude, Some(temp_c), Some(pressure_hpa), humidity);
+                let got = [
+                    station.altitude_m(),
+                    station.temperature_c(),
+                    station.pressure_hpa(),
+                    station.humidity().percent(),
+                    station.density_kg_m3(),
+                    station.density_ratio(),
+                    station.speed_of_sound_mps(),
+                ];
+                let want = [
+                    altitude,
+                    temp_c,
+                    pressure_hpa,
+                    humidity,
+                    density,
+                    density / 1.225,
+                    sound,
+                ];
+                assert_eq!(
+                    got.map(f64::to_bits),
+                    want.map(f64::to_bits),
+                    "{presence:?} {altitude} m {temperature} C {pressure} hPa {humidity}%"
+                );
+                // The test-only tuple view reads the same station.
+                assert_eq!(
+                    [
+                        solver.resolved_atmosphere().0,
+                        solver.resolved_atmosphere().1,
+                        solver.resolved_atmosphere().2,
+                        solver.resolved_atmosphere().3,
+                    ]
+                    .map(f64::to_bits),
+                    [density, sound, temp_c, pressure_hpa].map(f64::to_bits)
+                );
+            }
+        }
+    }
+
+    /// An out-of-range station RH (beyond the sensor band) is REJECTED, never clamped. 0.49.0
+    /// flew 150 % as 100 % and -5 % as 0 %; `validate_for_solve` now refuses both, and the
+    /// station itself (`station_air`) refuses them through `StationAir::new` too, so no solve
+    /// path can fly an unvalidated humidity.
+    #[test]
+    fn out_of_range_station_humidity_is_rejected_never_clamped() {
+        // Beyond the 5-point sensor band (a reading within it is the next test's).
+        for humidity in [150.0, -5.000_000_1, 105.000_000_1, f64::NAN, f64::INFINITY] {
+            let mut solver = solver(
+                AtmosphericConditions {
+                    humidity,
+                    temperature: 30.0,
+                    ..AtmosphericConditions::default()
+                },
+                StationAtmospherePresence::BOTH,
+            );
+            solver.set_max_range(600.0);
+            let station = solver
+                .station_air()
+                .expect_err(&format!("RH {humidity}: the station refuses it"));
+            assert!(
+                station.to_string().contains("atmosphere.humidity"),
+                "{station}"
+            );
+            let solve = solver
+                .solve()
+                .expect_err(&format!("RH {humidity}: the solve refuses it"));
+            assert!(solve.to_string().contains("atmosphere.humidity"), "{solve}");
+        }
+        // The ends of the range are humidities and fly as given, with no clamp in between.
+        for humidity in [0.0, 100.0] {
+            let solver = solver(
+                AtmosphericConditions {
+                    humidity,
+                    temperature: 30.0,
+                    ..AtmosphericConditions::default()
+                },
+                StationAtmospherePresence::BOTH,
+            );
+            let station = solver.station_air().expect("a valid station");
+            assert_eq!(station.humidity().percent().to_bits(), humidity.to_bits());
+            solver.solve().expect("a valid humidity flies");
+        }
+    }
+
+    /// The sensor band (owner decision 2026-11-01): a station reading within 5 points of the range
+    /// is sensor error in saturated or dry air, so the station is the end it reads as, and the
+    /// solve flies that end to the bit, on every integrator: the 0.49.0 clamp's numbers, now for
+    /// the band only.
+    #[test]
+    fn a_station_reading_within_five_points_of_the_range_flies_the_end_bit_for_bit() {
+        let flight = |humidity: f64, rk4: bool, rk45: bool| -> Vec<u64> {
+            let mut solver = TrajectorySolver::new_with_station_presence(
+                BallisticInputs {
+                    use_rk4: rk4,
+                    use_adaptive_rk45: rk45,
+                    ..BallisticInputs::default()
+                },
+                WindConditions::default(),
+                AtmosphericConditions {
+                    humidity,
+                    temperature: 30.0,
+                    ..AtmosphericConditions::default()
+                },
+                StationAtmospherePresence::BOTH,
+            );
+            solver.set_max_range(600.0);
+            let station = solver
+                .station_air()
+                .expect("a reading in the band is a station");
+            let result = solver.solve().expect("a reading in the band flies");
+            let mut bits = vec![
+                station.humidity().percent().to_bits(),
+                station.density_kg_m3().to_bits(),
+                station.speed_of_sound_mps().to_bits(),
+            ];
+            for point in &result.points {
+                bits.extend([
+                    point.time.to_bits(),
+                    point.position.x.to_bits(),
+                    point.position.y.to_bits(),
+                    point.position.z.to_bits(),
+                    point.velocity_magnitude.to_bits(),
+                ]);
+            }
+            bits
+        };
+        for (rk4, rk45) in [(false, false), (true, false), (true, true)] {
+            for (reading, end) in [
+                (100.0001, 100.0),
+                (101.7, 100.0),
+                (105.0, 100.0),
+                (-0.0001, 0.0),
+                (-2.0, 0.0),
+                (-5.0, 0.0),
+            ] {
+                assert_eq!(
+                    flight(reading, rk4, rk45),
+                    flight(end, rk4, rk45),
+                    "RH {reading} must fly {end} (rk4 {rk4}, rk45 {rk45})"
+                );
+            }
+        }
+    }
+}
+
+// The humidity class guard: every solver family flies TrajectorySolver's humid air, at every
+// step. A child module so it can drive the solver's own per-step acceleration.
+#[cfg(test)]
+mod humidity_consistency_tests;
+
+// Builder pins: every builder of a BallisticInputs leaves the humidity in it as the percent the
+// engine flies. A child module so it can read the solver's and the Monte Carlo sampler's own
+// inputs.
+#[cfg(test)]
+mod humidity_inputs_tests;

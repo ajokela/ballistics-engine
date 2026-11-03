@@ -2,9 +2,11 @@
 .coderabbit.yaml
 .git-blame-ignore-revs
 .gitattributes
+.githooks/commit-msg
 .githooks/pre-commit
 .gitignore
 .sensitive-patterns
+benches/humidity_air_bench.rs
 benches/trajectory_bench.rs
 Cargo.lock
 Cargo.toml
@@ -72,6 +74,11 @@ src/angle_calculations.rs
 src/api_client.rs
 src/atmosphere_service.rs
 src/atmosphere.rs
+src/atmosphere/aloft_vapour_tests.rs
+src/atmosphere/held_vapour_tests.rs
+src/atmosphere/humidity_model_tests.rs
+src/atmosphere/nan_humidity_tests.rs
+src/atmosphere/temperature_rule_tests.rs
 src/bc_conversion.rs
 src/bc_estimation.rs
 src/bc_table_5d.rs
@@ -82,6 +89,8 @@ src/bridge/mod.rs
 src/card_service.rs
 src/card.rs
 src/cli_api.rs
+src/cli_api/humidity_consistency_tests.rs
+src/cli_api/humidity_inputs_tests.rs
 src/cluster_bc.rs
 src/constants.rs
 src/credentials.rs
@@ -97,6 +106,7 @@ src/ffi.rs
 src/form_factor.rs
 src/gravity.rs
 src/hold_curve.rs
+src/humidity_byte_identity_tests.rs
 src/lib.rs
 src/main.rs
 src/mc_stats.rs

@@ -123,7 +123,52 @@ All dimensional input and result fields use SI units, made explicit by their suf
 
 - `_kg` is kilograms, `_m` is metres, `_mps` is metres per second, and `_j` is joules.
 - `_s` is seconds, `_pa` is pascals, `_k` is kelvin, and `_rad` is radians.
-- `relative_humidity` is a dimensionless fraction from `0` through `1`.
+- `relative_humidity` is a dimensionless fraction from `0` through `1`. A sensor reading up to
+  `0.05` outside that range (a weather meter or phone at 101.7 % in fog, or a little below 0 % in
+  very dry air) is read as saturated (`1`) or dry (`0`) air: it resolves to exactly `1` or `0` in
+  `resolved_request`, and the solve flies that end to the bit. A value beyond `-0.05` or `1.05`
+  is an `invalid_value` at `$.atmosphere.relative_humidity`, as before, and its message states
+  the band: `relative_humidity = 1.06: relative humidity must be a fraction from 0 to 1 (0.5 =
+  50 %; a sensor reading from -0.05 to 1.05 is read as 0 or 1)`. Weather is an input source,
+  never a gate: relative-humidity sensors are good to about ±2-3 % and read above 100 % in
+  condensing air, while free air is supersaturated by under 1 %.
+- Air that cannot exist (a humidity needing more water-vapour pressure than the air's total
+  pressure, such as saturated air at 100 °C under 1000 hPa) is an `invalid_value` too, refused
+  before any flight with the air in the request's own units: `relative_humidity = 1 at 373.15 K
+  and 100000 Pa: no such air exists: ...` at `$.atmosphere.relative_humidity`. It is located at
+  `$.atmosphere.temperature_k` when the temperature is outside 173.15–373.15 K, and the message
+  then names it: `...; temperature_k = 400 K is outside 173.15 K to 373.15 K, where the humid-air
+  formulas hold: check the temperature and its unit`. When the station pressure's pressure
+  altitude is outside the troposphere it is located at the reading that put it there, with a
+  hint to check that reading's unit: `$.atmosphere.pressure_pa` for a pressure sent as a station
+  pressure (hPa sent as pascals) or as a QNH that is itself outside the troposphere, and
+  `$.atmosphere.altitude_m` for one omitted or sent as a plausible QNH (feet sent as meters). A
+  QNH is quoted as it was sent, with the station pressure it was reduced to, never the reduced
+  pressure as if it had been sent: `...; pressure_pa is a QNH of 1013.25 Pa, and reduced to the
+  station altitude of 1500 m it is a station pressure of ... Pa, a pressure altitude of ... m,
+  outside the troposphere (-5000 m to 11000 m): check the pressure's unit`. A QNH that leaves no
+  station pressure at all at its altitude is located the same way. `atmosphere.density_altitude` refuses every such atmosphere with the same code,
+  path and message ([ATMOSPHERE_DENSITY_ALTITUDE.md](ATMOSPHERE_DENSITY_ALTITUDE.md#errors)).
+  Every atmosphere `solve` flies, that command answers for, with its pressure altitude and both
+  density altitudes wherever they land (0.50.0).
+- `pressure_pa` and `altitude_m` are each held to one rule (0.50.0), the one every surface
+  applies: a pressure finite and above 0 (`value must be finite and greater than zero`, at its
+  path), an altitude finite, and air that can exist. Nothing narrower: a near vacuum, twice sea
+  level and any altitude fly. 0.49.0 refused an `altitude_m` outside -5000..84000 m that every
+  other surface flew. An omitted temperature or pressure defaults to the ICAO standard at the
+  altitude, which beyond the ICAO table's ends (-5 km and 84 km) is that end's. A pressure so far
+  beyond any air's (above about 4e156 Pa) that the density model gives it no density is air that
+  cannot exist, refused at `$.atmosphere.pressure_pa`.
+- `temperature_k` is held to one rule (0.50.0), the one every surface applies: above 0 K, and
+  air that can exist. Nothing narrower: outside 173.15–373.15 K the humidity terms are
+  extrapolated, never refused, and dry air (`relative_humidity` 0) flies even above water's
+  critical point (647.096 K), where humid air cannot exist. A station whose standard lapse takes
+  the air to absolute zero at a height the flight reaches is refused at the step that reaches
+  it, as an `invalid_value` at `$.atmosphere.temperature_k`: `temperature_k = 10 K: the air
+  aloft would fall below absolute zero: from this temperature the standard lapse reaches 0 K at
+  1539 m above mean sea level, which this flight reaches (check the temperature and its unit)`.
+  0.49.0 failed such a flight as `solve_failed`, a non-finite integration state that pointed
+  first at the bore height.
 - Wind angles are wind-from directions relative to the shot axis: `0` is a headwind and positive
   `pi / 2` is wind from the shooter's right.
 - `drop_m` is positive below the line of sight.
@@ -666,11 +711,11 @@ is the right model only when the rifle was zeroed in the air it is being shot in
 
 | Field | Required | Default | Meaning |
 | --- | --- | --- | --- |
-| `altitude_m` | no | `0` | Station altitude. |
+| `altitude_m` | no | `0` | Station altitude, any finite number of metres. |
 | `temperature_k` | no | ICAO at `altitude_m` | Authoritative station temperature when present. |
 | `pressure_pa` | no | ICAO at `altitude_m` | Station or sea-level pressure when present; see `pressure_reference`. |
 | `pressure_reference` | no | `"absolute"` | Whether `pressure_pa` is absolute station pressure or a QNH altimeter setting. |
-| `relative_humidity` | no | `0.5` | Relative-humidity fraction. |
+| `relative_humidity` | no | `0.5` | Relative-humidity fraction, `0` to `1`; a reading up to `0.05` outside is read as `0` or `1`. |
 | `latitude_rad` | no | absent | Geodetic latitude; needed when Coriolis is enabled. |
 
 An empty atmosphere object selects ICAO standard conditions at the resolved altitude (sea level
@@ -707,6 +752,44 @@ The band catches gross mismatches only: 101325 Pa stays inside it up to about 64
 is never raised for a `"qnh"` pressure or an omitted one, and it changes no number in the
 response.
 
+#### Station altitudes outside the former range
+
+Save this request as `station.json` and run `ballistics solve-json < station.json`:
+
+```json
+{
+  "schema_version": 1,
+  "projectile": {"mass_kg": 0.01089, "diameter_m": 0.00782, "drag_model": "G1", "ballistic_coefficient": 0.475},
+  "rifle": {"muzzle_velocity_mps": 823.0},
+  "shot": {"max_range_m": 300.0, "zero_distance_m": 100.0},
+  "atmosphere": {"altitude_m": 90000.0, "temperature_k": 288.15, "pressure_pa": 101325.0, "relative_humidity": 0.0},
+  "wind": {"speed_mps": 0.0, "direction_from_rad": 0.0},
+  "solver": {"method": "rk45", "time_step_s": 0.001},
+  "effects": {"magnus": false, "coriolis": false, "enhanced_spin_drift": false},
+  "sampling": {"interval_m": 100.0}
+}
+```
+
+Actual engine results, changing only `altitude_m`, rounded to three decimals:
+
+| `altitude_m` | `summary.actual_range_m` | `summary.terminal_speed_mps` |
+| ---: | ---: | ---: |
+| -6000 | 300.000 | 641.558 |
+| 90000 | 300.000 | 641.558 |
+
+Both return `status: "ok"`. The explicit station temperature and pressure are used as sent;
+the unusual pressure for that altitude produces a warning, not a refusal. Omit them to use
+the standard-atmosphere defaults instead. The MCP schema has no altitude bounds and requires
+positive temperature and pressure; the engine still checks whether their combined air exists.
+`atmosphere.density_altitude` resolves the same air and returns pressure altitude and both
+density altitudes wherever they land. Its [layered result and continued NWS/FAA result](ATMOSPHERE_DENSITY_ALTITUDE.md#outside-the-troposphere)
+are deliberately distinct.
+
+Refusals identify the request member in SI units, including a temperature refusal discovered
+in flight. Other bridge commands name their own request fields and units. File export has a
+separate contract: `profile.export_a7p` retains the `.a7p` format's -100..100 °C and
+300..1500 hPa bounds; those are not solve acceptance bounds.
+
 #### `pressure_reference` (MBA-1397)
 
 `pressure_pa` can mean two different physical quantities, and the caller must say which:
@@ -724,7 +807,11 @@ response.
   not the raw QNH the caller sent. The reduction is recorded as an `assumptions` entry with
   code `qnh_reduced_to_station_pressure`. A QNH with no station pressure at `altitude_m` (its
   pressure altitude plus `h` at or past 44,331 m, where the standard troposphere would reach
-  absolute zero) is refused with `invalid_value` at `$.atmosphere.pressure_pa`.
+  absolute zero) is refused with `invalid_value`: at `$.atmosphere.altitude_m` when the QNH is
+  itself a pressure inside the troposphere (a plausible setting reduced to an impossible
+  altitude), and at `$.atmosphere.pressure_pa` otherwise. 0.49.0 located every one at
+  `pressure_pa`; `atmosphere.density_altitude` already blamed the altitude, and both commands
+  now refuse it identically.
 
 The mode itself is separately echoed in `resolved_request.atmosphere.pressure_reference`
 whenever the request supplies one, including an explicit `"absolute"` — which therefore solves

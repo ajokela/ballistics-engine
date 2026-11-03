@@ -1037,13 +1037,17 @@ fn true_wind_flies_a_sent_pressure_and_omits_an_absent_one() {
         assert_eq!(v["ok"], json!(true), "{v}");
         v["result"]["mean_crosswind_mph"].as_f64().unwrap()
     };
+    // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
+    // water-vapour mole fraction, with a virtual-temperature lapse), old -> new: sent
+    // 5.053688506163011 -> 5.053689066860352 mph (+1.1e-7), omitted 6.197365422146237 ->
+    // 6.197366125416333 mph (+1.1e-7).
     assert_eq!(
         mean(request(Some(29.92))).to_bits(),
-        5.053688506163011_f64.to_bits()
+        5.053689066860352_f64.to_bits()
     );
     assert_eq!(
         mean(request(None)).to_bits(),
-        6.197365422146237_f64.to_bits()
+        6.197366125416333_f64.to_bits()
     );
 }
 
@@ -1107,11 +1111,17 @@ fn true_dsf_flies_a_sent_pressure_at_its_zero_too() {
             r["dsf"].as_f64().unwrap(),
         )
     };
+    // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
+    // water-vapour mole fraction, with a virtual-temperature lapse), old -> new: predicted drop
+    // 0.9296793417404231 -> 0.9296971694667545 (+1.9e-5), DSF 1.0756396911304191 ->
+    // 1.0756190648333037 (-1.9e-5), omitted-air predicted drop 0.9084117581689021 ->
+    // 0.9084290895996207 (+1.9e-5). The DSF fit reaches the transonic, where the drag curve is
+    // steepest.
     let (predicted, dsf) = result(Some(29.92));
-    assert_eq!(predicted.to_bits(), 0.9296793417404231_f64.to_bits());
-    assert_eq!(dsf.to_bits(), 1.0756396911304191_f64.to_bits());
+    assert_eq!(predicted.to_bits(), 0.9296971694667545_f64.to_bits());
+    assert_eq!(dsf.to_bits(), 1.0756190648333037_f64.to_bits());
     let (predicted, _) = result(None);
-    assert_eq!(predicted.to_bits(), 0.9084117581689021_f64.to_bits());
+    assert_eq!(predicted.to_bits(), 0.9084290895996207_f64.to_bits());
 }
 
 /// A `null` reading on `true.*` is the same as leaving the field out, as on `card.*`, so an
@@ -1147,9 +1157,10 @@ fn true_star_reads_a_null_reading_as_omitted() {
         mean(request(Value::Null, Value::Null)).to_bits(),
         absent.to_bits()
     );
-    // The 5000 ft, 68 °F case of `true_wind_flies_a_sent_pressure_and_omits_an_absent_one`.
+    // The 5000 ft, 68 °F case of `true_wind_flies_a_sent_pressure_and_omits_an_absent_one`,
+    // re-captured with it for the aloft change (6.197365422146237 -> 6.197366125416333).
     assert_eq!(
         mean(request(Value::Null, json!(68.0))).to_bits(),
-        6.197365422146237_f64.to_bits()
+        6.197366125416333_f64.to_bits()
     );
 }

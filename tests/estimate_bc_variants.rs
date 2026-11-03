@@ -260,21 +260,12 @@ fn sparse_zeroed_data_as_bore_flags_at_bound() {
 
 // ---- CLI end-to-end ----
 
-use std::path::PathBuf;
 use std::process::Command;
 
-fn cli() -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.push("target");
-    p.push("debug");
-    p.push("ballistics");
-    if !p.exists() {
-        p.pop();
-        p.pop();
-        p.push("release");
-        p.push("ballistics");
-    }
-    p
+/// The binary cargo built for this test run. A path built by hand under `target/` ignores
+/// `CARGO_TARGET_DIR` and can run a stale build (tests/cli_binary_path_guard.rs).
+fn cli() -> &'static str {
+    env!("CARGO_BIN_EXE_ballistics")
 }
 
 /// `estimate-bc --drag-model both` on drop data prints both a G1 and a G7 variant, with the

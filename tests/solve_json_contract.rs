@@ -46,6 +46,17 @@ const CONFORMANCE_PAIRS: [(&str, &str, &str); 4] = [
 
 /// Fixture numerics are semantic values rather than serialized byte snapshots.
 ///
+/// 0.50.0 (the unified aloft vapour model) refreshed the six success
+/// fixtures' numbers that it moved, and only those: every one of these requests flies a
+/// humidity above 0, and the air off the station's height now holds the station's
+/// water-vapour mole fraction with a virtual-temperature lapse. Each refreshed value was the
+/// exact output of the engine just before the aloft change; 182 moved beyond the tolerance below
+/// and 10 inside it. The largest moves are 8.0e-7 relative on the crosswind windage (`crosswind`
+/// sample 5, `-0.1400548013623991 -> -0.1400549128912432` m) and 3.4e-7 on the terminal energy
+/// (`zeroed`: `2390.677127906434 -> 2390.6763146303106` J), besides a drop next to its zero
+/// crossing (`zeroed` sample 2, `-3.5069405515564256e-05 -> -3.506641133088628e-05` m, 3 nm).
+/// Nothing non-numeric changed.
+///
 /// Every numeric comparison uses:
 /// `abs(a-b) <= ABS_TOLERANCE + REL_TOLERANCE * max(abs(a), abs(b))`.
 const ABS_TOLERANCE: f64 = 1.0e-10;
@@ -212,7 +223,7 @@ fn direct_representative_solver() -> TrajectorySolver {
         altitude: 0.0,
         temperature: 20.0,
         pressure: 1000.0,
-        humidity: 0.4,
+        humidity_percent: 40.0,
         wind_speed: 4.0,
         wind_angle: std::f64::consts::FRAC_PI_2,
         twist_rate: 8.0,

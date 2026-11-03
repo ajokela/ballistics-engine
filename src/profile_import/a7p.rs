@@ -68,6 +68,10 @@ pub struct A7pProfile {
     pub powder_temperature_c: f64,
     pub air_temperature_c: f64,
     pub air_pressure_hpa: f64,
+    /// The zero's air humidity (`c_zero_air_humidity`), a whole percent. An absent field is 0 %,
+    /// the format's own meaning: the file writes 0 by omitting the field. Importing applies the
+    /// engine's one validator: a reading within [`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`] of 0
+    /// to 100 flies as the end it reads as, and one beyond it is refused, never clamped.
     pub air_humidity_pct: f64,
     pub bullet_diameter_in: f64,
     pub bullet_weight_gr: f64,

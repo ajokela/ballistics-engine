@@ -9,6 +9,16 @@ use ballistics_engine::{
 };
 use std::f64::consts::FRAC_PI_2;
 
+/// A legacy `(alt, T, P, ratio)` / `(rho, c, 0, 0)` fixture, as the dry station (or direct air)
+/// this test was written for: the one-line migration onto the 0.50.0 `KernelAtmosphere`.
+fn legacy(params: (f64, f64, f64, f64)) -> ballistics_engine::KernelAtmosphere {
+    ballistics_engine::KernelAtmosphere::from_legacy_params(
+        params,
+        ballistics_engine::RelativeHumidity::DRY,
+    )
+    .expect("valid legacy atmosphere")
+}
+
 fn base() -> BallisticInputs {
     BallisticInputs {
         muzzle_velocity: 800.0,
@@ -251,7 +261,7 @@ fn fast_yz_at_400(
                 0.0,
             ],
             t_span: (0.0, 5.0),
-            atmo_params: (0.0, 15.0, 1013.25, 1.0),
+            atmosphere: legacy((0.0, 15.0, 1013.25, 1.0)),
             atmo_sock: None,
         },
     );

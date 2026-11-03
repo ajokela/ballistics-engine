@@ -156,7 +156,9 @@ pub fn axis_meta(axis: InputAxis) -> AxisMeta {
         Altitude => (Atmosphere, cont("m", 1e-3, 1.0), false),
         Temperature => (Atmosphere, cont("K", 1e-3, 0.05), false),
         Pressure => (Atmosphere, cont("Pa", 1e-3, 10.0), false),
-        RelativeHumidity => (Atmosphere, cont("", 1e-3, 1e-3), false),
+        // A FRACTION (0.5 = 50 %), the solve-json request's own unit, like every axis here: the
+        // CLI prints it, so a percent typed as a sigma or a domain is seen for what it is.
+        RelativeHumidity => (Atmosphere, cont("fraction", 1e-3, 1e-3), false),
         Latitude => (Atmosphere, cont("rad", 1e-3, 1e-5), false),
         WindSpeed => (Wind, cont("m/s", 1e-3, 0.05), false),
         WindDirection => (Wind, cont("rad", 1e-3, 1e-4), false),
@@ -175,6 +177,45 @@ pub fn axis_meta(axis: InputAxis) -> AxisMeta {
         group,
         kind,
         requires_rezero,
+    }
+}
+
+/// The closed range of values an axis can physically take, where the engine states one, with
+/// the refusal a search domain reaching outside it gets.
+///
+/// Two axes have one: a relative humidity is a fraction from 0 to 1 (what
+/// `crate::atmosphere::RelativeHumidity::is_physical_fraction` accepts; the solve reads up to
+/// 0.05 past either end as a sensor reading of the end, but a perturbed humidity is no
+/// reading), and a wind speed is 0 m/s or more (the solve's own bound on `$.wind.speed_mps`).
+/// A request whose humidity resolves to exactly 0 or 1 (a sensor reading in the band does), or
+/// whose wind is calm, sits ON such an edge, where only one direction can be searched.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PhysicalDomain {
+    /// The lowest value the axis can take.
+    pub lower: f64,
+    /// The highest value the axis can take (`f64::INFINITY` when it has none).
+    pub upper: f64,
+    /// Why a search domain reaching outside `lower..=upper` is refused, in the axis's unit.
+    pub refusal: &'static str,
+}
+
+/// [`PhysicalDomain`] of `axis`, or `None` when the engine states none for it (its solve refuses
+/// a value it cannot fly, naming the field).
+pub fn physical_domain(axis: InputAxis) -> Option<PhysicalDomain> {
+    match axis {
+        InputAxis::RelativeHumidity => Some(PhysicalDomain {
+            lower: 0.0,
+            upper: 1.0,
+            refusal: "the domain must lie within the axis's physical range, a fraction from 0 \
+                      to 1 (0.5 = 50 %): a request file's relative humidity is a fraction, so a \
+                      percent domain such as 20:80 is 0.2:0.8",
+        }),
+        InputAxis::WindSpeed => Some(PhysicalDomain {
+            lower: 0.0,
+            upper: f64::INFINITY,
+            refusal: "the domain must lie within the axis's physical range, 0 m/s or more",
+        }),
+        _ => None,
     }
 }
 
@@ -302,6 +343,21 @@ mod tests {
                 "{a:?} must be Categorical"
             );
         }
+    }
+
+    /// The humidity axis's physical range is exactly what the humidity type itself calls a
+    /// physical fraction: both ends in, the nearest numbers past them out.
+    #[test]
+    fn the_humidity_domain_is_the_humidity_types_own() {
+        let domain = physical_domain(InputAxis::RelativeHumidity).expect("a bounded axis");
+        let physical = crate::atmosphere::RelativeHumidity::is_physical_fraction;
+        assert!(physical(domain.lower) && physical(domain.upper));
+        assert!(!physical(-f64::from_bits(1)) && !physical(f64::from_bits(1.0f64.to_bits() + 1)));
+        assert_eq!(
+            axis_meta(InputAxis::RelativeHumidity).kind,
+            cont("fraction", 1e-3, 1e-3),
+            "the axis says its unit"
+        );
     }
 
     /// Cost control: only zero-affecting axes force a re-zero.

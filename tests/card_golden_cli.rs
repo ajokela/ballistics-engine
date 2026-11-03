@@ -23,6 +23,20 @@
 // If a change to any of these four surfaces is INTENTIONAL, regenerate the affected
 // golden file(s) with the same invocation (see each test) and say so in the commit
 // message — silent drift is exactly what this file exists to catch.
+//
+// Regenerated in 0.50.0 (the unified aloft vapour model): these runs fly the
+// default 50 % RH, and the air off the station's height now holds the station's water-vapour
+// mole fraction with a virtual-temperature lapse. Only the four `*_json.txt` files moved (the
+// table and CSV forms round the change away), every value by at most 1.6e-6 relative and
+// 1.6e-9 absolute in the units printed. Old -> new, the largest of each file:
+// - come_ups_json: data[2].drop 1.2305099621071154 -> 1.2305099671254405 (+4.1e-9), data[0].drop
+//   0.00042704099043231494 -> 0.0004270414041071023 (+9.7e-7 of a near-zero value);
+// - range_table_json: data[2].drop 13.289507590756847 -> 13.289507644954757 (+4.1e-9), data[1]
+//   wind_drift -2.8520660388064454 -> -2.852066094782608 (+2.0e-8);
+// - wind_card_json: data[1].wind_20 -0.7922624146772185 -> -0.7922624302262841 (+2.0e-8);
+// - compare_json: rows[2].loads[0].energy 1743.5998823201753 -> 1743.5999063677366 (+1.4e-8),
+//   rows[0].loads[1].drop -0.0003852813726742867 -> -0.0003852807537905148 (-1.6e-6 of a
+//   near-zero value).
 use std::process::Command;
 
 fn bin() -> &'static str {

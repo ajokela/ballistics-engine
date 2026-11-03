@@ -9,6 +9,16 @@ use ballistics_engine::derivatives::compute_derivatives;
 use ballistics_engine::BallisticInputs;
 use nalgebra::Vector3;
 
+/// A legacy `(alt, T, P, ratio)` / `(rho, c, 0, 0)` fixture, as the dry station (or direct air)
+/// this test was written for: the one-line migration onto the 0.50.0 `KernelAtmosphere`.
+fn legacy(params: (f64, f64, f64, f64)) -> ballistics_engine::KernelAtmosphere {
+    ballistics_engine::KernelAtmosphere::from_legacy_params(
+        params,
+        ballistics_engine::RelativeHumidity::DRY,
+    )
+    .expect("valid legacy atmosphere")
+}
+
 /// Drag-axis acceleration magnitude for a straight 700 m/s shot at sea level.
 fn drag_accel(tipoff_yaw_rad: f64, decay_m: f64, cd_delta2: f64, pos_x: f64) -> f64 {
     let inputs = BallisticInputs {
@@ -22,7 +32,7 @@ fn drag_accel(tipoff_yaw_rad: f64, decay_m: f64, cd_delta2: f64, pos_x: f64) -> 
         Vector3::new(700.0, 0.0, 0.0),
         &inputs,
         Vector3::zeros(),
-        (1.225, 340.0, 0.0, 0.0),
+        &legacy((1.225, 340.0, 0.0, 0.0)),
         inputs.bc_value,
         None,
         0.0,

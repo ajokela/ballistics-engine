@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # Bump the engine to a new version: Cargo.toml, BOTH lockfiles, and the CHANGELOG cut.
 #
-# The fuzz lockfile is the step everyone forgets: it pins TWO copies of
-# ballistics-engine (the local path crate AND the 0.21.5 reference engine that
-# differential_prev links). Only the local one may move — `cargo update -p
-# ballistics-engine@<old>` disambiguates. Forgetting this fails CI's --locked
-# fuzz steps, which is exactly how dependabot's printpdf PR could never go green.
+# Both lockfiles pin TWO copies of ballistics-engine, and only the local path crate
+# may move:
+# - Cargo.lock also holds the released 0.49.0 engine, the dev-dependency the
+#   byte-identity tests run beside this one (ballistics_engine_049). At the 0.49.0 ->
+#   0.50.0 bump both copies are 0.49.0, so `-p ballistics-engine@<old>` is ambiguous
+#   there; `cargo update --workspace` moves exactly the local crate, at every bump.
+# - The fuzz lockfile is the step everyone forgets: it holds the 0.21.5 reference
+#   engine that differential_prev links. `cargo update -p ballistics-engine@<old>`
+#   disambiguates. Forgetting this fails CI's --locked fuzz steps, which is exactly
+#   how dependabot's printpdf PR could never go green.
 set -euo pipefail
 NEW="${1:?usage: bump.sh NEW_VERSION (e.g. 0.30.1)}"
 cd "$(git rev-parse --show-toplevel)"
@@ -15,7 +20,7 @@ OLD=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
 DATE=$(date +%Y-%m-%d)
 
 sed -i '' "s/^version = \"$OLD\"/version = \"$NEW\"/" Cargo.toml
-cargo update -p "ballistics-engine@$OLD" --precise "$NEW" 2>/dev/null || cargo update -p ballistics-engine
+cargo update --workspace
 cargo update --manifest-path fuzz/Cargo.toml -p "ballistics-engine@$OLD" --precise "$NEW" 2>/dev/null \
   || cargo update --manifest-path fuzz/Cargo.toml -p "ballistics-engine@$OLD"
 

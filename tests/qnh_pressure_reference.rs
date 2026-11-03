@@ -10,18 +10,10 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::process::Command;
 
-fn get_cli_binary() -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("target");
-    path.push("debug");
-    path.push("ballistics");
-    if !path.exists() {
-        path.pop();
-        path.pop();
-        path.push("release");
-        path.push("ballistics");
-    }
-    path
+/// The binary cargo built for this test run. A path built by hand under `target/` ignores
+/// `CARGO_TARGET_DIR` and can run a stale build (tests/cli_binary_path_guard.rs).
+fn get_cli_binary() -> &'static str {
+    env!("CARGO_BIN_EXE_ballistics")
 }
 
 fn run(args: &[&str]) -> std::process::Output {
@@ -310,9 +302,9 @@ fn pressure_type_help_names_the_altimeter_setting_relation() {
 }
 
 /// MBA-1605: a QNH with no station pressure at the altitude (500 hPa at 40 km, past where the
-/// altimeter-setting relation has a solution) is refused, never flown as near-vacuum air. The
-/// solving commands refuse it in the solver's input check; `stability` never solves, so it
-/// refuses on its own rather than print a NaN stability factor.
+/// altimeter-setting relation has a solution) is refused, never flown as near-vacuum air. Every
+/// command refuses it up front, `stability` (which never solves, and used to print a NaN
+/// stability factor) in the same words as the rest.
 #[test]
 fn a_qnh_with_no_station_pressure_at_the_altitude_is_refused() {
     let out_of_domain = [
@@ -344,8 +336,13 @@ fn a_qnh_with_no_station_pressure_at_the_altitude_is_refused() {
         &out_of_domain,
     ));
     assert!(!trajectory.status.success(), "trajectory flew it");
+    // Refused before any solve, naming the flags it came from and quoting the QNH as it was
+    // typed (0.50.0): it used to read "atmosphere.pressure must be finite", a field nobody typed.
+    let refusal = "Error: --pressure is a QNH of 500 hPa, and reduced to the station altitude of \
+                   40000 m it leaves no station pressure: the altimeter-setting relation has none \
+                   that high (check the altitude's unit)";
     assert!(
-        String::from_utf8_lossy(&trajectory.stderr).contains("atmosphere.pressure must be finite"),
+        String::from_utf8_lossy(&trajectory.stderr).contains(refusal),
         "{}",
         String::from_utf8_lossy(&trajectory.stderr)
     );
@@ -369,8 +366,9 @@ fn a_qnh_with_no_station_pressure_at_the_altitude_is_refused() {
         &out_of_domain,
     ));
     assert!(!stability.status.success(), "stability printed a result");
+    // In the words every command uses (0.50.0): it had a message of its own.
     assert!(
-        String::from_utf8_lossy(&stability.stderr).contains("has no station pressure"),
+        String::from_utf8_lossy(&stability.stderr).contains(refusal),
         "{}",
         String::from_utf8_lossy(&stability.stderr)
     );

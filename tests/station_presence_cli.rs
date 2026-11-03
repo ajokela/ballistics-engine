@@ -215,14 +215,20 @@ const E: &[&str] = &[
 /// flies as typed there). "Was" is what ab4eb0c printed (ICAO air at the altitude).
 #[test]
 fn the_canonical_repros_fly_the_typed_air() {
+    // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
+    // water-vapour mole fraction, with a virtual-temperature lapse), old -> new: every velocity and
+    // drop below moved by 2.5e-8 to 3.3e-7 relative, for example A's come-ups 491.61153010153987 ->
+    // 491.61166290955026 m/s and 5.020390667980392 -> 5.020390372633107 mil, C's trajectory
+    // 1817.3657972174826 -> 1817.3652235119462 fps and D's 1921.4805042716182 -> 1921.4800554070994
+    // fps. The zero angles did not move. The `Was` values are ab4eb0c's, before both changes.
     // A: QNH 1031 hPa at 150 m reduces to 1012.856 hPa. come-ups was 496.40 m/s, 4.976 mil.
     let (v, d) = come_ups_600("metric", A);
-    assert_bits(v, 491.61153010153987, "A come-ups velocity");
-    assert_bits(d, 5.020390667980392, "A come-ups drop");
+    assert_bits(v, 491.61166290955026, "A come-ups velocity");
+    assert_bits(d, 5.020390372633107, "A come-ups drop");
     // trajectory and zero already flew a declared QNH; unchanged.
     assert_bits(
         trajectory_impact("metric", A),
-        554.3835755312953,
+        554.3834135851836,
         "A trajectory",
     );
     assert_bits(zero_moa("metric", A), 9.381729277876076, "A zero");
@@ -230,54 +236,54 @@ fn the_canonical_repros_fly_the_typed_air() {
     // B: 1012.9 hPa typed at 150 m. Was 557.8999196740976 / 9.354189955142585 / 496.40.
     assert_bits(
         trajectory_impact("metric", B),
-        554.374816239558,
+        554.3746542977091,
         "B trajectory",
     );
     assert_bits(zero_moa("metric", B), 9.381729277876076, "B zero");
     let (v, d) = come_ups_600("metric", B);
-    assert_bits(v, 491.59958797242194, "B come-ups velocity");
-    assert_bits(d, 5.0205012760885595, "B come-ups drop");
+    assert_bits(v, 491.59972077692277, "B come-ups velocity");
+    assert_bits(d, 5.0205009807378795, "B come-ups drop");
 
     // C: 29.92 inHg typed at 5000 ft. Was 1934.971466102828 fps (the ICAO 24.90 inHg).
     assert_bits(
         trajectory_impact("imperial", C),
-        1817.3657972174826,
+        1817.3652235119462,
         "C trajectory",
     );
     assert_bits(zero_moa("imperial", C), 8.568663559077757, "C zero");
     let (v, d) = come_ups_600("imperial", C);
-    assert_bits(v, 1694.2464172321636, "C come-ups velocity");
-    assert_bits(d, 4.312616421347037, "C come-ups drop");
+    assert_bits(v, 1694.2467701931728, "C come-ups velocity");
+    assert_bits(d, 4.312616245507864, "C come-ups drop");
 
     // D: 59 F typed at 5000 ft on a 25.0 inHg day. Was 1903.376442150263.
     assert_bits(
         trajectory_impact("imperial", D),
-        1921.4805042716182,
+        1921.4800554070994,
         "D trajectory",
     );
     assert_bits(zero_moa("imperial", D), 8.382445281546529, "D zero");
     let (v, d) = come_ups_600("imperial", D);
-    assert_bits(v, 1826.6761166696906, "D come-ups velocity");
-    assert_bits(d, 4.03341406058797, "D come-ups drop");
+    assert_bits(v, 1826.6763836272626, "D come-ups velocity");
+    assert_bits(d, 4.033413958141333, "D come-ups drop");
 
     // E: 15 C typed at 1500 m on a QNH 1020 day. Was 580.1206903298374.
     assert_bits(
         trajectory_impact("metric", E),
-        585.5496949458625,
+        585.5495607803751,
         "E trajectory",
     );
     assert_bits(zero_moa("metric", E), 9.156169110725575, "E zero");
     let (v, d) = come_ups_600("metric", E);
-    assert_bits(v, 533.6128170428726, "E come-ups velocity");
-    assert_bits(d, 4.6699881905728855, "E come-ups drop");
+    assert_bits(v, 533.612926336783, "E come-ups velocity");
+    assert_bits(d, 4.669988001966301, "E come-ups drop");
 
     // M1 / M2: mixed presence. The omitted half still flies ICAO.
     let (v, d) = come_ups_600("metric", &["--altitude", "1500", "--temperature", "15"]);
-    assert_bits(v, 535.3431242847164, "M1 velocity");
-    assert_bits(d, 4.6565449685633675, "M1 drop");
+    assert_bits(v, 535.3432337805963, "M1 velocity");
+    assert_bits(d, 4.656544780392879, "M1 drop");
     let (v, d) = come_ups_600("metric", &["--altitude", "150", "--pressure", "1012.9"]);
-    assert_bits(v, 486.60940134345, "M2 velocity");
-    assert_bits(d, 5.063875736668549, "M2 drop");
+    assert_bits(v, 486.60949696397097, "M2 velocity");
+    assert_bits(d, 5.063875520564412, "M2 drop");
 }
 
 /// Write the `hold-corridor` scenarios file and a generated `reticle hold` reticle into `home`,
@@ -926,71 +932,83 @@ fn every_subcommand_flies_the_typed_air_at_its_zero_too() {
         }
     };
     // (case, command, value, now, was at ab4eb0c)
+    //
+    // `now` re-captured in 0.50.0 (the unified aloft vapour model: these
+    // commands fly the default 50 % RH, and the air off the station's height now holds the
+    // station's water-vapour mole fraction with a virtual-temperature lapse). 55 of the 63
+    // `now` values moved, by -7.6e-7 to +7.9e-8 relative; the largest are plan-truing's
+    // condition number (A: 645.8374395583315 -> 645.8369474990735, -7.6e-7), the wind-card
+    // (D: -2.2555711195619996 -> -2.2555700610516745, -4.7e-7) and range-table (D:
+    // 521.2425486288677 -> 521.2423954258915, -2.9e-7) at long range. The `was` column is the
+    // old rule's value at ab4eb0c's air and stays as captured, except case A's zero-from-angle,
+    // which the presence change never moved (now == was) and moves with its `now`
+    // (184.44065946144926 -> 184.4406586027654). Each pin still clears its `was` by orders of
+    // magnitude more than the tolerance.
     #[rustfmt::skip]
     let pins: &[(&str, &str, &str, f64, f64)] = &[
-        ("A", "zero-from-angle", "zero_range", 184.44065946144926, 184.44065946144926),
-        ("A", "mpbr", "mpbr", 277.57525170751234, 277.7648122247587),
-        ("A", "come-ups", "data/-1/drop", 3.554752524040378, 3.5188299573131094),
-        ("A", "lead", "rows/-1/lead", 3.7827576282715856, 3.763753693530174),
-        ("A", "wind-card", "data/-1/wind_10", -7.110933393129025, -6.94583022877229),
-        ("A", "range-table", "data/-1/drop", 20206.33848586181, 19840.774089725764),
-        ("A", "true-velocity", "calculated_drop_mil", 7.483927282826406, 7.485529736545842),
-        ("A", "true-velocity-observed", "fitted_muzzle_velocity", 722.3621602163888, 718.6512144304594),
-        ("A", "true-velocity-observed", "mv_window_start_m", 565.6397822977608, 569.2620823181188),
-        ("A", "true-velocity-observed", "mv_window_end_m", 628.488646997512, 632.5134247979098),
-        ("A", "true-velocity-chrono", "adjustment_percent", -44.654661921496206, -44.65095500018336),
-        ("A", "true-wind", "effective_crosswind", 2.12881831805145, 2.172083532303539),
-        ("A", "plan-truing", "information/condition_number", 645.8374395583315, 490.42237919090815),
-        ("A", "compare", "compare/rows/-1/loads/0/drop", 1134.6135560103025, 1124.9489467973397),
+        ("A", "zero-from-angle", "zero_range", 184.4406586027654, 184.4406586027654),
+        ("A", "mpbr", "mpbr", 277.5752492374234, 277.7648122247587),
+        ("A", "come-ups", "data/-1/drop", 3.554752686333038, 3.5188299573131094),
+        ("A", "lead", "rows/-1/lead", 3.782757179791667, 3.763753693530174),
+        ("A", "wind-card", "data/-1/wind_10", -7.110931291352282, -6.94583022877229),
+        ("A", "range-table", "data/-1/drop", 20206.337112372945, 19840.774089725764),
+        ("A", "true-velocity", "calculated_drop_mil", 7.483927141278229, 7.485529736545842),
+        ("A", "true-velocity-observed", "fitted_muzzle_velocity", 722.3621676541051, 718.6512144304594),
+        ("A", "true-velocity-observed", "mv_window_start_m", 565.6397867302042, 569.2620823181188),
+        ("A", "true-velocity-observed", "mv_window_end_m", 628.488651922449, 632.5134247979098),
+        ("A", "true-velocity-chrono", "adjustment_percent", -44.65466192148688, -44.65095500018336),
+        ("A", "true-wind", "effective_crosswind", 2.1288181234535917, 2.172083532303539),
+        ("A", "plan-truing", "information/condition_number", 645.8369474990735, 490.42237919090815),
+        ("A", "compare", "compare/rows/-1/loads/0/drop", 1134.6136187575398, 1124.9489467973397),
         ("A", "estimate-bc", "variants/0/estimated_bc", 0.25, 0.246),
         ("A", "mark-to-range", "marks/-1/range", 693.8915418242184, 697.4353937913447),
-        ("A", "bdc-match", "fitted_magnification", 17.046803176810492, 17.234551565451333),
+        ("A", "bdc-match", "fitted_magnification", 17.04680276375181, 17.234551565451333),
         ("A", "optimal-zero", "optimal_zero", 428.4605521015392, 427.99036890521256),
-        ("A", "adaptive-card", "rows/-1/drop_adj", 3.554752524040378, 3.5188299573131094),
-        ("A", "hold-corridor", "rows/-1/minimax_elevation_mil", 3.554867259390395, 3.518940460585484),
-        ("A", "reticle-hold", "hold/down_mil", 2.2044838121635126, 2.1855361168682452),
-        ("B", "zero-from-angle", "zero_range", 184.43974635007845, 184.80632783196094),
-        ("B", "mpbr", "mpbr", 277.5736752363296, 277.7648122247587),
-        ("B", "come-ups", "data/-1/drop", 3.554863128953085, 3.5188299573131094),
-        ("B", "lead", "rows/-1/lead", 3.7828053900044294, 3.763753693530174),
-        ("B", "wind-card", "data/-1/wind_10", -7.111347180475116, -6.94583022877229),
-        ("B", "range-table", "data/-1/drop", 20207.28174930798, 19840.774089725764),
-        ("B", "true-velocity", "calculated_drop_mil", 7.483991955554914, 7.485529736545842),
-        ("B", "true-velocity-observed", "fitted_muzzle_velocity", 722.4107728583531, 718.6512144304594),
-        ("B", "true-velocity-observed", "mv_window_start_m", 565.6657738930813, 569.2620823181188),
-        ("B", "true-velocity-observed", "mv_window_end_m", 628.5175265478681, 632.5134247979098),
-        ("B", "true-velocity-chrono", "adjustment_percent", -44.65467119987547, -44.65095500018336),
-        ("B", "true-wind", "effective_crosswind", 2.128711796782978, 2.172083532303539),
-        ("B", "plan-truing", "information/condition_number", 645.139317487319, 490.42237919090815),
-        ("B", "compare", "compare/rows/-1/loads/0/drop", 1134.6473510599828, 1124.9489467973397),
+        ("A", "adaptive-card", "rows/-1/drop_adj", 3.554752686333038, 3.5188299573131094),
+        ("A", "hold-corridor", "rows/-1/minimax_elevation_mil", 3.554867421679602, 3.518940460585484),
+        ("A", "reticle-hold", "hold/down_mil", 2.204483963150837, 2.1855361168682452),
+        ("B", "zero-from-angle", "zero_range", 184.43974549140586, 184.80632783196094),
+        ("B", "mpbr", "mpbr", 277.5736727662759, 277.7648122247587),
+        ("B", "come-ups", "data/-1/drop", 3.5548632912446454, 3.5188299573131094),
+        ("B", "lead", "rows/-1/lead", 3.7828049415168157, 3.763753693530174),
+        ("B", "wind-card", "data/-1/wind_10", -7.111345079504386, -6.94583022877229),
+        ("B", "range-table", "data/-1/drop", 20207.280377750445, 19840.774089725764),
+        ("B", "true-velocity", "calculated_drop_mil", 7.483991813997867, 7.485529736545842),
+        ("B", "true-velocity-observed", "fitted_muzzle_velocity", 722.410777843656, 718.6512144304594),
+        ("B", "true-velocity-observed", "mv_window_start_m", 565.6657767282798, 569.2620823181188),
+        ("B", "true-velocity-observed", "mv_window_end_m", 628.5175296980887, 632.5134247979098),
+        ("B", "true-velocity-chrono", "adjustment_percent", -44.65467119986615, -44.65095500018336),
+        ("B", "true-wind", "effective_crosswind", 2.1287116022076598, 2.172083532303539),
+        ("B", "plan-truing", "information/condition_number", 645.138825616976, 490.42237919090815),
+        ("B", "compare", "compare/rows/-1/loads/0/drop", 1134.6474138071826, 1124.9489467973397),
         ("B", "estimate-bc", "variants/0/estimated_bc", 0.25, 0.246),
         ("B", "mark-to-range", "marks/-1/range", 693.8815080866484, 697.4353937913447),
-        ("B", "bdc-match", "fitted_magnification", 17.046232235566688, 17.234551565451333),
+        ("B", "bdc-match", "fitted_magnification", 17.046231822539745, 17.234551565451333),
         ("B", "optimal-zero", "optimal_zero", 428.4547651761321, 427.99036890521256),
-        ("B", "adaptive-card", "rows/-1/drop_adj", 3.554863128953085, 3.5188299573131094),
-        ("B", "hold-corridor", "rows/-1/minimax_elevation_mil", 3.5549778707511086, 3.518940460585484),
-        ("B", "reticle-hold", "hold/down_mil", 2.204551402110831, 2.1855361168682452),
-        ("D", "zero-from-angle", "zero_range", 204.55089485001628, 203.9627191953953),
-        ("D", "mpbr", "mpbr", 311.3027544989547, 309.4064871371572),
-        ("D", "come-ups", "data/-1/drop", 2.8401683241504876, 2.8771593427158986),
-        ("D", "lead", "rows/-1/lead", 1.5864756044145347, 1.5966150517244653),
-        ("D", "wind-card", "data/-1/wind_10", -2.2555711195619996, -2.3492521052917232),
-        ("D", "range-table", "data/-1/drop", 521.2425486288677, 535.0865231210498),
-        ("D", "true-velocity", "calculated_drop_mil", 6.186676348196818, 6.299968420836825),
-        ("D", "true-velocity-observed", "fitted_muzzle_velocity", 1882.6119671554238, 2140.5495855985573),
-        ("D", "true-velocity-observed", "mv_window_start_m", 803.3096554604081, 549.1094520822987),
-        ("D", "true-velocity-observed", "mv_window_end_m", 892.5662838448978, 610.1216134247763),
-        ("D", "true-velocity-chrono", "adjustment_percent", -44.4931569064095, -44.49484406197996),
-        ("D", "true-wind", "effective_crosswind", 7.279270215377554, 7.058519377470756),
-        ("D", "plan-truing", "information/condition_number", 258.5000158802868, 278.5062568096683),
-        ("D", "compare", "compare/rows/-1/loads/0/drop", 32.530981086706674, 32.909841432326665),
+        ("B", "adaptive-card", "rows/-1/drop_adj", 3.5548632912446454, 3.5188299573131094),
+        ("B", "hold-corridor", "rows/-1/minimax_elevation_mil", 3.554978033039215, 3.518940460585484),
+        ("B", "reticle-hold", "hold/down_mil", 2.204551553098242, 2.1855361168682452),
+        ("D", "zero-from-angle", "zero_range", 204.5508941307517, 203.9627191953953),
+        ("D", "mpbr", "mpbr", 311.3027523006719, 309.4064871371572),
+        ("D", "come-ups", "data/-1/drop", 2.840168402437433, 2.8771593427158986),
+        ("D", "lead", "rows/-1/lead", 1.5864755028260469, 1.5966150517244653),
+        ("D", "wind-card", "data/-1/wind_10", -2.2555700610516745, -2.3492521052917232),
+        ("D", "range-table", "data/-1/drop", 521.2423954258915, 535.0865231210498),
+        ("D", "true-velocity", "calculated_drop_mil", 6.186676337956355, 6.299968420836825),
+        ("D", "true-velocity-observed", "fitted_muzzle_velocity", 1882.6121165057073, 2140.5495855985573),
+        ("D", "true-velocity-observed", "mv_window_start_m", 803.3096547518144, 549.1094520822987),
+        ("D", "true-velocity-observed", "mv_window_end_m", 892.5662830575715, 610.1216134247763),
+        ("D", "true-velocity-chrono", "adjustment_percent", -44.493156906409176, -44.49484406197996),
+        ("D", "true-wind", "effective_crosswind", 7.279269733470785, 7.058519377470756),
+        ("D", "plan-truing", "information/condition_number", 258.4999666714088, 278.5062568096683),
+        ("D", "compare", "compare/rows/-1/loads/0/drop", 32.530982300990544, 32.909841432326665),
         ("D", "estimate-bc", "variants/0/estimated_bc", 0.159, 0.164),
-        ("D", "mark-to-range", "marks/-1/range", 777.9575523622334, 771.9128933586179),
-        ("D", "bdc-match", "fitted_magnification", 21.547484910326702, 21.249038846017886),
+        ("D", "mark-to-range", "marks/-1/range", 777.9575615338982, 771.9128933586179),
+        ("D", "bdc-match", "fitted_magnification", 21.547484539850103, 21.249038846017886),
         ("D", "optimal-zero", "optimal_zero", 423.81437898352885, 424.39776778488186),
-        ("D", "adaptive-card", "rows/-1/drop_adj", 2.8401683241504876, 2.8771593427158986),
-        ("D", "hold-corridor", "rows/-1/minimax_elevation_mil", 2.8402563969250787, 2.8771198979743846),
-        ("D", "reticle-hold", "hold/down_mil", 1.789278277384567, 1.8095631018860499),
+        ("D", "adaptive-card", "rows/-1/drop_adj", 2.840168402437433, 2.8771593427158986),
+        ("D", "hold-corridor", "rows/-1/minimax_elevation_mil", 2.8402564752915747, 2.8771198979743846),
+        ("D", "reticle-hold", "hold/down_mil", 1.7892783485658414, 1.8095631018860499),
     ];
     std::thread::scope(|scope| {
         let jobs: Vec<_> = pins
@@ -1097,13 +1115,17 @@ fn max_height(args: &[&str]) -> f64 {
 
 #[test]
 fn the_zero_day_flies_its_own_typed_air_and_inherits_presence() {
+    // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
+    // water-vapour mole fraction, with a virtual-temperature lapse), old -> new: S1
+    // 2.2201995067396814 -> 2.220199376108147 m and S1 inherited 2.2204084092114758 ->
+    // 2.2204082785459076 m (-5.9e-8).
     // S1: --zero-pressure 1012.9 at --zero-altitude 150. Was 2.212887919946592 (ICAO).
     assert_bits(
         max_height(&cat(&[
             TR_MZ,
             &["--zero-altitude", "150", "--zero-pressure", "1012.9"],
         ])),
-        2.2201995067396814,
+        2.220199376108147,
         "S1",
     );
     // The zero day inherits a typed shot-day 1013.25 hPa WITH its presence.
@@ -1112,11 +1134,11 @@ fn the_zero_day_flies_its_own_typed_air_and_inherits_presence() {
             TR_MZ,
             &["--pressure", "1013.25", "--zero-altitude", "150"],
         ])),
-        2.2204084092114758,
+        2.2204082785459076,
         "S1 inherited",
     );
     let omitted = max_height(&cat(&[TR_MZ, &["--zero-altitude", "150"]]));
-    assert_ne!(omitted.to_bits(), 2.2201995067396814_f64.to_bits());
+    assert_ne!(omitted.to_bits(), 2.220199376108147_f64.to_bits());
     // Imperial: 29.92 inHg and 59 F on the zero day.
     let base = cat(&[TR_IZ, &["--zero-altitude", "5000"]]);
     assert_ne!(
@@ -1148,13 +1170,17 @@ fn the_zero_day_flies_its_own_typed_air_and_inherits_presence() {
 
 #[test]
 fn a_density_altitude_with_a_typed_temperature_flies_that_temperature() {
+    // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
+    // water-vapour mole fraction, with a virtual-temperature lapse), old -> new: S2
+    // 1.5526787637373636 -> 1.5526787619247384 m and S2b 1.5523778009403533 -> 1.5523777991389598 m
+    // (-1.2e-9).
     // S2: the zero day re-entered the sentinel with the DA-derived air. Was 1.5528031629639063.
     assert_bits(
         max_height(&cat(&[
             TR_M,
             &["--density-altitude", "1500", "--temperature", "15"],
         ])),
-        1.5526787637373636,
+        1.5526787619247384,
         "S2",
     );
     // S2b: the zero day's own DA. At a 100 m zero the search quantizes nearby airs to one
@@ -1162,7 +1188,7 @@ fn a_density_altitude_with_a_typed_temperature_flies_that_temperature() {
     // ab4eb0c's swap put it at 1.5525016629998145.
     let base = cat(&[TR_M, &["--zero-density-altitude", "1500"]]);
     let typed = max_height(&cat(&[&base, &["--zero-temperature", "15"]]));
-    assert_bits(typed, 1.5523778009403533, "S2b");
+    assert_bits(typed, 1.5523777991389598, "S2b");
     assert_bits(
         typed,
         max_height(&cat(&[&base, &["--zero-temperature", "15.2"]])),
@@ -1350,9 +1376,12 @@ fn location_and_profile_csv_cells_are_readings() {
         "--pressure",
         "25",
     ]);
+    // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
+    // water-vapour mole fraction, with a virtual-temperature lapse), old -> new: 2020.232528009309
+    // -> 2020.2321531314424 fps (-1.9e-7).
     assert_bits(
         doc["impact_velocity"].as_f64().unwrap(),
-        2020.232528009309,
+        2020.2321531314424,
         "S6",
     );
 }
@@ -1519,9 +1548,13 @@ fn saved_profiles_fly_a_marked_reading_and_keep_the_legacy_rule_unmarked() {
     let text = std::fs::read_to_string(home.join(".ballistics/profiles/typed.json")).unwrap();
     assert!(text.contains("\"pressure_supplied\": true"), "{text}");
     // The C repro, through a saved profile.
+    // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
+    // water-vapour mole fraction, with a virtual-temperature lapse), old -> new: marked
+    // 1817.3657972174826 -> 1817.3652235119462 fps and unmarked 1934.971466102828 ->
+    // 1934.9708328297384 fps (-3.2e-7 and -3.3e-7).
     assert_bits(
         impact("typed"),
-        1817.3657972174826,
+        1817.3652235119462,
         "marked 29.92 at 5000 ft",
     );
     // A hand-written legacy file: the same numbers, no marker.
@@ -1533,7 +1566,7 @@ fn saved_profiles_fly_a_marked_reading_and_keep_the_legacy_rule_unmarked() {
     .unwrap();
     assert_bits(
         impact("legacy"),
-        1934.971466102828,
+        1934.9708328297384,
         "unmarked 29.92 at 5000 ft (ICAO)",
     );
     // A typed --altitude 0 beats the profile's 5000 ft.
@@ -1999,62 +2032,69 @@ fn a_profiles_omitted_pressure_flown_as_a_qnh_stays_omitted() {
             .unwrap()
     };
     // (units, run, condition number captured from ab4eb0c)
+    // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
+    // water-vapour mole fraction, with a virtual-temperature lapse), old -> new: metric
+    // 147.22911163966467 -> 147.22929978491447, 146.77803224676077 -> 146.7782194651384 and
+    // 146.78702305164347 -> 146.78721029084687 (+1.3e-6); imperial 158.11027132668036 ->
+    // 158.11033474999823, 158.11768242204755 -> 158.11774587098967 and 158.11766725855364 ->
+    // 158.11773070984339 (+4.0e-7).
+
     let cases: [(&str, Vec<&str>, f64); 12] = [
         (
             "metric",
             cat(&[&metric_load, &metric_air, &qnh]),
-            147.22911163966467,
+            147.22929978491447,
         ),
         (
             "metric",
             cat(&[&["--profile", "a-metric", "--altitude", "3"], &qnh]),
-            147.22911163966467,
+            147.22929978491447,
         ),
         (
             "metric",
             cat(&[&["--profile", "a-metric"], &qnh]),
-            147.22911163966467,
+            147.22929978491447,
         ),
-        ("metric", vec!["--profile", "q-metric"], 147.22911163966467),
+        ("metric", vec!["--profile", "q-metric"], 147.22929978491447),
         (
             "metric",
             cat(&[&["--profile", "a-imperial", "--altitude", "3"], &qnh]),
-            146.77803224676077,
+            146.7782194651384,
         ),
         (
             "metric",
             vec!["--profile", "q-imperial"],
-            146.78702305164347,
+            146.78721029084687,
         ),
         (
             "imperial",
             cat(&[&imperial_load, &imperial_air, &qnh]),
-            158.11027132668036,
+            158.11033474999823,
         ),
         (
             "imperial",
             cat(&[&["--profile", "a-imperial", "--altitude", "10"], &qnh]),
-            158.11027132668036,
+            158.11033474999823,
         ),
         (
             "imperial",
             cat(&[&["--profile", "a-imperial"], &qnh]),
-            158.11027132668036,
+            158.11033474999823,
         ),
         (
             "imperial",
             vec!["--profile", "q-imperial"],
-            158.11027132668036,
+            158.11033474999823,
         ),
         (
             "imperial",
             cat(&[&["--profile", "a-metric", "--altitude", "10"], &qnh]),
-            158.11768242204755,
+            158.11774587098967,
         ),
         (
             "imperial",
             vec!["--profile", "q-metric"],
-            158.11766725855364,
+            158.11773070984339,
         ),
     ];
     for (units, run, was) in &cases {
@@ -2079,7 +2119,7 @@ fn a_profiles_omitted_pressure_flown_as_a_qnh_stays_omitted() {
             &["--pressure", "1013.5", "--pressure-type", "qnh"],
         ]),
     );
-    assert_ne!(typed.to_bits(), 147.22911163966467_f64.to_bits());
+    assert_ne!(typed.to_bits(), 147.22929978491447_f64.to_bits());
     assert_bits(plan("metric", &["--profile", "q-typed"]), typed, "marked");
     assert_bits(
         plan("metric", &["--profile", "q-typed-legacy"]),

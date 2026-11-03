@@ -256,9 +256,25 @@ command:
 | --- | --- |
 | `solve`, `atmosphere.density_altitude` | The command's whole solve-json error envelope (below). |
 | `reticle.describe`, `reticle.hold`, `reticle.holds`, `reticle.import` | A flat object: a `reason` (one per reticle error) and the `command`, plus the offending values when the error has any. |
-| `true.dsf`, `true.plan`, `true.dial_plan` | A flat object: a `reason`, plus the error's own numbers when it has any (`true.plan` always adds `rejected_candidates`). |
-| `profile.export_a7p` | A flat object: a `reason` of `units`, `drag_model` (with the `drag_model`) or `field` (with the `field`). |
+| `true.dsf`, `true.plan`, `true.dial_plan` | A flat object: a `reason`, plus the error's own numbers when it has any (`true.plan` always adds `rejected_candidates`). A refused humidity or air adds the solve-json envelope beside the `reason` (see below). |
+| `profile.export_a7p` | A flat object: a `reason` of `units`, `drag_model` (with the `drag_model`) or `field` (with the `field`). A refused humidity or air adds the solve-json envelope beside it. |
+| `card.*`, `true.fit`, `true.wind`, `profile.import_a7p` | For a refused humidity or air, the solve-json envelope (see below). For every other failure, none. |
 | Every other command | None. The reason is in `error.message` alone. |
+
+**A refused humidity or air has one shape on every command (since 0.50.0).** A humidity beyond
+the sensor band, or air that cannot exist, carries the solve-json error envelope in
+`error.details` on every command that takes a humidity: `error.details.error.code` is
+`invalid_value` and `error.details.error.path` is the member to blame in that command's own
+request: `$.atmosphere.relative_humidity` for `solve` and `atmosphere.density_altitude`,
+`$.humidity` for `card.*` and `profile.export_a7p`, `$.model.humidity_pct` for `true.fit`,
+`true.dsf` and `true.plan`, `$.humidity_pct` for `true.wind` and `a7p:c_zero_air_humidity` for
+`profile.import_a7p` (or the temperature, pressure or altitude member, when that is the reading
+to blame: the temperature outside 173.15-373.15 K, then the pressure or the altitude, whichever
+put the station above the troposphere; `solve` and `atmosphere.density_altitude` give the same
+path for the same atmosphere).
+The outer `error.message` leads with the cause, for example `card.come_ups failed: humidity =
+100 at 212 °F and 29.92 inHg: no such air exists: ...`. The `failureOf` unwrap below reads it
+unchanged.
 
 A payload that does not decode is `invalid_request`, with no `details`, for every command except
 `solve` and `atmosphere.density_altitude`. Those two decode their payload with the solve-json

@@ -161,7 +161,8 @@ impl std::fmt::Display for KernelError {
                     "axis {axis:?} is not supported for this request: {reason}"
                 )
             }
-            KernelError::Solve { code, message } => write!(f, "solve failed ({code:?}): {message}"),
+            // The code by its wire name (`invalid_value`), never the Rust variant.
+            KernelError::Solve { code, message } => write!(f, "solve failed ({code}): {message}"),
             KernelError::Observation(e) => write!(f, "observation failed: {e}"),
             KernelError::NonFinite(a) => write!(f, "axis {a:?} produced a non-finite result"),
             KernelError::StepOutOfDomain { axis, attempted } => write!(

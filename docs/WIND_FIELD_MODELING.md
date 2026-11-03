@@ -38,8 +38,8 @@ All pure additions to the `wind` module:
 - GRIB2/HRRR/GFS acquisition and decoding, HTTP subset downloads, offline
   caches, radiosonde validation datasets — winds-engine's job.
 - Diagnostic mass-consistent terrain flow — deferred; revisit only with a
-  concrete artillery (moving-batteries) requirement. If ever built, its
-  home is this crate, not winds-engine.
+  concrete requirement from a downstream artillery simulation. If ever
+  built, its home is this crate, not winds-engine.
 - Any change to existing wind APIs.
 
 ## Determinism policy

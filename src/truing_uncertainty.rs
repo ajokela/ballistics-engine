@@ -339,13 +339,37 @@ pub struct UncertaintyTruingReportV1 {
 }
 
 /// Input or forward-model failure before a report can be produced.
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Error, Clone)]
 pub enum UncertaintyTruingErrorV1 {
+    /// Air refused in the forward flight, before a fit can be made.
+    #[error("{0}")]
+    Atmosphere(#[source] crate::atmosphere::AtmosphereError),
     #[error("invalid uncertainty-truing request: {0}")]
     InvalidInput(String),
     #[error("truing forward model failed: {0}")]
     ForwardModel(String),
 }
+
+// Preserve the error type's equality contract when a cause carries a refused NaN reading.
+// Compare the new variant's floating-point payloads by bits; the string variants are unchanged.
+impl PartialEq for UncertaintyTruingErrorV1 {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::InvalidInput(a), Self::InvalidInput(b))
+            | (Self::ForwardModel(a), Self::ForwardModel(b)) => a == b,
+            (Self::Atmosphere(a), Self::Atmosphere(b)) => {
+                a.field() == b.field()
+                    && a.reason() == b.reason()
+                    && a.value().to_bits() == b.value().to_bits()
+                    && a.altitude_m().map(f64::to_bits) == b.altitude_m().map(f64::to_bits)
+                    && a.explanation() == b.explanation()
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for UncertaintyTruingErrorV1 {}
 
 /// A symmetric 2x2 matrix -- posterior/information matrices in this module, and (0.33.0
 /// decision-support Task 10, MBA-1347) an impact-space covariance in the `error_budget` module.
@@ -1328,7 +1352,10 @@ fn push_warning(
 }
 
 fn forward_error(error: Box<dyn std::error::Error>) -> UncertaintyTruingErrorV1 {
-    UncertaintyTruingErrorV1::ForwardModel(error.to_string())
+    match crate::atmosphere::AtmosphereError::in_error(&*error) {
+        Some(air) => UncertaintyTruingErrorV1::Atmosphere(air.clone()),
+        None => UncertaintyTruingErrorV1::ForwardModel(error.to_string()),
+    }
 }
 
 fn unreachable_range_error(range_yd: f64) -> UncertaintyTruingErrorV1 {
@@ -1340,6 +1367,25 @@ fn unreachable_range_error(range_yd: f64) -> UncertaintyTruingErrorV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forward_air_error_keeps_its_cause_and_equality_contract() {
+        fn requires_eq<T: Eq>() {}
+        requires_eq::<UncertaintyTruingErrorV1>();
+        for value in [f64::NAN, -1.0, 106.0] {
+            let air = if value == -1.0 {
+                crate::atmosphere::check_station_pressure_hpa(value).unwrap_err()
+            } else {
+                crate::RelativeHumidity::try_percent(value).unwrap_err()
+            };
+            let error = forward_error(Box::new(air.clone()));
+            assert_eq!(error, error.clone());
+            let cause = crate::atmosphere::AtmosphereError::in_error(&error).unwrap();
+            assert_eq!(cause.field(), air.field());
+            assert_eq!(cause.value().to_bits(), air.value().to_bits());
+            assert_eq!(cause.reason(), air.reason());
+        }
+    }
 
     #[test]
     fn request_deserializes_from_the_wire_and_rejects_unknown_fields() {

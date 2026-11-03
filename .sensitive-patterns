@@ -1,7 +1,9 @@
 # Paths that must never enter this PUBLIC repository. One extended-regex per
 # line, matched case-insensitively against every staged path by
-# .githooks/pre-commit. Material matching these belongs in the PRIVATE
-# ballistics application repo. Deliberate exceptions: SENSITIVE_OK=1 git commit ...
+# .githooks/pre-commit, which says how a line is read (surrounding whitespace
+# is ignored, and a pattern grep cannot compile refuses every commit).
+# Material matching these belongs in the PRIVATE ballistics application repo.
+# Deliberate exceptions: SENSITIVE_OK=1 git commit ...
 ab_geometry
 applied[_-]?ballistics
 removal[- ]request

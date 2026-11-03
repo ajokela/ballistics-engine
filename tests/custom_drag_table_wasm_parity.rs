@@ -84,7 +84,7 @@ fn wasm_style_inputs(table: DragTable) -> BallisticInputs {
     inputs.ground_threshold = 0.0; // WASM: ignore_ground_impact=false -> 0.0 (not the struct default)
     inputs.temperature = (59.0 - 32.0) * 5.0 / 9.0; // WASM imperial default: 59 F
     inputs.pressure = 29.92 * 33.863886666667; // WASM imperial default: 29.92 inHg
-    inputs.humidity = (50.0_f64 / 100.0).clamp(0.0, 1.0); // WASM default: 50%
+    inputs.humidity_percent = 50.0; // WASM default: 50%
     inputs.altitude = 0.0;
     inputs.custom_drag_table = Some(table);
     inputs
@@ -94,7 +94,7 @@ fn atmosphere_for_wasm_style() -> AtmosphericConditions {
     AtmosphericConditions {
         temperature: (59.0 - 32.0) * 5.0 / 9.0,
         pressure: 29.92 * 33.863886666667,
-        humidity: 50.0, // AtmosphericConditions::humidity is PERCENT, not the 0-1 fraction
+        humidity: 50.0, // percent, as is BallisticInputs::humidity_percent
         altitude: 0.0,
     }
 }

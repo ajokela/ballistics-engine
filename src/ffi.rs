@@ -193,8 +193,11 @@ pub struct FFIWindConditions {
 pub struct FFIAtmosphericConditions {
     pub temperature: c_double, // Celsius
     pub pressure: c_double,    // hPa
-    pub humidity: c_double,    // percentage (0-100)
-    pub altitude: c_double,    // meters
+    /// Relative humidity, PERCENT, 0-100. A sensor reading within 5 points of the range
+    /// (`HUMIDITY_SENSOR_TOLERANCE_PERCENT`) flies as the end it reads as; a value beyond it
+    /// makes the call return NULL (a zero angle, NaN).
+    pub humidity: c_double,
+    pub altitude: c_double, // meters
 }
 
 #[repr(C)]
@@ -1330,6 +1333,29 @@ pub unsafe extern "C" fn ballistics_monte_carlo_with_station_presence(
     }
 }
 
+/// The Monte Carlo's base inputs, and the station presence its solves use, from the C inputs
+/// and atmosphere. A `None` (null) atmosphere leaves the inputs' own defaults, which are not
+/// readings, so its presence is [`StationAtmospherePresence::NEITHER`]. A separate builder so the
+/// units it writes are testable.
+pub(crate) fn monte_carlo_base_inputs(
+    inputs: &FFIBallisticInputs,
+    atmosphere: Option<&FFIAtmosphericConditions>,
+    station_presence: StationAtmospherePresence,
+) -> (BallisticInputs, StationAtmospherePresence) {
+    let mut ballistic_inputs = convert_inputs(inputs);
+    ballistic_inputs.muzzle_height = 1.5;
+    ballistic_inputs.ground_threshold = 0.0;
+    let Some(atmo) = atmosphere else {
+        return (ballistic_inputs, StationAtmospherePresence::NEITHER);
+    };
+    ballistic_inputs.temperature = atmo.temperature;
+    ballistic_inputs.pressure = atmo.pressure;
+    // A percent, the unit of both: the caller's exact value, which the solve flies.
+    ballistic_inputs.humidity_percent = atmo.humidity;
+    ballistic_inputs.altitude = atmo.altitude;
+    (ballistic_inputs, station_presence)
+}
+
 unsafe fn ballistics_monte_carlo_impl(
     inputs: *const FFIBallisticInputs,
     atmosphere: *const FFIAtmosphericConditions,
@@ -1355,22 +1381,13 @@ unsafe fn ballistics_monte_carlo_impl(
     }
 
     // Convert FFI inputs to internal types
-    let mut ballistic_inputs = convert_inputs(inputs);
-    ballistic_inputs.muzzle_height = 1.5;
-    ballistic_inputs.ground_threshold = 0.0;
-    // A null atmosphere leaves the inputs' own defaults, which are not readings.
-    let station_presence = if atmosphere.is_null() {
-        StationAtmospherePresence::NEITHER
+    let atmosphere = if atmosphere.is_null() {
+        None
     } else {
-        station_presence
+        Some(unsafe { &*atmosphere })
     };
-    if !atmosphere.is_null() {
-        let atmo = unsafe { &*atmosphere };
-        ballistic_inputs.temperature = atmo.temperature;
-        ballistic_inputs.pressure = atmo.pressure;
-        ballistic_inputs.humidity = (atmo.humidity / 100.0).clamp(0.0, 1.0);
-        ballistic_inputs.altitude = atmo.altitude;
-    }
+    let (ballistic_inputs, station_presence) =
+        monte_carlo_base_inputs(inputs, atmosphere, station_presence);
 
     // Create Monte Carlo parameters
     let mc_params = MonteCarloParams {
@@ -1650,6 +1667,19 @@ pub extern "C" fn ballistics_reduce_qnh_pressure(
 /// `is_nan()`, not equality), matching that precedent.
 pub const FFI_NO_EXPLICIT_TEMPERATURE: c_double = f64::NAN;
 
+/// The station `(altitude m, temperature °C, pressure hPa)` the three
+/// `ballistics_density_altitude_*` exports report, by the one density-altitude rule
+/// ([`crate::atmosphere::station_for_density_altitude`], bit for bit), or `None` where it
+/// refuses the density altitude. `explicit_temperature_c` is NaN for none
+/// ([`FFI_NO_EXPLICIT_TEMPERATURE`]).
+fn ffi_station_for_density_altitude(
+    density_altitude_m: c_double,
+    explicit_temperature_c: c_double,
+) -> Option<(f64, f64, f64)> {
+    let explicit = (!explicit_temperature_c.is_nan()).then_some(explicit_temperature_c);
+    crate::atmosphere::station_for_density_altitude(density_altitude_m, explicit).ok()
+}
+
 /// Back-solve the station TEMPERATURE (Celsius) an ISA-equivalent atmosphere at
 /// `density_altitude_m` implies (MBA-1366; see
 /// [`crate::atmosphere::resolve_atmosphere_for_density_altitude`] for the full derivation).
@@ -1668,9 +1698,19 @@ pub const FFI_NO_EXPLICIT_TEMPERATURE: c_double = f64::NAN;
 /// altitude is reproduced either way, but the air matches the real air only when the real
 /// temperature is passed: the ISA default rebuilds a different temperature, and with it a
 /// slightly different density and speed of sound (see the Rust doc comment).
-/// A non-finite `density_altitude_m` returns NaN for all three exports (there is no plausible
-/// station value to fall back to, unlike the QNH/BC conversions above, which return their input
-/// unchanged).
+///
+/// All three exports apply the one density-altitude rule every surface applies
+/// ([`crate::atmosphere::station_for_density_altitude`]): a density altitude flies when it is
+/// finite and the station the FAA rule's inverse gives for it can exist. Each returns NaN, the
+/// "no station" signal, where that rule refuses: a density altitude that is not finite; one no
+/// air has (with no explicit temperature, a pressure altitude past 145286 ft, where the rule's
+/// standard temperature reaches absolute zero; with one, past 145366 ft, where the NWS pressure
+/// formula reaches 0 hPa; or so far below sea level that the formula overflows); and an
+/// `explicit_temperature_c` that is not finite or not above absolute zero. There is no
+/// plausible station value to fall back to, unlike the QNH/BC conversions above, which return
+/// their input unchanged. Before 0.50.0 only a density altitude that is not finite gave NaN:
+/// DA 44300 m returned a station below absolute zero (-273.26 °C at 1.8e-17 hPa), and DA
+/// 50000 m a temperature of -310.35 °C beside a NaN pressure.
 ///
 /// Fly the triple through a `*_with_station_presence` export, and set
 /// [`BALLISTICS_STATION_TEMPERATURE_SUPPLIED`] when an explicit temperature was passed: the
@@ -1682,11 +1722,8 @@ pub extern "C" fn ballistics_density_altitude_temperature_c(
     density_altitude_m: c_double,
     explicit_temperature_c: c_double,
 ) -> c_double {
-    if !density_altitude_m.is_finite() {
-        return f64::NAN;
-    }
-    let explicit = (!explicit_temperature_c.is_nan()).then_some(explicit_temperature_c);
-    crate::atmosphere::resolve_atmosphere_for_density_altitude(density_altitude_m, explicit).1
+    ffi_station_for_density_altitude(density_altitude_m, explicit_temperature_c)
+        .map_or(f64::NAN, |station| station.1)
 }
 
 /// Companion to [`ballistics_density_altitude_temperature_c`]: the back-solved station PRESSURE
@@ -1696,11 +1733,8 @@ pub extern "C" fn ballistics_density_altitude_pressure_hpa(
     density_altitude_m: c_double,
     explicit_temperature_c: c_double,
 ) -> c_double {
-    if !density_altitude_m.is_finite() {
-        return f64::NAN;
-    }
-    let explicit = (!explicit_temperature_c.is_nan()).then_some(explicit_temperature_c);
-    crate::atmosphere::resolve_atmosphere_for_density_altitude(density_altitude_m, explicit).2
+    ffi_station_for_density_altitude(density_altitude_m, explicit_temperature_c)
+        .map_or(f64::NAN, |station| station.2)
 }
 
 /// Companion to [`ballistics_density_altitude_temperature_c`]: the back-solved station ALTITUDE
@@ -1712,11 +1746,8 @@ pub extern "C" fn ballistics_density_altitude_altitude_m(
     density_altitude_m: c_double,
     explicit_temperature_c: c_double,
 ) -> c_double {
-    if !density_altitude_m.is_finite() {
-        return f64::NAN;
-    }
-    let explicit = (!explicit_temperature_c.is_nan()).then_some(explicit_temperature_c);
-    crate::atmosphere::resolve_atmosphere_for_density_altitude(density_altitude_m, explicit).0
+    ffi_station_for_density_altitude(density_altitude_m, explicit_temperature_c)
+        .map_or(f64::NAN, |station| station.0)
 }
 
 /// Largest `marks_len` [`ballistics_hold_point_in_reticle`] will accept (MBA-1361).
