@@ -5,14 +5,28 @@
 # to commit instead of shipping.
 #
 # Rules:
-#   1. No staged PATH may match a pattern in .sensitive-patterns.
-#   2. No NEWLY ADDED file's content may name Applied Ballistics (existing
-#      tracked files legitimately cite AB's published research; new files that
-#      genuinely need to are the rare, eyes-open case).
+#   1. No staged PATH may match a pattern in .sensitive-patterns: the path of
+#      a file added, copied, modified, renamed or changed in type, or of a
+#      submodule.
+#   2. No NEWLY ADDED file's content may name Applied Ballistics or BC5D
+#      (existing tracked files legitimately cite AB's published research; new
+#      files that genuinely need to are the rare, eyes-open case). The whole
+#      file is read, a binary one too. Whatever diff.renames says, a renamed
+#      file is the file it was, not a new one, and a copy is a new file. A new
+#      submodule's content is not in this repository; rule 1 reads its path.
 #   3. No ADDED line of the staged diff, in any file, may match a pattern in
 #      the clone's LOCAL private pattern list (below). Only added text is read:
 #      a line the commit keeps, carries along in a rename or removes is not,
 #      and binary files are skipped. A staged copy of the list is refused.
+#
+# The three rules read alike. .sensitive-patterns is read as the private list
+# is (below): one extended regex per line, surrounding whitespace, empty lines
+# and lines starting with # ignored, and a pattern grep cannot compile refuses
+# the commit. Matching is byte for byte whatever the locale, the case of ASCII
+# letters only ignored, and GREP_OPTIONS changes nothing. A file name is read
+# as git stores it, whatever bytes it holds (a name holding a newline is
+# matched line by line), and a refusal shows it as git does with
+# core.quotePath=false, less the quotes: a tab as \t, for one.
 #
 # The local private pattern list. Rules 1 and 2 cannot catch private-app
 # material (internals of the owner's private apps and services, private repo
@@ -43,36 +57,121 @@ set -euo pipefail
 TOP="$(git rev-parse --show-toplevel)"
 PATTERNS="$TOP/.sensitive-patterns"
 HOOK=pre-commit
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/$HOOK-guard.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+
+# Run grep -q for the extended regex $1 on the file $2 as private_pattern_hits (below)
+# runs it: byte for byte, the case of ASCII letters only ignored, GREP_OPTIONS removed.
+# Return grep's status: 0 for a match, 1 for none, more if grep failed.
+grep_bytes() {
+    env -u GREP_OPTIONS LC_ALL=C grep -qaiE -e "$1" -- "$2"
+}
+
+# Print the file name $1 as git shows it with core.quotePath=false, less the quotes: a
+# control character, '"' and '\' escaped as git escapes them, every other byte as it is.
+shown_name() {
+    NAME="$1" LC_ALL=C awk 'BEGIN {
+        split("a b t n v f r", letter, " ")
+        for (c = 1; c < 32; c++) code[sprintf("%c", c)] = c
+        code[sprintf("%c", 127)] = 127
+        name = ENVIRON["NAME"]
+        for (i = 1; i <= length(name); i++) {
+            ch = substr(name, i, 1)
+            if (ch == "\"" || ch == "\\") shown = shown "\\" ch
+            else if (!(ch in code)) shown = shown ch
+            else if (code[ch] >= 7 && code[ch] <= 13) shown = shown "\\" letter[code[ch] - 6]
+            else shown = shown sprintf("\\%03o", code[ch])
+        }
+        print shown
+    }'
+}
+
+# Refuse the commit, saying that the newly added file $1 $3, if a line of the file's
+# staged content, in $WORK/blob, matches the extended regex $2.
+content_rule() {
+    local rc=0
+    grep_bytes "$2" "$WORK/blob" || rc=$?
+    if [ "$rc" = 0 ]; then
+        echo "pre-commit GUARD: newly added '$(shown_name "$1")' $3" >&2
+        viol=1
+    elif [ "$rc" != 1 ]; then
+        echo "pre-commit GUARD: could not read the newly added '$(shown_name "$1")'" >&2
+        viol=1
+    fi
+}
 
 viol=0
 if [ -f "$PATTERNS" ]; then
-    while IFS= read -r path; do
-        while IFS= read -r pat; do
-            case "$pat" in ''|'#'*) continue ;; esac
-            if printf '%s\n' "$path" | grep -qiE "$pat"; then
-                echo "pre-commit GUARD: staged path '$path' matches sensitive pattern '$pat'" >&2
-                viol=1
-            fi
-        done < "$PATTERNS"
-    done < <(git diff --cached --name-only --diff-filter=ACMR)
+    SENSITIVE=()
+    while IFS= read -r pat || [ -n "$pat" ]; do
+        pat="${pat#"${pat%%[![:space:]]*}"}"
+        pat="${pat%"${pat##*[![:space:]]}"}"
+        case "$pat" in ''|'#'*) continue ;; esac
+        rc=0
+        grep_bytes "$pat" /dev/null 2>/dev/null || rc=$?
+        if [ "$rc" = 1 ]; then
+            SENSITIVE+=("$pat")
+        else
+            echo "pre-commit GUARD: sensitive pattern '$pat' is not a valid extended regular expression" >&2
+            viol=1
+        fi
+    done < "$PATTERNS"
 
-    while IFS= read -r path; do
-        # The guard's own files legitimately name the sensitive party; skip them.
-        case "$path" in .githooks/*|.sensitive-patterns) continue ;; esac
-        body="$(git show ":$path" 2>/dev/null | head -c 200000)"
-        if printf '%s' "$body" | grep -qiE 'applied[ _-]?ballistics'; then
-            echo "pre-commit GUARD: newly added '$path' names Applied Ballistics" >&2
-            viol=1
-        fi
-        # Same shape, same reasoning, different subject: a patent application on the
-        # BC5D solver is pending. The 31 files already tracked here that discuss BC5D
-        # are grandfathered by scoping this to ADDED files only -- editing them is
-        # ordinary maintenance; introducing a NEW one is the eyes-open case.
-        if printf '%s' "$body" | grep -qiE 'bc[ _-]?5d'; then
-            echo "pre-commit GUARD: newly added '$path' contains BC5D material (patent pending)" >&2
-            viol=1
-        fi
-    done < <(git diff --cached --name-only --diff-filter=A)
+    # Names are listed NUL-separated, so git neither quotes nor escapes them. Pinned so no
+    # diff.* setting changes what is listed: renames are not looked for, so a renamed or
+    # copied file is listed by its new name as an added file, and a submodule is listed
+    # whatever diff.ignoreSubmodules says.
+    if git diff --cached --name-only -z --no-color --no-renames --ignore-submodules=none \
+        --diff-filter=ACMRT > "$WORK/staged"
+    then
+        while IFS= read -r -d '' path; do
+            printf '%s\n' "$path" > "$WORK/name"
+            for pat in ${SENSITIVE[@]+"${SENSITIVE[@]}"}; do
+                rc=0
+                grep_bytes "$pat" "$WORK/name" || rc=$?
+                if [ "$rc" = 0 ]; then
+                    echo "pre-commit GUARD: staged path '$(shown_name "$path")' matches sensitive pattern '$pat'" >&2
+                    viol=1
+                elif [ "$rc" != 1 ]; then
+                    echo "pre-commit GUARD: could not match the staged path '$(shown_name "$path")' against sensitive pattern '$pat'" >&2
+                    viol=1
+                fi
+            done
+        done < "$WORK/staged"
+    else
+        echo "pre-commit GUARD: could not list the staged paths" >&2
+        viol=1
+    fi
+
+    # Every newly added file and its staged blob (":<old mode> <mode> <old blob> <blob> A",
+    # then the name), pinned as rule 3's diff is: renames are found, so a renamed file is
+    # not new, and copies are not, so a copy is. The content is read from the blob, so no
+    # textconv or filter applies.
+    if git diff --cached --raw -z --no-abbrev --no-color -M --ignore-submodules=none \
+        --diff-filter=A > "$WORK/new-files"
+    then
+        while IFS= read -r -d '' meta && IFS= read -r -d '' path; do
+            # The guard's own files legitimately name the sensitive party; skip them.
+            case "$path" in .githooks/*|.sensitive-patterns) continue ;; esac
+            read -r _ mode _ blob _ <<< "$meta"
+            # A submodule: its commit is not in this repository.
+            [ "$mode" = 160000 ] && continue
+            if ! git cat-file blob "$blob" > "$WORK/blob"; then
+                echo "pre-commit GUARD: could not read the newly added '$(shown_name "$path")'" >&2
+                viol=1
+                continue
+            fi
+            content_rule "$path" 'applied[ _-]?ballistics' "names Applied Ballistics"
+            # Same shape, same reasoning, different subject: a patent application on the
+            # BC5D solver is pending. The 31 files already tracked here that discuss BC5D
+            # are grandfathered by scoping this to ADDED files only -- editing them is
+            # ordinary maintenance; introducing a NEW one is the eyes-open case.
+            content_rule "$path" 'bc[ _-]?5d' "contains BC5D material (patent pending)"
+        done < "$WORK/new-files"
+    else
+        echo "pre-commit GUARD: could not list the newly added files" >&2
+        viol=1
+    fi
 fi
 
 # --- BEGIN shared block: the local private pattern list. This block is the
@@ -148,18 +247,26 @@ report_private_hits() {
 
 PRIVATE="$(private_patterns_file)"
 if [ -n "$PRIVATE" ]; then
-    WORK="$(mktemp -d "${TMPDIR:-/tmp}/$HOOK-guard.XXXXXX")"
-    trap 'rm -rf "$WORK"' EXIT
     load_private_patterns "$PRIVATE"
 
     # The list itself, staged anywhere: a regex need not match its own text, so the
-    # content check below would not see it.
+    # content check below would not see it. A copy is named as git shows it with
+    # core.quotePath=false, less the quotes.
     if [ -s "$PRIVATE" ]; then
-        blob="$(git hash-object --no-filters -- "$PRIVATE")"
-        while IFS= read -r path; do
-            echo "pre-commit GUARD: staged '$path' is a copy of the private pattern file, which must never be committed" >&2
+        list_blob="$(git hash-object --no-filters -- "$PRIVATE")"
+        if git -c core.quotePath=false ls-files -s > "$WORK/index"; then
+            while IFS= read -r path; do
+                echo "pre-commit GUARD: staged '$path' is a copy of the private pattern file, which must never be committed" >&2
+                viol=1
+            done < <(LC_ALL=C awk -v blob="$list_blob" '$2 == blob {
+                sub(/^[^\t]*\t/, "")
+                if (/^"/) { $0 = substr($0, 2); sub(/"$/, "") }
+                print
+            }' "$WORK/index")
+        else
+            echo "pre-commit GUARD: could not list the index for copies of the private pattern file" >&2
             viol=1
-        done < <(git ls-files -s | awk -v blob="$blob" '$2 == blob { sub(/^[^\t]*\t/, ""); print }')
+        fi
     fi
 
     if [ "${#PRIVATE_PATTERNS[@]}" -gt 0 ]; then

@@ -9,9 +9,17 @@
 //! `hooks.privatePatterns` points. These tests write DUMMY patterns only, never a real name.
 //!
 //! Every test skips, saying so, when `git` or `bash` is not installed.
+//!
+//! Some cases can only fail on macOS. Its BSD `grep` skips, in a UTF-8 locale, every line that
+//! is not valid UTF-8, and obeys `GREP_OPTIONS`; GNU `grep` (Linux, and so CI) reads such a line
+//! with `-a` (and calls a file holding one binary, which still matches without `-a`) and ignores
+//! `GREP_OPTIONS`. Those tests say so, and pass on Linux against a guard without the defence too;
+//! run this suite on macOS as well as on Linux.
 #![cfg(unix)]
 
+use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -31,6 +39,45 @@ const PATTERNS: &str = "# ordinary\n\n   \n  private[_-]?dummy[_-]?token\nSECOND
 
 /// Text no pattern in [`PATTERNS`] matches.
 const ORDINARY: &str = "# ordinary heading\nwords   spaced   out\n";
+
+/// File names git quotes in its listings, each with the form the guard names the file by: as git
+/// shows it with `core.quotePath=false`, less the quotes. Non-ASCII UTF-8 is shown as it is; a
+/// quote, a backslash, a tab and a newline are escaped as in C; a space is kept (and makes git
+/// end a diff's `+++` line with a tab). The last name holds a Latin-1 `é`, a byte that is not
+/// UTF-8: it is shown as it is (and read here as U+FFFD), and as no file system of macOS accepts
+/// it in a name, these files are staged in the index alone.
+const ODD_NAMES: [(&[u8], &str); 6] = [
+    ("café.md".as_bytes(), "café.md"),
+    (b"say \"hi\".md", r#"say \"hi\".md"#),
+    (b"tab\there.md", r"tab\there.md"),
+    (b"back\\slash.md", r"back\\slash.md"),
+    (b"new\nline.md", r"new\nline.md"),
+    (b"caf\xe9 latin1.md", "caf\u{fffd} latin1.md"),
+];
+
+/// A submodule's commit, which need not exist in the repository that records it.
+const SUBMODULE_COMMIT: &str = "1234567890123456789012345678901234567890";
+
+/// The owner of the data rule 2 guards, spelled apart so this file does not name it.
+fn party() -> String {
+    ["Applied", "Ballistics"].join(" ")
+}
+
+/// The patent-pending solver rule 2 guards, spelled apart for the same reason.
+fn solver() -> String {
+    ["BC", "5D"].concat()
+}
+
+/// `bytes` or a little more of ordinary text, in whole numbered lines.
+fn filler(bytes: usize) -> String {
+    let mut text = String::new();
+    let mut n = 0;
+    while text.len() < bytes {
+        n += 1;
+        text.push_str(&format!("filler line {n}\n"));
+    }
+    text
+}
 
 /// Environment a test run may inherit that would point `git` at another repository, add
 /// configuration, or turn the guard off.
@@ -273,6 +320,37 @@ impl Checkout<'_> {
     fn discard(&self) {
         self.ok(&["reset", "-q", "--hard"]);
         self.ok(&["clean", "-fdq"]);
+    }
+
+    /// Unstage whatever a refused commit left staged, touching no file of the working tree.
+    fn unstage(&self) {
+        self.ok(&["reset", "-q"]);
+    }
+
+    /// Stage `contents` as the file `path`, given as raw bytes, in the index alone: no file is
+    /// written, so a name that no file system of macOS accepts can be staged too.
+    fn stage_in_index(&self, path: &[u8], contents: impl AsRef<[u8]>) {
+        let file = self.sandbox.root.join("index-only.blob");
+        fs::write(&file, contents).unwrap();
+        let blob = self.ok(&["hash-object", "-w", "--", file.to_str().unwrap()]);
+        self.add_index_entry("100644", blob.trim(), path);
+    }
+
+    /// Add the index entry `mode`, `object`, `path` (raw bytes), as `git update-index` does.
+    #[track_caller]
+    fn add_index_entry(&self, mode: &str, object: &str, path: &[u8]) {
+        let info = [format!("{mode},{object},").as_bytes(), path].concat();
+        let out = self
+            .command("git")
+            .args(["update-index", "--add", "--cacheinfo"])
+            .arg(OsStr::from_bytes(&info))
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git update-index failed:\n{}",
+            text(&out)
+        );
     }
 
     /// Write the pattern file at its default place: `info/private-patterns` in the clone's
@@ -810,5 +888,386 @@ fn both_hooks_carry_the_same_shared_block() {
         block("pre-commit"),
         block("commit-msg"),
         "the shared block differs between .githooks/pre-commit and .githooks/commit-msg"
+    );
+}
+
+#[test]
+fn the_earlier_rules_read_every_byte_of_a_name_or_line_in_a_utf8_locale() {
+    // macOS only: GNU grep reads these lines and names in any locale.
+    let Some(sandbox) = Sandbox::new() else {
+        return;
+    };
+    let repo = sandbox.guarded_repo();
+    let locale = utf8_locale();
+    let env: Vec<(&str, &str)> = locale
+        .as_deref()
+        .map(|name| vec![("LC_ALL", name), ("LANG", name)])
+        .unwrap_or_default();
+    let (party, solver) = (party(), solver());
+
+    // Rule 2: a Latin-1 line (0xE9 is "é" there and no valid UTF-8 sequence) naming either.
+    repo.stage(
+        "docs/latin1-source.md",
+        [&b"Donn\xe9es de "[..], party.as_bytes(), b"\n"].concat(),
+    );
+    repo.stage(
+        "docs/latin1-table.txt",
+        [&b"caf\xe9 "[..], solver.as_bytes(), b" table\n"].concat(),
+    );
+    repo.attempt(&["commit", "-q", "-m", "Add notes"], &env)
+        .expect_refused(
+            "pre-commit",
+            &[
+                &format!("newly added 'docs/latin1-source.md' names {party}"),
+                &format!("newly added 'docs/latin1-table.txt' contains {solver} material"),
+            ],
+        );
+    repo.discard();
+
+    // Rule 1: a staged name holding that byte.
+    repo.stage_in_index(b"notes/caf\xe9_hornady.txt", ORDINARY);
+    repo.attempt(&["commit", "-q", "-m", "Add loads"], &env)
+        .expect_refused(
+            "pre-commit",
+            &["_hornady.txt' matches sensitive pattern 'hornady'"],
+        );
+}
+
+#[test]
+fn grep_options_from_the_environment_do_not_change_what_the_earlier_rules_match() {
+    // macOS only: GNU grep ignores GREP_OPTIONS.
+    let Some(sandbox) = Sandbox::new() else {
+        return;
+    };
+    let repo = sandbox.guarded_repo();
+    let (party, solver) = (party(), solver());
+    // -x would let only a whole-line match through.
+    let env = [("GREP_OPTIONS", "-x")];
+    repo.stage("notes/hornady_loads.txt", ORDINARY);
+    repo.stage("docs/source.md", format!("Data from {party}.\n"));
+    repo.stage("docs/table.txt", format!("{solver} table\n"));
+    repo.attempt(&["commit", "-q", "-m", "Add notes"], &env)
+        .expect_refused(
+            "pre-commit",
+            &[
+                "staged path 'notes/hornady_loads.txt' matches sensitive pattern 'hornady'",
+                &format!("newly added 'docs/source.md' names {party}"),
+                &format!("newly added 'docs/table.txt' contains {solver} material"),
+            ],
+        );
+}
+
+#[test]
+fn a_file_whose_name_git_quotes_is_read_by_every_rule_and_named_as_git_shows_it() {
+    let Some(sandbox) = Sandbox::new() else {
+        return;
+    };
+    let repo = sandbox.guarded_repo();
+    let patterns = "# ordinary\nprivate[_-]?dummy[_-]?token\n";
+    repo.private_patterns(patterns);
+    let locale = utf8_locale();
+    let env: Vec<(&str, &str)> = locale
+        .as_deref()
+        .map(|name| vec![("LC_ALL", name), ("LANG", name)])
+        .unwrap_or_default();
+    let commit = |message: &str| repo.attempt(&["commit", "-q", "-m", message], &env);
+    let (party, solver) = (party(), solver());
+
+    for (name, shown) in ODD_NAMES {
+        let path = |dir: &str| [dir.as_bytes(), b"/", name].concat();
+
+        // An ordinary file of that name commits, and git shows the name as `shown` says.
+        repo.stage_in_index(&path("ordinary"), ORDINARY);
+        let listed = repo.ok(&[
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--cached",
+            "--name-only",
+        ]);
+        let expected = format!("ordinary/{shown}");
+        assert!(
+            listed
+                .lines()
+                .any(|line| line == expected || line == format!("\"{expected}\"")),
+            "git does not show `{expected}` so:\n{listed}"
+        );
+        commit("Add an ordinary file").expect_landed();
+
+        // Every rule reads a file of that name, and names it.
+        repo.stage_in_index(&path("party"), format!("Data from {party}.\n"));
+        repo.stage_in_index(&path("solver"), format!("{solver} table\n"));
+        repo.stage_in_index(&path("token"), format!("{TOKEN}\n"));
+        repo.stage_in_index(&path("copy"), patterns);
+        repo.stage_in_index(&[b"loads/", name, b".drg"].concat(), ORDINARY);
+        commit("Add more").expect_refused(
+            "pre-commit",
+            &[
+                &format!("newly added 'party/{shown}' names {party}"),
+                &format!("newly added 'solver/{shown}' contains {solver} material"),
+                &format!("token/{shown}:1 adds text matching private pattern '{PATTERN}'"),
+                &format!("staged 'copy/{shown}' is a copy of the private pattern file"),
+                &format!("staged path 'loads/{shown}.drg' matches sensitive pattern '\\.drg$'"),
+            ],
+        );
+        repo.unstage();
+    }
+}
+
+#[test]
+fn a_large_new_file_is_read_to_its_end_and_does_not_stop_the_hook() {
+    let Some(sandbox) = Sandbox::new() else {
+        return;
+    };
+    let repo = sandbox.guarded_repo();
+    repo.private_patterns(PATTERNS);
+    let (party, solver) = (party(), solver());
+
+    // Two megabytes of ordinary text.
+    repo.stage("docs/large.txt", filler(2_000_000));
+    repo.commit("Add a large file").expect_landed();
+
+    // A name on the first line, ahead of more text than a pipe holds (whoever reads the file
+    // through one may stop at the match, and the writer then fails); the same ahead of 300 kB;
+    // a name on the last line only, past the first 200 kB.
+    repo.stage(
+        "docs/first.txt",
+        format!("Data from {party}.\n{}", filler(225_000)),
+    );
+    repo.stage(
+        "docs/first-of-more.txt",
+        format!("Data from {party}.\n{}", filler(300_000)),
+    );
+    repo.stage(
+        "docs/last.txt",
+        format!("{}{solver} table\n", filler(300_000)),
+    );
+    repo.commit("Add three large files").expect_refused(
+        "pre-commit",
+        &[
+            &format!("newly added 'docs/first.txt' names {party}"),
+            &format!("newly added 'docs/first-of-more.txt' names {party}"),
+            &format!("newly added 'docs/last.txt' contains {solver} material"),
+        ],
+    );
+}
+
+#[test]
+fn rule_two_reads_a_binary_new_file_too() {
+    let Some(sandbox) = Sandbox::new() else {
+        return;
+    };
+    let repo = sandbox.guarded_repo();
+    let (party, solver) = (party(), solver());
+    // Rule 3 skips a file git calls binary (a_binary_file_is_skipped); rule 2 reads it, each
+    // name on a line of its own after the NUL bytes.
+    let blob = |name: &str| [&[0u8, 1, 2, 0, b'\n'][..], name.as_bytes(), b"\n\x00"].concat();
+    repo.stage("data/party.bin", blob(&party));
+    repo.stage("data/solver.bin", blob(&solver));
+    repo.commit("Add two binary blobs").expect_refused(
+        "pre-commit",
+        &[
+            &format!("newly added 'data/party.bin' names {party}"),
+            &format!("newly added 'data/solver.bin' contains {solver} material"),
+        ],
+    );
+}
+
+#[test]
+fn rule_two_reads_a_copy_as_a_new_file_and_a_rename_as_not_whatever_diff_renames_says() {
+    let Some(sandbox) = Sandbox::new() else {
+        return;
+    };
+    let repo = sandbox.guarded_repo();
+    let party = party();
+    // A tracked file that already cites the party, as some here do.
+    let cited = format!("Cited from {party}'s published work.\n{}", numbered(1..=20));
+    repo.commit_past_the_guard("docs/cited.md", &cited);
+
+    // diff.renames=false would show a rename as a removed file and a new one.
+    repo.ok(&["config", "diff.renames", "false"]);
+    repo.ok(&["mv", "docs/cited.md", "docs/moved.md"]);
+    let status = repo.ok(&["diff", "--cached", "--name-status"]);
+    assert!(
+        status.contains("A\tdocs/moved.md"),
+        "diff.renames=false did not hide the rename:\n{status}"
+    );
+    repo.commit("Rename the cited file").expect_landed();
+
+    // diff.renames=copies would show a copy of a file changed in the same commit as a copy.
+    repo.ok(&["config", "diff.renames", "copies"]);
+    repo.write("docs/copy.md", &cited);
+    repo.write("docs/moved.md", format!("{cited}an ordinary line\n"));
+    repo.ok(&["add", "--", "docs"]);
+    let status = repo.ok(&["diff", "--cached", "--name-status"]);
+    assert!(
+        status.contains("\tdocs/moved.md\tdocs/copy.md"),
+        "diff.renames=copies did not find the copy:\n{status}"
+    );
+    repo.commit("Copy the cited file").expect_refused(
+        "pre-commit",
+        &[&format!("newly added 'docs/copy.md' names {party}")],
+    );
+}
+
+#[test]
+fn rule_three_reads_a_rename_and_a_copy_alike_whatever_diff_renames_says() {
+    let Some(sandbox) = Sandbox::new() else {
+        return;
+    };
+    let repo = sandbox.guarded_repo();
+    repo.private_patterns(PATTERNS);
+    let kept = format!("{}the {TOKEN} stays\n", numbered(1..=4));
+    repo.commit_past_the_guard("docs/old.txt", &kept);
+
+    // Carried along unchanged by a rename that diff.renames=false would not look for.
+    repo.ok(&["config", "diff.renames", "false"]);
+    repo.ok(&["mv", "docs/old.txt", "docs/kept.txt"]);
+    let status = repo.ok(&["diff", "--cached", "--name-status"]);
+    assert!(
+        status.contains("A\tdocs/kept.txt"),
+        "diff.renames=false did not hide the rename:\n{status}"
+    );
+    repo.commit("Rename the file").expect_landed();
+
+    // Renamed with a line added: that line alone is read.
+    repo.ok(&["mv", "docs/kept.txt", "docs/again.txt"]);
+    repo.write(
+        "docs/again.txt",
+        format!("{kept}and SECOND_DUMMY_NAME arrives\n"),
+    );
+    repo.ok(&["add", "--", "docs"]);
+    let attempt = repo.commit("Rename the file and add a line");
+    attempt.expect_refused("pre-commit", &["docs/again.txt:6 ", "SECOND_DUMMY_NAME"]);
+    assert!(
+        !attempt.output.contains("docs/again.txt:5 "),
+        "the line the rename carried along was read:\n{}",
+        attempt.output
+    );
+    repo.discard();
+
+    // A copy, which diff.renames=copies would find, is a new file: every line of it is added.
+    repo.ok(&["config", "diff.renames", "copies"]);
+    repo.write("docs/copy.txt", &kept);
+    repo.write("docs/kept.txt", format!("{kept}an ordinary line\n"));
+    repo.ok(&["add", "--", "docs"]);
+    let status = repo.ok(&["diff", "--cached", "--name-status"]);
+    assert!(
+        status.contains("\tdocs/kept.txt\tdocs/copy.txt"),
+        "diff.renames=copies did not find the copy:\n{status}"
+    );
+    repo.commit("Copy the file")
+        .expect_refused("pre-commit", &["docs/copy.txt:5 ", PATTERN]);
+}
+
+#[test]
+fn a_matching_line_the_diff_shows_only_as_context_is_not_read() {
+    let Some(sandbox) = Sandbox::new() else {
+        return;
+    };
+    let repo = sandbox.guarded_repo();
+    repo.private_patterns(PATTERNS);
+    // Line 5 matches; so does line 7, whose text starts with "+", as an added line's does in a
+    // diff.
+    let mut lines: Vec<String> = numbered(1..=12).lines().map(str::to_string).collect();
+    lines[4] = format!("the {TOKEN} stays");
+    lines[6] = "+ and SECOND_DUMMY_NAME stays".to_string();
+    repo.commit_past_the_guard("docs/context.txt", &(lines.join("\n") + "\n"));
+
+    // GIT_DIFF_OPTS overrides -U0, so lines 3 to 9 come as context around line 6.
+    lines[5] = "an ordinary sixth line".to_string();
+    repo.stage("docs/context.txt", lines.join("\n") + "\n");
+    repo.attempt(
+        &["commit", "-q", "-m", "Edit line six"],
+        &[("GIT_DIFF_OPTS", "--unified=3")],
+    )
+    .expect_landed();
+
+    // diff.interHunkContext joins the hunks at lines 2 and 10 across lines 3 to 9.
+    lines[1] = "an ordinary second line".to_string();
+    lines[9] = "an ordinary tenth line".to_string();
+    repo.stage("docs/context.txt", lines.join("\n") + "\n");
+    repo.ok(&["config", "diff.interHunkContext", "10"]);
+    repo.commit("Edit lines two and ten").expect_landed();
+}
+
+#[test]
+fn the_sensitive_patterns_are_read_as_the_private_list_is() {
+    let Some(sandbox) = Sandbox::new() else {
+        return;
+    };
+    let repo = sandbox.guarded_repo();
+    // The hook reads the working tree's .sensitive-patterns. Surrounding whitespace is ignored,
+    // a pattern may start with a dash, and the last line needs no newline.
+    let tracked = fs::read_to_string(repo.dir.join(".sensitive-patterns")).unwrap();
+    repo.write(
+        ".sensitive-patterns",
+        format!("{tracked}   spaced_dummy \t\n-dash-dummy\nlast_dummy"),
+    );
+    for (path, pattern) in [
+        ("docs/a_spaced_dummy.txt", "spaced_dummy"),
+        ("docs/a-dash-dummy.txt", "-dash-dummy"),
+        ("docs/a_last_dummy.txt", "last_dummy"),
+    ] {
+        repo.stage(path, ORDINARY);
+        repo.commit("Add a file").expect_refused(
+            "pre-commit",
+            &[&format!(
+                "staged path '{path}' matches sensitive pattern '{pattern}'"
+            )],
+        );
+        repo.unstage();
+    }
+
+    // A pattern grep cannot compile refuses the commit rather than being skipped.
+    repo.write(".sensitive-patterns", format!("{tracked}(unbalanced\n"));
+    repo.stage("docs/ordinary.txt", ORDINARY);
+    repo.commit("Add ordinary words").expect_refused(
+        "pre-commit",
+        &["sensitive pattern '(unbalanced' is not a valid extended regular expression"],
+    );
+}
+
+#[test]
+fn a_submodule_and_a_type_change_are_checked_by_path() {
+    let Some(sandbox) = Sandbox::new() else {
+        return;
+    };
+    let repo = sandbox.guarded_repo();
+    repo.private_patterns(PATTERNS);
+
+    // A submodule's commit is not in this repository, so its path alone is read.
+    repo.add_index_entry("160000", SUBMODULE_COMMIT, b"vendor/lib");
+    repo.commit("Add a submodule").expect_landed();
+    // Also where diff.ignoreSubmodules=all would hide it from the diff.
+    repo.add_index_entry("160000", SUBMODULE_COMMIT, b"vendor/hornady");
+    let says = ["staged path 'vendor/hornady' matches sensitive pattern 'hornady'"];
+    repo.commit("Add another submodule")
+        .expect_refused("pre-commit", &says);
+    repo.ok(&["config", "diff.ignoreSubmodules", "all"]);
+    repo.commit("Add another submodule")
+        .expect_refused("pre-commit", &says);
+    repo.ok(&["config", "--unset", "diff.ignoreSubmodules"]);
+    repo.unstage();
+
+    // A tracked symbolic link (here a reviewed exception) that becomes a file is a staged path,
+    // as a modified file is.
+    std::os::unix::fs::symlink("elsewhere", repo.dir.join("notes-hornady")).unwrap();
+    repo.ok(&["add", "--", "notes-hornady"]);
+    repo.attempt(
+        &["commit", "-q", "-m", "A reviewed exception"],
+        &[("SENSITIVE_OK", "1")],
+    )
+    .expect_landed();
+    fs::remove_file(repo.dir.join("notes-hornady")).unwrap();
+    repo.stage("notes-hornady", ORDINARY);
+    let status = repo.ok(&["diff", "--cached", "--name-status"]);
+    assert!(
+        status.starts_with("T\t"),
+        "git did not record a type change:\n{status}"
+    );
+    repo.commit("Turn the link into a file").expect_refused(
+        "pre-commit",
+        &["staged path 'notes-hornady' matches sensitive pattern 'hornady'"],
     );
 }
