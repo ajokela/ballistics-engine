@@ -17,7 +17,9 @@ jobs:
   rust-quality:
     name: Rust quality and protocol compatibility
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 0.50.0 grew this job from ~16 to ~31 minutes (the suite now also builds the released
+    # 0.49.0 engine as a byte-identity oracle); 30 cut it off before its last two steps.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
