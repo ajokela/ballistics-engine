@@ -739,14 +739,15 @@ fn the_docs_quote_the_engine() {
                     .unwrap()
             ),
             format!("it now reads {standard_20_km:.0} m"),
-            density_altitude(&json!({"pressure_pa": 1013.25}))
-                .expect_err("hPa sent as pascals")["message"]
-                .as_str()
-                .unwrap()
-                .split(", the standard atmosphere's troposphere")
-                .next()
-                .unwrap()
-                .to_string(),
+            // hPa sent as pascals, dry, is answered as the solve flies it (0.50.0): the
+            // command no longer refuses a station pressure for its pressure altitude.
+            format!(
+                "answers for it with a `pressure_altitude` of {:.0} m",
+                answer(&json!({"pressure_pa": 1013.25, "relative_humidity": 0.0}))
+                    ["pressure_altitude"]["m"]
+                    .as_f64()
+                    .unwrap()
+            ),
         ],
     );
     assert_quotes(

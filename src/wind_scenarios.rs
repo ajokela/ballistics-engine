@@ -180,6 +180,8 @@ pub struct RobustHoldRequest {
 /// trajectory is solved except [`Self::ZeroFailed`] and [`Self::SolveFailed`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum WindScenarioError {
+    /// A typed air refusal discovered by a zero trial or scenario flight.
+    Atmosphere(crate::atmosphere::AtmosphereError),
     /// The set declared a version this build does not implement.
     UnsupportedVersion { version: u32, expected: u32 },
     /// No scenarios at all.
@@ -284,7 +286,9 @@ impl fmt::Display for WindScenarioError {
             WindScenarioError::InvalidLoad { field, value } => {
                 write!(f, "{field} ({value}) must be finite and greater than zero")
             }
-            WindScenarioError::InvalidHumidity(error) => write!(f, "{error}"),
+            WindScenarioError::InvalidHumidity(error) | WindScenarioError::Atmosphere(error) => {
+                write!(f, "{error}")
+            }
             WindScenarioError::MalformedDocument { message } => {
                 write!(f, "malformed wind scenario set: {message}")
             }
@@ -301,7 +305,14 @@ impl fmt::Display for WindScenarioError {
     }
 }
 
-impl Error for WindScenarioError {}
+impl Error for WindScenarioError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Atmosphere(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 /// One scenario's hold at one range.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -681,8 +692,11 @@ pub fn solve_robust_hold(
         atmosphere.clone(),
         load.station_presence,
     )
-    .map_err(|e| WindScenarioError::ZeroFailed {
-        message: e.to_string(),
+    .map_err(|e| match e.atmosphere_error() {
+        Some(air) => WindScenarioError::Atmosphere(air.clone()),
+        None => WindScenarioError::ZeroFailed {
+            message: e.to_string(),
+        },
     })?;
 
     let furthest_m = request
@@ -708,9 +722,12 @@ pub fn solve_robust_hold(
         solver.set_max_range(max_range_m);
         solver.set_time_step(0.001);
         solver.set_wind_segments(scenario.segments.clone());
-        let result = solver.solve().map_err(|e| WindScenarioError::SolveFailed {
-            scenario: scenario.name.clone(),
-            message: e.to_string(),
+        let result = solver.solve().map_err(|e| match e.atmosphere_error() {
+            Some(air) => WindScenarioError::Atmosphere(air.clone()),
+            None => WindScenarioError::SolveFailed {
+                scenario: scenario.name.clone(),
+                message: e.to_string(),
+            },
         })?;
         let samples = result.sampled_points.unwrap_or_default();
         if samples.len() < 2 {

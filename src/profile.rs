@@ -647,9 +647,10 @@ impl ProfileData {
     /// its place, which differs from it by at most the 0.04 hPa between the two.
     ///
     /// Returns the conditions (°C, hPa, the stored humidity percent, m), the presence a solver
-    /// resolves them with, and where the station pressure came from (the stored reading, a
-    /// stored QNH reduced here, or the standard pressure at the altitude for an omitted one;
-    /// a density altitude's derived pressure counts as a reading); an error for `units` or a
+    /// resolves them with, and where the station's readings came from (the stored reading, a
+    /// stored QNH reduced here, kept as it is stored so a refusal quotes it, the standard
+    /// pressure at the altitude for an omitted one, or a stored density altitude's station, and
+    /// its temperature unless one is stored as a reading); an error for `units` or a
     /// `pressure_reference` the profile cannot be read in.
     pub fn stored_station(
         &self,
@@ -657,13 +658,13 @@ impl ProfileData {
         (
             crate::cli_api::AtmosphericConditions,
             crate::atmosphere::StationAtmospherePresence,
-            crate::atmosphere::StationPressureOrigin,
+            crate::atmosphere::StationOrigin,
         ),
         String,
     > {
         use crate::atmosphere::{
             reduce_qnh_to_station_pressure, resolve_atmosphere_for_density_altitude,
-            PressureReferenceMode, StationAtmospherePresence, StationPressureOrigin,
+            PressureReferenceMode, StationAtmospherePresence, StationOrigin,
         };
         let units = self.unit_system()?;
         // The CLI's own `UnitConverter` factors and default pressures, in the same order.
@@ -696,7 +697,7 @@ impl ProfileData {
                     pressure_hpa,
                     altitude_m,
                     StationAtmospherePresence::BOTH,
-                    StationPressureOrigin::Reading,
+                    StationOrigin::density_altitude(explicit_temperature_c.is_some()),
                 )
             }
             None => {
@@ -740,7 +741,7 @@ impl ProfileData {
                     altitude_m,
                     presence,
                     // From the pressure as stored (a QNH before its reduction).
-                    StationPressureOrigin::resolving(entered_hpa, altitude_m, mode, presence),
+                    StationOrigin::resolving(entered_hpa, altitude_m, mode, presence),
                 )
             }
         };
@@ -756,61 +757,120 @@ impl ProfileData {
         ))
     }
 
-    /// This profile's stored air refused by the humidity rules a flight of it applies (a
-    /// humidity outside the sensor band, air that cannot exist), named in the words of whoever
-    /// reads the profile (`fields`: humidity, temperature, pressure, altitude), with the
-    /// temperature and pressure in the profile's own units; `None` when those rules pass, or
-    /// when [`Self::stored_station`] cannot read the profile at all (its own refusal is
-    /// reported where that is checked).
+    /// This profile's stored air refused by the rule a flight of it applies (a humidity outside
+    /// the sensor band, a temperature at or below absolute zero, a pressure at or below 0, a
+    /// density altitude no air has, air that cannot exist), named in the words of whoever reads
+    /// the profile (`fields`: humidity, temperature, pressure, altitude), with the temperature,
+    /// pressure and every altitude in the profile's own units; `None` when the air flies, or
+    /// when [`Self::stored_station`] cannot read the profile at all (its own refusal is reported
+    /// where that is checked).
+    ///
+    /// A profile with a stored density altitude flies its station
+    /// ([`crate::atmosphere::station_for_density_altitude`]), so a caller names the altitude and
+    /// the pressure (and the temperature, unless one is stored as a reading) by the density
+    /// altitude's field, as [`Self::air_refusal`] does.
     pub fn air_refusal_in(
         &self,
         fields: [crate::atmosphere::AirField<'_>; 4],
     ) -> Option<crate::atmosphere::AirRefusal> {
-        use crate::atmosphere::reading_text;
-        let units = self.unit_system().ok()?;
+        use crate::atmosphere::AirUnits;
+        let air_units = match self.unit_system().ok()? {
+            UnitSystem::Metric => AirUnits::METRIC,
+            UnitSystem::Imperial => AirUnits::IMPERIAL,
+        };
+        if let Some(density_altitude) = self.density_altitude {
+            let (to_celsius, to_meters) = self.station_converters().ok()?;
+            let explicit_temperature_c = self
+                .temperature_supplied
+                .then(|| to_celsius(self.temperature));
+            if let Err(error) = crate::atmosphere::station_for_density_altitude(
+                to_meters(density_altitude),
+                explicit_temperature_c,
+            ) {
+                let [humidity, temperature, pressure, altitude] = fields;
+                let temperature_c = explicit_temperature_c.unwrap_or(f64::NAN);
+                return Some(
+                    error.refusal_in(
+                        &crate::atmosphere::AirSpelling {
+                            humidity,
+                            temperature,
+                            pressure,
+                            altitude,
+                            humidity_sent: self.humidity,
+                            temperature_text: air_units.temperature.text(temperature_c),
+                            temperature_unit: air_units.temperature,
+                            temperature_origin: crate::atmosphere::StationOrigin::density_altitude(
+                                explicit_temperature_c.is_some(),
+                            )
+                            .temperature,
+                            pressure_text: String::new(),
+                            pressure_origin:
+                                crate::atmosphere::StationPressureOrigin::DensityAltitude,
+                            qnh_text: None,
+                            altitude_unit: air_units.altitude,
+                        },
+                        to_meters(density_altitude),
+                        temperature_c,
+                        f64::NAN,
+                    ),
+                );
+            }
+        }
         let (conditions, presence, origin) = self.stored_station().ok()?;
-        conditions
-            .air_refusal_from(
-                presence,
-                origin,
-                fields,
-                self.humidity,
-                |celsius| match units {
-                    UnitSystem::Metric => reading_text(celsius, "°C"),
-                    UnitSystem::Imperial => reading_text(celsius * 9.0 / 5.0 + 32.0, "°F"),
-                },
-                |hpa| match units {
-                    UnitSystem::Metric => reading_text(hpa, "hPa"),
-                    UnitSystem::Imperial => reading_text(hpa / 33.8639, "inHg"),
-                },
-            )
-            .filter(crate::atmosphere::AirRefusal::is_humidity_rule)
+        conditions.air_refusal_from(presence, origin, fields, self.humidity, air_units)
+    }
+
+    /// The profile's `units` conversions of a stored temperature to °C and an altitude to
+    /// metres, the CLI's own factors.
+    #[allow(clippy::type_complexity)]
+    fn station_converters(&self) -> Result<(fn(f64) -> f64, fn(f64) -> f64), String> {
+        Ok(match self.unit_system()? {
+            UnitSystem::Metric => (|value| value, |value| value),
+            UnitSystem::Imperial => (|value| (value - 32.0) * 5.0 / 9.0, |value| value * 0.3048),
+        })
     }
 
     /// [`Self::air_refusal_in`] in the stored profile's own words: `profile '<name>' field
-    /// humidity = 100 at 100 °C and 1013.25 hPa: no such air exists: ...`, located at the
-    /// stored document's member (`$.humidity`, `$.temperature`, `$.pressure`, `$.altitude`).
-    /// The impossible-air rule every flight of the profile applies, for the surfaces that read
-    /// a profile without flying it: `profile.validate`, `.a7p` export, `profile show`.
+    /// humidity = 100 at 100 °C and 1013.25 hPa: no such air exists: ...`,
+    /// `profile '<name>' field pressure = -1 inHg: pressure must be greater than 0`, located at
+    /// the stored document's member (`$.humidity`, `$.temperature`, `$.pressure`,
+    /// `$.altitude`). A stored density altitude is the field of the altitude and the pressure
+    /// it gives the station, and of its temperature unless one is stored as a reading
+    /// (`profile '<name>' field density_altitude = 200000 ft: no air has this density altitude:
+    /// ...`, at `$.density_altitude`). The rule every flight of the profile applies, for the
+    /// surfaces that read a profile without flying it: `profile.validate`, `.a7p` export,
+    /// `profile show`.
     pub fn air_refusal(&self) -> Option<crate::atmosphere::AirRefusal> {
-        let names = ["humidity", "temperature", "pressure", "altitude"]
-            .map(|field| format!("profile '{}' field {field}", self.name));
+        let names = [
+            "humidity",
+            "temperature",
+            "pressure",
+            "altitude",
+            "density_altitude",
+        ]
+        .map(|field| format!("profile '{}' field {field}", self.name));
+        let field = |index: usize, path: &'static str| crate::atmosphere::AirField {
+            name: &names[index],
+            path,
+        };
+        let density_altitude = field(4, "$.density_altitude");
+        let derived = self.density_altitude.is_some();
         self.air_refusal_in([
-            crate::atmosphere::AirField {
-                name: &names[0],
-                path: "$.humidity",
+            field(0, "$.humidity"),
+            if derived && !self.temperature_supplied {
+                density_altitude
+            } else {
+                field(1, "$.temperature")
             },
-            crate::atmosphere::AirField {
-                name: &names[1],
-                path: "$.temperature",
+            if derived {
+                density_altitude
+            } else {
+                field(2, "$.pressure")
             },
-            crate::atmosphere::AirField {
-                name: &names[2],
-                path: "$.pressure",
-            },
-            crate::atmosphere::AirField {
-                name: &names[3],
-                path: "$.altitude",
+            if derived {
+                density_altitude
+            } else {
+                field(3, "$.altitude")
             },
         ])
     }
@@ -832,10 +892,11 @@ impl ProfileData {
         if let Err(err) = self.validate_humidity() {
             warnings.push(err);
         } else if let Some(refusal) = self.air_refusal() {
-            // The impossible-air rule every flight of this profile applies, so a profile
-            // reported valid is one every solve of it can fly.
+            // The rule every flight of this profile applies to its air, so a profile reported
+            // valid is one every solve of it can fly.
             warnings.push(format!(
-                "{refusal}; edit the humidity, temperature or pressure stored in the profile"
+                "{refusal}; edit the humidity, temperature, pressure, altitude or density \
+                 altitude stored in the profile"
             ));
         }
         if let Some(cf) = self.elevation_cf {

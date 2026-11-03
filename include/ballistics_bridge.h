@@ -39,16 +39,19 @@
  *     document, "solve failed" when the solve service refused or could not
  *     finish it, and "atmosphere.density_altitude request rejected" for every
  *     refusal of that command.
- *   - A refused humidity or station air, on every command that takes one
+ *   - A refused station reading or air, on every command that takes one
  *     ("card.*", "true.fit", "true.dsf", "true.plan", "true.wind",
  *     "profile.import_a7p", "profile.export_a7p"; since 0.50.0): the same
  *     solve-json error envelope, with error.details.error.code "invalid_value"
- *     at the path of the member to blame in that command's own request
- *     ("$.humidity", "$.model.humidity_pct", "$.humidity_pct",
- *     "a7p:c_zero_air_humidity", or the temperature, pressure or altitude
- *     member when that is the reading to blame: the temperature outside
- *     173.15-373.15 K, the pressure or altitude, whichever put the station
- *     above the troposphere). A command whose details carry a flat
+ *     at the path of the member to blame in that command's own request, the
+ *     message naming it in the request's own units ("$.humidity",
+ *     "$.model.humidity_pct", "$.humidity_pct", "a7p:c_zero_air_humidity", or
+ *     the temperature, pressure or altitude member when that is the reading
+ *     to blame: a temperature at or below absolute zero, or outside
+ *     173.15-373.15 K for air that cannot exist; a pressure at or below 0;
+ *     for impossible air outside the troposphere, the pressure or altitude
+ *     that put the station there: "pressure = -1 inHg: pressure must be greater than 0").
+ *     A command whose details carry a flat
  *     "reason" keeps it beside "error" ("invalid_input" for true.dsf,
  *     "invalid_request" for true.plan, "field" for profile.export_a7p). The
  *     outer "message" leads with the cause: "card.come_ups failed: humidity =
@@ -64,6 +67,27 @@
  *
  * Messages are text for a person; branch on codes. Per command, with a Kotlin
  * unwrap: docs/ANDROID_JNI_BRIDGE.md, "Reading a failure".
+ *
+ * Station air, per command: station pressure is finite and positive, station
+ * altitude finite, and temperature finite and above absolute zero. A density altitude is
+ * finite and resolves to a station that can exist. The combined humid air must
+ * exist too. No card, truing or solve command imposes a narrower weather range.
+ * A refusal discovered in flight keeps the request field and its units, just
+ * as an initial station refusal does. A QNH is quoted as sent, with its reduced
+ * station pressure identified separately.
+ *
+ * atmosphere.density_altitude answers beyond the troposphere: pressure_altitude
+ * walks the same ICAO layers as air_at outside the troposphere band; faa_rule
+ * keeps the NWS formula's continuation plus the FAA temperature correction;
+ * density_matched finds equal density in the standard layers. The Rust
+ * nws_pressure_altitude_ft still reports the NWS continuation, not the layers.
+ * See docs/ATMOSPHERE_DENSITY_ALTITUDE.md for measured request/response examples.
+ *
+ * File-format bounds are separate: profile.export_a7p retains the .a7p format's
+ * -100..100 C and 300..1500 hPa bounds. Import reads absent or zero pressure as
+ * omitted and absent humidity as dry air. These are not solve acceptance bounds.
+ * This header's JSON bridge reports refusals in the envelope described above;
+ * scalar and struct C APIs keep their existing NULL, NaN or status signals.
  *
  * Relative humidity, per command. One rule: a field named "relative_humidity"
  * (the SI wire of solve-json v1, beside temperature_k and pressure_pa) is a

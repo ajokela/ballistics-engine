@@ -881,8 +881,8 @@ fn not_carried_for(p: &ProfileData) -> Vec<NotCarried> {
         "the file's pressure field declares no reference, so it is written as-is; a QNH \
          profile therefore travels as if it were station pressure",
     );
-    // 0.49.0: the file has no notion of an omitted reading, and an import marks its
-    // temperature and pressure as typed. A value the profile did NOT mark as typed therefore
+    // Export writes temperature and nonzero pressure, and import marks these as typed.
+    // A value the profile did NOT mark as typed therefore
     // arrives as a reading. That changes what flies wherever the old rule reads the unmarked
     // value as omitted: inside its band (15 ± 0.1 °C, 1013.25 ± 0.5 hPa), at any altitude above
     // 1 m. The file carries no altitude, and a run supplies its own with `--altitude` (the
@@ -914,8 +914,8 @@ fn not_carried_for(p: &ProfileData) -> Vec<NotCarried> {
     push(
         "pressure_supplied",
         pressure_lost.then(|| "false".to_string()),
-        "the file has no concept of an omitted reading and an import marks its pressure as \
-         typed station pressure, so an unmarked stored 1013.25 hPa / 29.92 inHg (within the old \
+        "export writes a nonzero pressure and import marks it as typed station pressure, \
+         so an unmarked stored 1013.25 hPa / 29.92 inHg (within the old \
          rule's 0.5 hPa band), which flies ICAO air at any altitude above 1 m, the profile's or \
          a run's --altitude (a QNH there reduces to about the same), travels as a reading and \
          flies as typed there — see `altitude` and `pressure_reference`",

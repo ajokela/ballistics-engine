@@ -182,6 +182,9 @@ pub struct TruingPlanErrorV1 {
     pub code: TruingPlanErrorCodeV1,
     pub message: String,
     pub rejected_candidates: Vec<RejectedTruingCandidateV1>,
+    /// Typed flight refusal, kept until a surface names the request's station reading.
+    #[serde(skip)]
+    pub atmosphere_error: Option<crate::atmosphere::AtmosphereError>,
 }
 
 impl fmt::Display for TruingPlanErrorV1 {
@@ -190,7 +193,13 @@ impl fmt::Display for TruingPlanErrorV1 {
     }
 }
 
-impl Error for TruingPlanErrorV1 {}
+impl Error for TruingPlanErrorV1 {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.atmosphere_error
+            .as_ref()
+            .map(|error| error as &(dyn Error + 'static))
+    }
+}
 
 impl TruingPlanErrorV1 {
     fn invalid(message: impl Into<String>) -> Self {
@@ -198,6 +207,7 @@ impl TruingPlanErrorV1 {
             code: TruingPlanErrorCodeV1::InvalidRequest,
             message: message.into(),
             rejected_candidates: Vec::new(),
+            atmosphere_error: None,
         }
     }
 
@@ -835,9 +845,12 @@ pub fn plan_truing_experiment_v1(
         // error, with its cause first, never a list of candidates "unreachable" for it, which
         // would point a caller at range selection for a problem no range choice can fix.
         Err(error) => {
-            return Err(TruingPlanErrorV1::invalid(format!(
+            let atmosphere_error = crate::atmosphere::AtmosphereError::in_error(&*error).cloned();
+            let mut failure = TruingPlanErrorV1::invalid(format!(
                 "{error}; no candidate range could be evaluated"
-            )));
+            ));
+            failure.atmosphere_error = atmosphere_error;
+            return Err(failure);
         }
     }
     rejected.sort_by_key(|candidate| candidate.input_index);
@@ -851,6 +864,7 @@ pub fn plan_truing_experiment_v1(
                 candidates.len()
             ),
             rejected_candidates: rejected,
+            atmosphere_error: None,
         });
     }
     if maximum_compatible_count_with_fixed(&candidates, &[], request.minimum_separation_yd)
@@ -863,6 +877,7 @@ pub fn plan_truing_experiment_v1(
                 request.observation_count, request.minimum_separation_yd
             ),
             rejected_candidates: rejected,
+            atmosphere_error: None,
         });
     }
 
@@ -883,6 +898,7 @@ pub fn plan_truing_experiment_v1(
                 request.observation_count, request.minimum_separation_yd
             ),
             rejected_candidates: rejected,
+            atmosphere_error: None,
         });
     };
     design.indices.sort_by(|a, b| {

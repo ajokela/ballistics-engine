@@ -48,7 +48,7 @@ use crate::optic::{
 use crate::truing::{DropUnit, TruingModelInputsV1};
 use crate::truing_dsf::{
     dsf_observation_warrants_90pct_warning, interpolate_position_and_velocity,
-    mach_1_crossing_range_m, solve_for_dsf, DsfSolveInputs, DSF_MACH_CEILING,
+    mach_1_crossing_range_m, DsfSolveInputs, DSF_MACH_CEILING,
 };
 
 /// Request for a tall-target correction-factor computation.
@@ -181,6 +181,9 @@ pub struct DsfPointResultV1 {
 /// particular the JSON bridge — can match exhaustively instead of sniffing message text.
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum DsfServiceErrorV1 {
+    /// Air refused in the forward flight.
+    #[error("{0}")]
+    Atmosphere(#[source] crate::atmosphere::AtmosphereError),
     #[error("invalid dsf request: {0}")]
     InvalidInput(String),
     #[error(
@@ -217,7 +220,9 @@ impl DsfServiceErrorV1 {
             Self::DegenerateDrop { range_yd } => {
                 serde_json::json!({"reason": "degenerate_drop", "range_yd": range_yd})
             }
-            Self::ForwardModel(_) => serde_json::json!({"reason": "forward_model"}),
+            Self::ForwardModel(_) | Self::Atmosphere(_) => {
+                serde_json::json!({"reason": "forward_model"})
+            }
         })
     }
 }
@@ -253,7 +258,12 @@ pub fn derive_dsf_point_v1(
     let solve_inputs: DsfSolveInputs = (&req.model).into();
     let max_range_m = dsf_solve_envelope_m(req.range_yd);
     let result =
-        solve_for_dsf(&solve_inputs, max_range_m).map_err(DsfServiceErrorV1::ForwardModel)?;
+        crate::truing_dsf::solve_for_dsf_checked(&solve_inputs, max_range_m).map_err(|error| {
+            match error.atmosphere_error() {
+                Some(air) => DsfServiceErrorV1::Atmosphere(air.clone()),
+                None => DsfServiceErrorV1::ForwardModel(error.to_string()),
+            }
+        })?;
 
     let range_m = req.range_yd * 0.9144;
     derive_dsf_point_from_solve_v1(&result, range_m, req.observed_drop, req.drop_unit)
@@ -399,6 +409,7 @@ pub fn dial_plan_v1(req: &DialPlanRequestV1) -> Result<DialPlanReportV1, OpticEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::truing_dsf::solve_for_dsf;
 
     #[test]
     fn tall_target_matches_the_cli_arithmetic_and_rejects_clicks() {

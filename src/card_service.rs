@@ -94,8 +94,8 @@ use crate::adjustment::{
     AdjustmentUnit, ClickValue,
 };
 use crate::atmosphere::{
-    reading_text, AirField, AirRefusal, RelativeHumidity, StationAtmospherePresence,
-    DEFAULT_HUMIDITY_PERCENT,
+    AirField, AirRefusal, AirUnits, AltitudeUnit, PressureUnit, RelativeHumidity,
+    StationAtmospherePresence, TemperatureUnit, DEFAULT_HUMIDITY_PERCENT,
 };
 use crate::hold_curve::{
     card_sample_max_range_m, range_not_sampled_message, run_sampled_flight_with_station_presence,
@@ -771,6 +771,9 @@ impl From<CardTruncationV1> for CardTruncation {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CardServiceError {
+    /// Air refused during the zero or sampled flight; retain its typed cause for the caller.
+    #[error("{0}")]
+    Atmosphere(#[source] crate::atmosphere::AtmosphereError),
     #[error("invalid request: {0}")]
     InvalidRequest(String),
     #[error("zero solve failed: {0}")]
@@ -1206,12 +1209,42 @@ fn resolve_axes_only(req: &CardRequestV1) -> Result<Resolved, CardServiceError> 
 /// The card request's station air refused in the card's own words, or `None` when it flies:
 /// `humidity = 106: relative humidity must be a percent from 0 to 100 (...)` for a humidity
 /// beyond the sensor band, `humidity = 100 at 212 °F and 29.92 inHg: no such air exists: ...`
-/// for air that cannot exist. The temperature and pressure are the station values every solve
-/// of the card flies, in the request's own units; the path is the member to blame in the
-/// request (`$.humidity`, `$.temperature`, `$.pressure`, `$.altitude`).
+/// for air that cannot exist, `pressure = -1 inHg: pressure must be greater than 0` and
+/// `temperature = -500 °F: temperature must be above absolute zero (-459.67 °F)` for a reading no
+/// air has. The temperature and pressure are the station values every solve of the card flies,
+/// and every altitude is stated, in the request's own units; the path is the member to blame in
+/// the request (`$.humidity`, `$.temperature`, `$.pressure`, `$.altitude`).
 ///
 /// Every card command checks this before it solves anything, and the bridge reports it in
 /// `error.details` when it is the refusal the service made.
+/// A card's station refusal, or a typed refusal discovered during its flight.
+pub fn air_refusal_for_error(
+    req: &CardRequestV1,
+    error: Option<&crate::atmosphere::AtmosphereError>,
+) -> Option<AirRefusal> {
+    if let Some(error) = error {
+        let units = Units::resolve(req);
+        return Some(error.temperature_refusal(
+            AirField {
+                name: "temperature",
+                path: "$.temperature",
+            },
+            AirUnits {
+                temperature: match units.temperature {
+                    CardTemperatureUnit::Fahrenheit => TemperatureUnit::Fahrenheit,
+                    CardTemperatureUnit::Celsius => TemperatureUnit::Celsius,
+                },
+                altitude: match units.altitude {
+                    CardAltitudeUnit::Feet => AltitudeUnit::Feet,
+                    CardAltitudeUnit::Meters => AltitudeUnit::Meters,
+                },
+                ..AirUnits::default()
+            },
+        ));
+    }
+    air_refusal(req)
+}
+
 pub fn air_refusal(req: &CardRequestV1) -> Option<AirRefusal> {
     let u = Units::resolve(req);
     let station_presence =
@@ -1245,17 +1278,21 @@ pub fn air_refusal(req: &CardRequestV1) -> Option<AirRefusal> {
             },
         ],
         req.humidity,
-        |celsius| match u.temperature {
-            CardTemperatureUnit::Fahrenheit => reading_text(celsius * 9.0 / 5.0 + 32.0, "°F"),
-            CardTemperatureUnit::Celsius => reading_text(celsius, "°C"),
-        },
-        |hpa| match u.pressure {
-            CardPressureUnit::InHg => reading_text(hpa / 33.8639, "inHg"),
-            CardPressureUnit::HPa => reading_text(hpa, "hPa"),
+        AirUnits {
+            temperature: match u.temperature {
+                CardTemperatureUnit::Fahrenheit => TemperatureUnit::Fahrenheit,
+                CardTemperatureUnit::Celsius => TemperatureUnit::Celsius,
+            },
+            pressure: match u.pressure {
+                CardPressureUnit::InHg => PressureUnit::InchesOfMercury,
+                CardPressureUnit::HPa => PressureUnit::Hectopascals,
+            },
+            altitude: match u.altitude {
+                CardAltitudeUnit::Feet => AltitudeUnit::Feet,
+                CardAltitudeUnit::Meters => AltitudeUnit::Meters,
+            },
         },
     )
-    // The humidity rules only: any other refusal of a reading is the solver's, as before.
-    .filter(AirRefusal::is_humidity_rule)
 }
 
 fn resolve_inner(
@@ -1581,7 +1618,10 @@ fn solve_zero(r: &Resolved) -> Result<f64, CardServiceError> {
         atmosphere,
         r.station_presence,
     )
-    .map_err(|e| CardServiceError::ZeroSolve(e.to_string()))
+    .map_err(|e| match e.atmosphere_error() {
+        Some(air) => CardServiceError::Atmosphere(air.clone()),
+        None => CardServiceError::ZeroSolve(e.to_string()),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1621,7 +1661,12 @@ fn sampled(
         Some(r.zero_distance_m),
         r.station_presence,
     )
-    .map_err(|e| CardServiceError::Trajectory(e.to_string()))
+    .map_err(
+        |e| match crate::atmosphere::AtmosphereError::in_error(&*e) {
+            Some(air) => CardServiceError::Atmosphere(air.clone()),
+            None => CardServiceError::Trajectory(e.to_string()),
+        },
+    )
 }
 
 /// Read one card row's sample off a solved flight, or `None` when the flight does not span it

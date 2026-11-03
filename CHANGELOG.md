@@ -114,13 +114,27 @@ humidity, altitude, density altitude), field by field. In 0.49.0 only `trajector
   `trajectory_integration::KernelInputError` and `AtmoSock::validate` are new too.
   `perturbation::InputAxis` has a `RelativeHumidity` variant, so a glob import of both
   `ballistics_engine::*` and `InputAxis::*` makes `RelativeHumidity` ambiguous. Name one of them.
-- **`wind_scenarios::WindScenarioError` has two new variants, `InvalidHumidity(AtmosphereError)`
-  and `ZeroFailed { message }`**, so an exhaustive `match` needs an arm for each.
+- **`wind_scenarios::WindScenarioError` gains `InvalidHumidity(AtmosphereError)`
+  and `ZeroFailed { message }`**, so an exhaustive `match` needs an arm for each. Its new
+  `Atmosphere` variant is described with the other typed flight errors below.
   - A load's `humidity_pct` beyond the sensor band, NaN or infinite, is `InvalidHumidity`, at the
     field `humidity_pct`. 0.49.0 reported a NaN as `InvalidLoad { field: "humidity", .. }` and
     flew 150 as 100 %.
-  - A load whose zero cannot be solved is `ZeroFailed`. It was a `SolveFailed` of a scenario
-    named `<zero>`, a placeholder no scenario set contains.
+  - A load whose zero cannot be solved for a non-atmospheric reason is `ZeroFailed`. It was
+    a `SolveFailed` of a scenario named `<zero>`, a placeholder no scenario set contains.
+- **Typed air refusals survive service boundaries.** The new variants
+  `card_service::CardServiceError::Atmosphere`, `truing_service::DsfServiceErrorV1::Atmosphere`,
+  `truing_uncertainty::UncertaintyTruingErrorV1::Atmosphere` and
+  `wind_scenarios::WindScenarioError::Atmosphere` each carry an `AtmosphereError`; exhaustive
+  matches need an arm for them. `TruingPlanErrorV1::atmosphere_error` is a new optional field
+  that struct literals must supply; serialization skips it. These retain a refusal found in
+  flight until the calling surface can name its originating station reading and units.
+  `UncertaintyTruingErrorV1` retains its `Eq` contract, including for a refused NaN.
+  `AtmosphereError::in_error` follows typed error causes;
+  `temperature_refusal` and `temperature_refusal_from` format a late temperature refusal,
+  with the latter retaining a density-altitude origin. `card_service::air_refusal_for_error`
+  provides the same formatting for card requests. `truing_dsf::solve_for_dsf_checked` keeps
+  the typed cause; the existing `solve_for_dsf` still returns its string error.
 - **`wasm::Calculator::set_humidity` returns `Result<Calculator, JsValue>`** (wasm32 only). It
   refuses a humidity beyond the sensor band itself; JavaScript chains as before and catches the
   throw.
@@ -129,7 +143,7 @@ humidity, altitude, density altitude), field by field. In 0.49.0 only `trajector
   locates the field to blame; `AtmosphereError::explanation` is the reason alone, and
   `atmosphere::parse_humidity_percent_text` parses a typed percent through the one validator,
   and `atmosphere::reading_text` writes a reading the way a refusal quotes it.
-  `AtmosphericConditions` gains `resolved_station`, `station_air`, `pressure_origin`,
+  `AtmosphericConditions` gains `resolved_station`, `station_air`, `station_origin`,
   `air_refusal`, `air_refusal_from`, `air_refusal_named` and `air_refusal_named_from`;
   `ProfileData` gains `stored_station`, `air_refusal` and `air_refusal_in`;
   `TruingModelInputsV1` and `WindTruingRequest` gain `air_refusal`;
@@ -140,6 +154,20 @@ humidity, altitude, density altitude), field by field. In 0.49.0 only `trajector
   `AirSpelling::altitude_unit` (an `AltitudeUnit`, `Meters` or `Feet`, exported from the crate
   root) is the unit every altitude a refusal quotes is stated in, and
   `AtmosphereError::explanation_in` gives the reason with its altitude in a chosen unit.
+  `AtmosphericConditions::air_refusal` and `air_refusal_from` take the surface's `AirUnits`
+  (a `TemperatureUnit`, a `PressureUnit` and an `AltitudeUnit`), and `AirSpelling` carries its
+  `temperature_unit`. `AtmosphericConditions::for_density_altitude_named` states a density
+  altitude no air has in a terminal's words, and `StationPressureOrigin::DensityAltitude` marks a
+  density altitude's station. `StationOrigin` (exported from the crate root) is what a surface
+  that resolved its own station states to `air_refusal_from` and `air_refusal_named_from`: the
+  pressure's origin, the QNH as it was given (so a refusal quotes it, never the station pressure
+  reduced from it), and a `StationTemperatureOrigin` saying whether a density altitude gave the
+  temperature; `AirSpelling` carries the same as `qnh_text` and `temperature_origin`, and
+  `ProfileData::stored_station` returns it. The one rule for each station reading has its own
+  functions in `atmosphere`: `check_station_temperature_c`, `check_station_pressure_hpa`,
+  `check_temperature_flag`, `check_pressure_flag`, `check_altitude_flag` and
+  `station_for_density_altitude` (with `AtmosphereErrorReason::NoAirAtDensityAltitude`), and
+  `pressure_altitude_m` is the pressure altitude of any station pressure.
   `BallisticsError::in_terminal_words` states a refusal of air aloft, found in flight, the way a
   terminal states every refusal of its air.
 
@@ -437,17 +465,19 @@ table outputs round the change away.
   - `solve` (bridge, `solve-json`, the MCP `solve` tool, and the `explain`, `tolerance` and
     `error-budget` request files) refuses air that cannot exist before any flight as
     `invalid_value`. The path is `$.atmosphere.relative_humidity`, or `temperature_k` when the
-    temperature is outside 173.15-373.15 K. When the station pressure is outside the
-    troposphere it is the reading that put it there, with a hint to check that reading's unit:
-    `pressure_pa` for a pressure sent as a station pressure (hPa sent as pascals) or as a QNH
-    that is itself outside the troposphere, and `altitude_m` for one omitted or sent as a
-    plausible QNH ("no pressure_pa was given, and the standard pressure at the station
-    altitude of 20000 m is a pressure altitude of ... m, outside the troposphere (-5000 m to
-    11000 m): check the altitude's unit"). `atmosphere.density_altitude` asks the same rule
-    first, and runs its own station-pressure check after a refusal blamed on the temperature
-    and before any other, so the two commands give the same code and path for every atmosphere
-    `solve` refuses, and the same message wherever that check passes. `solve-json` exits 2 for
-    it, as for any invalid value.
+    temperature is outside 173.15-373.15 K, the message then naming it ("...; temperature_k =
+    400 K is outside 173.15 K to 373.15 K, where the humid-air formulas hold: check the
+    temperature and its unit"). When the station pressure is outside the troposphere it is the
+    reading that put it there, with a hint to check that reading's unit: `pressure_pa` for a
+    pressure sent as a station pressure (hPa sent as pascals) or as a QNH that is itself outside
+    the troposphere, and `altitude_m` for one omitted or sent as a plausible QNH ("no
+    pressure_pa was given, and the standard pressure at the station altitude of 20000 m is a
+    pressure altitude of ... m, outside the troposphere (-5000 m to 11000 m): check the
+    altitude's unit"). A QNH is quoted as it was sent, with the station pressure it was reduced
+    to ("pressure_pa is a QNH of 1013.25 Pa, and reduced to the station altitude of 1500 m it is
+    a station pressure of ... Pa, ..."), never the reduced pressure as if it had been sent. `atmosphere.density_altitude` asks the same rule
+    and has no check of its own, so the two commands give the same code, path and message for
+    every atmosphere `solve` refuses. `solve-json` exits 2 for it, as for any invalid value.
   - A QNH that leaves no station pressure at its altitude (MBA-1605: its pressure altitude plus
     the station height at or past 44,331 m, such as 500 hPa at 40 km) is refused by `solve` and
     `atmosphere.density_altitude` alike, with one message: "a QNH of 50000 Pa leaves no station
@@ -508,11 +538,9 @@ table outputs round the change away.
     than 0 K), with both density altitudes wherever they land: °C sent as `temperature_k`
     (15 K) reads `faa_rule` -9991 m and `density_matched` -44505 m, dry air at 700 K 15064 m
     and 8337 m. Air that cannot exist, which it blamed on the temperature with a message of its
-    own, now gets `solve`'s message, at the same path. Its one check of its own left is about
-    the pressure: a station pressure whose pressure altitude is outside the troposphere (hPa
-    sent as pascals) is refused at the reading to blame, as before, whatever the temperature,
-    and its message now reads "a station pressure is read only between -5000 m and 11000 m of
-    pressure altitude".
+    own, now gets `solve`'s message, at the same path. Its last check of its own, on the station
+    pressure, is gone too (see the one rule for each station pressure, altitude and density
+    altitude below).
 
   `atmosphere::density_matched_altitude_m`, behind `density_matched`, now follows the standard
   atmosphere's upper layers for air thinner than the standard tropopause's, so standard air
@@ -545,9 +573,10 @@ table outputs round the change away.
   (within 0.2 % of the ideal gas) and 520.117 m/s, the dry sound speed. 0.49.0 flew it as pure
   steam, 0.29325 kg/m³ and 591.326 m/s, at any humidity. Humid air there cannot exist and is
   `ImpossibleAir` on the temperature, whose message now reads "... or the air is humid above
-  water's critical point, or too hot to have a density". The last clause is dry air the
+  water's critical point, or too hot or too dense to have a density". "Too hot" is dry air the
   CIPM-2007 compressibility gives no positive density, from about 90,000 K at 1013.25 hPa, which
-  is refused at the temperature too. Below the critical point every result is bit-identical:
+  is refused at the temperature too; "too dense" is a pressure beyond any air's (see the one
+  rule for each station pressure below). Below the critical point every result is bit-identical:
   the zero-humidity vapour fraction is the very value the full formula gave.
 - **BEHAVIOUR CHANGE: a flight into air that cannot exist aloft is refused, naming the
   temperature.** The standard lapse from a station temperature (6.5 K per km in the troposphere)
@@ -565,9 +594,11 @@ table outputs round the change away.
   - The CLI and the browser terminal state it in their own words and units, as they state every
     refusal of their air: `--temperature = -263.15 °C: ... at 1539 m above mean sea level ...`,
     and under `--units imperial` `--temperature = -441.67 °F: ... at 5049 ft above mean sea level
-    ...` (the new `BallisticsError::in_terminal_words`). The CLI's `trajectory` names a saved
-    profile's field or a `--location` column where the reading came from one, and the zero day's
-    own temperature as `--zero-temperature`.
+    ...` (the new `BallisticsError::in_terminal_words`). Every CLI command names a saved
+    profile's field, a `--location` column or a density altitude where the reading came from
+    one (`profile 'p' field temperature = -273.14 °C: the air aloft would fall below absolute
+    zero: ...` on `come-ups --profile p`), and `trajectory` the zero day's own temperature as
+    `--zero-temperature`.
   - A zero search whose steeper trials climb there is refused with it too. It used to discard
     those trials and report "Cannot find zero angle: target beyond effective range even at
     maximum angle".
@@ -586,6 +617,181 @@ table outputs round the change away.
     `solve_trajectory_rust` end the trajectory at the state before the failing step, so they
     return no NaN state (RK45 always stopped there; RK4 ran on). `try_solve_trajectory_rust`
     cannot name the cause: its error type is still `WindSegmentError`.
+
+- **BEHAVIOUR CHANGE: one rule for each station pressure, altitude and density altitude on every
+  surface.** A station pressure flies when it is finite and above 0, an altitude when it is
+  finite, and a density altitude when it is finite and the station the FAA rule's inverse gives
+  for it can exist; beyond that each is refused only when the air it describes cannot exist.
+  Nothing narrower anywhere, so a reading flies, or is refused, alike wherever it enters, as the
+  one temperature rule above does for a temperature. Each narrower bound 0.49.0 had is gone:
+  - the CLI's `--pressure` range, 8..33 inHg (250..1100 hPa), on `trajectory`, `zero`,
+    `true-velocity`, `true-wind`, `plan-truing`, `mpbr`, `come-ups`, `lead`, `wind-card`,
+    `stability`, `range-table`, `compare`, `hold-corridor`, `mark-to-range`, `bdc-match`,
+    `optimal-zero`, `adaptive-card`, `reticle hold` and `profile save`. A `--location` CSV cell,
+    `--zero-pressure`, `estimate-bc --pressure` and a saved profile flew such a reading already.
+    The 5 inHg trajectory below now flies;
+  - the browser terminal's same range on `true-velocity` and `true-wind` (its `trajectory`,
+    `zero`, `lead`, `estimate-bc` and `--zero-pressure` flew such a reading already).
+    It accepts the same 5 inHg station as the native run below;
+  - the CLI's `--density-altitude` and `--zero-density-altitude` range, -5000..120000 (feet or
+    metres), on `trajectory`, `zero` and `profile save`, which a `--location` CSV `DA` cell, a
+    saved profile and the browser terminal flew. The -60000 ft shot-day and zero-day runs
+    below now fly;
+  - solve-json's `altitude_m` range, -5000..84000 m, on `solve` (the bridge, `solve-json`, the
+    MCP `solve` tool, and the `explain`, `tolerance` and `error-budget` request files) and
+    `atmosphere.density_altitude`. Every other surface flew any finite altitude. The standard
+    air an omitted temperature or pressure defaults to is still that of the ICAO table's ends,
+    -5 km and 84 km, beyond them. The explicit-air solves below now fly at -6000 m and
+    90000 m; the MCP schema no longer advertises either altitude bound;
+  - `atmosphere.density_altitude`'s refusal of a station pressure whose pressure altitude is
+    outside -5 km to 11 km, which refused air `solve` flies (twice sea level, the stratosphere,
+    a near vacuum). It now answers for every station `solve` flies, and refuses what `solve`
+    refuses with `solve`'s code, path and message, word for word. Its `pressure_altitude` is the
+    NWS formula inside -5 km to 11 km, bit for bit as before, and outside that band the standard
+    atmosphere's own altitude of the pressure, its ICAO layers walked as `air_at` walks them
+    (`atmosphere::pressure_altitude_m`, new): standard pressure at 20 km reads 20000 m, where the
+    NWS formula continued reads 18879 m, and hPa sent as `pressure_pa` (1013.25 Pa, dry) reads
+    30967 m, where it was refused. `faa_rule` is the NWS formula plus the FAA rule's straight
+    line wherever it lands, as before, so it stays the exact inverse of density-altitude entry;
+    outside the band it is that formula's figure, not the standard atmosphere's.
+    `nws_pressure_altitude_ft` is unchanged, and says what it reports outside the band.
+
+  Engine output for the newly accepted CLI readings (impact line only; warnings remain on
+  stderr):
+
+  ```text
+  $ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --pressure 5 | grep "Impact Vel"
+  ║ Impact Velocity:    2605.18 fps       ║
+  $ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --density-altitude=-60000 --humidity 0 | grep "Impact Vel"
+  ║ Impact Velocity:    1088.15 fps       ║
+  $ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --auto-zero 100 --zero-density-altitude=-60000 --zero-humidity 0 | grep "Impact Vel"
+  ║ Impact Velocity:    2153.92 fps       ║
+  ```
+
+  The same explicit-air solve at either altitude below reaches its requested range; output
+  rounded to three decimals. The full runnable request is in
+  [SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#station-altitudes-outside-the-former-range).
+
+  | `altitude_m` | `summary.actual_range_m` | `summary.terminal_speed_mps` |
+  | ---: | ---: | ---: |
+  | -6000 | 300.000 | 641.558 |
+  | 90000 | 300.000 | 641.558 |
+
+  `atmosphere.density_altitude` output outside the former pressure-altitude band, dry in
+  every row, altitudes rounded to metres. The first row uses the engine's standard air at
+  20 km. `NWS continuation` is `nws_pressure_altitude_ft` converted to metres, not the
+  bridge's layered `pressure_altitude` result:
+
+  | Temperature (K) | Station pressure (Pa) | `pressure_altitude` (m) | NWS continuation (m) | `faa_rule` (m) | `density_matched` (m) |
+  | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 216.65 | 5474.89023 | 20000 | 18879 | 20757 | 20002 |
+  | 288.15 | 1013.25000 | 30967 | 25861 | 32016 | 32478 |
+  | 288.15 | 202650.00000 | -6249 | -6247 | -7734 | -7846 |
+
+  Every flag that takes a station reading refuses what its rule refuses, up front, in its own
+  words and unit, the zero day's flags and `estimate-bc`'s included: `--pressure -1 inHg is at
+  or below zero`, `--pressure NaN hPa is not a finite number`, `--altitude NaN ft is not a
+  finite number`. `atmosphere::check_station_pressure_hpa`, `check_pressure_flag` and
+  `check_altitude_flag` (new) are the shared checks. A density altitude no air has is refused
+  naming the reading that carried it, in the run's units:
+  `--density-altitude = 200000 ft: no air has this density altitude: at its pressure altitude by
+  the FAA rule, 200000 ft, the NWS pressure formula gives no finite pressure above 0 (check the
+  density altitude and its unit)`, where 0.49.0 failed it as "atmosphere.pressure must be
+  finite". `atmosphere::station_for_density_altitude` (new) is the rule, and
+  `AtmosphereErrorReason::NoAirAtDensityAltitude` (new) its refusal. With no temperature a
+  density altitude flies up to a pressure altitude of 145286 ft (44283 m), where the FAA rule's
+  standard temperature reaches 0 K; with one, up to 145366 ft (44308 m), where the NWS pressure
+  formula reaches 0 hPa.
+
+  A pressure so far beyond any air's (above about 4e156 Pa) that the CIPM-2007 density comes
+  out 0 is air that cannot exist, refused at the pressure; 0.49.0 flew it as a vacuum. The
+  `ImpossibleAir` message now reads "... (more vapour pressure than the total), or the air is
+  humid above water's critical point, or too hot or too dense to have a density".
+
+  The `.a7p` file format's own bounds stay, and are the format's, not the air's:
+  `profile.export_a7p` refuses a pressure outside 300..1500 hPa, as it refuses a temperature
+  outside -100..100 °C, because its recipient cannot open a file outside them. The format has no
+  altitude or density altitude. `profile.import_a7p` and `profile import` accept an absent or
+  explicitly zero `c_zero_air_pressure` (0 hPa) as no pressure reading. The imported profile
+  stores the metric default, 1013.25 hPa, without a `pressure_supplied` marker, so its flight
+  uses the documented default pressure at the station altitude. This preserves import
+  compatibility and replaces the supplied vacuum that flights previously refused.
+  The mapping report now identifies the absent reading and its default. Nonzero pressure
+  remains supplied and impossible air is refused by the flight's rule, naming the file's
+  field and units. Other proto3 weather zeros keep their meanings: absent air temperature
+  imports as a supplied 0 °C and absent humidity as 0 %. Export writes the default pressure
+  with the format's normal quantization; re-import reads it as supplied, with the lost
+  omission marker named in export's `not_carried` report.
+
+  The MCP `solve` tool's schema states the rule: `temperature_k` and `pressure_pa` carry
+  `exclusiveMinimum: 0`, and `altitude_m` no bound.
+
+  The C ABI's density-altitude conversions, `ballistics_density_altitude_altitude_m`,
+  `ballistics_density_altitude_temperature_c` and `ballistics_density_altitude_pressure_hpa`,
+  apply the same rule: each returns NaN, the "no station" signal it gave only for a density
+  altitude that is not finite, wherever `station_for_density_altitude` refuses, including an
+  explicit temperature that is not finite or not above absolute zero. They returned a station
+  no air has: DA 44300 m gave -273.26 °C at 1.8e-17 hPa, and DA 50000 m -310.35 °C beside a NaN
+  pressure. Every station they return is bit-identical.
+- **Every refused station reading is named where it came from, on every surface, in that
+  surface's units**, a humidity, a temperature, a pressure, an altitude and a density altitude
+  alike:
+  - every CLI command names the flag, the `--location` or `--profile` CSV column (`--location
+    CSV column PRESSURE = -1 inHg: pressure must be greater than 0`), the saved profile's field
+    (`profile 'p' field temperature = -500 °F: temperature must be above absolute zero (-459.67
+    °F)`), the zero day's own flag, or the density altitude that gave the reading
+    (`--density-altitude`, `--location CSV column DA`, `profile 'p' field density_altitude`).
+    In 0.49.0 only `trajectory` named the source, and only of a humidity or of air that cannot
+    exist: a CSV or stored pressure of -1 came back from the solver as `atmosphere.pressure =
+    -33.86 hPa: pressure must be greater than 0`, a `--location` temperature, pressure or
+    altitude was named as its flag, and `stability` printed a NaN for a stored pressure of 0;
+  - the browser terminal names its flags the same way, the zero day's and a density altitude's
+    included;
+  - the bridge's `card.*` and `true.*` commands, and the C ABI that carries them
+    (`ballistics_bridge_call`), name the request's own member in its own units, with the
+    solve-json error envelope in `error.details` at its path, as `solve` does:
+    `pressure = -1 inHg: pressure must be greater than 0` at `$.pressure`,
+    `temperature_f = -500 °F: temperature must be above absolute zero (-459.67 °F)` at
+    `$.model.temperature_f`. `true.*` read "pressure must be positive and finite", naming no
+    member, and `card.*` the solver's message, with no path;
+  - `profile.validate`, `profile.export_a7p`, `profile save` and `profile show` refuse, or warn
+    of, a stored temperature, pressure or density altitude no air has, as they did of a
+    humidity, and the online client refuses one before any request is sent, in the request's
+    words;
+  - a refusal of a temperature at or below absolute zero states absolute zero in the surface's
+    own unit: `-459.67 °F`, `-273.15 °C`, `0 K`;
+  - air that cannot exist, blamed on the temperature (outside -100 °C to 100 °C, where the
+    humid-air formulas hold), names the temperature where it came from, as every other blamed
+    reading is: `; profile 'hot' field temperature = 214 °F is outside -148 °F to 212 °F, where
+    the humid-air formulas hold: check the temperature and its unit`, or the density altitude
+    that gave it: `; --density-altitude gives a station temperature of -458.65 °F, outside -148
+    °F to 212 °F, where the humid-air formulas hold: check the density altitude's unit`. The
+    bridge's `card.*` and `true.*` commands name their own member (`; temperature = 214 °F is
+    outside ...`) at the path they blame;
+  - a QNH is quoted as it was given, with the station pressure it was reduced to, on every
+    surface (a flag, the zero day's flag, a `--location` column, a saved profile's stored QNH,
+    the browser terminal, solve-json): `--pressure is a QNH of 5 hPa, and reduced to the station
+    altitude of 1500 m it is a station pressure of 2.99 hPa, a pressure altitude of 39443 m,
+    outside the troposphere (-5000 m to 11000 m): check the pressure's unit`, never the reduced
+    pressure as if it had been typed. A QNH the altimeter-setting relation leaves no station
+    pressure for reads `--pressure is a QNH of 5 hPa, and reduced to the station altitude of
+    20000 m it leaves no station pressure: the altimeter-setting relation has none that high
+    (check the pressure's unit)` on every command, `stability` included, where 0.49.0 read
+    `atmosphere.pressure must be finite` for such a QNH (500 hPa at 40 km; `stability` had a
+    wording of its own, with no units).
+    Every command, the calculator commands (`come-ups`, `lead`, `mpbr`, `plan-truing` and the
+    rest) included, blames a plausible QNH reduced at too high an altitude on the altitude.
+    `atmosphere::StationOrigin` and `StationTemperatureOrigin` (new) carry where a station's
+    readings came from, and `AirSpelling` carries `temperature_origin` and `qnh_text`;
+  - air that cannot exist at a density altitude's station above the troposphere is blamed on
+    the density altitude, "check the density altitude's unit";
+  - an absurd reading is refused in a few characters, as the SI wire's echo already was
+    (`1e300 K`): a reading, and every altitude a refusal quotes, from 10^7 on is written in
+    exponent form to six significant digits, a typed value from 10^7 on or below 0.001 is
+    echoed in exponent form exactly (`--pressure -1e300 hPa is at or below zero`), and a
+    pressure that is not 0 is never stated as 0 (`at 15 °C and 1e-300 hPa`). `--pressure
+    1e160` was refused with the pressure written out twice in 161 digits and its pressure
+    altitude in 35.
 
 ### Fixed
 - **A profile re-save no longer drops stored data.** In 0.49.0, a profile that failed to load

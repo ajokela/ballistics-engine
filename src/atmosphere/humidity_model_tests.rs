@@ -1664,8 +1664,11 @@ fn impossible_air_is_blamed_on_one_reading_in_one_order() {
             altitude: AirField::named("a"),
             humidity_sent: 100.0,
             temperature_text: format!("{temperature_c} °C"),
+            temperature_unit: crate::atmosphere::TemperatureUnit::Celsius,
+            temperature_origin: crate::atmosphere::StationTemperatureOrigin::Reading,
             pressure_text: format!("{pressure_hpa} hPa"),
             pressure_origin: origin,
+            qnh_text: None,
             altitude_unit: AltitudeUnit::Meters,
         };
         let refusal = error.refusal_in(&spelling, 0.0, temperature_c, pressure_hpa);

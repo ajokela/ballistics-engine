@@ -101,7 +101,7 @@ use ballistics_engine::wez::{
 // MBA-1372: SAAMI free-recoil and power-factor calculators.
 use ballistics_engine::atmosphere::{
     resolve_station_conditions_with_presence, PressureReferenceMode, StationAtmospherePresence,
-    StationPressureOrigin, StationReading,
+    StationOrigin, StationReading,
 };
 use ballistics_engine::power_factor::{evaluate_all as pf_evaluate_all, scored_power_factor};
 use ballistics_engine::recoil::{
@@ -453,6 +453,35 @@ fn parse_humidity_percent(raw: &str) -> Result<f64, String> {
     ballistics_engine::atmosphere::parse_humidity_percent_text(raw).map(RelativeHumidity::percent)
 }
 
+/// Keep clap's flag, reason and exit status while echoing numeric readings compactly.
+#[derive(Clone, Debug)]
+struct HumidityPercentParser;
+
+impl clap::builder::TypedValueParser for HumidityPercentParser {
+    type Value = f64;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        raw: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        parse_humidity_percent
+            .parse_ref(cmd, arg, raw)
+            .map_err(|mut error| {
+                if let Some(value) = raw.to_str().and_then(|s| s.trim().parse::<f64>().ok()) {
+                    error.insert(
+                        clap::error::ContextKind::InvalidValue,
+                        clap::error::ContextValue::String(
+                            ballistics_engine::atmosphere::echo_number(value),
+                        ),
+                    );
+                }
+                error
+            })
+    }
+}
+
 /// The flags a user types for the shot day's station air, in the order
 /// [`refuse_cli_air`] takes them: humidity, temperature, pressure, altitude.
 const SHOT_AIR_FLAGS: [&str; 4] = ["--humidity", "--temperature", "--pressure", "--altitude"];
@@ -464,27 +493,82 @@ const ZERO_AIR_FLAGS: [&str; 4] = [
     "--zero-altitude",
 ];
 
+/// Where each station reading a command flies came from, by the name the user can see it under
+/// (in [`SHOT_AIR_FLAGS`] order: humidity, temperature, pressure, altitude), and, for a station
+/// the command resolved itself, where its readings came from: a QNH as it was typed, or a
+/// density altitude's pressure (and temperature).
+///
+/// The one way every command names a refused reading: its flag (`--pressure`,
+/// `--zero-pressure`), a `--location` or `--profile` CSV column (`--location CSV column
+/// PRESSURE`), a saved profile's field (`profile 'p' field pressure`), or the density altitude
+/// that gave it (`--density-altitude`, `profile 'p' field density_altitude`). A bare array of
+/// flags is the labels of a command whose readings all come from its flags.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AirLabels<'a> {
+    names: [&'a str; 4],
+    /// `Some` when the station's readings are not plain readings the presence rule can place: a
+    /// QNH reduced to the station (quoted as typed), or a density altitude's station. `None`
+    /// lets the presence rule say where the pressure came from.
+    origin: Option<StationOrigin>,
+}
+
+impl AirLabels<'_> {
+    /// Apply the same reading names to errors discovered after the station check.
+    fn error(self, error: impl Into<Box<dyn Error>>, units: UnitSystem) -> Box<dyn Error> {
+        let error = error.into();
+        if let (Some(origin), Some(air)) = (
+            self.origin,
+            ballistics_engine::atmosphere::AtmosphereError::in_error(&*error),
+        ) {
+            return Box::new(air.temperature_refusal_from(
+                ballistics_engine::atmosphere::AirField::named(self.names[1]),
+                match units {
+                    UnitSystem::Imperial => ballistics_engine::atmosphere::AirUnits::IMPERIAL,
+                    UnitSystem::Metric => ballistics_engine::atmosphere::AirUnits::METRIC,
+                },
+                origin.temperature,
+            ));
+        }
+        in_the_clis_words(error, units, self.names[1])
+    }
+}
+
+impl<'a> From<[&'a str; 4]> for AirLabels<'a> {
+    fn from(names: [&'a str; 4]) -> Self {
+        Self {
+            names,
+            origin: None,
+        }
+    }
+}
+
 /// Refuse the station air a command is about to fly, in the CLI's own words, before it does
 /// any work.
 ///
 /// `atmosphere` and `presence` are exactly what the command hands its solver, so this refuses
 /// what every solve of them would refuse ([`AtmosphericConditions::station_air`]), and nothing
-/// a solve would fly. `labels` names the readings where the user can see them (the flags, a
-/// `--location` CSV column, a saved profile's field); the temperature and pressure are the
-/// station values the solve resolved, in the run's units:
+/// a solve would fly: a humidity outside the sensor band, a temperature at or below absolute
+/// zero, a pressure at or below 0, a reading that is not finite, air that cannot exist. `labels`
+/// names the readings where the user can see them ([`AirLabels`]); the temperature and pressure
+/// are the station values the solve resolved, in the run's units:
 ///
 /// `--humidity = 100 at 212 °F and 29.92 inHg: no such air exists: ...`
+/// `--location CSV column PRESSURE = -1 inHg: pressure must be greater than 0`
 ///
 /// So a command whose every row or candidate would fail on the air (lead, plan-truing, the
 /// searches) exits 1 with the cause as its first line instead of a table of failed rows, a
 /// shortage of reachable ranges or a fitted zero no search found.
-fn refuse_cli_air(
+fn refuse_cli_air<'a>(
     atmosphere: &AtmosphericConditions,
     presence: StationAtmospherePresence,
     units: UnitSystem,
-    labels: [&str; 4],
+    labels: impl Into<AirLabels<'a>>,
 ) -> Result<(), String> {
-    match atmosphere.air_refusal_named(presence, units, labels) {
+    let labels = labels.into();
+    let origin = labels
+        .origin
+        .unwrap_or_else(|| atmosphere.station_origin(presence));
+    match atmosphere.air_refusal_named_from(presence, origin, units, labels.names) {
         Some(refusal) => Err(refusal.message().to_string()),
         None => Ok(()),
     }
@@ -492,33 +576,65 @@ fn refuse_cli_air(
 
 /// [`refuse_cli_air`] for a command that resolved its station itself (a QNH reduced, the
 /// presence rule applied, a density altitude's derived triple), so `resolved` flies as given and
-/// `origin` says where its pressure came from: the reading, the standard pressure at the
-/// altitude, or a QNH reduced there ([`StationPressureOrigin::resolving`] on the inputs the
-/// resolution was handed). A station pressure outside the troposphere is then blamed on the
-/// reading that put it there, never on a `--pressure` nobody typed.
-fn refuse_resolved_cli_air(
+/// `origin` says where its readings came from: the reading, the standard pressure at the
+/// altitude, a QNH reduced there, quoted as typed ([`StationOrigin::resolving`] on the inputs
+/// the resolution was handed), or a density altitude. A station pressure outside the
+/// troposphere is then blamed on the reading that put it there, never on a `--pressure` nobody
+/// typed, and never quoted as a `--pressure` the user did not type.
+fn refuse_resolved_cli_air<'a>(
     resolved: &AtmosphericConditions,
-    origin: StationPressureOrigin,
+    origin: StationOrigin,
     units: UnitSystem,
-    labels: [&str; 4],
+    labels: impl Into<AirLabels<'a>>,
 ) -> Result<(), String> {
-    match resolved.air_refusal_named_from(StationAtmospherePresence::BOTH, origin, units, labels) {
+    let labels = labels.into();
+    match resolved.air_refusal_named_from(
+        StationAtmospherePresence::BOTH,
+        labels.origin.unwrap_or(origin),
+        units,
+        labels.names,
+    ) {
         Some(refusal) => Err(refusal.message().to_string()),
         None => Ok(()),
     }
 }
 
+/// The station a density altitude (`density_altitude_display`, feet imperial / metres metric)
+/// gives, in metric (°C, hPa, m), by the one rule
+/// ([`ballistics_engine::atmosphere::station_for_density_altitude`]), or its
+/// refusal naming the reading that carried it: `--density-altitude = 200000 ft: no air has this
+/// density altitude: ...`. `explicit_temperature_c` is the temperature it is re-solved around,
+/// when one was given; `labels` name the station's readings, the altitude (and the pressure,
+/// and the temperature unless one was given) by the density altitude's own name.
+fn cli_station_for_density_altitude(
+    density_altitude_display: f64,
+    explicit_temperature_c: Option<f64>,
+    humidity: f64,
+    units: UnitSystem,
+    labels: [&str; 4],
+) -> Result<(f64, f64, f64), String> {
+    AtmosphericConditions::for_density_altitude_named(
+        UnitConverter::altitude_to_metric(density_altitude_display, units),
+        explicit_temperature_c,
+        humidity,
+        units,
+        labels,
+    )
+    .map(|station| (station.altitude, station.temperature, station.pressure))
+    .map_err(|refusal| refusal.message().to_string())
+}
+
 /// [`refuse_cli_air`] for the truing commands, whose forward model takes the air in imperial
 /// units (`temp_f`, `press_inhg`, `alt_ft`) and converts it to metric itself: the station
 /// checked is the one that conversion flies, and the message is in the run's units.
-fn refuse_truing_cli_air(
+fn refuse_truing_cli_air<'a>(
     temp_f: f64,
     press_inhg: f64,
     humidity: f64,
     alt_ft: f64,
     presence: StationAtmospherePresence,
     units: UnitSystem,
-    labels: [&str; 4],
+    labels: impl Into<AirLabels<'a>>,
 ) -> Result<(), String> {
     refuse_cli_air(
         &AtmosphericConditions {
@@ -532,6 +648,28 @@ fn refuse_truing_cli_air(
         units,
         labels,
     )
+}
+
+/// The labels of a command whose station readings all come from its flags ([`SHOT_AIR_FLAGS`])
+/// and that reduces its pressure (`pressure_display`, inHg / hPa as entered) by `mode` itself
+/// before the air is checked: a QNH is kept as it was entered, so a refusal quotes it rather
+/// than the station pressure reduced from it ([`StationOrigin::of`]). An absolute pressure
+/// leaves its origin to the presence rule.
+fn shot_flag_labels(
+    pressure_display: Option<f64>,
+    mode: Option<PressureReferenceMode>,
+    units: UnitSystem,
+) -> AirLabels<'static> {
+    AirLabels {
+        names: SHOT_AIR_FLAGS,
+        origin: match (pressure_display, mode) {
+            (Some(qnh), Some(PressureReferenceMode::Qnh)) => Some(StationOrigin::of(
+                Some(UnitConverter::pressure_to_metric(qnh, units)),
+                PressureReferenceMode::Qnh,
+            )),
+            _ => None,
+        },
+    }
 }
 
 /// `--confidence`'s three permitted levels, parsed directly into
@@ -859,7 +997,7 @@ enum Commands {
         #[arg(
             long,
             default_value = "50.0",
-            value_parser = parse_humidity_percent,
+            value_parser = HumidityPercentParser,
             allow_negative_numbers = true
         )]
         humidity: f64,
@@ -881,12 +1019,9 @@ enum Commands {
         /// speed of sound) and the implied pressure is re-solved so the density altitude is
         /// still reproduced exactly. A `--location`/CSV `DA`/`DENSITY_ALTITUDE` column is used
         /// when this flag is omitted.
-        // MBA-1420: bound the flag so an out-of-range value fails naming --density-altitude.
-        // Without this an extreme value drives the pressure inverse negative and surfaces as
-        // "atmosphere.pressure must be finite", pointing at a field the user never typed. The
-        // band is deliberately wide (and unit-agnostic, since the flag is feet imperial /
-        // meters metric): -2000 and 100000 both solve fine, so this only catches nonsense.
-        #[arg(long, allow_hyphen_values = true, value_parser = f64_range(-5000.0, 120000.0))]
+        // The one density-altitude rule (0.50.0): a finite number whose station can exist,
+        // refused naming --density-altitude otherwise, at any value; no band of its own.
+        #[arg(long, allow_hyphen_values = true)]
         density_altitude: Option<f64>,
 
         /// Output format
@@ -1176,7 +1311,7 @@ enum Commands {
         /// outside that range (101.7 in fog) is read as 100 or 0.
         #[arg(
             long,
-            value_parser = parse_humidity_percent,
+            value_parser = HumidityPercentParser,
             allow_negative_numbers = true
         )]
         zero_humidity: Option<f64>,
@@ -1190,8 +1325,9 @@ enum Commands {
         /// conditions expressed as a single density altitude. SUPERSEDES --zero-altitude and
         /// --zero-pressure/--zero-pressure-type for the zero solve only; the shot-day
         /// atmosphere is untouched. An explicit --zero-temperature still wins over the ISA
-        /// temperature at that density altitude.
-        #[arg(long, allow_hyphen_values = true, value_parser = f64_range(-5000.0, 120000.0))]
+        /// temperature at that density altitude. Held to the one density-altitude rule, as
+        /// --density-altitude is.
+        #[arg(long, allow_hyphen_values = true)]
         zero_density_altitude: Option<f64>,
 
         /// Zero-day powder temperature for --auto-zero (°F/°C). With --powder-temp-curve,
@@ -1458,7 +1594,7 @@ enum Commands {
         #[arg(
             long,
             default_value = "50.0",
-            value_parser = parse_humidity_percent,
+            value_parser = HumidityPercentParser,
             allow_negative_numbers = true
         )]
         humidity: f64,
@@ -1691,7 +1827,7 @@ enum Commands {
         #[arg(
             long,
             default_value = "50.0",
-            value_parser = parse_humidity_percent,
+            value_parser = HumidityPercentParser,
             allow_negative_numbers = true
         )]
         humidity: f64,
@@ -1705,8 +1841,9 @@ enum Commands {
         /// SUPERSEDES `--altitude` and `--pressure`/`--pressure-type` entirely — an ISA-
         /// equivalent station altitude and pressure are back-solved from it. An explicit
         /// `--temperature` still wins over the ISA temperature at that density altitude, and
-        /// the pressure is re-solved so the density altitude is reproduced exactly.
-        #[arg(long, allow_hyphen_values = true, value_parser = f64_range(-5000.0, 120000.0))]
+        /// the pressure is re-solved so the density altitude is reproduced exactly. Held to the
+        /// one density-altitude rule, as `trajectory --density-altitude` is.
+        #[arg(long, allow_hyphen_values = true)]
         density_altitude: Option<f64>,
 
         /// Path to a custom drag deck: CSV `mach,cd` per line, or a vendor `.drg` file (by
@@ -1796,7 +1933,7 @@ enum Commands {
         #[arg(
             long,
             default_value = "50.0",
-            value_parser = parse_humidity_percent,
+            value_parser = HumidityPercentParser,
             allow_negative_numbers = true
         )]
         humidity: f64,
@@ -2045,7 +2182,7 @@ enum Commands {
         #[arg(
             long,
             default_value = "50.0",
-            value_parser = parse_humidity_percent,
+            value_parser = HumidityPercentParser,
             allow_negative_numbers = true
         )]
         humidity: f64,
@@ -2230,7 +2367,7 @@ enum Commands {
         #[arg(
             long,
             default_value = "50.0",
-            value_parser = parse_humidity_percent,
+            value_parser = HumidityPercentParser,
             allow_negative_numbers = true
         )]
         humidity: f64,
@@ -2351,7 +2488,7 @@ enum Commands {
         /// A sensor reading up to 5 outside that range (101.7 in fog) is read as 100 or 0.
         #[arg(
             long,
-            value_parser = parse_humidity_percent,
+            value_parser = HumidityPercentParser,
             allow_negative_numbers = true
         )]
         humidity: Option<f64>,
@@ -2469,7 +2606,7 @@ enum Commands {
         #[arg(
             long,
             default_value = "50.0",
-            value_parser = parse_humidity_percent,
+            value_parser = HumidityPercentParser,
             allow_negative_numbers = true
         )]
         humidity: f64,
@@ -2610,7 +2747,7 @@ enum Commands {
         #[arg(
             long,
             default_value = "50.0",
-            value_parser = parse_humidity_percent,
+            value_parser = HumidityPercentParser,
             allow_negative_numbers = true
         )]
         humidity: f64,
@@ -2726,7 +2863,7 @@ enum Commands {
         #[arg(
             long,
             default_value = "50.0",
-            value_parser = parse_humidity_percent,
+            value_parser = HumidityPercentParser,
             allow_negative_numbers = true
         )]
         humidity: f64,
@@ -3081,7 +3218,7 @@ enum Commands {
         #[arg(
             long,
             default_value = "50.0",
-            value_parser = parse_humidity_percent,
+            value_parser = HumidityPercentParser,
             allow_negative_numbers = true
         )]
         humidity: f64,
@@ -3300,7 +3437,7 @@ enum Commands {
         #[arg(
             long,
             default_value = "50.0",
-            value_parser = parse_humidity_percent,
+            value_parser = HumidityPercentParser,
             allow_negative_numbers = true
         )]
         humidity: f64,
@@ -3443,7 +3580,7 @@ enum Commands {
         #[arg(
             long,
             default_value = "50.0",
-            value_parser = parse_humidity_percent,
+            value_parser = HumidityPercentParser,
             allow_negative_numbers = true
         )]
         humidity: f64,
@@ -3576,7 +3713,7 @@ enum Commands {
         #[arg(
             long,
             default_value = "50.0",
-            value_parser = parse_humidity_percent,
+            value_parser = HumidityPercentParser,
             allow_negative_numbers = true
         )]
         humidity: f64,
@@ -4145,7 +4282,7 @@ enum ReticleAction {
         #[arg(
             long,
             default_value = "50.0",
-            value_parser = parse_humidity_percent,
+            value_parser = HumidityPercentParser,
             allow_negative_numbers = true
         )]
         humidity: f64,
@@ -4328,7 +4465,7 @@ struct InverseSolverLoadArgs {
     #[arg(
         long,
         default_value = "50.0",
-        value_parser = parse_humidity_percent,
+        value_parser = HumidityPercentParser,
         allow_negative_numbers = true
     )]
     humidity: f64,
@@ -4363,7 +4500,7 @@ impl InverseSolverLoadArgs {
         typed: &TypedStation,
         zero_distance: Option<f64>,
         units: UnitSystem,
-    ) -> Result<(HoldCurveLoad, Option<ProfileData>), Box<dyn Error>> {
+    ) -> Result<(HoldCurveLoad, Option<ProfileData>, FlownStation), Box<dyn Error>> {
         let profile = match self.profile.as_deref() {
             Some(name) => Some(load_profile_for_units(name, units)?),
             None => None,
@@ -4431,7 +4568,7 @@ impl InverseSolverLoadArgs {
             units,
             station.labels(),
         )?;
-        Ok((load, profile))
+        Ok((load, profile, station))
     }
 }
 
@@ -4533,7 +4670,7 @@ enum ProfileAction {
         #[arg(
             long,
             default_value = "50.0",
-            value_parser = parse_humidity_percent,
+            value_parser = HumidityPercentParser,
             allow_negative_numbers = true
         )]
         humidity: f64,
@@ -4549,12 +4686,9 @@ enum ProfileAction {
         /// 0.50.0): a stored density altitude flies whenever the run supplies no pressure or
         /// altitude of its own. A typed `--temperature` saved with it is the explicit
         /// temperature at that density altitude.
-        // MBA-1420: bound the flag so an out-of-range value fails naming --density-altitude.
-        // Without this an extreme value drives the pressure inverse negative and surfaces as
-        // "atmosphere.pressure must be finite", pointing at a field the user never typed. The
-        // band is deliberately wide (and unit-agnostic, since the flag is feet imperial /
-        // meters metric): -2000 and 100000 both solve fine, so this only catches nonsense.
-        #[arg(long, allow_hyphen_values = true, value_parser = f64_range(-5000.0, 120000.0))]
+        // The one density-altitude rule (0.50.0): a finite number whose station can exist,
+        // refused naming --density-altitude otherwise, at any value; no band of its own.
+        #[arg(long, allow_hyphen_values = true)]
         density_altitude: Option<f64>,
 
         /// Bullet name/description
@@ -5469,29 +5603,15 @@ impl UnitConverter {
     /// Resolve the pressure CLI argument AFTER --units is known.
     ///
     /// `None` -> the per-unit standard atmosphere (29.92 inHg / 1013.25 hPa).
-    /// `Some(v)` -> validated against a plausible range in the user's own unit
-    /// and returned IN USER UNITS (the caller still applies `pressure_to_metric`).
+    /// `Some(v)` -> checked by the one station-pressure rule every surface applies (finite and
+    /// above 0, `check_pressure_flag`; a near vacuum and twice sea level fly) and returned IN
+    /// USER UNITS (the caller still applies `pressure_to_metric`).
     fn resolve_pressure(val: Option<f64>, units: UnitSystem) -> Result<f64, String> {
         match (val, units) {
             (None, UnitSystem::Imperial) => Ok(29.92),
             (None, UnitSystem::Metric) => Ok(1013.25),
-            (Some(v), UnitSystem::Imperial) => {
-                if !(8.0..=33.0).contains(&v) {
-                    Err(format!(
-                        "--pressure {v} inHg is out of range (expected ~8..33 inHg for imperial units)"
-                    ))
-                } else {
-                    Ok(v)
-                }
-            }
-            (Some(v), UnitSystem::Metric) => {
-                if !(250.0..=1100.0).contains(&v) {
-                    Err(format!(
-                        "--pressure {v} hPa is out of range (expected ~250..1100 hPa for metric units)"
-                    ))
-                } else {
-                    Ok(v)
-                }
+            (Some(v), units) => {
+                check_station_flag(StationQuantity::Pressure, "--pressure", v, units)
             }
         }
     }
@@ -5997,6 +6117,33 @@ fn csv_number(
     Ok(None)
 }
 
+/// Where a station reading a run flies was read from a CSV row: the file's flag and the column,
+/// so a refusal of the reading names them (`--location CSV column PRESSURE`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CsvColumn {
+    file: &'static str,
+    column: &'static str,
+}
+
+impl CsvColumn {
+    /// The reading's name in a refusal: `--location CSV column PRESSURE`.
+    fn label(self) -> String {
+        format!("{} CSV column {}", self.file, self.column)
+    }
+}
+
+/// The column [`csv_number`] reads for `keys` in `row` (the first one the row has), as a
+/// [`CsvColumn`] of the file `file`.
+fn csv_column(
+    row: &HashMap<String, String>,
+    keys: &[&'static str],
+    file: &'static str,
+) -> Option<CsvColumn> {
+    keys.iter()
+        .find(|key| row.contains_key(**key))
+        .map(|&column| CsvColumn { file, column })
+}
+
 /// A `--location` CSV's HUMIDITY cell through the one humidity validator: the percent it flies
 /// (a sensor reading in the band is the end it reads as), `None` for no cell, or the refusal
 /// naming the column. A number the band refuses reads as every refused humidity does
@@ -6039,6 +6186,9 @@ struct ProfileCsvNumbers {
     poi_up_mil: Option<f64>,
     poi_right_mil: Option<f64>,
     bullet_length: Option<f64>,
+    /// The columns `zero_temperature` and `zero_altitude` were read from, to name them.
+    zero_temperature_column: Option<CsvColumn>,
+    zero_altitude_column: Option<CsvColumn>,
 }
 
 impl ProfileCsvNumbers {
@@ -6056,6 +6206,8 @@ impl ProfileCsvNumbers {
             poi_up_mil: number(&["V_OFFSET_MIL"])?,
             poi_right_mil: number(&["H_OFFSET_MIL"])?,
             bullet_length: number(&["BULLET_LENGTH", "LENGTH"])?,
+            zero_temperature_column: csv_column(row, &["ZERO_TEMP"], SOURCE),
+            zero_altitude_column: csv_column(row, &["ZERO_ALT"], SOURCE),
         })
     }
 }
@@ -6070,19 +6222,32 @@ struct LocationCsvNumbers {
     humidity_percent: Option<f64>,
     density_altitude: Option<f64>,
     wind_direction: Option<f64>,
+    /// The columns each station reading was read from, to name them.
+    columns: StationColumns,
 }
 
 impl LocationCsvNumbers {
     fn read(row: &HashMap<String, String>) -> Result<Self, String> {
         const SOURCE: &str = "--location";
         let number = |keys: &[&str]| csv_number(row, keys, SOURCE);
+        const TEMPERATURE: &[&str] = &["TARGET_TEMP", "TEMPERATURE", "TEMP"];
+        const PRESSURE: &[&str] = &["PRESSURE", "PRESSURE(HPA OR INHG)"];
+        const ALTITUDE: &[&str] = &["ALTITUDE", "ALT"];
+        const DENSITY_ALTITUDE: &[&str] = &["DA", "DENSITY_ALTITUDE"];
         Ok(Self {
-            temperature: number(&["TARGET_TEMP", "TEMPERATURE", "TEMP"])?,
-            pressure: number(&["PRESSURE", "PRESSURE(HPA OR INHG)"])?,
-            altitude: number(&["ALTITUDE", "ALT"])?,
+            temperature: number(TEMPERATURE)?,
+            pressure: number(PRESSURE)?,
+            altitude: number(ALTITUDE)?,
             humidity_percent: csv_humidity_percent(row, SOURCE)?,
-            density_altitude: number(&["DA", "DENSITY_ALTITUDE"])?,
+            density_altitude: number(DENSITY_ALTITUDE)?,
             wind_direction: number(&["WIND_DIR", "WIND_DIRECTION"])?,
+            columns: StationColumns {
+                humidity: csv_column(row, &["HUMIDITY"], SOURCE),
+                temperature: csv_column(row, TEMPERATURE, SOURCE),
+                pressure: csv_column(row, PRESSURE, SOURCE),
+                altitude: csv_column(row, ALTITUDE, SOURCE),
+                density_altitude: csv_column(row, DENSITY_ALTITUDE, SOURCE),
+            },
         })
     }
 }
@@ -6256,6 +6421,41 @@ fn load_profile_for_units(name: &str, units: UnitSystem) -> Result<ProfileData, 
 // A saved profile's stored weather, flown by every command that takes one (0.50.0)
 // ============================================================================
 
+/// Which station reading a flag carries, for [`check_station_flag`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StationQuantity {
+    /// A temperature, °F imperial / °C metric.
+    Temperature,
+    /// A pressure, inHg imperial / hPa metric.
+    Pressure,
+    /// An altitude or a density altitude, feet imperial / metres metric.
+    Altitude,
+}
+
+/// A station reading typed into `flag`, in the run's `units`, held to the one rule its quantity
+/// has on every surface and refused in the flag's own words and unit, or returned unchanged: a
+/// temperature finite and above absolute zero, a pressure finite and above 0, an altitude or a
+/// density altitude a finite number (a density altitude's station is checked where it is
+/// resolved, since that depends on the temperature). The library's
+/// `atmosphere::check_*_flag` functions are the rule, so the browser terminal refuses alike.
+fn check_station_flag(
+    quantity: StationQuantity,
+    flag: &str,
+    value: f64,
+    units: UnitSystem,
+) -> Result<f64, String> {
+    use ballistics_engine::atmosphere::{
+        check_altitude_flag, check_pressure_flag, check_temperature_flag,
+    };
+    let imperial = matches!(units, UnitSystem::Imperial);
+    match quantity {
+        StationQuantity::Temperature => check_temperature_flag(flag, value, imperial),
+        StationQuantity::Pressure => check_pressure_flag(flag, value, imperial),
+        StationQuantity::Altitude => check_altitude_flag(flag, value, imperial),
+    }
+    .map(|()| value)
+}
+
 /// Where one station reading a run flies came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StationSource {
@@ -6266,6 +6466,27 @@ enum StationSource {
     Profile,
     /// Neither did: the command's documented default.
     Default,
+    /// A CSV cell supplied it (`trajectory`'s `--location` and `--profile` rows), which the run
+    /// counts as typed.
+    Column(CsvColumn),
+}
+
+/// The CSV columns a run's typed station readings were read from, each `None` for a reading
+/// typed as a flag (or not given): `trajectory`'s `--location` and `--profile` CSV cells.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct StationColumns {
+    humidity: Option<CsvColumn>,
+    temperature: Option<CsvColumn>,
+    pressure: Option<CsvColumn>,
+    altitude: Option<CsvColumn>,
+    density_altitude: Option<CsvColumn>,
+}
+
+impl StationColumns {
+    /// Where a reading the run supplied came from: its CSV column, or its flag.
+    fn source(column: Option<CsvColumn>) -> StationSource {
+        column.map_or(StationSource::Typed, StationSource::Column)
+    }
 }
 
 /// The station readings a run supplied itself, in the run's display units, each `None` when the
@@ -6290,6 +6511,8 @@ struct TypedStation {
     /// The command flies no humidity (`stability`'s Miller correction is dry), so a stored
     /// humidity is never read, and so never refused.
     dry: bool,
+    /// The CSV columns `trajectory` read any of these from, so a refusal names them.
+    columns: StationColumns,
 }
 
 impl TypedStation {
@@ -6297,7 +6520,8 @@ impl TypedStation {
     /// subcommand's arguments by their ids (`temperature`, `pressure`, `pressure_type`,
     /// `humidity`, `altitude`); a command without one of them reads it as not typed. A flag with
     /// a clap default (`--humidity 50`, `--altitude 0`) counts only when it was typed, and a
-    /// typed temperature or pressure is range-checked as each command checks it.
+    /// typed temperature, pressure or altitude is held to its one rule, in the flag's words
+    /// ([`check_station_flag`]).
     fn typed_in(matches: &clap::ArgMatches, units: UnitSystem) -> Result<Self, String> {
         let mut leaf = matches;
         while let Some((_, sub)) = leaf.subcommand() {
@@ -6320,9 +6544,12 @@ impl TypedStation {
                 .flatten()
                 .copied(),
             humidity: typed("humidity"),
-            altitude: typed("altitude"),
+            altitude: typed("altitude")
+                .map(|a| check_station_flag(StationQuantity::Altitude, "--altitude", a, units))
+                .transpose()?,
             density_altitude: None,
             dry: false,
+            columns: StationColumns::default(),
         })
     }
 
@@ -6404,11 +6631,12 @@ fn resolve_profile_station(
     profile: Option<(&str, &ProfileData)>,
     units: UnitSystem,
 ) -> Result<ProfileStation, String> {
-    use StationSource::{Default as Fallback, Profile, Typed};
+    use StationSource::{Default as Fallback, Profile};
     let stored = profile.map(|(_, data)| data);
+    let columns = typed.columns;
     let (temperature, temperature_supplied, temperature_source) = match (typed.temperature, stored)
     {
-        (Some(value), _) => (value, true, Typed),
+        (Some(value), _) => (value, true, StationColumns::source(columns.temperature)),
         (None, Some(p)) if saved_temperature_is_reading(p, units) => {
             (p.temperature, p.temperature_supplied, Profile)
         }
@@ -6419,7 +6647,7 @@ fn resolve_profile_station(
         ),
     };
     let (pressure, pressure_supplied, pressure_source) = match (typed.pressure, stored) {
-        (Some(value), _) => (value, true, Typed),
+        (Some(value), _) => (value, true, StationColumns::source(columns.pressure)),
         (None, Some(p)) if saved_pressure_is_reading(p, units) => {
             (p.pressure, p.pressure_supplied, Profile)
         }
@@ -6438,7 +6666,7 @@ fn resolve_profile_station(
     };
     let (humidity, humidity_source) = match (typed.dry, typed.humidity, profile) {
         (true, _, _) => (DEFAULT_HUMIDITY_PERCENT, Fallback),
-        (false, Some(value), _) => (value, Typed),
+        (false, Some(value), _) => (value, StationColumns::source(columns.humidity)),
         (false, None, Some((name, p))) => {
             let flown = p
                 .flown_humidity()
@@ -6451,12 +6679,12 @@ fn resolve_profile_station(
         (false, None, None) => (DEFAULT_HUMIDITY_PERCENT, Fallback),
     };
     let (altitude, altitude_source) = match (typed.altitude, stored) {
-        (Some(value), _) => (value, Typed),
+        (Some(value), _) => (value, StationColumns::source(columns.altitude)),
         (None, Some(p)) => (p.altitude, Profile),
         _ => (0.0, Fallback),
     };
     let density_altitude = match typed.density_altitude {
-        Some(value) => Some((value, Typed)),
+        Some(value) => Some((value, StationColumns::source(columns.density_altitude))),
         None if typed.pressure.is_none() && typed.altitude.is_none() => stored
             .and_then(|p| p.density_altitude)
             .map(|value| (value, Profile)),
@@ -6494,14 +6722,22 @@ struct FlownStation {
     altitude: f64,
     /// Which readings fly as given.
     presence: StationAtmospherePresence,
-    /// Where each reading came from, in [`SHOT_AIR_FLAGS`] order: the flag, or the profile field.
+    /// Where each reading came from, in [`SHOT_AIR_FLAGS`] order: the flag, the profile field,
+    /// or the density altitude that gave it.
     labels: [String; 4],
+    /// Where the readings came from: a density altitude's station
+    /// ([`StationOrigin::density_altitude`]), or the pressure as entered, a QNH before its
+    /// reduction ([`StationOrigin::resolving`]), so a refusal quotes the QNH as typed.
+    origin: Option<StationOrigin>,
 }
 
 impl FlownStation {
-    /// The labels as `&str`, for [`refuse_cli_air`].
-    fn labels(&self) -> [&str; 4] {
-        self.labels.each_ref().map(String::as_str)
+    /// The labels, for [`refuse_cli_air`].
+    fn labels(&self) -> AirLabels<'_> {
+        AirLabels {
+            names: self.labels.each_ref().map(String::as_str),
+            origin: self.origin,
+        }
     }
 
     /// The same air in metric (°C, hPa, percent, m), as the solvers take it.
@@ -6530,29 +6766,39 @@ impl FlownStation {
 
 impl ProfileStation {
     /// Each reading's name where the user can see it, in [`SHOT_AIR_FLAGS`] order (humidity,
-    /// temperature, pressure, altitude): the flag for a typed or default value, `profile 'NAME'
-    /// field humidity` for a stored one. A stored density altitude supplies the pressure and the
-    /// altitude.
+    /// temperature, pressure, altitude): the flag for a typed or default value, the column for a
+    /// CSV cell (`--location CSV column PRESSURE`), `profile 'NAME' field humidity` for a stored
+    /// one. A density altitude supplies the pressure and the altitude, and the temperature unless
+    /// one was supplied, so they are named by the density altitude's own name
+    /// (`--density-altitude`, `--location CSV column DA`, `profile 'NAME' field
+    /// density_altitude`).
     fn air_labels(&self) -> [String; 4] {
         let name = self.profile_name.as_deref().unwrap_or_default();
         let label = |source: StationSource, field: &str, flag: &str| match source {
             StationSource::Profile => format!("profile '{name}' field {field}"),
+            StationSource::Column(column) => column.label(),
             StationSource::Typed | StationSource::Default => flag.to_string(),
         };
-        let stored_density_altitude =
-            matches!(self.density_altitude, Some((_, StationSource::Profile)));
-        let derived = |source: StationSource, field: &str, flag: &str| {
-            if stored_density_altitude {
-                format!("profile '{name}' field density_altitude")
-            } else {
-                label(source, field, flag)
-            }
+        let density_altitude = self
+            .density_altitude
+            .map(|(_, source)| label(source, "density_altitude", "--density-altitude"));
+        let derived = |source: StationSource, field: &str, flag: &str, derived: bool| match (
+            &density_altitude,
+            derived,
+        ) {
+            (Some(density_altitude), true) => density_altitude.clone(),
+            _ => label(source, field, flag),
         };
         [
             label(self.humidity_source, "humidity", SHOT_AIR_FLAGS[0]),
-            label(self.temperature_source, "temperature", SHOT_AIR_FLAGS[1]),
-            derived(self.pressure_source, "pressure", SHOT_AIR_FLAGS[2]),
-            derived(self.altitude_source, "altitude", SHOT_AIR_FLAGS[3]),
+            derived(
+                self.temperature_source,
+                "temperature",
+                SHOT_AIR_FLAGS[1],
+                !self.temperature_supplied,
+            ),
+            derived(self.pressure_source, "pressure", SHOT_AIR_FLAGS[2], true),
+            derived(self.altitude_source, "altitude", SHOT_AIR_FLAGS[3], true),
         ]
     }
 
@@ -6571,10 +6817,10 @@ impl ProfileStation {
     /// otherwise the pressure reduced by its type at the altitude flown
     /// ([`apply_pressure_mode`]), each reading's presence as resolved, and a stored QNH reading
     /// flown as a reading. Says so on stderr when a density altitude supersedes a typed
-    /// `--pressure-type`.
-    fn flown(&self, units: UnitSystem) -> FlownStation {
+    /// `--pressure-type`. A density altitude no air has is refused naming where it came from.
+    fn flown(&self, units: UnitSystem) -> Result<FlownStation, String> {
         let labels = self.air_labels();
-        match self.density_altitude {
+        Ok(match self.density_altitude {
             Some((density_altitude, _)) => {
                 if self.pressure_type_typed {
                     eprintln!(
@@ -6582,15 +6828,16 @@ impl ProfileStation {
                          (station pressure is derived from density altitude instead)"
                     );
                 }
-                let da_m = UnitConverter::altitude_to_metric(density_altitude, units);
                 let explicit_temp_c = self
                     .temperature_supplied
                     .then(|| UnitConverter::temperature_to_metric(self.temperature, units));
-                let (da_altitude_m, da_temp_c, da_pressure_hpa) =
-                    ballistics_engine::atmosphere::resolve_atmosphere_for_density_altitude(
-                        da_m,
-                        explicit_temp_c,
-                    );
+                let (da_altitude_m, da_temp_c, da_pressure_hpa) = cli_station_for_density_altitude(
+                    density_altitude,
+                    explicit_temp_c,
+                    self.humidity,
+                    units,
+                    labels.each_ref().map(String::as_str),
+                )?;
                 // The derived triple flies authoritatively, as on trajectory's
                 // density-altitude path.
                 FlownStation {
@@ -6600,25 +6847,37 @@ impl ProfileStation {
                     altitude: UnitConverter::altitude_from_metric(da_altitude_m, units),
                     presence: StationAtmospherePresence::BOTH,
                     labels,
+                    origin: Some(StationOrigin::density_altitude(self.temperature_supplied)),
                 }
             }
-            None => FlownStation {
-                temperature: self.temperature,
-                pressure: apply_pressure_mode(
-                    self.pressure,
-                    self.altitude,
-                    self.pressure_type,
-                    units,
-                ),
-                humidity: self.humidity,
-                altitude: self.altitude,
-                presence: StationAtmospherePresence::new(
+            None => {
+                let presence = StationAtmospherePresence::new(
                     self.temperature_supplied,
                     self.pressure_supplied || self.stored_qnh_reading(),
-                ),
-                labels,
-            },
-        }
+                );
+                FlownStation {
+                    temperature: self.temperature,
+                    pressure: apply_pressure_mode(
+                        self.pressure,
+                        self.altitude,
+                        self.pressure_type,
+                        units,
+                    ),
+                    humidity: self.humidity,
+                    altitude: self.altitude,
+                    presence,
+                    labels,
+                    // From the pressure as entered, a QNH before its reduction.
+                    origin: Some(StationOrigin::resolving(
+                        UnitConverter::pressure_to_metric(self.pressure, units),
+                        UnitConverter::altitude_to_metric(self.altitude, units),
+                        self.pressure_type
+                            .unwrap_or(PressureReferenceMode::Absolute),
+                        presence,
+                    )),
+                }
+            }
+        })
     }
 }
 
@@ -6630,7 +6889,7 @@ fn flown_profile_station(
     profile: Option<&ProfileData>,
     units: UnitSystem,
 ) -> Result<FlownStation, String> {
-    Ok(resolve_profile_station(typed, name.zip(profile), units)?.flown(units))
+    resolve_profile_station(typed, name.zip(profile), units)?.flown(units)
 }
 
 /// The result of [`resolve_zero_selection`] (MBA-1360): which zero distance this run
@@ -7715,15 +7974,17 @@ fn solve_profile_for_dsf(
     let (temperature_c, pressure_hpa, altitude_m, temperature_supplied, pressure_supplied) =
         match station.density_altitude {
             Some((da_display, _)) => {
-                let da_m = UnitConverter::altitude_to_metric(da_display, units);
                 let explicit_temp_c = station
                     .temperature_supplied
                     .then(|| UnitConverter::temperature_to_metric(station.temperature, units));
-                let (da_altitude_m, da_temp_c, da_pressure_hpa) =
-                    ballistics_engine::atmosphere::resolve_atmosphere_for_density_altitude(
-                        da_m,
-                        explicit_temp_c,
-                    );
+                // A stored density altitude no air has is refused naming the profile's field.
+                let (da_altitude_m, da_temp_c, da_pressure_hpa) = cli_station_for_density_altitude(
+                    da_display,
+                    explicit_temp_c,
+                    station.humidity,
+                    units,
+                    station.air_labels().each_ref().map(String::as_str),
+                )?;
                 (da_temp_c, da_pressure_hpa, da_altitude_m, true, true)
             }
             None => {
@@ -7819,10 +8080,15 @@ fn solve_profile_for_dsf(
         bore_height_m,
     };
 
-    Ok(ballistics_engine::truing_dsf::solve_for_dsf(
-        &inputs,
-        max_range_m,
-    )?)
+    let names = station.air_labels();
+    let labels = AirLabels {
+        names: names.each_ref().map(String::as_str),
+        origin: station
+            .density_altitude
+            .map(|_| StationOrigin::density_altitude(station.temperature_supplied)),
+    };
+    ballistics_engine::truing_dsf::solve_for_dsf_checked(&inputs, max_range_m)
+        .map_err(|error| labels.error(error, units))
 }
 
 /// Mirrors `Commands::Trajectory`'s own `--max-range` default (1000.0, in the active
@@ -7907,10 +8173,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     // `--humidity 50` from the clap defaults; see `trajectory_flag_typed`.
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
-    // A refusal of air that cannot exist aloft, which a solve finds only in flight, is stated in
-    // the CLI's words and units like every other refusal of its air. A command that knows where
-    // its temperature came from (a saved profile's field, a --location CSV column, the zero
-    // day's own flag) has already named it so; any other is the station's --temperature.
     let units = cli.units;
     run_command(cli, matches).map_err(|error| in_the_clis_words(error, units, "--temperature"))
 }
@@ -7924,18 +8186,24 @@ fn in_the_clis_words(
     units: UnitSystem,
     temperature_label: &str,
 ) -> Box<dyn Error> {
-    use ballistics_engine::moving_target::LeadError;
-    match error.downcast::<ballistics_engine::BallisticsError>() {
-        Ok(error) => Box::new(error.in_terminal_words(units, temperature_label)),
-        Err(error) => match error.downcast::<LeadError>() {
-            Ok(error) => match *error {
-                LeadError::Solver(error) => Box::new(LeadError::Solver(
-                    error.in_terminal_words(units, temperature_label),
-                )),
-                error => Box::new(error),
+    // An inner solve may already have applied its own station (notably the zero day).
+    if let Some(named) = error.downcast_ref::<ballistics_engine::BallisticsError>() {
+        if named
+            .atmosphere_error()
+            .is_some_and(|air| named.to_string() != air.to_string())
+        {
+            return error;
+        }
+    }
+    match ballistics_engine::atmosphere::AtmosphereError::in_error(&*error) {
+        Some(air) => Box::new(air.temperature_refusal(
+            ballistics_engine::atmosphere::AirField::named(temperature_label),
+            match units {
+                UnitSystem::Imperial => ballistics_engine::atmosphere::AirUnits::IMPERIAL,
+                UnitSystem::Metric => ballistics_engine::atmosphere::AirUnits::METRIC,
             },
-            Err(error) => error,
-        },
+        )),
+        None => error,
     }
 }
 
@@ -8417,13 +8685,66 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
             // so.
             // The zero day's typed temperature is held to the same one rule, in its own flag's
             // words, so a reading is accepted or refused alike whichever flag carries it.
-            if let Some(t) = zero_temperature {
-                ballistics_engine::atmosphere::check_temperature_flag(
+            // Every station flag, the zero day's too, is held to its quantity's one rule, in its
+            // own words, before any of it is used.
+            for (quantity, flag, value) in [
+                (
+                    StationQuantity::Temperature,
                     "--zero-temperature",
-                    t,
-                    matches!(cli.units, UnitSystem::Imperial),
-                )?;
+                    zero_temperature,
+                ),
+                (StationQuantity::Pressure, "--zero-pressure", zero_pressure),
+                (StationQuantity::Altitude, "--zero-altitude", zero_altitude),
+                (
+                    StationQuantity::Altitude,
+                    "--zero-density-altitude",
+                    zero_density_altitude,
+                ),
+                (
+                    StationQuantity::Altitude,
+                    "--density-altitude",
+                    density_altitude,
+                ),
+                (
+                    StationQuantity::Altitude,
+                    "--altitude",
+                    altitude_typed.then_some(altitude),
+                ),
+            ] {
+                if let Some(value) = value {
+                    check_station_flag(quantity, flag, value, cli.units)?;
+                }
             }
+            // A reading from a CSV cell is named by its column wherever it is refused.
+            let column = |typed: bool, columns: &[Option<CsvColumn>]| {
+                if typed {
+                    None
+                } else {
+                    columns.iter().find_map(|column| *column)
+                }
+            };
+            let run_columns = StationColumns {
+                humidity: column(humidity_typed, &[location_csv.columns.humidity]),
+                temperature: column(
+                    temperature.is_some(),
+                    &[
+                        location_csv.columns.temperature,
+                        profile_csv.zero_temperature_column,
+                    ],
+                ),
+                pressure: column(pressure.is_some(), &[location_csv.columns.pressure]),
+                altitude: column(
+                    altitude_typed,
+                    &[
+                        location_csv.columns.altitude,
+                        profile_csv.zero_altitude_column,
+                    ],
+                ),
+                density_altitude: column(
+                    density_altitude.is_some(),
+                    &[location_csv.columns.density_altitude],
+                ),
+            };
             let run_station = TypedStation {
                 temperature: match temperature {
                     Some(t) => Some(UnitConverter::resolve_temperature(Some(t), cli.units)?),
@@ -8460,6 +8781,7 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                 // own to supersede: no explicit --pressure/--altitude, and nothing from a CSV.
                 density_altitude: density_altitude.or(location_csv.density_altitude),
                 dry: false,
+                columns: run_columns,
             };
             let station = resolve_profile_station(
                 &run_station,
@@ -8495,10 +8817,18 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                      back-solved from density altitude instead)"
                 );
             }
+            // Where each shot-day reading came from, by the name the user can see it under: a
+            // flag, a --location or --profile CSV column, a saved profile's field, or the density
+            // altitude that gave it. The zero day names a reading it inherits the same way.
+            let shot_air_labels: [String; 4] = station.air_labels();
+            let shot_air_context = AirLabels {
+                names: shot_air_labels.each_ref().map(String::as_str),
+                origin: final_density_altitude
+                    .map(|_| StationOrigin::density_altitude(temperature_supplied)),
+            };
             let (final_temperature, final_pressure, final_altitude, final_pressure_type) =
                 match final_density_altitude {
                     Some(da_display) => {
-                        let da_m = UnitConverter::altitude_to_metric(da_display, cli.units);
                         // "Explicit temperature" for DA precedence is the temperature in use
                         // whenever its source supplied it (0.49.0): the flag, a --location
                         // CSV cell, a --profile CSV ZERO_TEMP cell or a marked saved profile.
@@ -8508,11 +8838,16 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                         let explicit_temp_c = temperature_supplied.then(|| {
                             UnitConverter::temperature_to_metric(final_temperature, cli.units)
                         });
+                        // A density altitude no air has is refused here, naming where it came
+                        // from, before any note, warning or solve.
                         let (da_altitude_m, da_temp_c, da_pressure_hpa) =
-                            ballistics_engine::atmosphere::resolve_atmosphere_for_density_altitude(
-                                da_m,
+                            cli_station_for_density_altitude(
+                                da_display,
                                 explicit_temp_c,
-                            );
+                                final_humidity,
+                                cli.units,
+                                shot_air_labels.each_ref().map(String::as_str),
+                            )?;
                         (
                             UnitConverter::temperature_from_metric(da_temp_c, cli.units),
                             UnitConverter::pressure_from_metric(da_pressure_hpa, cli.units),
@@ -8537,27 +8872,8 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
             );
             // The shot day's air refused up front, before any note, warning or solve, in
             // the CLI's words: the station `run_trajectory` resolves (a density altitude's
-            // derived triple as it stands, otherwise by presence and pressure mode), with the
-            // humidity named where it came from.
-            // Where the shot day's humidity came from, by the name the user can see it under;
-            // the zero day names a humidity it inherits the same way.
-            // A reading the saved profile stored is named as its field; a --location CSV
-            // humidity as its column; every other one as its flag.
-            let shot_air_labels: [String; 4] = {
-                let [humidity_label, temperature_label, pressure_label, altitude_label] =
-                    station.air_labels();
-                let humidity_label = if !humidity_typed && location_csv.humidity_percent.is_some() {
-                    "--location CSV column HUMIDITY".to_string()
-                } else {
-                    humidity_label
-                };
-                [
-                    humidity_label,
-                    temperature_label,
-                    pressure_label,
-                    altitude_label,
-                ]
-            };
+            // derived triple as it stands, otherwise by presence and pressure mode), with each
+            // reading named where it came from.
             let shot_humidity_label = shot_air_labels[0].clone();
             {
                 let entered = AtmosphericConditions {
@@ -8577,14 +8893,19 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                         shot_presence,
                     )
                 };
-                // A density altitude's derived pressure is no sentinel default, so it counts as a
-                // reading here, as in every solve of it.
-                let origin = StationPressureOrigin::resolving(
-                    entered.pressure,
-                    entered.altitude,
-                    final_pressure_type,
-                    shot_presence,
-                );
+                // A density altitude's derived pressure is no sentinel default: it is the
+                // density altitude's, and blamed on it, as is its temperature unless one was
+                // given. A QNH is quoted as it was entered.
+                let origin = if final_density_altitude.is_some() {
+                    StationOrigin::density_altitude(temperature_supplied)
+                } else {
+                    StationOrigin::resolving(
+                        entered.pressure,
+                        entered.altitude,
+                        final_pressure_type,
+                        shot_presence,
+                    )
+                };
                 refuse_resolved_cli_air(
                     &AtmosphericConditions {
                         temperature,
@@ -9401,17 +9722,54 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                 // than re-reducing a pressure the back-solve already produced as absolute. That
                 // is the same bug 0.29.0's whole-branch review caught on the shot-day DA path
                 // (apex 1.6959 -> 1.6655 m at an 800 m zero, silently).
+                // Each zero-day reading by the flag it came from: the zero day's own when it was
+                // given (a zero-day density altitude supplies the pressure and altitude, and the
+                // temperature unless --zero-temperature is given), the shot day's when it is
+                // inherited.
+                let zero_air_labels: [&str; 4] = {
+                    let flag = |own: bool, i: usize| {
+                        if own {
+                            ZERO_AIR_FLAGS[i]
+                        } else {
+                            shot_air_labels[i].as_str()
+                        }
+                    };
+                    let derived = |own: bool, i: usize| {
+                        if zero_density_altitude.is_some() {
+                            "--zero-density-altitude"
+                        } else {
+                            flag(own, i)
+                        }
+                    };
+                    [
+                        if zero_humidity.is_some() {
+                            ZERO_AIR_FLAGS[0]
+                        } else {
+                            shot_humidity_label.as_str()
+                        },
+                        if zero_density_altitude.is_some() && zero_temperature.is_none() {
+                            "--zero-density-altitude"
+                        } else {
+                            flag(zero_temperature.is_some(), 1)
+                        },
+                        derived(zero_pressure.is_some(), 2),
+                        derived(zero_altitude.is_some(), 3),
+                    ]
+                };
                 let (zero_temperature_metric, zero_pressure_metric, zero_altitude_metric) =
                     match zero_density_altitude {
                         Some(da_display) => {
-                            let da_m = UnitConverter::altitude_to_metric(da_display, cli.units);
                             let explicit_zero_temp_c = zero_temperature
                                 .map(|t| UnitConverter::temperature_to_metric(t, cli.units));
+                            // A zero-day density altitude no air has is refused naming its flag.
                             let (da_altitude_m, da_temp_c, da_pressure_hpa) =
-                                ballistics_engine::atmosphere::resolve_atmosphere_for_density_altitude(
-                                    da_m,
+                                cli_station_for_density_altitude(
+                                    da_display,
                                     explicit_zero_temp_c,
-                                );
+                                    zero_humidity_value,
+                                    cli.units,
+                                    zero_air_labels,
+                                )?;
                             (da_temp_c, da_pressure_hpa, da_altitude_m)
                         }
                         None => (
@@ -9459,6 +9817,30 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                         eprintln!("{w}");
                     }
                 }
+                // A density altitude's pressure, the zero day's own or one it inherits from
+                // the shot day, is the density altitude's, and blamed on it, as is its
+                // temperature unless the zero day flies a temperature reading.
+                let mut zero_origin = if zero_density_altitude.is_some()
+                    || (final_density_altitude.is_some() && zero_pressure.is_none())
+                {
+                    StationOrigin::density_altitude(zero_presence.temperature_supplied)
+                } else {
+                    StationOrigin::resolving(
+                        zero_pressure_metric,
+                        zero_altitude_metric,
+                        zero_pressure_type_resolved,
+                        zero_presence,
+                    )
+                };
+                // Pressure and temperature can come from different inputs. Replacing the
+                // inherited pressure does not replace a density altitude's temperature.
+                if zero_temperature.is_none()
+                    && (zero_density_altitude.is_some()
+                        || (final_density_altitude.is_some() && !temperature_supplied))
+                {
+                    zero_origin.temperature =
+                        ballistics_engine::atmosphere::StationTemperatureOrigin::DensityAltitude;
+                }
                 // The zero day's air refused up front, before the note below, under the
                 // zero day's own flags: the station `zero_atmosphere` below resolves.
                 {
@@ -9469,21 +9851,6 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                         zero_pressure_type_resolved,
                         zero_presence,
                     );
-                    // Each reading by the flag it came from: the zero day's own when it was
-                    // given (a zero-day density altitude supplies the pressure and altitude),
-                    // the shot day's when it is inherited.
-                    let flag = |own: bool, i: usize| {
-                        if own {
-                            ZERO_AIR_FLAGS[i]
-                        } else {
-                            shot_air_labels[i].as_str()
-                        }
-                    };
-                    let humidity_label = if zero_humidity.is_some() {
-                        ZERO_AIR_FLAGS[0]
-                    } else {
-                        shot_humidity_label.as_str()
-                    };
                     refuse_resolved_cli_air(
                         &AtmosphericConditions {
                             temperature,
@@ -9491,25 +9858,9 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                             humidity: zero_humidity_value,
                             altitude: zero_altitude_metric,
                         },
-                        StationPressureOrigin::resolving(
-                            zero_pressure_metric,
-                            zero_altitude_metric,
-                            zero_pressure_type_resolved,
-                            zero_presence,
-                        ),
+                        zero_origin,
                         cli.units,
-                        [
-                            humidity_label,
-                            flag(zero_temperature.is_some(), 1),
-                            flag(
-                                zero_pressure.is_some() || zero_density_altitude.is_some(),
-                                2,
-                            ),
-                            flag(
-                                zero_altitude.is_some() || zero_density_altitude.is_some(),
-                                3,
-                            ),
-                        ],
+                        zero_air_labels,
                     )?;
                 }
                 if zero_velocity.is_some()
@@ -9635,10 +9986,9 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                 };
                 // A zero trial that climbs into air that cannot exist aloft names the zero
                 // day's temperature where it came from, as the refusal of its air above does.
-                let zero_temperature_label = if zero_temperature.is_some() {
-                    ZERO_AIR_FLAGS[1]
-                } else {
-                    shot_air_labels[1].as_str()
+                let zero_air_context = AirLabels {
+                    names: zero_air_labels,
+                    origin: Some(zero_origin),
                 };
                 let zero_angle = ballistics_engine::calculate_zero_angle_with_resolved_conditions(
                     zero_inputs,
@@ -9647,7 +9997,7 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                     zero_wind,
                     zero_atmosphere,
                 )
-                .map_err(|error| error.in_terminal_words(cli.units, zero_temperature_label))?;
+                .map_err(|error| zero_air_context.error(error, cli.units))?;
 
                 // Convert to degrees for the trajectory function
                 zero_angle.to_degrees()
@@ -10147,9 +10497,8 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                                 eprintln!("Warning: API request failed: {}", e);
                                 eprintln!("Falling back to local calculation...\n");
 
-                                run_trajectory(&traj_config).map_err(|error| {
-                                    in_the_clis_words(error, cli.units, &shot_air_labels[1])
-                                })?;
+                                run_trajectory(&traj_config)
+                                    .map_err(|error| shot_air_context.error(error, cli.units))?;
                             } else {
                                 eprintln!("Error: API request failed: {}", e);
                                 eprintln!("Hint: Use --offline-fallback to use local calculation on API failure");
@@ -10159,9 +10508,8 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                     }
                 } else {
                     // Local calculation (default)
-                    run_trajectory(&traj_config).map_err(|error| {
-                        in_the_clis_words(error, cli.units, &shot_air_labels[1])
-                    })?;
+                    run_trajectory(&traj_config)
+                        .map_err(|error| shot_air_context.error(error, cli.units))?;
                 }
             }
 
@@ -10169,7 +10517,7 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
             #[cfg(not(feature = "online"))]
             {
                 run_trajectory(&traj_config)
-                    .map_err(|error| in_the_clis_words(error, cli.units, &shot_air_labels[1]))?;
+                    .map_err(|error| shot_air_context.error(error, cli.units))?;
             }
         }
 
@@ -10429,6 +10777,33 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
             let pressure_given = pressure.is_some();
             let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
             let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
+            check_station_flag(StationQuantity::Altitude, "--altitude", altitude, cli.units)?;
+            if let Some(value) = density_altitude {
+                check_station_flag(
+                    StationQuantity::Altitude,
+                    "--density-altitude",
+                    value,
+                    cli.units,
+                )?;
+            }
+            // Each reading by its flag; a density altitude names the altitude and pressure it
+            // gives, and the temperature unless --temperature is given.
+            let zero_air_labels = match density_altitude {
+                Some(_) => AirLabels {
+                    names: [
+                        SHOT_AIR_FLAGS[0],
+                        if temperature_given {
+                            SHOT_AIR_FLAGS[1]
+                        } else {
+                            "--density-altitude"
+                        },
+                        "--density-altitude",
+                        "--density-altitude",
+                    ],
+                    origin: Some(StationOrigin::density_altitude(temperature_given)),
+                },
+                None => AirLabels::from(SHOT_AIR_FLAGS),
+            };
             let bullet_mass = mass;
             let bullet_diameter = diameter;
             // Convert inputs to metric
@@ -10458,7 +10833,6 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
             let (temperature_metric, pressure_metric, altitude_metric, pressure_type) =
                 match density_altitude {
                     Some(da_display) => {
-                        let da_m = UnitConverter::altitude_to_metric(da_display, cli.units);
                         // 0.49.0: a typed --temperature is explicit whatever its value. Before,
                         // "explicit" was inferred by comparing against the unit system's
                         // standard, which dropped a typed 15 C / 59 F.
@@ -10468,11 +10842,15 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                                 "warning: --pressure-type is ignored because --density-altitude supplies the station pressure directly"
                             );
                         }
+                        // A density altitude no air has is refused naming its flag.
                         let (da_altitude_m, da_temp_c, da_pressure_hpa) =
-                            ballistics_engine::atmosphere::resolve_atmosphere_for_density_altitude(
-                                da_m,
+                            cli_station_for_density_altitude(
+                                da_display,
                                 explicit_temp_c,
-                            );
+                                humidity,
+                                cli.units,
+                                zero_air_labels.names,
+                            )?;
                         (
                             da_temp_c,
                             da_pressure_hpa,
@@ -10551,6 +10929,7 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                         elevation_cf,
                         output,
                         cli.units,
+                        zero_air_labels,
                     )?;
                 }
                 None => {
@@ -10581,6 +10960,7 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                         elevation_cf,
                         output,
                         cli.units,
+                        zero_air_labels,
                     )?;
                 }
             }
@@ -10615,12 +10995,12 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
             // density, so this must match the dope card's conditions (defaults = ICAO std). A
             // typed temperature is held to the one rule `--temperature` is everywhere.
             if let Some(t) = temperature {
-                ballistics_engine::atmosphere::check_temperature_flag(
-                    "--temperature",
-                    t,
-                    matches!(cli.units, UnitSystem::Imperial),
-                )?;
+                check_station_flag(StationQuantity::Temperature, "--temperature", t, cli.units)?;
             }
+            if let Some(p) = pressure {
+                check_station_flag(StationQuantity::Pressure, "--pressure", p, cli.units)?;
+            }
+            check_station_flag(StationQuantity::Altitude, "--altitude", altitude, cli.units)?;
             let (atmosphere, station_presence) = estimate_bc_station_air(
                 temperature,
                 pressure,
@@ -10631,7 +11011,12 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
             );
             // The air refused up front, before any trial of the fit; a search whose every
             // trial fails on the air would otherwise blame the data.
-            refuse_cli_air(&atmosphere, station_presence, cli.units, SHOT_AIR_FLAGS)?;
+            refuse_cli_air(
+                &atmosphere,
+                station_presence,
+                cli.units,
+                shot_flag_labels(pressure, pressure_type, cli.units),
+            )?;
             // Zero range (dope-card frame) and sight height, in meters.
             let zero_range_m = zero_range.map(|z| UnitConverter::distance_to_metric(z, cli.units));
             let sight_height_m = sight_height
@@ -10916,14 +11301,12 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
             let station_presence =
                 StationAtmospherePresence::new(temperature.is_some(), pressure.is_some());
             let temperature = UnitConverter::resolve_temperature(temperature, units)?;
+            check_station_flag(StationQuantity::Altitude, "--altitude", altitude, units)?;
             // MBA-1416: honor --pressure-type here too, so a QNH altimeter setting means
             // the same thing on this command as it does on `trajectory`.
-            let pressure = apply_pressure_mode(
-                UnitConverter::resolve_pressure(pressure, units)?,
-                altitude,
-                pressure_type,
-                units,
-            );
+            let entered_pressure = UnitConverter::resolve_pressure(pressure, units)?;
+            let air_labels = shot_flag_labels(Some(entered_pressure), pressure_type, units);
+            let pressure = apply_pressure_mode(entered_pressure, altitude, pressure_type, units);
             // Convert to imperial for calculations (internal calculations use imperial)
             let range_yd = match units {
                 UnitSystem::Imperial => range,
@@ -10975,7 +11358,7 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                 alt_ft,
                 station_presence,
                 units,
-                SHOT_AIR_FLAGS,
+                air_labels,
             )?;
 
             let drag_str = match drag_model {
@@ -11299,7 +11682,10 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                         )?;
                     }
                     Err(e) => {
-                        eprintln!("Error: Local calculation failed: {}", e);
+                        eprintln!(
+                            "Error: Local calculation failed: {}",
+                            AirLabels::from(SHOT_AIR_FLAGS).error(e, units)
+                        );
                         std::process::exit(1);
                     }
                 }
@@ -11425,7 +11811,8 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                                     Err(fallback_err) => {
                                         eprintln!(
                                             "Error: Fallback calculation also failed: {}",
-                                            fallback_err
+                                            AirLabels::from(SHOT_AIR_FLAGS)
+                                                .error(fallback_err, units)
                                         );
                                         std::process::exit(1);
                                     }
@@ -11494,14 +11881,12 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
             let station_presence =
                 StationAtmospherePresence::new(temperature.is_some(), pressure.is_some());
             let temperature = UnitConverter::resolve_temperature(temperature, units)?;
+            check_station_flag(StationQuantity::Altitude, "--altitude", altitude, units)?;
             // MBA-1416: a declared QNH reduces against this command's own --altitude,
             // exactly as it does on `trajectory` and `true-velocity`.
-            let pressure = apply_pressure_mode(
-                UnitConverter::resolve_pressure(pressure, units)?,
-                altitude,
-                pressure_type,
-                units,
-            );
+            let entered_pressure = UnitConverter::resolve_pressure(pressure, units)?;
+            let air_labels = shot_flag_labels(Some(entered_pressure), pressure_type, units);
+            let pressure = apply_pressure_mode(entered_pressure, altitude, pressure_type, units);
 
             // Convert to the truing core's internal imperial units — factor-for-factor
             // the `Commands::TrueVelocity` dispatch above.
@@ -11550,7 +11935,7 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                 alt_ft,
                 station_presence,
                 units,
-                SHOT_AIR_FLAGS,
+                air_labels,
             )?;
             // --twist-rate is mm/turn in metric and inches/turn in imperial (MBA-970);
             // the engine treats twist as inches/turn everywhere.
@@ -11843,7 +12228,8 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                 request.candidate_ranges_yd.len(),
                 request.observation_count
             );
-            let plan = plan_truing_experiment_v1(&request)?;
+            let plan = plan_truing_experiment_v1(&request)
+                .map_err(|e| station.labels().error(e, cli.units))?;
             display_truing_experiment_plan(&plan, cli.units, output)?;
         }
 
@@ -12256,7 +12642,8 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                                 );
                             }
                             DsfServiceErrorV1::InvalidInput(_)
-                            | DsfServiceErrorV1::ForwardModel(_) => {
+                            | DsfServiceErrorV1::ForwardModel(_)
+                            | DsfServiceErrorV1::Atmosphere(_) => {
                                 eprintln!("error: {e}");
                             }
                         }
@@ -12796,22 +13183,23 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                 profile.as_deref().zip(profile_data.as_ref()),
                 cli.units,
             )?;
-            let station = resolved.flown(cli.units);
+            let station = resolved.flown(cli.units)?;
             let (temperature, pressure, altitude) =
                 (station.temperature, station.pressure, station.altitude);
-            // MBA-1605: a QNH with no station pressure at this altitude reduces to NaN. Every
-            // command that runs a solve refuses that in the solver's input check; this one never
-            // solves, so it refuses here rather than print a NaN stability factor, naming each
-            // reading where it came from.
-            if !pressure.is_finite() {
-                let labels = station.labels();
-                return Err(format!(
-                    "{} {} as a QNH has no station pressure at {} {altitude}: the \
-                     altimeter-setting reduction has no solution that high",
-                    labels[2], resolved.pressure, labels[3]
-                )
-                .into());
-            }
+            // The air it corrects for held to the rule every solve applies, its temperature,
+            // pressure and altitude each named where it came from (a stored pressure of 0 used
+            // to print a NaN stability factor), in the words every command uses: a QNH with no
+            // station pressure at this altitude (MBA-1605) is quoted as it was given, as every
+            // other command quotes it. The Miller correction is dry, so the air is checked dry.
+            refuse_cli_air(
+                &AtmosphericConditions {
+                    humidity: 0.0,
+                    ..station.metric(cli.units)
+                },
+                station.presence,
+                cli.units,
+                station.labels(),
+            )?;
 
             let final_mass = resolve_param(mass, &profile_data, |p| p.mass).unwrap_or_else(|| {
                 eprintln!("Error: --mass is required (or use --profile)");
@@ -13213,6 +13601,20 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                     let pressure_supplied = pressure.is_some();
                     let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
                     let pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
+                    check_station_flag(
+                        StationQuantity::Altitude,
+                        "--altitude",
+                        altitude,
+                        cli.units,
+                    )?;
+                    if let Some(value) = density_altitude {
+                        check_station_flag(
+                            StationQuantity::Altitude,
+                            "--density-altitude",
+                            value,
+                            cli.units,
+                        )?;
+                    }
                     let units_str = match cli.units {
                         UnitSystem::Imperial => "imperial",
                         UnitSystem::Metric => "metric",
@@ -13523,10 +13925,25 @@ fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>
                             .map_err(|e| format!("optic profile: {e}"))?;
                     }
 
-                    // Air no solve could fly is never saved: the impossible-air rule every
-                    // flight of this profile applies, in the words of the flags it came from.
+                    // Air no solve could fly is never saved: the rule every flight of this
+                    // profile applies, in the words of the flags it came from (a density
+                    // altitude names the altitude and pressure it gives, and the temperature
+                    // unless --temperature is given).
+                    let save_labels = match density_altitude {
+                        Some(_) => [
+                            SHOT_AIR_FLAGS[0],
+                            if temperature_supplied {
+                                SHOT_AIR_FLAGS[1]
+                            } else {
+                                "--density-altitude"
+                            },
+                            "--density-altitude",
+                            "--density-altitude",
+                        ],
+                        None => SHOT_AIR_FLAGS,
+                    };
                     if let Some(refusal) = profile.air_refusal_in(
-                        SHOT_AIR_FLAGS.map(ballistics_engine::atmosphere::AirField::named),
+                        save_labels.map(ballistics_engine::atmosphere::AirField::named),
                     ) {
                         return Err(refusal.message().into());
                     }
@@ -16721,6 +17138,8 @@ fn run_zero_calculation(
     elevation_cf: f64,
     output: OutputFormat,
     units: UnitSystem,
+    // Where each reading came from: the flags, or a density altitude.
+    labels: AirLabels<'_>,
 ) -> Result<(), Box<dyn Error>> {
     // Create ballistic inputs
     let inputs = BallisticInputs {
@@ -16763,9 +17182,9 @@ fn run_zero_calculation(
     // The air refused up front, in the CLI's words, before any solve.
     refuse_resolved_cli_air(
         &atmosphere,
-        StationPressureOrigin::resolving(pressure, altitude, pressure_type, station_presence),
+        StationOrigin::resolving(pressure, altitude, pressure_type, station_presence),
         units,
-        SHOT_AIR_FLAGS,
+        labels,
     )?;
 
     // The bullet starts at bore height. A same-elevation zero crosses the horizontal line of
@@ -16780,7 +17199,8 @@ fn run_zero_calculation(
         los_target_height,
         WindConditions::default(),
         atmosphere.clone(),
-    )?;
+    )
+    .map_err(|e| labels.error(e, units))?;
 
     // Calculate trajectory at zero angle to get additional info
     let mut zeroed_inputs = inputs;
@@ -16792,7 +17212,7 @@ fn run_zero_calculation(
         atmosphere,
     );
     solver.set_max_range(target_distance * 3.0);
-    let trajectory = solver.solve()?;
+    let trajectory = solver.solve().map_err(|e| labels.error(e, units))?;
 
     // `zero_angle` is the bore angle above horizontal. The sight line runs from
     // (0, sight_height) to (target_distance, sight_height + target_height), so its slope is
@@ -16956,6 +17376,8 @@ fn run_zero_range_calculation(
     elevation_cf: f64,
     output: OutputFormat,
     units: UnitSystem,
+    // Where each reading came from: the flags, or a density altitude.
+    labels: AirLabels<'_>,
 ) -> Result<(), Box<dyn Error>> {
     // Create ballistic inputs
     let inputs = BallisticInputs {
@@ -16997,9 +17419,9 @@ fn run_zero_range_calculation(
     // The air refused up front, in the CLI's words, before any solve.
     refuse_resolved_cli_air(
         &atmosphere,
-        StationPressureOrigin::resolving(pressure, altitude, pressure_type, station_presence),
+        StationOrigin::resolving(pressure, altitude, pressure_type, station_presence),
         units,
-        SHOT_AIR_FLAGS,
+        labels,
     )?;
 
     // Same line-of-sight target height convention as run_zero_calculation's forward solve.
@@ -17014,7 +17436,8 @@ fn run_zero_range_calculation(
         los_target_height,
         WindConditions::default(),
         atmosphere.clone(),
-    )?;
+    )
+    .map_err(|e| labels.error(e, units))?;
 
     // A single concrete distance is still needed to size the follow-up trajectory solve and
     // to compute the sight-adjustment/point-blank-range diagnostics below. Prefer the far
@@ -17055,7 +17478,7 @@ fn run_zero_range_calculation(
         (primary_range * 3.0).max(ballistics_engine::ZERO_RANGE_FROM_ANGLE_MAX_RANGE_M)
     };
     solver.set_max_range(diagnostics_envelope);
-    let trajectory = solver.solve()?;
+    let trajectory = solver.solve().map_err(|e| labels.error(e, units))?;
 
     // Same sight-adjustment/point-blank-range diagnostics as the forward command, now
     // referenced against the primary crossing rather than a supplied target distance.
@@ -19063,6 +19486,7 @@ fn handle_mpbr(
     let tolerance_m = 0.001; // ~0.04 inches
     let max_iter = 60;
 
+    let mut first_failure = None;
     let mut best_zero_m = 0.0;
     let mut best_max_ord_m = 0.0;
     let mut best_max_ord_dist_m = 0.0;
@@ -19102,9 +19526,12 @@ fn handle_mpbr(
             WindConditions::default(),
             atmosphere,
             station_presence,
-        ) {
+        )
+        .map_err(|e| station.labels().error(e, units))
+        {
             Ok(a) => a,
-            Err(_) => {
+            Err(error) => {
+                first_failure.get_or_insert(error);
                 zero_high_m = test_zero_m;
                 continue;
             }
@@ -19137,9 +19564,12 @@ fn handle_mpbr(
             sight_offset_lateral_m,
             Some(test_zero_m),
             station_presence,
-        ) {
+        )
+        .map_err(|e| station.labels().error(e, units))
+        {
             Ok(flight) => flight.samples,
-            Err(_) => {
+            Err(error) => {
+                first_failure.get_or_insert(error);
                 zero_high_m = test_zero_m;
                 continue;
             }
@@ -19194,6 +19624,11 @@ fn handle_mpbr(
             zero_low_m = test_zero_m;
         }
     }
+    if best_zero_m == 0.0 {
+        if let Some(error) = first_failure {
+            return Err(error);
+        }
+    }
 
     // Now run the final trajectory at optimal zero to find MPBR, near zero, far zero
     let drag_model_enum = drag_model;
@@ -19227,7 +19662,8 @@ fn handle_mpbr(
         WindConditions::default(),
         atmosphere,
         station_presence,
-    )?;
+    )
+    .map_err(|e| station.labels().error(e, units))?;
 
     let final_samples = run_sampled_flight_with_station_presence(
         velocity_m,
@@ -19253,7 +19689,8 @@ fn handle_mpbr(
         sight_offset_lateral_m,
         Some(best_zero_m),
         station_presence,
-    )?
+    )
+    .map_err(|e| station.labels().error(e, units))?
     .samples;
 
     // Find near zero crossing (first time trajectory crosses from below LOS to above)
@@ -19604,7 +20041,8 @@ fn handle_come_ups(
         WindConditions::default(),
         atmosphere,
         station_presence,
-    )?;
+    )
+    .map_err(|e| station.labels().error(e, units))?;
 
     // Run trajectory with sampling
     let flight = run_sampled_flight_with_station_presence(
@@ -19634,7 +20072,8 @@ fn handle_come_ups(
         sight_offset_lateral_m,
         Some(zero_distance_m),
         station_presence,
-    )?;
+    )
+    .map_err(|e| station.labels().error(e, units))?;
 
     // Build output rows at the requested range intervals
     let adj_label = match adjustment_unit {
@@ -20615,7 +21054,7 @@ fn handle_lead(
 
     struct LeadRow {
         range: f64,
-        result: Result<ballistics_engine::LeadSolution, ballistics_engine::LeadError>,
+        result: Result<ballistics_engine::LeadSolution, Box<dyn Error>>,
         bodies: Option<f64>,
     }
 
@@ -20632,7 +21071,8 @@ fn handle_lead(
             target_angle,
             range_m,
             station_presence,
-        );
+        )
+        .map_err(|error| station.labels().error(error, units));
 
         let bodies = match (&result, target_length_m) {
             (Ok(sol), Some(len_m)) if len_m > 0.0 => Some(sol.lead_m / len_m),
@@ -20956,7 +21396,8 @@ fn handle_wind_card(
         WindConditions::default(),
         atmosphere,
         station_presence,
-    )?;
+    )
+    .map_err(|e| station.labels().error(e, units))?;
 
     let adj_label = adjustment_unit_label(adjustment_unit);
 
@@ -21024,7 +21465,8 @@ fn handle_wind_card(
                 sight_offset_lateral_m,
                 Some(zero_distance_m),
                 station_presence,
-            )?;
+            )
+            .map_err(|e| station.labels().error(e, units))?;
 
             reach_m = reach_m.min(flight.reach_m);
 
@@ -21492,7 +21934,8 @@ fn handle_range_table(
         WindConditions::default(),
         atmosphere,
         station_presence,
-    )?;
+    )
+    .map_err(|e| station.labels().error(e, units))?;
 
     // Run trajectory WITH wind (for wind drift values)
     // range-table does not yet consume saved-profile bc_segments/drag_curve (MBA-1323
@@ -21524,7 +21967,8 @@ fn handle_range_table(
         sight_offset_lateral_m,
         Some(zero_distance_m),
         station_presence,
-    )?;
+    )
+    .map_err(|e| station.labels().error(e, units))?;
 
     // Run trajectory WITHOUT wind (for pure drop)
     let no_wind_flight = run_sampled_flight_with_station_presence(
@@ -21554,7 +21998,8 @@ fn handle_range_table(
         sight_offset_lateral_m,
         Some(zero_distance_m),
         station_presence,
-    )?;
+    )
+    .map_err(|e| station.labels().error(e, units))?;
 
     // Build output rows. MBA-1410: Drop is the elevation axis, Wind the (possibly
     // different) windage axis.
@@ -21997,6 +22442,7 @@ fn handle_compare(
             atmosphere.clone(),
             station_presence,
         )
+        .map_err(|e| air.labels().error(e, units))
         .map_err(|e| format!("load '{}': zeroing failed: {e}", load.name))?;
 
         let wind_flight = run_sampled_flight_with_station_presence(
@@ -22027,6 +22473,7 @@ fn handle_compare(
             Some(zero_distance_m),
             station_presence,
         )
+        .map_err(|e| air.labels().error(e, units))
         .map_err(|e| format!("load '{}': {e}", load.name))?;
         let no_wind_flight = run_sampled_flight_with_station_presence(
             velocity_m,
@@ -22056,6 +22503,7 @@ fn handle_compare(
             Some(zero_distance_m),
             station_presence,
         )
+        .map_err(|e| air.labels().error(e, units))
         .map_err(|e| format!("load '{}': {e}", load.name))?;
 
         // Both flights feed every row, so this load can only run as far as the shorter.
@@ -23892,6 +24340,8 @@ mod a7p_import_mapping_tests {
         enc_i32(7, -20_000, &mut p);
         enc_i32(8, 10_000, &mut p);
         enc_i32(11, 7920, &mut p);
+        // A supplied station pressure.
+        enc_i32(16, 10132, &mut p);
         enc_i32(20, 338, &mut p);
         enc_i32(21, 3000, &mut p);
         enc_i32(24, 0, &mut p);
@@ -23994,6 +24444,7 @@ mod a7p_import_mapping_tests {
         // for the same minimal-fixture style), plus field 18 = w_pitch_raw.
         let mut p = Vec::new();
         enc_i32(24, 0, &mut p); // G1
+        enc_i32(16, 10132, &mut p); // a pressure, 1013.2 hPa: 0 hPa is air no solve flies
         let mut row = Vec::new();
         enc_i32(1, 5000, &mut row);
         enc_i32(2, 5000, &mut row);
@@ -25660,7 +26111,7 @@ fn handle_hold_corridor(
         station.labels(),
     )?;
 
-    let report = solve_robust_hold(&request).map_err(|e| e.to_string())?;
+    let report = solve_robust_hold(&request).map_err(|e| station.labels().error(e, units))?;
     print!("{}", format_robust_hold_report(&report, format, units));
     Ok(())
 }
@@ -25776,11 +26227,12 @@ fn handle_mark_to_range(
     }
     let scale = reference_mag / mag;
 
-    let (load, _) = load_args.resolve(&typed, zero_distance, units)?;
+    let (load, _, station) = load_args.resolve(&typed, zero_distance, units)?;
     let max_range_m = UnitConverter::distance_to_metric(max_range, units);
     // Search a little past the requested limit so a mark landing exactly at it still
     // brackets.
-    let curve = HoldCurve::solve(&load, max_range_m * 1.02)?;
+    let curve = HoldCurve::solve(&load, max_range_m * 1.02)
+        .map_err(|e| station.labels().error(e, units))?;
 
     struct Row {
         nominal_mil: f64,
@@ -25992,9 +26444,10 @@ fn handle_bdc_match(
         );
     }
 
-    let (load, _) = load_args.resolve(&typed, zero_distance, units)?;
+    let (load, _, station) = load_args.resolve(&typed, zero_distance, units)?;
     let furthest_m = pairs.iter().fold(0.0_f64, |acc, p| acc.max(p.range_m));
-    let curve = HoldCurve::solve(&load, furthest_m * 1.05)?;
+    let curve =
+        HoldCurve::solve(&load, furthest_m * 1.05).map_err(|e| station.labels().error(e, units))?;
 
     // Solved angular drop at each mark's nominal range.
     let mut solved_mil = Vec::with_capacity(pairs.len());
@@ -26234,7 +26687,7 @@ fn handle_optimal_zero(
     // "no zero could be solved" later, and so the saved profile is read once rather than
     // once per search iteration. The zero distance handed in is a placeholder — this
     // command solves for it, and every candidate below overwrites it.
-    let (base_load, _) = load_args.resolve(&typed, Some(1.0), units)?;
+    let (base_load, _, station) = load_args.resolve(&typed, Some(1.0), units)?;
 
     // Holds at every target for one candidate zero: one solve, read at each range. The
     // error says why, so the final report below can name the cause (a refused air, say)
@@ -26246,7 +26699,9 @@ fn handle_optimal_zero(
     let holds_at = |zero_m: f64| -> Result<Vec<f64>, String> {
         let mut load = base_load.clone();
         load.zero_distance_m = zero_m;
-        let curve = HoldCurve::solve(&load, curve_max_m).map_err(|e| e.to_string())?;
+        let curve = HoldCurve::solve(&load, curve_max_m)
+            .map_err(|e| station.labels().error(e, units))
+            .map_err(|e| e.to_string())?;
         parsed
             .iter()
             .map(|target| {
@@ -26788,7 +27243,8 @@ fn handle_reticle(
                         station.labels(),
                     )?;
                     let range_m = UnitConverter::distance_to_metric(range, units);
-                    let curve = HoldCurve::solve(&load, range_m * 1.05)?;
+                    let curve = HoldCurve::solve(&load, range_m * 1.05)
+                        .map_err(|e| station.labels().error(e, units))?;
                     let point = curve.at_range(range_m).ok_or_else(|| {
                         format!(
                             "the trajectory does not reach {range} — it was sampled only to {:.1}",
@@ -28607,7 +29063,7 @@ fn handle_adaptive_card(
     units: UnitSystem,
     output: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
-    let (load, profile_data) = load_args.resolve(&typed, zero_distance, units)?;
+    let (load, profile_data, station) = load_args.resolve(&typed, zero_distance, units)?;
 
     // Optic is OPTIONAL here (unlike dial-plan): no --profile, or a --profile with no
     // turret/click data saved, both just mean "print exact, unquantized angles."
@@ -28682,17 +29138,19 @@ fn handle_adaptive_card(
     // N-3 fixed for the budget flags. Every other refusal is about the load, not --end (air
     // that cannot exist used to read "--end 800.000 yd: atmosphere.humidity = 100: ..."), and
     // surfaces as itself.
-    let curve = HoldCurve::solve(&load, max_solve_range_m).map_err(|e| -> Box<dyn Error> {
-        let dist_unit = match units {
-            UnitSystem::Imperial => "yd",
-            UnitSystem::Metric => "m",
-        };
-        if !(max_solve_range_m.is_finite() && max_solve_range_m > 0.0) {
-            format!("--end {end:.3} {dist_unit}: {e}").into()
-        } else {
-            e
-        }
-    })?;
+    let curve = HoldCurve::solve(&load, max_solve_range_m)
+        .map_err(|e| station.labels().error(e, units))
+        .map_err(|e| -> Box<dyn Error> {
+            let dist_unit = match units {
+                UnitSystem::Imperial => "yd",
+                UnitSystem::Metric => "m",
+            };
+            if !(max_solve_range_m.is_finite() && max_solve_range_m > 0.0) {
+                format!("--end {end:.3} {dist_unit}: {e}").into()
+            } else {
+                e
+            }
+        })?;
 
     // MBA-1478: truncate like every other card surface instead of refusing the whole card.
     //
@@ -29116,6 +29574,35 @@ mod humidity_flag_tests {
                 }
             }
             assert!(unchecked.is_empty(), "{}", unchecked.join("\n"));
+        });
+    }
+
+    #[test]
+    fn every_humidity_flag_echoes_long_numbers_compactly() {
+        on_a_big_stack(|| {
+            let values = [
+                (format!("1{}", "0".repeat(300)), "1e300"),
+                (format!("150.{}", "0".repeat(300)), "150"),
+                (format!("105.0000001{}", "0".repeat(300)), "105.0000001"),
+            ];
+            for (path, arg) in all_humidity_args() {
+                let long = arg.get_long().unwrap();
+                for (raw, expected) in &values {
+                    let error = clap::Command::new("probe")
+                        .no_binary_name(true)
+                        .arg(arg.clone().required(false))
+                        .try_get_matches_from([format!("--{long}={raw}")])
+                        .expect_err("humidity is outside the sensor band");
+                    let message = error.to_string();
+                    assert!(
+                        message.contains(&format!("invalid value '{expected}'"))
+                            && message.contains(&format!("--{long}"))
+                            && message.contains("relative humidity must be a percent")
+                            && !message.contains(raw),
+                        "{path}: {message}"
+                    );
+                }
+            }
         });
     }
 

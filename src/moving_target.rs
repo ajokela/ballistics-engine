@@ -107,7 +107,14 @@ impl fmt::Display for LeadError {
     }
 }
 
-impl std::error::Error for LeadError {}
+impl std::error::Error for LeadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Solver(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl From<BallisticsError> for LeadError {
     fn from(e: BallisticsError) -> Self {

@@ -4,7 +4,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::atmosphere::{
     resolve_station_conditions_with_presence, PressureReferenceMode, StationAtmospherePresence,
-    StationPressureOrigin,
+    StationOrigin,
 };
 use crate::bc_table_5d::Bc5dTable;
 #[cfg(feature = "wasm-zero")]
@@ -120,8 +120,9 @@ pub(crate) fn zero_station_air(
     )
 }
 
-/// Where the pressure [`zero_station_air`] resolves from the same inputs came from: the
-/// reading, a QNH reduced to the station, or the standard pressure at the altitude.
+/// Where the readings [`zero_station_air`] resolves from the same inputs came from: the
+/// reading, a QNH reduced to the station (kept as typed, so a refusal quotes it), the standard
+/// pressure at the altitude, or a density altitude (and its temperature unless one was given).
 #[cfg(feature = "wasm-zero")]
 fn zero_station_pressure_origin(
     atmosphere: &AtmosphericConditions,
@@ -129,14 +130,17 @@ fn zero_station_pressure_origin(
     pressure_given: bool,
     density_altitude_given: bool,
     pressure_type: Option<PressureReferenceMode>,
-) -> StationPressureOrigin {
+) -> StationOrigin {
+    if density_altitude_given {
+        return StationOrigin::density_altitude(temperature_given);
+    }
     let (mode, presence) = zero_station_rule(
         temperature_given,
         pressure_given,
         density_altitude_given,
         pressure_type,
     );
-    StationPressureOrigin::resolving(atmosphere.pressure, atmosphere.altitude, mode, presence)
+    StationOrigin::resolving(atmosphere.pressure, atmosphere.altitude, mode, presence)
 }
 
 /// The pressure mode and presence the `zero` command resolves its station by: a declared QNH
@@ -189,11 +193,7 @@ pub(crate) fn lead_station_air(
         };
     }
     if let Some(p) = pressure {
-        let p_hpa = if imperial {
-            p * 33.863886666667 // inHg to hPa
-        } else {
-            p
-        };
+        let p_hpa = lead_pressure_hpa(p, imperial);
         atmosphere.pressure = match pressure_type.unwrap_or(PressureReferenceMode::Absolute) {
             PressureReferenceMode::Absolute => p_hpa,
             PressureReferenceMode::Qnh => {
@@ -216,6 +216,30 @@ pub(crate) fn lead_station_air(
     }
     let presence = StationAtmospherePresence::new(temperature.is_some(), pressure.is_some());
     (atmosphere, presence)
+}
+
+/// A pressure typed on `lead` (inHg imperial / hPa metric) in hPa, by the command's own factor.
+#[cfg(feature = "wasm-lead")]
+fn lead_pressure_hpa(pressure: f64, imperial: bool) -> f64 {
+    if imperial {
+        pressure * 33.863886666667 // inHg to hPa
+    } else {
+        pressure
+    }
+}
+
+/// The origin of a pressure typed as `qnh_hpa` under `mode`, for a terminal command that
+/// reduces it itself before checking the air: the QNH as typed when `mode` declares it one
+/// ([`StationOrigin::of`]), so a refusal quotes it rather than the station pressure reduced from
+/// it; `None` for an absolute pressure, whose origin the presence rule decides.
+#[cfg(any(
+    feature = "wasm-lead",
+    feature = "wasm-truing",
+    feature = "wasm-estimate-bc"
+))]
+fn typed_qnh_origin(qnh_hpa: f64, mode: Option<PressureReferenceMode>) -> Option<StationOrigin> {
+    (mode == Some(PressureReferenceMode::Qnh))
+        .then(|| StationOrigin::of(Some(qnh_hpa), PressureReferenceMode::Qnh))
 }
 
 /// The atmosphere `estimate-bc`'s data was measured in, and which of it was typed (0.49.0).
@@ -261,6 +285,16 @@ pub(crate) fn estimate_bc_station_air(
     (atmosphere, presence)
 }
 
+/// A display-unit pressure (inHg imperial / hPa metric) in hPa, by native
+/// `apply_pressure_mode`'s factor.
+#[cfg(any(feature = "wasm-truing", feature = "wasm-estimate-bc"))]
+fn display_pressure_hpa(pressure: f64, units: UnitSystem) -> f64 {
+    match units {
+        UnitSystem::Imperial => pressure * 33.8639,
+        UnitSystem::Metric => pressure,
+    }
+}
+
 /// Reduce a display-unit QNH (inHg imperial / hPa metric) to display-unit station pressure at a
 /// display-unit altitude (feet / meters), with native `apply_pressure_mode`'s factors and
 /// arithmetic so the two terminals fly the same air (MBA-1605). The reduction runs in hPa (the
@@ -269,10 +303,11 @@ pub(crate) fn estimate_bc_station_air(
 /// bit-exact.
 #[cfg(feature = "wasm-truing")]
 fn qnh_display_to_station_display(pressure: f64, altitude: f64, units: UnitSystem) -> f64 {
-    let (altitude_m, qnh_hpa) = match units {
-        UnitSystem::Imperial => (altitude * 0.3048, pressure * 33.8639),
-        UnitSystem::Metric => (altitude, pressure),
+    let altitude_m = match units {
+        UnitSystem::Imperial => altitude * 0.3048,
+        UnitSystem::Metric => altitude,
     };
+    let qnh_hpa = display_pressure_hpa(pressure, units);
     let station_hpa = crate::atmosphere::reduce_qnh_to_station_pressure(qnh_hpa, altitude_m);
     pressure * (station_hpa / qnh_hpa)
 }
@@ -308,7 +343,11 @@ const ZERO_AIR_FLAGS: [&str; 4] = [
 /// [`refuse_terminal_air`] for the truing commands, whose forward model takes the air in
 /// imperial units and converts it to metric itself: the station checked is the one that
 /// conversion flies (`truing::solve_trajectory_sample`'s own arithmetic).
+///
+/// `qnh_origin` is the origin of a typed QNH the command reduced itself ([`typed_qnh_origin`]),
+/// so a refusal quotes it as typed.
 #[cfg(feature = "wasm-truing")]
+#[allow(clippy::too_many_arguments)]
 fn refuse_truing_terminal_air(
     temp_f: f64,
     press_inhg: f64,
@@ -316,6 +355,7 @@ fn refuse_truing_terminal_air(
     alt_ft: f64,
     presence: StationAtmospherePresence,
     units: UnitSystem,
+    qnh_origin: Option<StationOrigin>,
 ) -> Result<(), JsValue> {
     refuse_terminal_air(
         &AtmosphericConditions {
@@ -327,6 +367,7 @@ fn refuse_truing_terminal_air(
         presence,
         units,
         SHOT_AIR_FLAGS,
+        qnh_origin,
     )
 }
 
@@ -338,7 +379,9 @@ fn refuse_truing_terminal_air(
 ///
 /// For the commands that hand the presence to the engine (`lead`, the truing commands,
 /// `estimate-bc`); `trajectory` and `zero` resolve their station themselves and use
-/// [`refuse_resolved_terminal_air`].
+/// [`refuse_resolved_terminal_air`]. A command that reduced a typed QNH itself passes its origin
+/// (`qnh_origin`, [`typed_qnh_origin`]) so a refusal quotes the QNH as typed; `None` lets the
+/// presence rule say where the pressure came from.
 #[cfg(any(
     feature = "wasm-lead",
     feature = "wasm-truing",
@@ -349,12 +392,14 @@ fn refuse_terminal_air(
     presence: StationAtmospherePresence,
     units: UnitSystem,
     labels: [&str; 4],
+    qnh_origin: Option<StationOrigin>,
 ) -> Result<(), JsValue> {
     let units = match units {
         UnitSystem::Imperial => crate::cli_api::UnitSystem::Imperial,
         UnitSystem::Metric => crate::cli_api::UnitSystem::Metric,
     };
-    match atmosphere.air_refusal_named(presence, units, labels) {
+    let origin = qnh_origin.unwrap_or_else(|| atmosphere.station_origin(presence));
+    match atmosphere.air_refusal_named_from(presence, origin, units, labels) {
         Some(refusal) => Err(JsValue::from_str(refusal.message())),
         None => Ok(()),
     }
@@ -368,13 +413,84 @@ fn check_temperature_flag_js(flag: &str, value: f64, units: UnitSystem) -> Resul
         .map_err(|refusal| JsValue::from_str(&refusal))
 }
 
+/// Which station reading a flag carries, for [`check_station_flag_js`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StationQuantity {
+    /// A pressure, inHg imperial / hPa metric.
+    Pressure,
+    /// An altitude or a density altitude, feet imperial / metres metric.
+    Altitude,
+}
+
+/// A station pressure, altitude or density altitude typed into `flag` in the terminal's
+/// `units`, held to the one rule its quantity has on every surface and refused in the native
+/// CLI's own words, or returned unchanged: a pressure finite and above 0
+/// ([`crate::atmosphere::check_pressure_flag`]; a near vacuum and twice sea level fly), an
+/// altitude or a density altitude a finite number ([`crate::atmosphere::check_altitude_flag`];
+/// a density altitude's station is checked where it is resolved).
+fn check_station_flag_js(
+    quantity: StationQuantity,
+    flag: &str,
+    value: f64,
+    units: UnitSystem,
+) -> Result<f64, JsValue> {
+    let imperial = units == UnitSystem::Imperial;
+    match quantity {
+        StationQuantity::Pressure => crate::atmosphere::check_pressure_flag(flag, value, imperial),
+        StationQuantity::Altitude => crate::atmosphere::check_altitude_flag(flag, value, imperial),
+    }
+    .map(|()| value)
+    .map_err(|refusal| JsValue::from_str(&refusal))
+}
+
+/// The station a density altitude (`density_altitude_m`) gives, by the one rule
+/// ([`crate::atmosphere::station_for_density_altitude`]), as `(altitude m, temperature °C,
+/// pressure hPa)`, or its refusal thrown in the native CLI's words, naming the reading that
+/// carried it (`labels`, as [`refuse_resolved_terminal_air`] takes them, name the altitude and
+/// pressure, and the temperature unless one was given, by the density altitude's flag).
+fn station_for_density_altitude_js(
+    density_altitude_m: f64,
+    explicit_temperature_c: Option<f64>,
+    humidity: f64,
+    units: UnitSystem,
+    labels: [&str; 4],
+) -> Result<(f64, f64, f64), JsValue> {
+    AtmosphericConditions::for_density_altitude_named(
+        density_altitude_m,
+        explicit_temperature_c,
+        humidity,
+        units.engine(),
+        labels,
+    )
+    .map(|station| (station.altitude, station.temperature, station.pressure))
+    .map_err(|refusal| JsValue::from_str(refusal.message()))
+}
+
+/// The labels of a station a density altitude gave (`flag`): the humidity's flag, the
+/// temperature's unless none was given (`temperature_given`), and the density altitude's for
+/// the altitude and the pressure it gives, in [`SHOT_AIR_FLAGS`] order.
+fn density_altitude_labels<'a>(
+    flags: [&'a str; 4],
+    flag: &'a str,
+    temperature_given: bool,
+) -> [&'a str; 4] {
+    [
+        flags[0],
+        if temperature_given { flags[1] } else { flag },
+        flag,
+        flag,
+    ]
+}
+
 /// [`refuse_terminal_air`] for a command that resolved its station itself (a QNH reduced, the
 /// presence rule applied, a density altitude's derived triple): `resolved` flies as given, and
-/// `origin` says where its pressure came from, so a station pressure outside the troposphere is
-/// blamed on the reading that put it there, never on a `--pressure` nobody typed.
+/// `origin` says where its readings came from, so a station pressure outside the troposphere is
+/// blamed on the reading that put it there, never on a `--pressure` nobody typed, a QNH is
+/// quoted as typed, and a temperature a density altitude gave is named as that density
+/// altitude's.
 fn refuse_resolved_terminal_air(
     resolved: &AtmosphericConditions,
-    origin: StationPressureOrigin,
+    origin: StationOrigin,
     units: UnitSystem,
     labels: [&str; 4],
 ) -> Result<(), JsValue> {
@@ -385,6 +501,28 @@ fn refuse_resolved_terminal_air(
     match resolved.air_refusal_named_from(StationAtmospherePresence::BOTH, origin, units, labels) {
         Some(refusal) => Err(JsValue::from_str(refusal.message())),
         None => Ok(()),
+    }
+}
+
+/// Carry the same station labels into failures discovered by a flight or a search.
+fn terminal_flight_error(
+    error: &(dyn std::error::Error + 'static),
+    units: UnitSystem,
+    labels: [&str; 4],
+    origin: Option<StationOrigin>,
+) -> String {
+    match crate::atmosphere::AtmosphereError::in_error(error) {
+        Some(air) => air
+            .temperature_refusal_from(
+                crate::atmosphere::AirField::named(labels[1]),
+                match units {
+                    UnitSystem::Imperial => crate::atmosphere::AirUnits::IMPERIAL,
+                    UnitSystem::Metric => crate::atmosphere::AirUnits::METRIC,
+                },
+                origin.unwrap_or_default().temperature,
+            )
+            .to_string(),
+        None => error.to_string(),
     }
 }
 
@@ -1767,9 +1905,14 @@ impl WasmBallistics {
                 }
                 "--pressure" => {
                     if i + 1 < args.len() {
-                        pressure = args[i + 1]
-                            .parse()
-                            .map_err(|_| JsValue::from_str("Invalid pressure"))?;
+                        pressure = check_station_flag_js(
+                            StationQuantity::Pressure,
+                            "--pressure",
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid pressure"))?,
+                            units,
+                        )?;
                         pressure_supplied = true;
                         i += 1;
                     }
@@ -1789,19 +1932,27 @@ impl WasmBallistics {
                 }
                 "--altitude" => {
                     if i + 1 < args.len() {
-                        altitude = args[i + 1]
-                            .parse()
-                            .map_err(|_| JsValue::from_str("Invalid altitude"))?;
+                        altitude = check_station_flag_js(
+                            StationQuantity::Altitude,
+                            "--altitude",
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid altitude"))?,
+                            units,
+                        )?;
                         i += 1;
                     }
                 }
                 "--density-altitude" => {
                     if i + 1 < args.len() {
-                        density_altitude = Some(
+                        density_altitude = Some(check_station_flag_js(
+                            StationQuantity::Altitude,
+                            "--density-altitude",
                             args[i + 1]
                                 .parse()
                                 .map_err(|_| JsValue::from_str("Invalid density altitude"))?,
-                        );
+                            units,
+                        )?);
                         i += 1;
                     }
                 }
@@ -2026,11 +2177,14 @@ impl WasmBallistics {
                 }
                 "--zero-pressure" => {
                     if i + 1 < args.len() {
-                        zero_pressure = Some(
+                        zero_pressure = Some(check_station_flag_js(
+                            StationQuantity::Pressure,
+                            "--zero-pressure",
                             args[i + 1]
                                 .parse()
                                 .map_err(|_| JsValue::from_str("Invalid zero pressure"))?,
-                        );
+                            units,
+                        )?);
                         i += 1;
                     }
                 }
@@ -2048,21 +2202,27 @@ impl WasmBallistics {
                 }
                 "--zero-density-altitude" => {
                     if i + 1 < args.len() {
-                        zero_density_altitude = Some(
+                        zero_density_altitude = Some(check_station_flag_js(
+                            StationQuantity::Altitude,
+                            "--zero-density-altitude",
                             args[i + 1]
                                 .parse()
                                 .map_err(|_| JsValue::from_str("Invalid zero-density-altitude"))?,
-                        );
+                            units,
+                        )?);
                         i += 1;
                     }
                 }
                 "--zero-altitude" => {
                     if i + 1 < args.len() {
-                        zero_altitude = Some(
+                        zero_altitude = Some(check_station_flag_js(
+                            StationQuantity::Altitude,
+                            "--zero-altitude",
                             args[i + 1]
                                 .parse()
                                 .map_err(|_| JsValue::from_str("Invalid zero altitude"))?,
-                        );
+                            units,
+                        )?);
                         i += 1;
                     }
                 }
@@ -2526,8 +2686,14 @@ impl WasmBallistics {
                 UnitSystem::Metric => da,
             };
             let explicit_temp_c = temperature_supplied.then_some(atmosphere.temperature);
-            let (da_altitude_m, da_temp_c, da_pressure_hpa) =
-                crate::atmosphere::resolve_atmosphere_for_density_altitude(da_m, explicit_temp_c);
+            // A density altitude no air has is thrown naming its flag.
+            let (da_altitude_m, da_temp_c, da_pressure_hpa) = station_for_density_altitude_js(
+                da_m,
+                explicit_temp_c,
+                humidity,
+                units,
+                density_altitude_labels(SHOT_AIR_FLAGS, "--density-altitude", temperature_supplied),
+            )?;
             atmosphere.temperature = da_temp_c;
             atmosphere.pressure = da_pressure_hpa;
             atmosphere.altitude = da_altitude_m;
@@ -2554,6 +2720,13 @@ impl WasmBallistics {
             }
         }
 
+        let shot_labels = if density_altitude_active {
+            density_altitude_labels(SHOT_AIR_FLAGS, "--density-altitude", temperature_supplied)
+        } else {
+            SHOT_AIR_FLAGS
+        };
+        let shot_origin =
+            density_altitude_active.then(|| StationOrigin::density_altitude(temperature_supplied));
         // The shot day's air refused up front, before the zero or the flight, in the
         // terminal's words: the station the solver below flies (a density altitude's derived
         // triple as it stands, otherwise by presence and pressure mode).
@@ -2570,18 +2743,32 @@ impl WasmBallistics {
                     presence,
                 )
             };
-            // A density altitude's derived pressure is no sentinel default, so it counts as a
-            // reading here, as in every solve of it.
-            let origin = StationPressureOrigin::resolving(
-                atmosphere.pressure,
-                atmosphere.altitude,
-                pressure_type,
-                presence,
-            );
+            // A density altitude's derived pressure is no sentinel default: it is the density
+            // altitude's, and blamed on it, as is every reading it gave.
+            let (origin, labels) = if density_altitude_active {
+                (
+                    StationOrigin::density_altitude(temperature_supplied),
+                    density_altitude_labels(
+                        SHOT_AIR_FLAGS,
+                        "--density-altitude",
+                        temperature_supplied,
+                    ),
+                )
+            } else {
+                (
+                    StationOrigin::resolving(
+                        atmosphere.pressure,
+                        atmosphere.altitude,
+                        pressure_type,
+                        presence,
+                    ),
+                    SHOT_AIR_FLAGS,
+                )
+            };
             let mut station = atmosphere.clone();
             station.temperature = temperature;
             station.pressure = pressure;
-            refuse_resolved_terminal_air(&station, origin, units, SHOT_AIR_FLAGS)?;
+            refuse_resolved_terminal_air(&station, origin, units, labels)?;
         }
 
         // Handle auto-zero if specified
@@ -2683,11 +2870,27 @@ impl WasmBallistics {
                     UnitSystem::Imperial => (t - 32.0) * 5.0 / 9.0,
                     UnitSystem::Metric => t,
                 });
-                let (da_altitude_m, da_temp_c, da_pressure_hpa) =
-                    crate::atmosphere::resolve_atmosphere_for_density_altitude(
-                        da_m,
-                        explicit_zero_temp_c,
-                    );
+                // A zero-day density altitude no air has is thrown naming its flag.
+                let (da_altitude_m, da_temp_c, da_pressure_hpa) = station_for_density_altitude_js(
+                    da_m,
+                    explicit_zero_temp_c,
+                    zero_atmosphere.humidity,
+                    units,
+                    density_altitude_labels(
+                        [
+                            if zero_humidity.is_some() {
+                                ZERO_AIR_FLAGS[0]
+                            } else {
+                                SHOT_AIR_FLAGS[0]
+                            },
+                            ZERO_AIR_FLAGS[1],
+                            ZERO_AIR_FLAGS[2],
+                            ZERO_AIR_FLAGS[3],
+                        ],
+                        "--zero-density-altitude",
+                        zero_temperature.is_some(),
+                    ),
+                )?;
                 zero_atmosphere.temperature = da_temp_c;
                 zero_inputs.temperature = da_temp_c;
                 zero_atmosphere.pressure = da_pressure_hpa;
@@ -2770,36 +2973,60 @@ impl WasmBallistics {
             resolved_zero_atmosphere.pressure = resolved_pressure_hpa;
             // The zero day's air refused up front, each reading named by the flag it came
             // from: the zero day's own when it was given (a zero-day density altitude supplies
-            // the pressure and altitude), the shot day's when it is inherited.
+            // the pressure and altitude, and the temperature unless --zero-temperature is
+            // given), the shot day's when it is inherited (a shot-day density altitude's, when
+            // it gave them).
+            let shot_labels = if density_altitude_active {
+                density_altitude_labels(SHOT_AIR_FLAGS, "--density-altitude", temperature_supplied)
+            } else {
+                SHOT_AIR_FLAGS
+            };
             let flag = |own: bool, i: usize| {
                 if own {
                     ZERO_AIR_FLAGS[i]
                 } else {
-                    SHOT_AIR_FLAGS[i]
+                    shot_labels[i]
                 }
             };
-            refuse_resolved_terminal_air(
-                &resolved_zero_atmosphere,
-                StationPressureOrigin::resolving(
+            let zero_labels = if zero_density_altitude.is_some() {
+                density_altitude_labels(
+                    [
+                        flag(zero_humidity.is_some(), 0),
+                        flag(zero_temperature.is_some(), 1),
+                        ZERO_AIR_FLAGS[2],
+                        ZERO_AIR_FLAGS[3],
+                    ],
+                    "--zero-density-altitude",
+                    zero_temperature.is_some(),
+                )
+            } else {
+                [
+                    flag(zero_humidity.is_some(), 0),
+                    flag(zero_temperature.is_some(), 1),
+                    flag(zero_pressure.is_some(), 2),
+                    flag(zero_altitude.is_some(), 3),
+                ]
+            };
+            let mut origin = if zero_density_altitude.is_some()
+                || (density_altitude_active && zero_pressure.is_none())
+            {
+                StationOrigin::density_altitude(zero_presence.temperature_supplied)
+            } else {
+                StationOrigin::resolving(
                     zero_atmosphere.pressure,
                     zero_atmosphere.altitude,
                     zero_pressure_type_resolved,
                     zero_presence,
-                ),
-                units,
-                [
-                    flag(zero_humidity.is_some(), 0),
-                    flag(zero_temperature.is_some(), 1),
-                    flag(
-                        zero_pressure.is_some() || zero_density_altitude.is_some(),
-                        2,
-                    ),
-                    flag(
-                        zero_altitude.is_some() || zero_density_altitude.is_some(),
-                        3,
-                    ),
-                ],
-            )?;
+                )
+            };
+            // A pressure override leaves an inherited density-altitude temperature intact.
+            if zero_temperature.is_none()
+                && (zero_density_altitude.is_some()
+                    || (density_altitude_active && !temperature_supplied))
+            {
+                origin.temperature = crate::atmosphere::StationTemperatureOrigin::DensityAltitude;
+            }
+            refuse_resolved_terminal_air(&resolved_zero_atmosphere, origin, units, zero_labels)?;
             // A zero trial that climbs into air that cannot exist aloft names the zero day's
             // temperature by its flag, in the terminal's units, as the refusal above does.
             let zero_solve_result = calculate_zero_angle_with_resolved_conditions(
@@ -2809,9 +3036,7 @@ impl WasmBallistics {
                 wind.clone(),
                 resolved_zero_atmosphere,
             )
-            .map_err(|error| {
-                error.in_terminal_words(units.engine(), flag(zero_temperature.is_some(), 1))
-            });
+            .map_err(|error| terminal_flight_error(&error, units, zero_labels, Some(origin)));
             match zero_solve_result {
                 Ok(zero_angle) => {
                     inputs.muzzle_angle = zero_angle;
@@ -3221,7 +3446,7 @@ impl WasmBallistics {
             // -o json (the npm Calculator reported it as a JSON parse error).
             Err(e) => {
                 // Air that cannot exist aloft, found in flight, in the terminal's words.
-                let e = e.in_terminal_words(units.engine(), SHOT_AIR_FLAGS[1]);
+                let e = terminal_flight_error(&e, units, shot_labels, shot_origin);
                 let mut combined = format!("Error: {}", e);
                 // MBA-1386 (0.28.1 sweep): the Ok arm above prepends bc5d_coercion_warning
                 // (table-only, like every other human-readable block here); the Err arm was
@@ -3448,11 +3673,14 @@ impl WasmBallistics {
                 }
                 "--pressure" => {
                     if i + 1 < args.len() {
-                        pressure = Some(
+                        pressure = Some(check_station_flag_js(
+                            StationQuantity::Pressure,
+                            "--pressure",
                             args[i + 1]
                                 .parse()
                                 .map_err(|_| JsValue::from_str("Invalid pressure"))?,
-                        );
+                            units,
+                        )?);
                         i += 1;
                     }
                 }
@@ -3470,21 +3698,27 @@ impl WasmBallistics {
                 }
                 "--altitude" => {
                     if i + 1 < args.len() {
-                        altitude = Some(
+                        altitude = Some(check_station_flag_js(
+                            StationQuantity::Altitude,
+                            "--altitude",
                             args[i + 1]
                                 .parse()
                                 .map_err(|_| JsValue::from_str("Invalid altitude"))?,
-                        );
+                            units,
+                        )?);
                         i += 1;
                     }
                 }
                 "--density-altitude" => {
                     if i + 1 < args.len() {
-                        density_altitude = Some(
+                        density_altitude = Some(check_station_flag_js(
+                            StationQuantity::Altitude,
+                            "--density-altitude",
                             args[i + 1]
                                 .parse()
                                 .map_err(|_| JsValue::from_str("Invalid density-altitude"))?,
-                        );
+                            units,
+                        )?);
                         i += 1;
                     }
                 }
@@ -3554,8 +3788,18 @@ impl WasmBallistics {
                 UnitSystem::Imperial => (t - 32.0) * 5.0 / 9.0,
                 UnitSystem::Metric => t,
             });
-            let (da_altitude_m, da_temp_c, da_pressure_hpa) =
-                crate::atmosphere::resolve_atmosphere_for_density_altitude(da_m, explicit_temp_c);
+            // A density altitude no air has is thrown naming its flag.
+            let (da_altitude_m, da_temp_c, da_pressure_hpa) = station_for_density_altitude_js(
+                da_m,
+                explicit_temp_c,
+                atmosphere.humidity,
+                units,
+                density_altitude_labels(
+                    SHOT_AIR_FLAGS,
+                    "--density-altitude",
+                    temperature.is_some(),
+                ),
+            )?;
             atmosphere.temperature = da_temp_c;
             inputs.temperature = da_temp_c;
             atmosphere.pressure = da_pressure_hpa;
@@ -3644,8 +3888,14 @@ impl WasmBallistics {
         let mut resolved_atmosphere = atmosphere.clone();
         resolved_atmosphere.temperature = resolved_temp_c;
         resolved_atmosphere.pressure = resolved_pressure_hpa;
-        // The air refused up front, in the terminal's words, and thrown.
-        refuse_resolved_terminal_air(&resolved_atmosphere, origin, units, SHOT_AIR_FLAGS)?;
+        // The air refused up front, in the terminal's words, and thrown; a density altitude
+        // names the readings it gave.
+        let labels = if density_altitude.is_some() {
+            density_altitude_labels(SHOT_AIR_FLAGS, "--density-altitude", temperature.is_some())
+        } else {
+            SHOT_AIR_FLAGS
+        };
+        refuse_resolved_terminal_air(&resolved_atmosphere, origin, units, labels)?;
 
         let result = if let Some(angle_deg) = from_angle {
             // MBA-1402, corrected by the Tier 2 review (C2): inverse mode — given a
@@ -3662,7 +3912,8 @@ impl WasmBallistics {
                 los_height,
                 WindConditions::default(),
                 resolved_atmosphere,
-            );
+            )
+            .map_err(|error| terminal_flight_error(&error, units, labels, Some(origin)));
             match from_angle_result {
                 Ok(crossings) => {
                     let to_display = |m: f64| match units {
@@ -3750,7 +4001,7 @@ impl WasmBallistics {
                 WindConditions::default(),
                 resolved_atmosphere,
             )
-            .map_err(|error| error.in_terminal_words(units.engine(), SHOT_AIR_FLAGS[1]));
+            .map_err(|error| terminal_flight_error(&error, units, labels, Some(origin)));
             match zero_result {
                 Ok(zero_angle) => {
                     let zero_degrees = zero_angle * 180.0 / std::f64::consts::PI;
@@ -3953,11 +4204,14 @@ impl WasmBallistics {
                 }
                 "--pressure" => {
                     if i + 1 < args.len() {
-                        pressure = Some(
+                        pressure = Some(check_station_flag_js(
+                            StationQuantity::Pressure,
+                            "--pressure",
                             args[i + 1]
                                 .parse()
                                 .map_err(|_| JsValue::from_str("Invalid pressure"))?,
-                        );
+                            units,
+                        )?);
                         i += 1;
                     }
                 }
@@ -3975,11 +4229,14 @@ impl WasmBallistics {
                 }
                 "--altitude" => {
                     if i + 1 < args.len() {
-                        altitude = Some(
+                        altitude = Some(check_station_flag_js(
+                            StationQuantity::Altitude,
+                            "--altitude",
                             args[i + 1]
                                 .parse()
                                 .map_err(|_| JsValue::from_str("Invalid altitude"))?,
-                        );
+                            units,
+                        )?);
                         i += 1;
                     }
                 }
@@ -4242,8 +4499,20 @@ impl WasmBallistics {
             pressure_type,
             units == UnitSystem::Imperial,
         );
-        // The air refused up front, in the terminal's words, as the native `lead` does.
-        refuse_terminal_air(&atmosphere, station_presence, units, SHOT_AIR_FLAGS)?;
+        // The air refused up front, in the terminal's words, as the native `lead` does: a typed
+        // QNH quoted as typed.
+        refuse_terminal_air(
+            &atmosphere,
+            station_presence,
+            units,
+            SHOT_AIR_FLAGS,
+            pressure.and_then(|p| {
+                typed_qnh_origin(
+                    lead_pressure_hpa(p, units == UnitSystem::Imperial),
+                    pressure_type,
+                )
+            }),
+        )?;
         inputs.temperature = atmosphere.temperature;
         inputs.pressure = atmosphere.pressure;
         if humidity.is_some() {
@@ -5232,11 +5501,14 @@ impl WasmBallistics {
                     i += 1;
                 }
                 "--pressure" => {
-                    pressure = Some(
+                    pressure = Some(check_station_flag_js(
+                        StationQuantity::Pressure,
+                        "--pressure",
                         require_value(args, i)?
                             .parse()
                             .map_err(|_| JsValue::from_str("Invalid pressure"))?,
-                    );
+                        units,
+                    )?);
                     i += 1;
                 }
                 "--humidity" => {
@@ -5250,9 +5522,14 @@ impl WasmBallistics {
                     i += 1;
                 }
                 "--altitude" => {
-                    altitude = require_value(args, i)?
-                        .parse()
-                        .map_err(|_| JsValue::from_str("Invalid altitude"))?;
+                    altitude = check_station_flag_js(
+                        StationQuantity::Altitude,
+                        "--altitude",
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid altitude"))?,
+                        units,
+                    )?;
                     i += 1;
                 }
                 "-o" | "--output" => {
@@ -5341,28 +5618,16 @@ impl WasmBallistics {
         let pressure = match (pressure, units) {
             (None, UnitSystem::Imperial) => 29.92,
             (None, UnitSystem::Metric) => 1013.25,
-            (Some(v), UnitSystem::Imperial) => {
-                if !(8.0..=33.0).contains(&v) {
-                    return Err(JsValue::from_str(&format!(
-                        "--pressure {v} inHg is out of range (expected ~8..33 inHg for imperial units)"
-                    )));
-                }
-                v
-            }
-            (Some(v), UnitSystem::Metric) => {
-                if !(250.0..=1100.0).contains(&v) {
-                    return Err(JsValue::from_str(&format!(
-                        "--pressure {v} hPa is out of range (expected ~250..1100 hPa for metric units)"
-                    )));
-                }
-                v
-            }
+            // Held to the one station-pressure rule where it was parsed.
+            (Some(v), _) => v,
         };
         // MBA-1426 item 3: a declared QNH reduces against this command's own --altitude,
         // matching native true-velocity since MBA-1416. The reduction takes hPa (the
         // altimeter-setting relation is not a plain ratio, MBA-1605), so an inHg value goes in
         // through native apply_pressure_mode's own factor, and the display value is scaled by
         // the station/QNH ratio exactly as native does (bit-exact at sea level).
+        // A QNH is quoted as typed by a refusal of the air.
+        let qnh_origin = typed_qnh_origin(display_pressure_hpa(pressure, units), pressure_type);
         let pressure = match pressure_type.unwrap_or(PressureReferenceMode::Absolute) {
             PressureReferenceMode::Absolute => pressure,
             PressureReferenceMode::Qnh => qnh_display_to_station_display(pressure, altitude, units),
@@ -5419,6 +5684,7 @@ impl WasmBallistics {
             alt_ft,
             station_presence,
             units,
+            qnh_origin,
         )?;
 
         // No BC5D segment synthesis on this path: native gates it behind
@@ -5455,7 +5721,9 @@ impl WasmBallistics {
                     &bc_segments,
                     station_presence,
                 )
-                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+                .map_err(|e| {
+                    JsValue::from_str(&terminal_flight_error(&*e, units, SHOT_AIR_FLAGS, None))
+                })?;
                 Some(correction.muzzle_velocity_fps)
             }
             _ => chrono_fps,
@@ -5508,7 +5776,9 @@ impl WasmBallistics {
                 &bc_segments,
                 station_presence,
             )
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            .map_err(|e| {
+                JsValue::from_str(&terminal_flight_error(&*e, units, SHOT_AIR_FLAGS, None))
+            })?;
             // MBA-1358: dial-unit report values are shown back in scope units (÷CF) via
             // the same shared helper the native CLI uses (/1.0 exact without a CF).
             let display_report = crate::truing::scale_report_dial_values(&report, observation_cf);
@@ -5537,7 +5807,9 @@ impl WasmBallistics {
                 &bc_segments,
                 station_presence,
             )
-            .map_err(|e| JsValue::from_str(&format!("Local calculation failed: {}", e)))?;
+            .map_err(|e| {
+                JsValue::from_str(&terminal_flight_error(&*e, units, SHOT_AIR_FLAGS, None))
+            })?;
 
             let velocity_adjustment = chrono_fps.map(|c| result.effective_velocity_fps - c);
             let adjustment_percent =
@@ -5722,11 +5994,14 @@ impl WasmBallistics {
                     i += 1;
                 }
                 "--pressure" => {
-                    pressure = Some(
+                    pressure = Some(check_station_flag_js(
+                        StationQuantity::Pressure,
+                        "--pressure",
                         require_value(args, i)?
                             .parse()
                             .map_err(|_| JsValue::from_str("Invalid pressure"))?,
-                    );
+                        units,
+                    )?);
                     i += 1;
                 }
                 "--pressure-type" => {
@@ -5738,9 +6013,14 @@ impl WasmBallistics {
                     i += 1;
                 }
                 "--altitude" => {
-                    altitude = require_value(args, i)?
-                        .parse()
-                        .map_err(|_| JsValue::from_str("Invalid altitude"))?;
+                    altitude = check_station_flag_js(
+                        StationQuantity::Altitude,
+                        "--altitude",
+                        require_value(args, i)?
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid altitude"))?,
+                        units,
+                    )?;
                     i += 1;
                 }
                 "-o" | "--output" => {
@@ -5844,25 +6124,13 @@ impl WasmBallistics {
         let pressure = match (pressure, units) {
             (None, UnitSystem::Imperial) => 29.92,
             (None, UnitSystem::Metric) => 1013.25,
-            (Some(v), UnitSystem::Imperial) => {
-                if !(8.0..=33.0).contains(&v) {
-                    return Err(JsValue::from_str(&format!(
-                        "--pressure {v} inHg is out of range (expected ~8..33 inHg for imperial units)"
-                    )));
-                }
-                v
-            }
-            (Some(v), UnitSystem::Metric) => {
-                if !(250.0..=1100.0).contains(&v) {
-                    return Err(JsValue::from_str(&format!(
-                        "--pressure {v} hPa is out of range (expected ~250..1100 hPa for metric units)"
-                    )));
-                }
-                v
-            }
+            // Held to the one station-pressure rule where it was parsed.
+            (Some(v), _) => v,
         };
         // A declared QNH reduces against this command's own --altitude (MBA-1416), the same
         // way native apply_pressure_mode does (MBA-1605).
+        // A QNH is quoted as typed by a refusal of the air.
+        let qnh_origin = typed_qnh_origin(display_pressure_hpa(pressure, units), pressure_type);
         let pressure = match pressure_type.unwrap_or(PressureReferenceMode::Absolute) {
             PressureReferenceMode::Absolute => pressure,
             PressureReferenceMode::Qnh => qnh_display_to_station_display(pressure, altitude, units),
@@ -5915,6 +6183,7 @@ impl WasmBallistics {
             alt_ft,
             station_presence,
             units,
+            qnh_origin,
         )?;
         let twist_in = match units {
             UnitSystem::Imperial => twist_rate,
@@ -5980,7 +6249,9 @@ impl WasmBallistics {
             earth,
             called_crosswind_mph: called_mph,
         };
-        let report = solve_wind_truing(&request).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let report = solve_wind_truing(&request).map_err(|e| {
+            JsValue::from_str(&terminal_flight_error(&*e, units, SHOT_AIR_FLAGS, None))
+        })?;
         Ok(format_wind_truing_report(
             &report,
             engine_units(units),
@@ -6121,11 +6392,14 @@ impl WasmBallistics {
                 }
                 "--pressure" => {
                     if i + 1 < args.len() {
-                        pressure = Some(
+                        pressure = Some(check_station_flag_js(
+                            StationQuantity::Pressure,
+                            "--pressure",
                             args[i + 1]
                                 .parse()
                                 .map_err(|_| JsValue::from_str("Invalid pressure"))?,
-                        );
+                            units,
+                        )?);
                         i += 1;
                     }
                 }
@@ -6143,9 +6417,14 @@ impl WasmBallistics {
                 }
                 "--altitude" => {
                     if i + 1 < args.len() {
-                        altitude = args[i + 1]
-                            .parse()
-                            .map_err(|_| JsValue::from_str("Invalid altitude"))?;
+                        altitude = check_station_flag_js(
+                            StationQuantity::Altitude,
+                            "--altitude",
+                            args[i + 1]
+                                .parse()
+                                .map_err(|_| JsValue::from_str("Invalid altitude"))?,
+                            units,
+                        )?;
                         i += 1;
                     }
                 }
@@ -6215,8 +6494,15 @@ impl WasmBallistics {
             pressure_type,
             units == UnitSystem::Imperial,
         );
-        // The air refused up front, before any trial of the fit, as native does.
-        refuse_terminal_air(&atmosphere, station_presence, units, SHOT_AIR_FLAGS)?;
+        // The air refused up front, before any trial of the fit, as native does: a typed QNH
+        // quoted as typed.
+        refuse_terminal_air(
+            &atmosphere,
+            station_presence,
+            units,
+            SHOT_AIR_FLAGS,
+            pressure.and_then(|p| typed_qnh_origin(display_pressure_hpa(p, units), pressure_type)),
+        )?;
         let zero_m = zero_range.map(|z| match units {
             UnitSystem::Imperial => z * 0.9144,
             UnitSystem::Metric => z,
@@ -6324,7 +6610,9 @@ impl WasmBallistics {
                     sight_m,
                     station_presence,
                 )
-                .map_err(|e| JsValue::from_str(&format!("Error estimating BC: {}", e)))?;
+                .map_err(|e| {
+                    JsValue::from_str(&terminal_flight_error(&e, units, SHOT_AIR_FLAGS, None))
+                })?;
                 if est.at_bound {
                     any_unreliable = true;
                 }
@@ -9324,7 +9612,7 @@ impl Calculator {
     /// that command's solve would, in this API's words rather than the terminal's or the
     /// solver's (`--humidity`, `atmosphere.temperature`).
     fn refuse_air(&self) -> Result<(), JsValue> {
-        use crate::atmosphere::{reading_text, AirField};
+        use crate::atmosphere::{AirField, AirUnits};
         let atmosphere = AtmosphericConditions {
             temperature: (self.temperature_f.unwrap_or(59.0) - 32.0) * 5.0 / 9.0,
             pressure: self.pressure_inhg.unwrap_or(29.92) * 33.863886666667,
@@ -9344,8 +9632,7 @@ impl Calculator {
             ]
             .map(AirField::named),
             self.humidity_percent,
-            |celsius| reading_text(celsius * 9.0 / 5.0 + 32.0, "°F"),
-            |hpa| reading_text(hpa / 33.863886666667, "inHg"),
+            AirUnits::IMPERIAL,
         ) {
             Some(refusal) => Err(JsValue::from_str(refusal.message())),
             None => Ok(()),

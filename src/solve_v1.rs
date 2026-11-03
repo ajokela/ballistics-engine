@@ -36,8 +36,6 @@ const DEFAULT_TIME_STEP_S: f64 = 0.001;
 const DEFAULT_SAMPLE_INTERVAL_M: f64 = 10.0;
 const DEFAULT_GROUND_THRESHOLD_M: f64 = -100.0;
 
-const MIN_ICAO_ALTITUDE_M: f64 = -5_000.0;
-const MAX_ICAO_ALTITUDE_M: f64 = 84_000.0;
 const METERS_PER_INCH: f64 = 0.0254;
 const KILOMETRES_PER_METRE: f64 = 0.001;
 const SECONDS_PER_HOUR: f64 = 3_600.0;
@@ -1369,13 +1367,11 @@ pub(crate) fn resolve_atmosphere(
     atmosphere: &AtmosphereV1,
     assumptions: &mut Vec<SolveNoticeV1>,
 ) -> Result<ResolvedAtmosphereV1, SolveErrorEnvelopeV1> {
+    // A station altitude is held to one rule on every surface: a finite number. The standard
+    // atmosphere an omitted temperature or pressure defaults to is clamped at -5 km and 84 km,
+    // the ends of the ICAO table, beyond which its standard air is that edge's.
     if let Some(value) = atmosphere.altitude_m {
-        require_range(
-            "$.atmosphere.altitude_m",
-            value,
-            MIN_ICAO_ALTITUDE_M,
-            MAX_ICAO_ALTITUDE_M,
-        )?;
+        require_finite("$.atmosphere.altitude_m", value)?;
     }
     if let Some(value) = atmosphere.temperature_k {
         require_positive("$.atmosphere.temperature_k", value)?;
@@ -1450,10 +1446,14 @@ pub(crate) fn resolve_atmosphere(
             // the reading the one rule blames: the altitude for a QNH that is itself a
             // plausible sea-level pressure (feet sent as metres), the pressure otherwise.
             if !(station_pa.is_finite() && station_pa > 0.0) {
+                // The SI wire takes no density altitude, so its pressure is never one's.
                 let path = match station_pressure_origin(atmosphere) {
                     crate::atmosphere::StationPressureOrigin::Reading => "$.atmosphere.pressure_pa",
                     crate::atmosphere::StationPressureOrigin::Standard
-                    | crate::atmosphere::StationPressureOrigin::Qnh => "$.atmosphere.altitude_m",
+                    | crate::atmosphere::StationPressureOrigin::Qnh
+                    | crate::atmosphere::StationPressureOrigin::DensityAltitude => {
+                        "$.atmosphere.altitude_m"
+                    }
                 };
                 return Err(invalid_value(
                     path,
@@ -1520,9 +1520,9 @@ pub(crate) fn resolve_atmosphere(
 /// Where the station pressure of a solve-json v1 `atmosphere` came from, as `sent`: the
 /// standard pressure at `altitude_m` when `pressure_pa` was omitted, a QNH when it was declared
 /// one and is itself a plausible sea-level pressure, a reading otherwise
-/// ([`crate::atmosphere::StationPressureOrigin::of`]). `atmosphere.density_altitude` locates its
-/// own troposphere refusal by it, and [`resolved_station_air`] its impossible-air refusal, so the
-/// two blame one reading for one station.
+/// ([`crate::atmosphere::StationPressureOrigin::of`]). [`resolved_station_air`] locates its
+/// impossible-air refusal by it, for `solve` and `atmosphere.density_altitude` alike, so the two
+/// blame one reading for one station.
 pub(crate) fn station_pressure_origin(
     sent: &AtmosphereV1,
 ) -> crate::atmosphere::StationPressureOrigin {
@@ -1541,18 +1541,20 @@ pub(crate) fn station_pressure_origin(
 /// the reading to blame, stated in the wire's own units.
 ///
 /// One function for both commands that read a solve-json v1 `atmosphere`: the solve calls it
-/// before any flight, and `atmosphere.density_altitude` first of all its checks, returning a
-/// refusal blamed on the temperature before its own station-pressure check and any other after
-/// it. [`crate::atmosphere::AtmosphereError::refusal_in`] blames in that same order, so whatever
-/// atmosphere the solve refuses, that command refuses with the same code and path. A
+/// before any flight, and `atmosphere.density_altitude` before it computes anything, with no
+/// check of its own, so whatever atmosphere the solve refuses, that command refuses with the
+/// same code, path and message. A
 /// temperature at or below absolute zero is blamed at `$.atmosphere.temperature_k`, and so is
 /// air that cannot exist when it is humid above water's critical point or its temperature is
 /// outside 173.15-373.15 K (where the humid-air formulas are extrapolated, a temperature is the
 /// likelier mistake). Otherwise impossible air at a station pressure outside the troposphere is
 /// blamed at `$.atmosphere.pressure_pa` for a pressure sent as a station reading (hPa sent as
 /// pascals) and at `$.atmosphere.altitude_m` for one omitted or sent as a plausible QNH
-/// ([`station_pressure_origin`]), each with a hint to check that unit; and any other at
-/// `$.atmosphere.relative_humidity`. Where both commands reach this function the message is the
+/// ([`station_pressure_origin`]), each with a hint to check that unit and a QNH quoted as it was
+/// sent (`pressure_pa is a QNH of 1013.25 Pa, and reduced to the station altitude of 1500 m it
+/// is a station pressure of ...`); and any other at `$.atmosphere.relative_humidity`. A
+/// refusal blamed on the temperature names it (`; temperature_k = 400 K is outside 173.15 K to
+/// 373.15 K, ...`). Where both commands reach this function the message is the
 /// same word for word: `"relative_humidity = 1 at 373.15 K and 100000 Pa: no such air exists:
 /// ..."`. The station is built exactly as the solve's `TrajectorySolver`
 /// builds it ([`AtmosphericConditions::station_air`] with both readings supplied, as the
@@ -1592,8 +1594,16 @@ pub(crate) fn resolved_station_air(
                 },
                 humidity_sent: resolved.relative_humidity,
                 temperature_text: format!("{} K", echo_si(resolved.temperature_k)),
+                temperature_unit: crate::atmosphere::TemperatureUnit::Kelvin,
+                // The SI wire takes no density altitude: its temperature is a reading.
+                temperature_origin: crate::atmosphere::StationTemperatureOrigin::Reading,
                 pressure_text: format!("{} Pa", echo_si(resolved.pressure_pa)),
                 pressure_origin: station_pressure_origin(sent),
+                // A QNH as it was sent, never the station pressure reduced from it.
+                qnh_text: sent
+                    .pressure_pa
+                    .filter(|_| sent.pressure_reference == Some(PressureReferenceV1::Qnh))
+                    .map(|qnh_pa| format!("{} Pa", echo_si(qnh_pa))),
                 altitude_unit: crate::atmosphere::AltitudeUnit::Meters,
             };
             let refusal = error.refusal_in(
@@ -1609,11 +1619,7 @@ pub(crate) fn resolved_station_air(
 /// A caller's SI number as a refusal quotes it: plain for ordinary magnitudes, and in exponent
 /// form for the absurd ones, which `{}` would otherwise print as 300 digits.
 pub(crate) fn echo_si(value: f64) -> String {
-    if value == 0.0 || (1e-3..1e7).contains(&value.abs()) {
-        format!("{value}")
-    } else {
-        format!("{value:e}")
-    }
+    crate::atmosphere::echo_number(value)
 }
 
 /// The [`WARNING_STATION_PRESSURE_IMPLAUSIBLE_FOR_ALTITUDE`] notice for a sent absolute

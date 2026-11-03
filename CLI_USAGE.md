@@ -366,7 +366,8 @@ warning: station pressure 29.92 inHg is 1.202 times the ICAO standard pressure a
   `--pressure-type qnh` (most reduce the default, `estimate-bc` never does).
 - **Saved profiles.** `profile save` records which of the two you typed
   (`temperature_supplied` / `pressure_supplied` in the file, written only when true), and
-  `.a7p` import marks both. A profile saved before 0.49.0 carries neither, so its stored
+  `.a7p` import marks temperature and nonzero pressure; an absent or zero pressure stays
+  unmarked and uses the default. A profile saved before 0.49.0 carries neither, so its stored
   59 °F / 29.92 inHg keeps the old meaning, standard air at a real altitude; re-save it with
   `--temperature` / `--pressure` to mark a real reading. On every command that takes a saved
   profile, a stored pressure flown as a QNH (its stored type, or a typed `--pressure-type qnh`)
@@ -500,14 +501,31 @@ is no percent alias.
 
   ```
   $ ballistics trajectory -u metric -v 823 -b 0.475 -m 10.9 -d 7.82 --max-range 300 --temperature 101 --humidity 100
-  Error: --humidity = 100 at 101 °C and 1013.25 hPa: no such air exists: at this temperature and pressure the humidity needs a water-vapour mole fraction of 1 or more (more vapour pressure than the air's total pressure), or the air is humid above water's critical point, or too hot to have a density
+  Error: --humidity = 100 at 101 °C and 1013.25 hPa: no such air exists: at this temperature and pressure the humidity needs a water-vapour mole fraction of 1 or more (more vapour pressure than the total), or the air is humid above water's critical point, or too hot or too dense to have a density; --temperature = 101 °C is outside -100 °C to 100 °C, where the humid-air formulas hold: check the temperature and its unit
   ```
+
+  Outside -100 °C to 100 °C (-148 °F to 212 °F), where the humid-air formulas hold, a
+  temperature is the likelier mistake (°F typed as °C), so the refusal ends by naming it where
+  it came from, as above, or as `profile 'p' field temperature`, `--location CSV column TEMP` or
+  `--zero-temperature`. A temperature a density altitude gave is named by the density altitude:
+  `; --density-altitude gives a station temperature of -458.65 °F, outside -148 °F to 212 °F,
+  where the humid-air formulas hold: check the density altitude's unit`.
 
   A command that solves many rows or candidates (`lead`, `plan-truing`, `optimal-zero`,
   `adaptive-card`, `hold-corridor`, `compare`, `estimate-bc`, ...) exits 1 with this line rather
   than printing a table of failed rows or blaming a range, a flag or a fitted zero. `profile
   save` and `profile import` refuse to store such air, and `profile show` still displays a
   profile whose stored humidity a flight would refuse, with the refusal printed as a `warning:`.
+- A `--pressure-type qnh` setting is quoted as you typed it, with the station pressure it was
+  reduced to, never the reduced pressure as if you had typed it. One that is no sea-level
+  pressure at all is blamed on the pressure: `--pressure is a QNH of 5 hPa, and reduced to the
+  station altitude of 1500 m it is a station pressure of 2.99 hPa, a pressure altitude of 39443
+  m, outside the troposphere (-5000 m to 11000 m): check the pressure's unit`. One the
+  altimeter-setting relation leaves no station pressure for is refused the same way:
+  `--pressure is a QNH of 5 hPa, and reduced to the station altitude of 20000 m it leaves no
+  station pressure: the altimeter-setting relation has none that high (check the pressure's
+  unit)`. Every command, the zero day's `--zero-pressure`, a `--location` column and a saved
+  profile's stored QNH say it alike (since 0.50.0).
 - When no `--pressure` was given (or a plausible `--pressure-type qnh` setting was reduced to
   the station), air that cannot exist at a station so high that its pressure is outside the
   troposphere is blamed on the altitude, with the unit to check:
@@ -610,9 +628,9 @@ command now answers for every temperature a solve flies, wherever its density al
   station it reaches absolute zero within reach of a flight: 10 K (-263.15 °C) at sea level
   reaches 0 K 1539 m up. A flight that climbs there is refused at the step that reaches it,
   naming the temperature by its flag in the run's units, never as a failed integration or a
-  trajectory of NaN. (`trajectory` names a reading from a saved profile or a `--location` CSV by
-  its field or column, as its other refusals of the air do, and the zero day's own temperature
-  as `--zero-temperature`.) A zero search whose steeper trials would climb there is refused the
+  trajectory of NaN. (`trajectory` names a reading from a saved profile, a `--location` CSV or a
+  density altitude by its field, column or flag, as its other refusals of the air do, and the
+  zero day's own temperature as `--zero-temperature`.) A zero search whose steeper trials would climb there is refused the
   same way:
 
   ```
@@ -626,6 +644,79 @@ command now answers for every temperature a solve flies, wherever its density al
   The same station flies a flat shot (`--angle 1`: 693 m, apex 6.1 m) as it always did. Over a
   realistic station the air reaches 0 K only far above any flight: 183 km above 15 °C at sea
   level.
+
+#### One Rule for Each Station Pressure, Altitude and Density Altitude
+
+Every flag, CSV cell and stored value that sets a station reading is held to the one rule that
+reading has on every surface (since 0.50.0), so a reading flies, or is refused, alike wherever
+it enters: a pressure finite and above 0, an altitude finite, and a density altitude finite with
+a station that can exist. Beyond that a reading is refused only when the air it describes cannot
+exist. Before 0.50.0 `--pressure` refused readings outside 8..33 inHg (250..1100 hPa) that a
+`--location` CSV cell, `--zero-pressure` and `estimate-bc` flew, and `--density-altitude` and
+`--zero-density-altitude` refused anything outside -5000..120000 that a CSV `DA` cell or a saved
+profile flew.
+
+```
+$ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --pressure 5 | grep "Impact Vel"
+║ Impact Velocity:    2605.18 fps       ║
+$ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --pressure=-1
+Error: --pressure -1 inHg is at or below zero
+$ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --density-altitude 200000
+Error: --density-altitude = 200000 ft: no air has this density altitude: at its pressure altitude by the FAA rule, 200000 ft, the NWS pressure formula gives no finite pressure above 0 (check the density altitude and its unit)
+```
+
+The removed density-altitude bounds apply to the shot day and the zero day alike. These
+runs are dry where the density altitude is entered; actual stdout impact lines:
+
+```text
+$ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --density-altitude=-60000 --humidity 0 | grep "Impact Vel"
+║ Impact Velocity:    1088.15 fps       ║
+$ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --auto-zero 100 --zero-density-altitude=-60000 --zero-humidity 0 | grep "Impact Vel"
+║ Impact Velocity:    2153.92 fps       ║
+```
+
+`atmosphere.density_altitude` also accepts every station the solve flies. Its pressure
+altitude uses the NWS formula within the troposphere band and the ICAO layers outside it;
+`faa_rule` continues the NWS/FAA approximation, while `density_matched` finds equal density
+in the standard layers. See the [measured table](docs/ATMOSPHERE_DENSITY_ALTITUDE.md#outside-the-troposphere).
+
+A NaN or infinite reading says `--pressure NaN inHg is not a finite number`, `--altitude NaN ft
+is not a finite number`. With no temperature a density altitude flies up to a pressure altitude
+of 145286 ft (44283 m), where the FAA rule's standard temperature reaches 0 K; with one, up to
+145366 ft (44308 m), where the NWS pressure formula reaches 0 hPa.
+
+**Every refusal names the reading where it came from**, on every command, in the run's units: the
+flag (the zero day's own, on `trajectory --auto-zero`), the `--location` or `--profile` CSV column,
+the saved profile's field, or the density altitude that gave the reading:
+
+```
+Error: --location CSV column PRESSURE = -1 inHg: pressure must be greater than 0
+Error: profile 'p' field temperature = -500 °F: temperature must be above absolute zero (-459.67 °F)
+Error: profile 'p' field density_altitude = 200000 ft: no air has this density altitude: ...
+```
+
+The source stays attached if the flight later reaches air below absolute zero. A temperature
+inherited from a profile still names that profile; a zero-day override changes only its own
+quantity's source. A density-altitude-derived temperature is described as a derived station
+temperature, in temperature units. A QNH refusal quotes the QNH sent and identifies the
+reduced station pressure separately. The bridge's `card.*` and `true.*` commands and
+`ballistics_bridge_call` do the same with the request field, units and error path. The scalar
+and struct C APIs retain their existing NULL, NaN or status failure signals.
+
+**File-format exception.** `profile.export_a7p` keeps the `.a7p` format's -100..100 °C and
+300..1500 hPa bounds. The engine accepts dry air on both sides of those format bounds;
+export refuses it because the recipient's format validator cannot accept the stored integer.
+Actual bridge `error.message` values, with dry metric profiles and only the named field changed:
+
+```text
+temperature: -101 C is outside what .a7p accepts: the format stores C x 1 and the ecosystem's validator requires that integer to be between -100 and 100 (this would be -101)
+temperature: 101 C is outside what .a7p accepts: the format stores C x 1 and the ecosystem's validator requires that integer to be between -100 and 100 (this would be 101)
+pressure: 299 hPa is outside what .a7p accepts: the format stores hPa x 10 and the ecosystem's validator requires that integer to be between 3000 and 15000 (this would be 2990)
+pressure: 1501 hPa is outside what .a7p accepts: the format stores hPa x 10 and the ecosystem's validator requires that integer to be between 3000 and 15000 (this would be 15010)
+```
+
+Regenerate these examples and the accepted-input tables with
+`cargo test --locked --all-features --test station_reading_rule station_rule_documentation -- --nocapture`.
 
 #### Pressure Reference: Absolute vs. QNH (`--pressure-type`)
 
@@ -731,7 +822,7 @@ Available on `trajectory` (CLI flag + `--location`/CSV `DA`/`DENSITY_ALTITUDE` c
 
 **WASM:** pass `--density-altitude <value>` as a terminal argument to `trajectory`; behavior matches native exactly (same back-solve, flown authoritatively — including when `--density-altitude` is combined with `--pressure-type`). A typed `--temperature` is the explicit temperature, whatever its value; the zero day that inherits the density-altitude air keeps that temperature as a reading and the derived pressure as derived.
 
-**FFI:** `FFIAtmosphericConditions` is the same ABI-frozen `repr(C)` struct as above, with no new field. A density-altitude-aware FFI caller calls three standalone conversions once — `ballistics_density_altitude_altitude_m`, `ballistics_density_altitude_temperature_c`, `ballistics_density_altitude_pressure_hpa` (all `(density_altitude_m, explicit_temperature_c)`, where `explicit_temperature_c = NAN` means the ISA-at-DA default) — and writes the three results into `FFIAtmosphericConditions.altitude`/`.temperature`/`.pressure`. Pass them to one of the `*_with_station_presence` exports with `BALLISTICS_STATION_PRESSURE_SUPPLIED` set, and `BALLISTICS_STATION_TEMPERATURE_SUPPLIED` too when you gave an explicit temperature, so the derived air flies as given. The older struct exports keep the pre-0.49.0 rule and replace an explicit 15 °C at altitude with the ICAO temperature (DA 1000 m with 15 °C: a 600 m zero of 0.0061035 rad through them, against 0.0060688 rad through the presence export).
+**FFI:** `FFIAtmosphericConditions` is the same ABI-frozen `repr(C)` struct as above, with no new field. A density-altitude-aware FFI caller calls three standalone conversions once — `ballistics_density_altitude_altitude_m`, `ballistics_density_altitude_temperature_c`, `ballistics_density_altitude_pressure_hpa` (all `(density_altitude_m, explicit_temperature_c)`, where `explicit_temperature_c = NAN` means the ISA-at-DA default) — and writes the three results into `FFIAtmosphericConditions.altitude`/`.temperature`/`.pressure`. Pass them to one of the `*_with_station_presence` exports with `BALLISTICS_STATION_PRESSURE_SUPPLIED` set, and `BALLISTICS_STATION_TEMPERATURE_SUPPLIED` too when you gave an explicit temperature, so the derived air flies as given. The three conversions apply the one density-altitude rule every surface applies: all three return NaN, "no station", for a density altitude the CLI refuses ("no air has this density altitude", past a pressure altitude of 145286 ft with no temperature, 145366 ft with one) or that is not finite, and for an explicit temperature that is not finite or not above absolute zero. The older struct exports keep the pre-0.49.0 rule and replace an explicit 15 °C at altitude with the ICAO temperature (DA 1000 m with 15 °C: a 600 m zero of 0.0061035 rad through them, against 0.0060688 rad through the presence export).
 
 #### BC5D Correction Tables
 
@@ -886,6 +977,17 @@ profiles are stored in metric units and can be recalled by name with
 `--profile <name>` (on `mpbr`, `come-ups`, `lead`, `wind-card`, `stability`,
 and `range-table`) or `--saved-profile <name>` on `trajectory`, which
 reserves `--profile` for CSV gun-profile files.
+
+**Absent weather fields.** Proto3 reads an omitted scalar as zero. An absent or explicitly
+zero `c_zero_air_pressure` (0 hPa) means no pressure reading: the imported profile stores
+the metric default, 1013.25 hPa, without a `pressure_supplied` marker. Its flight uses the
+documented default pressure at the station altitude. The mapping report labels this as
+absent, not as a measured vacuum. Nonzero pressure remains a supplied reading and is checked
+by the same physical-air rule as a flight; impossible air is refused with the file's field
+name and units. An absent `c_zero_air_temperature` remains a supplied 0 °C reading, and an
+absent `c_zero_air_humidity` remains 0 % humidity. Export writes the default pressure into
+the format's pressure field, with its normal quantization; re-import reads that nonzero
+pressure as supplied. The export's `not_carried` report names the lost omission marker.
 
 **Multi-BC and CUSTOM drag curves (MBA-1323 Phase 2).** A `.a7p` file with
 more than one G1/G7 coefficient row imports ALL rows as a velocity-banded BC

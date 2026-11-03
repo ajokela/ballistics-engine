@@ -122,11 +122,11 @@
 //! (announced in `assumptions`) and the QNH reduction are therefore the solve's: the air
 //! described is the air solved through. Air that cannot exist (a temperature at or below
 //! absolute zero, a humidity beyond the total pressure, humid air above water's critical point)
-//! is refused by both, by one rule (`StationAir::new`'s), at one path: the solve blames such air
-//! in the order this command's checks run. It refuses no temperature the solve flies, and
-//! reports both density altitudes wherever they land. Its one check of its own is about the
-//! pressure: a station pressure whose pressure altitude is outside the troposphere, which is
-//! what hPa sent as pascals looks like, is refused at the reading to blame.
+//! is refused by both, by one rule (`StationAir::new`'s), at one path and with one message. It
+//! refuses no temperature, pressure or altitude the solve flies (it has no
+//! check of its own), and reports the pressure altitude and both density altitudes wherever they
+//! land: the pressure altitude is the NWS formula inside -5 km to 11 km and the standard
+//! atmosphere's own outside it.
 //!
 //! The result reports pressure altitude, the CIPM-2007 air density the solver uses, and
 //! density altitude under TWO names, never one: `faa_rule` (NWS pressure altitude plus the
@@ -440,21 +440,21 @@ fn dispatch(request_json: &str) -> String {
             "card.come_ups",
             crate::card_service::come_ups_v1,
             |_| None,
-            crate::card_service::air_refusal,
+            crate::card_service::air_refusal_for_error,
         ),
         "card.range_table" => run_service_air(
             &request.request,
             "card.range_table",
             crate::card_service::range_table_v1,
             |_| None,
-            crate::card_service::air_refusal,
+            crate::card_service::air_refusal_for_error,
         ),
         "card.wind" => run_service_air(
             &request.request,
             "card.wind",
             crate::card_service::wind_card_v1,
             |_| None,
-            crate::card_service::air_refusal,
+            crate::card_service::air_refusal_for_error,
         ),
         #[cfg(feature = "pdf")]
         "card.pdf" => run_card_pdf(&request.request),
@@ -474,8 +474,9 @@ fn dispatch(request_json: &str) -> String {
             "true.fit",
             crate::truing_uncertainty::run_uncertainty_truing_v1,
             |_| None,
-            |request: &crate::truing_uncertainty::UncertaintyTruingRequestV1| {
-                request.model.air_refusal("$.model")
+            |request: &crate::truing_uncertainty::UncertaintyTruingRequestV1, error| {
+                truing_flight_refusal(error, "$.model.temperature_f")
+                    .or_else(|| request.model.air_refusal("$.model"))
             },
         ),
         "true.wind" => run_service_air(
@@ -483,7 +484,9 @@ fn dispatch(request_json: &str) -> String {
             "true.wind",
             crate::truing_wind::solve_wind_truing,
             |_| None,
-            crate::truing_wind::WindTruingRequest::air_refusal,
+            |request: &crate::truing_wind::WindTruingRequest, error| {
+                truing_flight_refusal(error, "$.temperature_f").or_else(|| request.air_refusal())
+            },
         ),
         "true.tall_target" => run_service(
             &request.request,
@@ -495,8 +498,9 @@ fn dispatch(request_json: &str) -> String {
             "true.dsf",
             crate::truing_service::derive_dsf_point_v1,
             crate::truing_service::DsfServiceErrorV1::failure_details,
-            |request: &crate::truing_service::DsfDeriveRequestV1| {
-                request.model.air_refusal("$.model")
+            |request: &crate::truing_service::DsfDeriveRequestV1, error| {
+                truing_flight_refusal(error, "$.model.temperature_f")
+                    .or_else(|| request.model.air_refusal("$.model"))
             },
         ),
         "true.plan" => run_service_air(
@@ -504,8 +508,9 @@ fn dispatch(request_json: &str) -> String {
             "true.plan",
             crate::truing_plan::plan_truing_experiment_v1,
             crate::truing_plan::TruingPlanErrorV1::failure_details,
-            |request: &crate::truing_plan::TruingExperimentPlanRequestV1| {
-                request.model.air_refusal("$.model")
+            |request: &crate::truing_plan::TruingExperimentPlanRequestV1, error| {
+                truing_flight_refusal(error, "$.model.temperature_f")
+                    .or_else(|| request.model.air_refusal("$.model"))
             },
         ),
         "true.dial_plan" => run_service_detailed(
@@ -604,10 +609,10 @@ fn run_service<Req, Resp, E, F>(inner: &Value, command: &'static str, service: F
 where
     Req: serde::de::DeserializeOwned,
     Resp: serde::Serialize,
-    E: std::fmt::Display,
+    E: std::fmt::Display + Into<Box<dyn std::error::Error>>,
     F: FnOnce(&Req) -> Result<Resp, E>,
 {
-    run_service_air(inner, command, service, |_: &E| None, |_: &Req| None)
+    run_service_air(inner, command, service, |_: &E| None, |_: &Req, _| None)
 }
 
 /// [`run_service`] for a service whose error carries a machine-readable reason.
@@ -628,11 +633,11 @@ fn run_service_detailed<Req, Resp, E, F, D>(
 where
     Req: serde::de::DeserializeOwned,
     Resp: serde::Serialize,
-    E: std::fmt::Display,
+    E: std::fmt::Display + Into<Box<dyn std::error::Error>>,
     F: FnOnce(&Req) -> Result<Resp, E>,
     D: FnOnce(&E) -> Option<Value>,
 {
-    run_service_air(inner, command, service, details, |_: &Req| None)
+    run_service_air(inner, command, service, details, |_: &Req, _| None)
 }
 
 /// [`run_service_detailed`] for a command whose request carries station air: `air` states the
@@ -644,6 +649,22 @@ where
 /// member to blame in this command's request (see [`air_refusal_details`]), with the
 /// command's own flat details (`reason`, ...) beside it, and a message that leads with the
 /// cause. The bridge never claims an air refusal the service did not make.
+/// The truing wire's flight error names its Fahrenheit member at the request's path.
+fn truing_flight_refusal(
+    error: Option<&crate::atmosphere::AtmosphereError>,
+    path: &str,
+) -> Option<crate::atmosphere::AirRefusal> {
+    error.map(|error| {
+        error.temperature_refusal(
+            crate::atmosphere::AirField {
+                name: "temperature_f",
+                path,
+            },
+            crate::atmosphere::AirUnits::IMPERIAL,
+        )
+    })
+}
+
 fn run_service_air<Req, Resp, E, F, D, A>(
     inner: &Value,
     command: &'static str,
@@ -654,10 +675,13 @@ fn run_service_air<Req, Resp, E, F, D, A>(
 where
     Req: serde::de::DeserializeOwned,
     Resp: serde::Serialize,
-    E: std::fmt::Display,
+    E: std::fmt::Display + Into<Box<dyn std::error::Error>>,
     F: FnOnce(&Req) -> Result<Resp, E>,
     D: FnOnce(&E) -> Option<Value>,
-    A: FnOnce(&Req) -> Option<crate::atmosphere::AirRefusal>,
+    A: FnOnce(
+        &Req,
+        Option<&crate::atmosphere::AtmosphereError>,
+    ) -> Option<crate::atmosphere::AirRefusal>,
 {
     if inner.is_null() {
         return error(
@@ -687,7 +711,11 @@ where
         },
         Err(err) => {
             let flat = details(&err);
-            match air(&request).filter(|refusal| err.to_string().contains(refusal.message())) {
+            let err: Box<dyn std::error::Error> = err.into();
+            let flight = crate::atmosphere::AtmosphereError::in_error(&*err);
+            match air(&request, flight)
+                .filter(|refusal| flight.is_some() || err.to_string().contains(refusal.message()))
+            {
                 Some(refusal) => error(
                     BridgeErrorCode::CommandFailed,
                     format!("{command} failed: {}", refusal.message()),
@@ -866,8 +894,9 @@ fn run_card_pdf(inner: &Value) -> String {
         }
         Err(err) => {
             // The air refusal every card command gives, when that is what refused it.
-            if let Some(refusal) = crate::card_service::air_refusal(&request)
-                .filter(|refusal| err.to_string().contains(refusal.message()))
+            let flight = crate::atmosphere::AtmosphereError::in_error(&err);
+            if let Some(refusal) = crate::card_service::air_refusal_for_error(&request, flight)
+                .filter(|refusal| flight.is_some() || err.to_string().contains(refusal.message()))
             {
                 return error(
                     BridgeErrorCode::CommandFailed,

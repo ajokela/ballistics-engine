@@ -1109,6 +1109,32 @@ The zero, Monte Carlo, BC-fit, lead, hold-curve and truing entry points have the
 `*_with_station_presence` twins, and `atmosphere::resolve_station_conditions_with_presence`
 returns the pair a solve will fly.
 
+### One rule for station air
+
+Every surface accepts the same station air: station pressure must be finite and positive,
+station altitude finite, and temperature finite and above absolute zero. A density altitude
+must be finite and resolve to a station that can exist. Humidity follows the sensor-band rule below;
+the combined air must be physically possible. CLI and zero-day flags, location CSVs, saved
+profiles, the browser terminal, C FFI, bridge cards and truing, solve-json and MCP use this
+rule. The former per-surface pressure, altitude and density-altitude bounds are gone.
+
+The `atmosphere.density_altitude` readout answers beyond the troposphere by walking the same
+ICAO layers as `air_at`. Standard pressure at 20 km reports 20000 m; the unchanged
+`nws_pressure_altitude_ft` formula continued there reports 18879 m. `faa_rule` keeps the
+NWS/FAA continuation so the density-altitude input remains its inverse; `density_matched`
+uses equal density in the standard layers. See the [engine-measured examples](docs/ATMOSPHERE_DENSITY_ALTITUDE.md#outside-the-troposphere).
+
+Refusals name the flag, zero-day flag, CSV column, profile field or request member that
+supplied the reading, in that surface's units, even when the failure is discovered in flight.
+A QNH is quoted as sent alongside its reduced station pressure. The JSON C bridge includes
+the request field path; scalar and struct C calls retain their NULL, NaN or status signals.
+
+A file format can impose its own limits: `profile.export_a7p` keeps the `.a7p` format's
+-100..100 °C and 300..1500 hPa bounds. Import treats absent or zero pressure as an omitted
+reading and absent humidity as dry air. These are format rules, not narrower solve rules.
+See [CLI_USAGE.md](CLI_USAGE.md#one-rule-for-each-station-pressure-altitude-and-density-altitude)
+for commands, real refusal output and format examples.
+
 ### Humidity in the library
 
 `AtmosphericConditions::humidity` and `BallisticInputs::humidity_percent` are percents (default

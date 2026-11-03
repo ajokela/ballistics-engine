@@ -1667,6 +1667,19 @@ pub extern "C" fn ballistics_reduce_qnh_pressure(
 /// `is_nan()`, not equality), matching that precedent.
 pub const FFI_NO_EXPLICIT_TEMPERATURE: c_double = f64::NAN;
 
+/// The station `(altitude m, temperature °C, pressure hPa)` the three
+/// `ballistics_density_altitude_*` exports report, by the one density-altitude rule
+/// ([`crate::atmosphere::station_for_density_altitude`], bit for bit), or `None` where it
+/// refuses the density altitude. `explicit_temperature_c` is NaN for none
+/// ([`FFI_NO_EXPLICIT_TEMPERATURE`]).
+fn ffi_station_for_density_altitude(
+    density_altitude_m: c_double,
+    explicit_temperature_c: c_double,
+) -> Option<(f64, f64, f64)> {
+    let explicit = (!explicit_temperature_c.is_nan()).then_some(explicit_temperature_c);
+    crate::atmosphere::station_for_density_altitude(density_altitude_m, explicit).ok()
+}
+
 /// Back-solve the station TEMPERATURE (Celsius) an ISA-equivalent atmosphere at
 /// `density_altitude_m` implies (MBA-1366; see
 /// [`crate::atmosphere::resolve_atmosphere_for_density_altitude`] for the full derivation).
@@ -1685,9 +1698,19 @@ pub const FFI_NO_EXPLICIT_TEMPERATURE: c_double = f64::NAN;
 /// altitude is reproduced either way, but the air matches the real air only when the real
 /// temperature is passed: the ISA default rebuilds a different temperature, and with it a
 /// slightly different density and speed of sound (see the Rust doc comment).
-/// A non-finite `density_altitude_m` returns NaN for all three exports (there is no plausible
-/// station value to fall back to, unlike the QNH/BC conversions above, which return their input
-/// unchanged).
+///
+/// All three exports apply the one density-altitude rule every surface applies
+/// ([`crate::atmosphere::station_for_density_altitude`]): a density altitude flies when it is
+/// finite and the station the FAA rule's inverse gives for it can exist. Each returns NaN, the
+/// "no station" signal, where that rule refuses: a density altitude that is not finite; one no
+/// air has (with no explicit temperature, a pressure altitude past 145286 ft, where the rule's
+/// standard temperature reaches absolute zero; with one, past 145366 ft, where the NWS pressure
+/// formula reaches 0 hPa; or so far below sea level that the formula overflows); and an
+/// `explicit_temperature_c` that is not finite or not above absolute zero. There is no
+/// plausible station value to fall back to, unlike the QNH/BC conversions above, which return
+/// their input unchanged. Before 0.50.0 only a density altitude that is not finite gave NaN:
+/// DA 44300 m returned a station below absolute zero (-273.26 °C at 1.8e-17 hPa), and DA
+/// 50000 m a temperature of -310.35 °C beside a NaN pressure.
 ///
 /// Fly the triple through a `*_with_station_presence` export, and set
 /// [`BALLISTICS_STATION_TEMPERATURE_SUPPLIED`] when an explicit temperature was passed: the
@@ -1699,11 +1722,8 @@ pub extern "C" fn ballistics_density_altitude_temperature_c(
     density_altitude_m: c_double,
     explicit_temperature_c: c_double,
 ) -> c_double {
-    if !density_altitude_m.is_finite() {
-        return f64::NAN;
-    }
-    let explicit = (!explicit_temperature_c.is_nan()).then_some(explicit_temperature_c);
-    crate::atmosphere::resolve_atmosphere_for_density_altitude(density_altitude_m, explicit).1
+    ffi_station_for_density_altitude(density_altitude_m, explicit_temperature_c)
+        .map_or(f64::NAN, |station| station.1)
 }
 
 /// Companion to [`ballistics_density_altitude_temperature_c`]: the back-solved station PRESSURE
@@ -1713,11 +1733,8 @@ pub extern "C" fn ballistics_density_altitude_pressure_hpa(
     density_altitude_m: c_double,
     explicit_temperature_c: c_double,
 ) -> c_double {
-    if !density_altitude_m.is_finite() {
-        return f64::NAN;
-    }
-    let explicit = (!explicit_temperature_c.is_nan()).then_some(explicit_temperature_c);
-    crate::atmosphere::resolve_atmosphere_for_density_altitude(density_altitude_m, explicit).2
+    ffi_station_for_density_altitude(density_altitude_m, explicit_temperature_c)
+        .map_or(f64::NAN, |station| station.2)
 }
 
 /// Companion to [`ballistics_density_altitude_temperature_c`]: the back-solved station ALTITUDE
@@ -1729,11 +1746,8 @@ pub extern "C" fn ballistics_density_altitude_altitude_m(
     density_altitude_m: c_double,
     explicit_temperature_c: c_double,
 ) -> c_double {
-    if !density_altitude_m.is_finite() {
-        return f64::NAN;
-    }
-    let explicit = (!explicit_temperature_c.is_nan()).then_some(explicit_temperature_c);
-    crate::atmosphere::resolve_atmosphere_for_density_altitude(density_altitude_m, explicit).0
+    ffi_station_for_density_altitude(density_altitude_m, explicit_temperature_c)
+        .map_or(f64::NAN, |station| station.0)
 }
 
 /// Largest `marks_len` [`ballistics_hold_point_in_reticle`] will accept (MBA-1361).

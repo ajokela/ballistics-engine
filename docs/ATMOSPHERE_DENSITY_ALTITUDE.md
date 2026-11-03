@@ -96,8 +96,8 @@ The envelope's `result` for the request above — engine output, not hand-writte
 | Field | Meaning |
 | --- | --- |
 | `atmosphere` | The atmosphere these figures describe, AFTER resolution: defaults filled in, and `pressure_pa` already reduced to station pressure if a QNH was sent. |
-| `pressure_altitude` | NWS pressure altitude of the station pressure. |
-| `density_altitude.faa_rule` | Pressure altitude plus the FAA's 120 ft/°C rule of thumb. No humidity term. |
+| `pressure_altitude` | NWS pressure altitude inside the troposphere band; the altitude of the station pressure in the ICAO layers outside it. See [Outside the troposphere](#outside-the-troposphere). |
+| `density_altitude.faa_rule` | The NWS pressure-altitude formula continued, plus the FAA's temperature correction. No humidity term; outside the troposphere it does not start from the reported `pressure_altitude`. |
 | `density_altitude.density_matched` | The ISA altitude whose standard density equals this air's actual density, humidity included. |
 | `air_density_kg_m3` | CIPM-2007 humid-air density — what the solver flies the bullet through. |
 | `assumptions` | Every default applied, plus a `qnh_reduced_to_station_pressure` notice whenever a QNH was reduced, in the solve's notice format (`code`, `message`, `path`). Informational: show them in a details view, never refuse a result over them, and key on `code` rather than on the list being empty. |
@@ -168,6 +168,32 @@ Whichever figure is displayed, the trajectory is the same: the solver uses the f
 density (`air_density_kg_m3`) either way. In this command density altitude is a readout,
 not an input.
 
+## Outside the troposphere
+
+The pressure-altitude band selects a formula; it is not an acceptance bound.
+`pressure_altitude` walks the same ICAO layers as `air_at` outside that band, and
+`density_matched` finds equal density in those layers. `faa_rule` continues the NWS formula
+and FAA straight line so density-altitude entry remains its inverse. The Rust function
+`nws_pressure_altitude_ft` still reports that tropospheric formula's continuation in feet;
+it does not switch to ICAO layers.
+
+Engine output, dry in every row, altitudes rounded to metres. The first row uses the engine's
+standard air at 20 km; the remaining rows specify their temperature and absolute pressure
+at sea level. The NWS column is `nws_pressure_altitude_ft` converted to metres:
+
+| Temperature (K) | Station pressure (Pa) | `pressure_altitude` (m) | NWS continuation (m) | `faa_rule` (m) | `density_matched` (m) |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 216.65 | 5474.89023 | 20000 | 18879 | 20757 | 20002 |
+| 288.15 | 1013.25000 | 30967 | 25861 | 32016 | 32478 |
+| 288.15 | 202650.00000 | -6249 | -6247 | -7734 | -7846 |
+
+These are reproducible with
+`cargo test --locked --all-features --test station_reading_rule station_rule_documentation_examples_are_measured -- --nocapture`,
+which prints the actual request and response for each row. For example, the dry
+1013.25 Pa input above is accepted; adding enough humidity to require more vapour pressure
+than the total pressure is refused, naming `pressure_pa` in Pa. The formula switch alone
+never causes a refusal.
+
 ## Errors
 
 Errors follow the bridge's usual envelope, `ok: false` with an `error` object, and are shaped
@@ -183,26 +209,28 @@ exactly like `solve`'s:
   Coriolis effect is on, and this command flies nothing.) Both commands resolve the atmosphere
   with one function, and both ask one function whether its air can exist and which reading is
   to blame when it cannot (since 0.50.0). This command has no temperature rule of its own (since
-  0.50.0): it answers for every temperature `solve` flies. The function blames impossible air in
-  this order, and this command checks its own station-pressure band (below) between the first
-  and the others:
+  0.50.0): it answers for every temperature `solve` flies, and it has no pressure or altitude
+  rule of its own either. The function blames impossible air in this order:
   1. the temperature, `$.atmosphere.temperature_k`, when the air is humid above water's critical
      point (647.096 K) or the temperature is outside 173.15–373.15 K, where the humid-air formulas
-     are extrapolated and the temperature is the likelier mistake;
+     are extrapolated and the temperature is the likelier mistake. The message names it:
+     `...; temperature_k = 400 K is outside 173.15 K to 373.15 K, where the humid-air formulas
+     hold: check the temperature and its unit`;
   2. when the station pressure's pressure altitude is outside the troposphere, the reading that
      put it there: `$.atmosphere.pressure_pa` for a pressure sent as a station pressure, or as a
      QNH that is itself outside the troposphere (hPa sent as pascals), and
      `$.atmosphere.altitude_m` for one omitted or sent as a plausible QNH (feet sent as
-     meters). A QNH that leaves no station pressure at all at its altitude is refused the same
-     way, by both, with one message;
+     meters). A QNH is quoted as it was sent, with the station pressure it was reduced to:
+     `...; pressure_pa is a QNH of 1013.25 Pa, and reduced to the station altitude of 1500 m it
+     is a station pressure of ... Pa, a pressure altitude of ... m, outside the troposphere
+     (-5000 m to 11000 m): check the pressure's unit`. A QNH that leaves no station pressure at
+     all at its altitude is refused the same way, by both, with one message;
   3. otherwise the humidity, `$.atmosphere.relative_humidity`.
 
-  The message is the same word for word too, except where this command's own station-pressure
-  check refuses the air first: then the path is still `solve`'s, and the message is this
-  command's own, naming the same reading. That check is the one refusal of air `solve` flies
-  (see [Scope](#scope)): a station pressure whose pressure altitude is outside the troposphere,
-  at the path of the field to blame. It is about the pressure alone. No temperature `solve`
-  flies is refused here, and no density altitude is refused for where it lands (since 0.50.0).
+  The message is the same word for word too. No temperature, pressure or altitude `solve` flies
+  is refused here, and no pressure altitude or density altitude is refused for where it lands
+  (since 0.50.0; 0.49.0 refused a station pressure whose pressure altitude was outside −5,000 m to
+  11,000 m, air `solve` flew).
 
 Humidity sent as a percentage (`"relative_humidity": 50.0`) comes back as:
 
@@ -235,13 +263,17 @@ The other mistakes worth knowing, each by its `details.error` (messages abridged
 | --- | --- | --- | --- |
 | `"temperature_c": 30.0` | `unknown_field` | `$.atmosphere.temperature_c` | unknown field `temperature_c` |
 | `"temperature_k": null` | `invalid_value` | `$.atmosphere.temperature_k` | expected a number |
-| `"temperature_k": 1e-300` (at absolute zero once converted to °C) | `invalid_value` | `$.atmosphere.temperature_k` | temperature_k = 1e-300 K: temperature must be above absolute zero (-273.15 C) |
-| `"pressure_pa": 1013.25` (hPa in the pascal field) | `invalid_value` | `$.atmosphere.pressure_pa` | a station pressure of 1013.25 Pa is a pressure altitude of 25861 m; a station pressure is read only between -5000 m and 11000 m of pressure altitude … pressure_pa is pascals (hPa × 100) |
+| `"temperature_k": 1e-300` (at absolute zero once converted to °C) | `invalid_value` | `$.atmosphere.temperature_k` | temperature_k = 1e-300 K: temperature must be above absolute zero (0 K) |
 
 °C sent as `temperature_k` is not refused: `solve` flies 15 K air, and this command answers for
 it (see [Scope](#scope)), with figures no rifle range has: `faa_rule` −9991 m and
 `density_matched` −44505 m, at an `air_density_kg_m3` of 23.61. A figure that far from the
 station's altitude is the sign to check the unit.
+
+Nor is hPa sent as `pressure_pa`, in dry air: `solve` flies 1013.25 Pa air, and this command
+answers for it with a `pressure_altitude` of 30967 m. On a warm humid day the vapour
+pressure alone exceeds that pressure: such air cannot exist, and both commands refuse it at
+`$.atmosphere.pressure_pa`, with a hint to check the pressure's unit.
 
 To leave a field to its default, omit it; `null` is refused.
 
@@ -308,10 +340,15 @@ Feature-detect before calling: an engine built before this command answers `unkn
 ## Scope
 
 - Heights are the standard atmosphere's own, with no geopotential correction. The pressure
-  altitude is the NWS troposphere formula, so a station pressure whose pressure altitude is
-  below −5,000 m or above 11,000 m is `invalid_value`, at the reading to blame: that is a
-  pressure in the wrong unit (hPa sent as pascals), not a place a rifle is fired. It is the
-  command's one check of its own, and it is about the pressure, whatever the temperature.
+  altitude is the NWS formula from −5,000 m to 11,000 m, bit for bit as before, and outside that
+  band the standard atmosphere's own altitude of the pressure, its ICAO layers walked from sea
+  level (`atmosphere::pressure_altitude_m`; since 0.50.0, where 0.49.0 refused such a station
+  pressure as `invalid_value`): standard pressure at 20 km reads 20000 m, where the NWS formula
+  continued reads 18879 m. At the band's edges the figure steps by the few metres the NWS
+  constants and the ICAO troposphere part by (5 m at 11 km, 2 m at −5 km); it never falls as
+  the pressure falls. `faa_rule` stays the NWS formula plus the FAA rule's straight line
+  wherever it lands, so it is still the exact inverse of density-altitude entry; outside the
+  band it is that formula's figure, not the standard atmosphere's.
 - Both density altitudes are reported wherever they land (since 0.50.0; 0.49.0 refused either
   one outside −5,000 m to 11,000 m, air `solve` flew). `faa_rule` is the FAA's straight line
   wherever it lands. `density_matched` is the standard atmosphere's altitude of equal density:
@@ -323,9 +360,9 @@ Feature-detect before calling: an engine built before this command answers `unkn
   standard air at 20 km as 20453 m; it now reads 20002 m, within the 2 m the CIPM-2007
   compressibility puts between the solver's density and the ideal gas's.
 - It refuses air that cannot exist exactly as `solve` does, through the same function
-  (`StationAir::new`'s rule): a temperature at or below absolute zero, a relative humidity that
-  would need more water-vapour pressure than the air's total pressure, humid air above water's
-  critical point. `invalid_value` at the field to blame, with the air in the wire's own units,
+  (`StationAir::new`'s rule): a temperature at or below absolute zero, a pressure at or below 0,
+  a relative humidity that would need more water-vapour pressure than the air's total pressure,
+  humid air above water's critical point, a pressure far beyond any air's. `invalid_value` at the field to blame, with the air in the wire's own units,
   for example `relative_humidity = 1 at 373.15 K and 100000 Pa: no such air exists: ...` at
   `$.atmosphere.relative_humidity`. Air that cannot exist at a temperature outside
   173.15–373.15 K is blamed on `temperature_k` by both commands (see [Errors](#errors)).

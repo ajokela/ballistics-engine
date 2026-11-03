@@ -25,10 +25,12 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// A token that reads as one of the humidity work's IDs: a step (`S1`-`S8`, `S5b`), a fix round
-/// (`R1`-`R7`), a plan item or an earlier review round's finding (`C0a`, `C0b`, `C1`-`C19`), a
-/// finding (`H1`-`H24`, `T1`-`T9`), a gate (`G9`-`G19`, `G8b`), or a review finding (`HR-4`,
-/// `GAP-3`, `DOC-1`, `API-2`, `PHYS-5`, `UX-6`, `VAL-1`).
+/// A token that reads as one of the humidity work's IDs, by its form rather than a fixed list:
+/// a step (`S` and digits, with an optional ASCII letter: `S1`, `S5b`, `S100B`),
+/// a fix round (`R` and digits: `R2`, `R10`, `R700`), a plan item or an earlier review
+/// round's finding (`C0a`, `C0b`, `C1`-`C19`), a finding (`H1`-`H24`, `T1`-`T9`), a gate
+/// (`G9`-`G19`, `G8b`), or a review finding (`HR-`, `GAP-`, `DOC-`, `API-`, `PHYS-`, `UX-` or
+/// `VAL-` and a number: `HR-4`, `UX-6`).
 fn is_process_id(token: &str) -> bool {
     let number = |digits: &str, low: u32, high: u32| {
         !digits.is_empty()
@@ -37,17 +39,23 @@ fn is_process_id(token: &str) -> bool {
                 .parse::<u32>()
                 .is_ok_and(|n| (low..=high).contains(&n))
     };
-    if let Some((prefix, digits)) = token.split_once('-') {
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+    if let Some((prefix, suffix)) = token.split_once('-') {
         return ["HR", "GAP", "DOC", "API", "PHYS", "UX", "VAL"].contains(&prefix)
-            && number(digits, 1, 999);
+            && digits(suffix);
     }
     let Some(first) = token.chars().next() else {
         return false;
     };
     let rest = &token[first.len_utf8()..];
     match first {
-        'S' => number(rest.strip_suffix('b').unwrap_or(rest), 1, 8),
-        'R' => number(rest, 1, 7),
+        'S' => {
+            let suffix = rest
+                .strip_suffix(|c: char| c.is_ascii_alphabetic())
+                .unwrap_or(rest);
+            digits(suffix)
+        }
+        'R' => digits(rest),
         'C' => matches!(rest, "0a" | "0b") || number(rest, 1, 19),
         'H' => number(rest, 1, 24),
         'T' => number(rest, 1, 9),
@@ -126,9 +134,16 @@ fn cites_the_plan(text: &str) -> bool {
 /// labels and review IDs, and legitimate uses of the same spelling. Every entry must still be
 /// needed ([`public_source_and_docs_cite_no_internal_plan_or_review_ids`] checks), so the list
 /// cannot outlive what it excuses.
-const EARLIER_WORK: [(&str, &str); 37] = [
+const EARLIER_WORK: [(&str, &str); 43] = [
     // Example zero-set and profile-row names, and a test CSV row's name: data, not IDs.
     ("CLI_USAGE.md", "R1"),
+    ("CLI_USAGE.md", "R700"),
+    ("src/main.rs", "R700"),
+    // The initial target range in the moving-target intercept equation.
+    ("docs/SOLVE_JSON_V1.md", "R0"),
+    // A dispersion statistic's name: the radius holding 95 % of the shots.
+    ("examples/02_monte_carlo.rs", "R95"),
+    ("examples/README.md", "R95"),
     ("src/main.rs", "available zero sets"),
     ("tests/zero_sets.rs", "available zero sets"),
     ("tests/csv_numeric_cells.rs", "S1"),
@@ -140,6 +155,7 @@ const EARLIER_WORK: [(&str, &str); 37] = [
     ("src/explain.rs", "S8"),
     ("src/main.rs", "C2"),
     ("src/main.rs", "MBA-1357 Task 2 review"),
+    ("src/main.rs", "design R9"),
     ("src/main.rs", "the Plan B final review"),
     ("src/cli_api.rs", "C2"),
     ("src/optic.rs", "C1"),
@@ -185,7 +201,8 @@ const THIS_FILE: &str = "tests/process_id_guard.rs";
 
 fn allowed_by(path: &str, line: &str, hit: &str) -> Option<usize> {
     EARLIER_WORK.iter().position(|&(file, what)| {
-        file == path && (what == hit || (what.len() > 2 && line.contains(what)))
+        file == path
+            && (what == hit || (what.len() > 2 && !is_process_id(what) && line.contains(what)))
     })
 }
 
@@ -483,11 +500,19 @@ fn walk(dir: &Path, top: bool, out: &mut Vec<PathBuf>) {
             }
         } else if (SCANNED.iter().any(|ext| name.ends_with(ext))
             && !(top && name == "CHANGELOG.md"))
-            || name == "pre-commit"
+            || in_git_hooks(&path)
         {
             out.push(path);
         }
     }
+}
+
+/// Whether `path` is one of the versioned git hooks: every file in `.githooks/`, whatever its
+/// name (`pre-commit`, `commit-msg`, and any hook added later).
+fn in_git_hooks(path: &Path) -> bool {
+    path.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|directory| directory == ".githooks")
 }
 
 /// The CHANGELOG's 0.50.0 section: under `## [0.50.0]` once cut, `## [Unreleased]` before.
@@ -534,6 +559,7 @@ fn public_source_and_docs_cite_no_internal_plan_or_review_ids() {
         "fuzz/Cargo.toml",
         ".github/workflows/ci.yml",
         ".githooks/pre-commit",
+        ".githooks/commit-msg",
         "scripts/fuzz-smoke.sh",
         "tests/fixtures/analyze_courtney_cd.py",
     ] {
@@ -589,15 +615,53 @@ fn public_source_and_docs_cite_no_internal_plan_or_review_ids() {
 /// The detector itself: every ID form it exists to catch, and the spellings it must leave alone.
 #[test]
 fn the_detector_knows_an_id_from_a_name() {
+    // A step or fix round of any number, not a fixed list: the work outgrew `R1`-`R7` and
+    // `S1`-`S8` once, and `R8`, `R10` and `S9` went unseen.
     for id in [
-        "S1", "S5b", "S8", "R2", "R7", "C0a", "C0b", "C4", "C7", "C11", "H5", "H24", "T3", "G17",
-        "G8b", "HR-4", "GAP-3", "UX-6", "VAL-1", "PHYS-5",
+        "S1",
+        "S5b",
+        "S8",
+        "S9",
+        "S12",
+        "S12a",
+        "R2",
+        "R7",
+        "R8",
+        "R10",
+        "R42",
+        "C0a",
+        "C0b",
+        "C4",
+        "C7",
+        "C11",
+        "H5",
+        "H24",
+        "T3",
+        "G17",
+        "G8b",
+        "HR-4",
+        "HR-12",
+        "GAP-3",
+        "UX-6",
+        "VAL-1",
+        "PHYS-5",
+        "DOC-17",
+        "API-1000",
+        "R0",
+        "S0",
+        "HR-0",
+        "R700",
+        "S100",
+        "S100B",
+        "R999999999999999999999",
+        "S999999999999999999999b",
+        "API-999999999999999999999",
     ] {
         assert!(is_process_id(id), "{id} is an ID");
     }
     for name in [
-        "G1", "G7", "G8", "S9", "R8", "C0", "C20", "C99", "H25", "T0", "MBA-1605", "H2O", "S", "R",
-        "C", "HR-", "API", "x_v", "1e-15",
+        "G1", "G7", "G8", "R1a", "S5bb", "S5BB", "C0", "C20", "C99", "H25", "T0", "MBA-1605",
+        "H2O", "S", "R", "C", "HR-", "API", "x_v", "1e-15",
     ] {
         assert!(!is_process_id(name), "{name} is not an ID");
     }
@@ -637,6 +701,16 @@ fn the_detector_knows_an_id_from_a_name() {
     );
     assert_eq!(review_items("review C11 and plan's C7"), ["C7", "C11"]);
     assert!(citations("src/x.rs", "// the solver's G7 drag, at 15 °C").is_empty());
+    // A legitimate row name or statistic excuses only its own token, not another ID
+    // that someone appends to the same line.
+    assert_eq!(
+        citations("CLI_USAGE.md", "--profile-row R700_308 // R10"),
+        ["R10"]
+    );
+    assert_eq!(
+        citations("examples/README.md", "R95 dispersion, measured in S100B"),
+        ["S100B"]
+    );
 }
 
 /// The lexer reads each kind of Rust and C prose, and each look-alike, as what it is.

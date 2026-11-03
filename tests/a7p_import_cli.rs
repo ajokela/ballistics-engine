@@ -35,15 +35,21 @@ fn enc_bytes(number: u32, payload: &[u8], out: &mut Vec<u8>) {
 }
 
 fn synthetic_a7p() -> Vec<u8> {
+    synthetic_a7p_with_air([Some(15), Some(10132), Some(50)])
+}
+
+fn synthetic_a7p_with_air(air: [Option<i64>; 3]) -> Vec<u8> {
     let mut p = Vec::new();
     enc_str(1, "CLI 6.5CM", &mut p);
     enc_str(3, "140 ELD-M", &mut p);
     enc_i32(9, 50, &mut p); // 50 mm sight height
     enc_i32(10, 800, &mut p); // 8.00 in twist
     enc_i32(11, 8230, &mut p); // 823.0 m/s
-    enc_i32(15, 15, &mut p);
-    enc_i32(16, 10132, &mut p); // 1013.2 hPa
-    enc_i32(17, 50, &mut p);
+    for (field, value) in [15, 16, 17].into_iter().zip(air) {
+        if let Some(value) = value {
+            enc_i32(field, value, &mut p);
+        }
+    }
     enc_i32(20, 264, &mut p); // 0.264 in
     enc_i32(21, 1400, &mut p); // 140 gr
     enc_i32(22, 1360, &mut p); // 1.36 in
@@ -116,8 +122,7 @@ fn import_then_show_roundtrip() {
     assert!(shown.contains("G7"), "{shown}");
 }
 
-/// 0.49.0: an `.a7p` carries real zero-condition readings and has no concept of omission, so
-/// the imported profile marks both its temperature and its pressure as supplied.
+/// Nonzero pressure and the file's temperature are supplied zero-condition readings.
 #[test]
 fn imported_profiles_mark_their_air_as_supplied() {
     let home = tempfile_dir();
@@ -139,6 +144,141 @@ fn imported_profiles_mark_their_air_as_supplied() {
     .unwrap();
     assert!(saved.contains("\"temperature_supplied\": true"), "{saved}");
     assert!(saved.contains("\"pressure_supplied\": true"), "{saved}");
+}
+
+#[test]
+fn absent_or_zero_pressure_imports_and_flies_the_default_at_altitude() {
+    for air in [
+        [Some(15), None, Some(50)],
+        [Some(15), Some(0), Some(50)],
+        [None, None, None],
+    ] {
+        let home = tempfile_dir();
+        let path = home.join("omitted-air.a7p");
+        std::fs::write(&path, synthetic_a7p_with_air(air)).unwrap();
+        for dry_run in [true, false] {
+            let mut command = cli();
+            command
+                .env("HOME", &home)
+                .args(["profile", "import"])
+                .arg(&path)
+                .args(["--name", "omitted-air", "--strict"]);
+            if dry_run {
+                command.arg("--dry-run");
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "air={air:?}, dry_run={dry_run}: {output:?}"
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout)
+                    .contains("absent; default 1013.25 hPa (not supplied)"),
+                "{output:?}"
+            );
+        }
+        let profile_path = home.join(".ballistics/profiles/omitted-air.json");
+        let mut saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&profile_path).unwrap()).unwrap();
+        assert_eq!(saved["pressure"], 1013.25);
+        assert!(saved.get("pressure_supplied").is_none());
+        assert_eq!(saved["temperature"], air[0].unwrap_or(0) as f64);
+        assert_eq!(saved["temperature_supplied"], true);
+        assert_eq!(saved["humidity"], air[2].unwrap_or(0) as f64);
+
+        // Compare the actual flight with an explicit ICAO pressure, at sea level and
+        // aloft. A stored zero or a falsely marked sea-level default cannot pass this.
+        for altitude in [0.0, 2000.0] {
+            let run = |extra: &[&str]| {
+                let out = cli()
+                    .env("HOME", &home)
+                    .args([
+                        "trajectory",
+                        "--saved-profile",
+                        "omitted-air",
+                        "--units",
+                        "metric",
+                        "--altitude",
+                        &altitude.to_string(),
+                        "--max-range",
+                        "500",
+                        "-o",
+                        "json",
+                    ])
+                    .args(extra)
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "{out:?}");
+                key_metrics(&out.stdout)
+            };
+            let omitted = run(&[]);
+            let (_, pressure) =
+                ballistics_engine::atmosphere::resolve_station_conditions_with_presence(
+                    15.0,
+                    1013.25,
+                    altitude,
+                    ballistics_engine::atmosphere::PressureReferenceMode::Absolute,
+                    ballistics_engine::atmosphere::StationAtmospherePresence::NEITHER,
+                );
+            assert_eq!(omitted, run(&["--pressure", &pressure.to_string()]));
+            if altitude > 0.0 {
+                assert_ne!(omitted, run(&["--pressure", "1013.25"]));
+            }
+        }
+
+        // Absence belongs to the format's zero sentinel only. A saved impossible
+        // pressure remains a reading and the flight refuses it in the profile's units.
+        saved["pressure"] = serde_json::json!(-1.0);
+        saved["pressure_supplied"] = serde_json::json!(true);
+        std::fs::write(&profile_path, serde_json::to_vec(&saved).unwrap()).unwrap();
+        let refused = cli()
+            .env("HOME", &home)
+            .args([
+                "trajectory",
+                "--saved-profile",
+                "omitted-air",
+                "--units",
+                "metric",
+                "--max-range",
+                "500",
+                "-o",
+                "json",
+            ])
+            .output()
+            .unwrap();
+        assert!(!refused.status.success());
+        assert!(
+            String::from_utf8_lossy(&refused.stderr)
+                .contains("profile 'omitted-air' field pressure = -1 hPa"),
+            "{refused:?}"
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
+}
+
+#[test]
+fn importing_nonzero_impossible_pressure_names_the_a7p_field() {
+    let home = tempfile_dir();
+    let path = home.join("impossible-air.a7p");
+    std::fs::write(
+        &path,
+        synthetic_a7p_with_air([Some(15), Some(-10), Some(50)]),
+    )
+    .unwrap();
+    let output = cli()
+        .env("HOME", &home)
+        .args(["profile", "import"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("c_zero_air_pressure = -1 hPa: pressure must be greater than 0"),
+        "{output:?}"
+    );
+    assert!(!home.join(".ballistics/profiles/CLI 6.5CM.json").exists());
+    std::fs::remove_dir_all(home).unwrap();
 }
 
 #[test]

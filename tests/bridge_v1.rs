@@ -145,7 +145,8 @@ fn density_altitude_rejects_an_atmosphere_exactly_as_solve_does() {
         json!({"pressure_pa": "101325"}),
         json!({"pressure_reference": "altimeter"}),
         json!({"relative_humidity": 50.0}),
-        json!({"altitude_m": 90000.0}),
+        // An altitude is refused only when it is no number; 90000 m flies (0.50.0).
+        json!({"altitude_m": "90000"}),
         json!({"temperature_k": -1.0}),
         json!({"latitude_rad": 45.0}),
         json!([]),
@@ -169,6 +170,8 @@ fn density_altitude_resolves_an_atmosphere_exactly_as_solve_does() {
     for atmosphere in [
         json!({}),
         json!({"altitude_m": 1500.0}),
+        // Beyond the ICAO table's top, which solve-json refused before 0.50.0.
+        json!({"altitude_m": 90000.0}),
         json!({"altitude_m": 1500.0, "temperature_k": 288.15, "pressure_pa": 101325.0,
                "pressure_reference": "qnh", "relative_humidity": 0.3}),
         json!({"altitude_m": -400.0, "temperature_k": 303.15, "pressure_pa": 102000.0,

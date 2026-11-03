@@ -1117,7 +1117,9 @@ pub(crate) fn deserialize_truing_pressure_inhg<'de, D: serde::Deserializer<'de>>
 ///
 /// `humidity_pct = 150: relative humidity must be a percent from 0 to 100 (...)` beyond the
 /// sensor band; `humidity_pct = 100 at 212 °F and 29.92 inHg: no such air exists: ...` for air
-/// that cannot exist.
+/// that cannot exist; `pressure_inhg = -1 inHg: pressure must be greater than 0` and
+/// `temperature_f = -500 °F: temperature must be above absolute zero (-459.67 °F)` for a reading
+/// no air has, and every reading that is not finite, each at its own member.
 pub(crate) fn truing_air_refusal(
     temperature_f: StationReading,
     pressure_inhg: StationReading,
@@ -1125,7 +1127,7 @@ pub(crate) fn truing_air_refusal(
     altitude_ft: f64,
     at: &str,
 ) -> Option<crate::atmosphere::AirRefusal> {
-    use crate::atmosphere::{reading_text, AirField};
+    use crate::atmosphere::AirField;
     let paths = [
         "humidity_pct",
         "temperature_f",
@@ -1148,12 +1150,8 @@ pub(crate) fn truing_air_refusal(
         StationAtmospherePresence::from_readings(temperature_f, pressure_inhg),
         [humidity, temperature, pressure, altitude],
         humidity_pct,
-        |celsius| reading_text(celsius * 9.0 / 5.0 + 32.0, "°F"),
-        |hpa| reading_text(hpa / 33.8639, "inHg"),
+        crate::atmosphere::AirUnits::IMPERIAL,
     )
-    // The humidity rules only: every other reading is range-checked by the request's own
-    // validation, which names it.
-    .filter(crate::atmosphere::AirRefusal::is_humidity_rule)
 }
 
 impl TruingModelInputsV1 {
@@ -1196,24 +1194,18 @@ impl TruingModelInputsV1 {
             ("bullet diameter", self.diameter_in),
             ("zero distance", self.zero_distance_yd),
             ("sight height", self.sight_height_in),
-            ("pressure", self.pressure_inhg.value),
         ] {
             if !value.is_finite() || value <= 0.0 {
                 return Err(format!("{name} must be positive and finite"));
             }
         }
-        if !self.temperature_f.value.is_finite() {
-            return Err("temperature must be finite".to_string());
-        }
-        if !self.altitude_ft.is_finite() {
-            return Err("altitude must be finite".to_string());
-        }
-        // The station air: the engine's one humidity validator (a percent in
+        // The station air, each reading by the one rule the solver applies and named at its own
+        // member in the model's units: the engine's one humidity validator (a percent in
         // [0, 100], a sensor reading within 5 points of it flown as the end it reads as,
-        // anything farther out refused with its field named, never clamped) and the solver's
-        // one impossible-air rule, so air that cannot exist is refused as bad input, named,
-        // before any forward model runs, never reported as a forward-model failure or a
-        // shortage of reachable ranges.
+        // anything farther out refused, never clamped), a finite temperature above absolute
+        // zero, a finite pressure above 0, a finite altitude, and the impossible-air rule, so
+        // air that cannot exist is refused as bad input before any forward model runs, never
+        // reported as a forward-model failure or a shortage of reachable ranges.
         if let Some(refusal) = self.air_refusal("$") {
             return Err(refusal.message().to_string());
         }

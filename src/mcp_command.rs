@@ -543,9 +543,11 @@ fn solve_input_schema() -> Value {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
+                    // The rule a solve applies to each station reading, and nothing narrower:
+                    // any finite altitude, a temperature and a pressure above 0.
                     "altitude_m": {"type": "number"},
-                    "temperature_k": {"type": "number"},
-                    "pressure_pa": {"type": "number"},
+                    "temperature_k": {"type": "number", "exclusiveMinimum": 0},
+                    "pressure_pa": {"type": "number", "exclusiveMinimum": 0},
                     "relative_humidity": {
                         "type": "number",
                         // The sensor band the decoder accepts, taken from the one rule
@@ -949,6 +951,39 @@ mod humidity_wire {
         let (_, default) = solve_tool(arguments(Some(0.5)));
         for key in ["resolved_request", "summary", "samples"] {
             assert_eq!(omitted[key], default[key], "omitted is 0.5: {key}");
+        }
+    }
+
+    /// The schema states the rule the solve applies to each station reading, and nothing
+    /// narrower: no bound on the altitude (any finite altitude flies), and a temperature and a
+    /// pressure above 0, so a client that checks the schema refuses exactly what the tool
+    /// refuses at that path. 0.49.0's decoder refused an altitude outside -5000..84000 m that
+    /// the schema did not state.
+    #[test]
+    fn the_schema_states_the_solves_rule_for_each_station_reading() {
+        let schema = solve_input_schema();
+        let atmosphere = &schema["properties"]["atmosphere"]["properties"];
+        assert_eq!(atmosphere["altitude_m"], json!({"type": "number"}));
+        for field in ["temperature_k", "pressure_pa"] {
+            assert_eq!(
+                atmosphere[field],
+                json!({"type": "number", "exclusiveMinimum": 0}),
+                "{field}"
+            );
+        }
+        let at = |field: &str, value: f64| {
+            let mut request = arguments(Some(0.0));
+            request["atmosphere"][field] = json!(value);
+            solve_tool(request)
+        };
+        for field in ["temperature_k", "pressure_pa"] {
+            let (is_error, answer) = at(field, 0.0);
+            assert!(is_error, "{field} = 0 is refused: {answer}");
+            assert_eq!(answer["error"]["path"], format!("$.atmosphere.{field}"));
+        }
+        for altitude_m in [-1000.0, 20_000.0, 90_000.0] {
+            let (is_error, answer) = at("altitude_m", altitude_m);
+            assert!(!is_error, "altitude_m = {altitude_m} flies: {answer}");
         }
     }
 }

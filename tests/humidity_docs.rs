@@ -266,6 +266,12 @@ fn the_0_50_0_section_lists_every_breaking_rust_api_change() {
         "AtmosphereError",
         "DEFAULT_HUMIDITY_PERCENT",
         "InputAxis",
+        // Typed air causes added while preserving the originating station reading.
+        "CardServiceError::Atmosphere",
+        "DsfServiceErrorV1::Atmosphere",
+        "UncertaintyTruingErrorV1::Atmosphere",
+        "WindScenarioError::Atmosphere",
+        "TruingPlanErrorV1::atmosphere_error",
     ] {
         assert_contains(&section, name, "CHANGELOG 0.50.0 breaking list");
     }

@@ -610,6 +610,14 @@ pub fn solve_for_dsf(
     inputs: &DsfSolveInputs,
     max_range_m: f64,
 ) -> Result<TrajectoryResult, String> {
+    solve_for_dsf_checked(inputs, max_range_m).map_err(|e| e.to_string())
+}
+
+/// The DSF solve with its typed failure preserved for service boundaries.
+pub fn solve_for_dsf_checked(
+    inputs: &DsfSolveInputs,
+    max_range_m: f64,
+) -> Result<TrajectoryResult, crate::BallisticsError> {
     let DsfFlight {
         inputs: mut ballistic_inputs,
         wind,
@@ -631,8 +639,7 @@ pub fn solve_for_dsf(
             wind.clone(),
             atmosphere.clone(),
             station_presence,
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
         // MBA-1359: the returned angle carries the vertical POI bias; the horizontal bias
         // is an azimuth term the flight inputs must apply themselves.
         ballistic_inputs.azimuth_angle += ballistic_inputs.windage_zero_bias_rad(zero_distance_m);
@@ -646,7 +653,7 @@ pub fn solve_for_dsf(
     );
     solver.set_max_range(max_range_m);
     solver.set_time_step(0.001);
-    solver.solve().map_err(|e| e.to_string())
+    solver.solve()
 }
 
 /// What [`solve_for_dsf`] flies, before its zero: the solver's inputs, wind, atmosphere and

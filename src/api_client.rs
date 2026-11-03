@@ -140,35 +140,31 @@ pub struct ApiTrajectoryPoint {
     pub time: f64,
 }
 
-/// The humidity a request sends, checked by the engine's whole humidity rule before anything
-/// goes over the network: the sensor band
-/// ([`crate::RelativeHumidity::try_percent`]) AND the impossible-air test every local solve
-/// applies ([`crate::StationAir::new`], through
-/// [`crate::AtmosphericConditions::air_refusal`]), on the station the request describes.
+/// The humidity a request sends, checked by the engine's whole station rule before anything
+/// goes over the network: the sensor band ([`crate::RelativeHumidity::try_percent`]) AND every
+/// refusal a local solve makes of the station the request describes ([`crate::StationAir::new`],
+/// through [`crate::AtmosphericConditions::air_refusal`]): a temperature at or below absolute
+/// zero, a pressure at or below 0, a reading that is not finite, air that cannot exist.
 ///
 /// A sensor reading within `HUMIDITY_SENSOR_TOLERANCE_PERCENT` of 0-100 is sent as the end it
-/// reads as (101.7 as 100), the value every local solve flies. A value beyond the band, or air
-/// that cannot exist, is an [`ApiError::RequestError`] in the request's own words:
-/// `humidity = 100 at 214 °F and 29.92 inHg: no such air exists: ...`. The station is resolved
-/// as a local solve resolves it: an omitted temperature or pressure is the standard default,
-/// which a solve flies as the ICAO value at the altitude (a typed one, `*_supplied`, flies as
-/// typed), and an omitted humidity is the default 50 %.
+/// reads as (101.7 as 100), the value every local solve flies. A value beyond the band, or a
+/// station no solve flies, is an [`ApiError::RequestError`] in the request's own words:
+/// `humidity = 100 at 214 °F and 29.92 inHg: no such air exists: ...`,
+/// `pressure_inhg = -1 inHg: pressure must be greater than 0`. The station is resolved as a
+/// local solve resolves it: an omitted temperature or pressure is the standard default, which a
+/// solve flies as the ICAO value at the altitude (a typed one, `*_supplied`, flies as typed), and
+/// an omitted humidity is the default 50 %.
 ///
 /// `air` is the request's `(temperature °C, pressure hPa, altitude m)` converted from its own
-/// units, `supplied` its temperature and pressure markers, and `spell` states a resolved
-/// temperature (°C) and pressure (hPa) in the request's units.
-/// How a request states a resolved reading in its own units: a temperature (°C) or a pressure
-/// (hPa) as text with the unit named.
-#[cfg(feature = "online")]
-type ReadingText = fn(f64) -> String;
-
+/// units, `supplied` its temperature and pressure markers, and `units` the units the request
+/// states its readings in.
 #[cfg(feature = "online")]
 fn sendable_humidity(
     humidity: Option<f64>,
     air: (Option<f64>, Option<f64>, Option<f64>),
     supplied: (Option<bool>, Option<bool>),
     names: [&'static str; 4],
-    spell: (ReadingText, ReadingText),
+    units: crate::atmosphere::AirUnits,
 ) -> Result<Option<f64>, ApiError> {
     let percent = humidity
         .map(|percent| {
@@ -188,43 +184,16 @@ fn sendable_humidity(
         temperature_c.is_some() && supplied.0 == Some(true),
         pressure_hpa.is_some() && supplied.1 == Some(true),
     );
-    let refusal = conditions
-        .air_refusal(
-            presence,
-            names.map(crate::AirField::named),
-            conditions.humidity,
-            spell.0,
-            spell.1,
-        )
-        .filter(crate::atmosphere::AirRefusal::is_humidity_rule);
+    let refusal = conditions.air_refusal(
+        presence,
+        names.map(crate::AirField::named),
+        conditions.humidity,
+        units,
+    );
     match refusal {
         Some(refusal) => Err(ApiError::RequestError(refusal.message().to_string())),
         None => Ok(percent),
     }
-}
-
-/// A temperature (°C) in a metric request's words.
-#[cfg(feature = "online")]
-fn celsius_text(celsius: f64) -> String {
-    crate::atmosphere::reading_text(celsius, "°C")
-}
-
-/// A pressure (hPa) in a metric request's words.
-#[cfg(feature = "online")]
-fn hpa_text(hpa: f64) -> String {
-    crate::atmosphere::reading_text(hpa, "hPa")
-}
-
-/// A temperature (°C) in an imperial request's words.
-#[cfg(feature = "online")]
-fn fahrenheit_text(celsius: f64) -> String {
-    crate::atmosphere::reading_text(celsius * 9.0 / 5.0 + 32.0, "°F")
-}
-
-/// A pressure (hPa) in an imperial request's words.
-#[cfg(feature = "online")]
-fn inhg_text(hpa: f64) -> String {
-    crate::atmosphere::reading_text(hpa / 33.8639, "inHg")
 }
 
 /// Request structure for velocity truing via Flask API
@@ -401,7 +370,7 @@ impl ApiClient {
             (request.temperature, request.pressure, request.altitude),
             (request.temperature_supplied, request.pressure_supplied),
             ["humidity", "temperature", "pressure", "altitude"],
-            (celsius_text, hpa_text),
+            crate::atmosphere::AirUnits::METRIC,
         )?;
         // Flask API uses GET /v1/calculate with query parameters (imperial units)
         let url = format!("{}/v1/calculate", self.base_url);
@@ -696,7 +665,7 @@ impl ApiClient {
                 ),
                 (request.temperature_supplied, request.pressure_supplied),
                 ["humidity", "temperature_f", "pressure_inhg", "altitude_ft"],
-                (fahrenheit_text, inhg_text),
+                crate::atmosphere::AirUnits::IMPERIAL,
             )?,
             ..request.clone()
         };
@@ -1308,7 +1277,7 @@ mod tests {
     #[test]
     fn the_client_check_sends_what_a_local_solve_flies() {
         let names = ["humidity", "temperature", "pressure", "altitude"];
-        let spell: (ReadingText, ReadingText) = (celsius_text, hpa_text);
+        let spell = crate::atmosphere::AirUnits::METRIC;
         let typed = (Some(true), Some(true));
         let sea_level = (Some(15.0), Some(1013.25), Some(0.0));
         assert_eq!(

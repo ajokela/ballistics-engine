@@ -4671,6 +4671,365 @@ Impact Velocity: 2510 fps\n";
         }
     }
 
+    /// One rule for each station pressure, altitude and density altitude, as on the native
+    /// CLI, and every refusal names its flag.
+    mod station_reading_rule {
+        use super::*;
+
+        /// The browser terminal's commands that take a station pressure, as the native CLI's: the
+        /// command, its pressure flag, and the flags it needs to run.
+        const PRESSURE_COMMANDS: [(&str, &str); 7] = [
+            ("trajectory -v 2700 -b 0.475 -m 168 -d 0.308", "--pressure"),
+            (
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --auto-zero 100",
+                "--zero-pressure",
+            ),
+            (
+                "zero -v 2700 -b 0.475 -m 168 -d 0.308 --target-distance 300",
+                "--pressure",
+            ),
+            (
+                "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 400",
+                "--pressure",
+            ),
+            (
+                "true-velocity --measured-drop 30 --range 500 -b 0.243 -m 175 -d 0.308 --offline",
+                "--pressure",
+            ),
+            (
+                "true-wind --miss 600:12 --twist-rate 10 -v 2700 -b 0.243 --drag-model g7 -m 175 \
+                 -d 0.308",
+                "--pressure",
+            ),
+            (
+                "estimate-bc -v 2700 -m 168 -d 0.308 --data \"100,2.5;200,10.2;300,23.5\"",
+                "--pressure",
+            ),
+        ];
+
+        /// One station-pressure rule on every command, as on the native CLI: a pressure is refused
+        /// on its own only when it is not finite or at or below zero, in the flag's own words, and
+        /// every other reading flies (5 and 40 inHg dry). `trajectory`, `zero`, `true-velocity` and
+        /// `true-wind` used to refuse them as "out of range (expected ~8..33 inHg)", while `lead`,
+        /// `estimate-bc` and `--zero-pressure` flew them.
+        #[wasm_bindgen_test]
+        fn every_command_with_a_pressure_applies_the_one_pressure_rule() {
+            let wasm = WasmBallistics::new();
+            for (base, pressure) in PRESSURE_COMMANDS {
+                for good in ["5", "40"] {
+                    let flown = wasm
+                        .run_command(&format!("{base} {pressure} {good} --humidity 0"))
+                        .unwrap_or_else(|e| panic!("`{base}` at {good} inHg dry flies: {e:?}"));
+                    assert!(
+                        !flown.trim_start().starts_with("Error"),
+                        "`{base}` at {good} inHg dry flies: {flown}"
+                    );
+                }
+                for (bad, refusal) in [
+                    ("-1", format!("{pressure} -1 inHg is at or below zero")),
+                    ("0", format!("{pressure} 0 inHg is at or below zero")),
+                    ("NaN", format!("{pressure} NaN inHg is not a finite number")),
+                ] {
+                    let message = match wasm.run_command(&format!("{base} {pressure} {bad}")) {
+                        Err(err) => err.as_string().unwrap_or_default(),
+                        Ok(text) => {
+                            panic!("`{base}` at {bad} inHg must be refused by a throw:\n{text}")
+                        }
+                    };
+                    assert_eq!(message, refusal, "`{base}`");
+                }
+            }
+        }
+
+        /// A density altitude flies when the station it gives exists, on every command that takes
+        /// one, and is refused naming its flag beyond that, in the run's units: the browser terminal
+        /// passed one past the FAA rule's inverse to the solver, which failed as "atmosphere.pressure
+        /// must be finite". -10000 ft flies, as it always did here.
+        #[wasm_bindgen_test]
+        fn every_density_altitude_flag_refuses_only_a_density_altitude_with_no_air() {
+            let wasm = WasmBallistics::new();
+            for (base, flag) in [
+                (
+                    "trajectory -v 2700 -b 0.475 -m 168 -d 0.308",
+                    "--density-altitude",
+                ),
+                (
+                    "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --auto-zero 100",
+                    "--zero-density-altitude",
+                ),
+                (
+                    "zero -v 2700 -b 0.475 -m 168 -d 0.308 --target-distance 300",
+                    "--density-altitude",
+                ),
+            ] {
+                for good in ["-10000", "60000", "140000"] {
+                    let flown = wasm
+                        .run_command(&format!("{base} {flag} {good} --humidity 0"))
+                        .unwrap_or_else(|e| panic!("`{base} {flag} {good}` flies: {e:?}"));
+                    assert!(!flown.trim_start().starts_with("Error"), "{flown}");
+                }
+                let message = match wasm.run_command(&format!("{base} {flag} 200000")) {
+                    Err(err) => err.as_string().unwrap_or_default(),
+                    Ok(text) => {
+                        panic!("`{base} {flag} 200000` must be refused by a throw:\n{text}")
+                    }
+                };
+                assert!(
+                    message.starts_with(&format!(
+                        "{flag} = 200000 ft: no air has this density altitude"
+                    )),
+                    "`{base}`: {message}"
+                );
+            }
+        }
+
+        /// A refused altitude is named by its flag, in the run's units, on every command.
+        #[wasm_bindgen_test]
+        fn every_command_names_a_refused_altitude_by_its_flag() {
+            let wasm = WasmBallistics::new();
+            for (base, _) in PRESSURE_COMMANDS {
+                let flag = if base.contains("--auto-zero") {
+                    "--zero-altitude"
+                } else {
+                    "--altitude"
+                };
+                let message = match wasm.run_command(&format!("{base} {flag} NaN")) {
+                    Err(err) => err.as_string().unwrap_or_default(),
+                    Ok(text) => panic!("`{base} {flag} NaN` must be refused by a throw:\n{text}"),
+                };
+                assert_eq!(
+                    message,
+                    format!("{flag} NaN ft is not a finite number"),
+                    "`{base}`"
+                );
+            }
+        }
+
+        /// The station flags of the command whose pressure flag is `pressure`: the zero day's own
+        /// for `--zero-pressure`, the shot day's otherwise, as (pressure type, altitude,
+        /// temperature, humidity, density altitude).
+        fn station_flags(pressure: &str) -> [&'static str; 5] {
+            if pressure == "--zero-pressure" {
+                [
+                    "--zero-pressure-type",
+                    "--zero-altitude",
+                    "--zero-temperature",
+                    "--zero-humidity",
+                    "--zero-density-altitude",
+                ]
+            } else {
+                [
+                    "--pressure-type",
+                    "--altitude",
+                    "--temperature",
+                    "--humidity",
+                    "--density-altitude",
+                ]
+            }
+        }
+
+        /// `command` thrown, as every refusal of the air is.
+        fn thrown(wasm: &WasmBallistics, command: &str) -> String {
+            match wasm.run_command(command) {
+                Err(err) => err.as_string().unwrap_or_default(),
+                Ok(text) => panic!("`{command}` must be refused by a throw:\n{text}"),
+            }
+        }
+
+        /// A refused QNH is quoted as it was typed, with the station pressure it was reduced to,
+        /// on every command that takes one, as on the native CLI: never the reduced station
+        /// pressure as if it had been typed (`--pressure = 0.09 inHg` for a typed 0.15). The
+        /// pressure is blamed when the QNH is no sea-level pressure, the altitude when it is one,
+        /// and a QNH the altimeter-setting relation leaves no station pressure for is refused the
+        /// same way, never as `--pressure = NaN inHg: must be finite`.
+        #[wasm_bindgen_test]
+        fn a_qnh_refusal_quotes_the_qnh_as_typed() {
+            let wasm = WasmBallistics::new();
+            for (base, pressure) in PRESSURE_COMMANDS {
+                let [kind, altitude, temperature, humidity, _] = station_flags(pressure);
+                let message = thrown(
+                    &wasm,
+                    &format!(
+                        "{base} {pressure} 0.15 {kind} qnh {altitude} 4921 {temperature} 68 \
+                         {humidity} 100"
+                    ),
+                );
+                assert!(
+                    message.contains(&format!(
+                        "; {pressure} is a QNH of 0.15 inHg, and reduced to the station altitude \
+                         of 4921 ft it is a station pressure of "
+                    )) && message.ends_with(": check the pressure's unit")
+                        && !message.contains(&format!("{pressure} = ")),
+                    "`{base}`: {message}"
+                );
+                let message = thrown(
+                    &wasm,
+                    &format!(
+                        "{base} {pressure} 29.92 {kind} qnh {altitude} 118110 {temperature} 68 \
+                         {humidity} 100"
+                    ),
+                );
+                assert!(
+                    message.contains(&format!(
+                        "; {pressure} is a QNH of 29.92 inHg, and reduced to the station altitude \
+                         of 118110 ft it is a station pressure of "
+                    )) && message.ends_with(": check the altitude's unit"),
+                    "`{base}`: {message}"
+                );
+                let message = thrown(
+                    &wasm,
+                    &format!("{base} {pressure} 0.15 {kind} qnh {altitude} 65617 {humidity} 0"),
+                );
+                assert_eq!(
+                    message,
+                    format!(
+                        "{pressure} is a QNH of 0.15 inHg, and reduced to the station altitude of \
+                         65617 ft it leaves no station pressure: the altimeter-setting relation \
+                         has none that high (check the pressure's unit)"
+                    ),
+                    "`{base}`"
+                );
+            }
+        }
+
+        /// Air that cannot exist, blamed on the temperature (outside -148 °F to 212 °F, where the
+        /// humid-air formulas hold), names the temperature by its flag, or by the density
+        /// altitude that gave it, as on the native CLI: the terminal named only the humidity.
+        #[wasm_bindgen_test]
+        fn impossible_air_blamed_on_the_temperature_names_where_it_came_from() {
+            let wasm = WasmBallistics::new();
+            let inherited = thrown(&wasm, "trajectory -u metric -v 823 -b 0.475 -m 10.9 -d 7.82 --density-altitude 44196 --humidity 0 --auto-zero 100 --zero-pressure 1e160");
+            assert!(
+                inherited.contains("--density-altitude gives a station temperature of "),
+                "{inherited}"
+            );
+            assert!(inherited.contains("no such air exists"), "{inherited}");
+            let inherited_pressure = thrown(&wasm, "trajectory -u metric -v 823 -b 0.475 -m 10.9 -d 7.82 --density-altitude 25000 --temperature 40 --humidity 0 --auto-zero 100 --zero-altitude 0 --zero-humidity 100");
+            assert!(
+                inherited_pressure.contains("--density-altitude gives a station pressure of "),
+                "{inherited_pressure}"
+            );
+            assert!(
+                !inherited_pressure.contains("--zero-altitude gives a station pressure"),
+                "{inherited_pressure}"
+            );
+            for (base, pressure) in PRESSURE_COMMANDS {
+                let [_, _, temperature, humidity, _] = station_flags(pressure);
+                let message = thrown(&wasm, &format!("{base} {temperature} 214 {humidity} 100"));
+                assert!(
+                    message.contains("no such air exists")
+                        && message.ends_with(&format!(
+                            "; {temperature} = 214 °F is outside -148 °F to 212 °F, where the \
+                             humid-air formulas hold: check the temperature and its unit"
+                        )),
+                    "`{base}`: {message}"
+                );
+            }
+            for (base, pressure) in &PRESSURE_COMMANDS[..3] {
+                let [_, _, _, _, density_altitude] = station_flags(pressure);
+                let message = thrown(&wasm, &format!("{base} {density_altitude} 145000"));
+                assert!(
+                    message.contains("no such air exists")
+                        && message.contains(&format!(
+                            "; {density_altitude} gives a station temperature of "
+                        ))
+                        && message.ends_with(
+                            ", outside -148 °F to 212 °F, where the humid-air formulas hold: \
+                             check the density altitude's unit"
+                        ),
+                    "`{base}`: {message}"
+                );
+            }
+        }
+
+        #[wasm_bindgen_test]
+        fn air_refused_in_flight_keeps_the_station_source() {
+            let wasm = WasmBallistics::new();
+            let load = "-v 823 -b 0.475 -m 10.9 -d 7.82 -u metric";
+            for (command, source) in [
+                ("trajectory --angle 40 --density-altitude 44196 --humidity 0 --max-range 20000", "--density-altitude"),
+                ("zero --from-angle 40 --temperature -273.1435 --pressure 0.0187 --humidity 0", "--temperature"),
+                ("zero --target-distance 600 --temperature -273.1435 --pressure 0.0187 --humidity 0", "--temperature"),
+                ("trajectory --auto-zero 600 --zero-temperature -273.1435 --zero-pressure 0.0187 --zero-humidity 0", "--zero-temperature"),
+                ("trajectory --auto-zero 600 --temperature -273.1435 --pressure 0.0187 --humidity 0", "--temperature"),
+            ] {
+                let message = thrown(&wasm, &format!("{command} {load}"));
+                assert!(message.contains(source) && message.contains("air aloft would fall below absolute zero"), "{command}: {message}");
+                if source == "--density-altitude" {
+                    assert!(!message.contains("--temperature"), "{message}");
+                }
+            }
+            for command in [
+                "true-velocity --measured-drop 30 --range 900 -b 0.243 -m 175 -d 0.308 --offline --zero-distance 700",
+                "true-wind --miss 900:12 --twist-rate 10 -v 2700 -b 0.243 --drag-model g7 -m 175 -d 0.308 --zero-distance 700",
+                "estimate-bc -v 2700 -m 168 -d 0.308 --data \"800,2.5;900,10.2\" --zero-range 700",
+            ] {
+                let message = thrown(&wasm, &format!("{command} --temperature -459.6583 --pressure 0.000552211 --humidity 0"));
+                assert!(message.contains("--temperature = -459.66 °F: the air aloft would fall below absolute zero"), "{command}: {message}");
+                assert!(!message.contains("temperature_c ="), "{message}");
+            }
+        }
+
+        /// An absurd reading is refused in a few characters, as on the native CLI: a reading,
+        /// and every altitude its refusal quotes, beyond 10^7 in exponent form, never hundreds of
+        /// digits, and a pressure that is not 0 never stated as 0.
+        #[wasm_bindgen_test]
+        fn absurd_readings_are_refused_in_a_few_characters() {
+            let wasm = WasmBallistics::new();
+            let base = "trajectory -v 2700 -b 0.475 -m 168 -d 0.308";
+            let large = format!("--pressure 1{} --humidity 0", "0".repeat(300));
+            let tiny = format!("--pressure 0.{}1 --humidity 50", "0".repeat(299));
+            let humidity = format!("--humidity 105.0000001{}", "0".repeat(300));
+            let zero_humidity = format!("--auto-zero 100 --zero-humidity 150.{}", "0".repeat(300));
+            for (flags, quotes) in [
+                (large.as_str(), vec!["--pressure = 1e300 inHg"]),
+                (tiny.as_str(), vec!["--pressure = 1e-300 inHg"]),
+                (humidity.as_str(), vec!["--humidity = 105.0000001"]),
+                (zero_humidity.as_str(), vec!["--zero-humidity = 150"]),
+                (
+                    "--pressure 1e160 --humidity 0",
+                    vec![
+                        "at 59 °F and 1e160 inHg",
+                        "--pressure = 1e160 inHg is a pressure altitude of -",
+                    ],
+                ),
+                (
+                    "--pressure 1e-300 --humidity 50",
+                    vec!["at 59 °F and 1e-300 inHg"],
+                ),
+                (
+                    "--pressure -1e300",
+                    vec!["--pressure -1e300 inHg is at or below zero"],
+                ),
+                (
+                    "--temperature -1e300",
+                    vec!["--temperature -1e300 F is at or below absolute zero (-459.67 F)"],
+                ),
+                (
+                    "--density-altitude 1e300",
+                    vec![
+                        "--density-altitude = 1e300 ft: no air has this density altitude: at its \
+                         pressure altitude by the FAA rule, 1e300 ft,",
+                    ],
+                ),
+            ] {
+                let message = match wasm.run_command(&format!("{base} {flags}")) {
+                    Err(err) => err.as_string().unwrap_or_default(),
+                    Ok(text) => panic!("`{flags}` must be refused by a throw:\n{text}"),
+                };
+                let longest = message
+                    .split(|c: char| !c.is_ascii_digit())
+                    .map(str::len)
+                    .max()
+                    .unwrap_or(0);
+                assert!(longest <= 12, "`{flags}`: {message}");
+                for quote in quotes {
+                    assert!(message.contains(quote), "`{flags}`: `{quote}` in {message}");
+                }
+            }
+        }
+    }
+
     #[wasm_bindgen_test]
     fn monte_carlo_humidity_reaches_the_wez_sweep() {
         let wasm = WasmBallistics::new();

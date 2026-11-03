@@ -706,9 +706,91 @@ const DA_FT_TO_M: f64 = 0.3048;
 ///
 /// Station pressure, never an altimeter setting (MBA-643): a QNH already corrects to sea
 /// level and would report the pressure altitude of the sea rather than of the firing point.
+///
+/// It is the troposphere's closed form, with the NWS's rounded constants, and that is all it
+/// is anywhere: below -5 km and above 11 km it continues the troposphere's lapse, which the
+/// standard atmosphere does not have above 11 km, so there it is no longer the standard
+/// atmosphere's altitude of the pressure (standard pressure at 20 km, 5474.89 Pa, reads
+/// 18879 m), and it approaches 145366.45 ft (44308 m), where that lapse would reach 0 K, as
+/// the pressure falls to 0. [`pressure_altitude_m`] is this formula inside -5 km to 11 km and
+/// the standard atmosphere's own altitude outside it.
 pub fn nws_pressure_altitude_ft(station_pressure_hpa: f64) -> f64 {
     DA_NWS_PRESSURE_ALT_FT
         * (1.0 - (station_pressure_hpa / DA_NWS_SEA_LEVEL_HPA).powf(DA_NWS_EXPONENT))
+}
+
+/// The pressure altitude of a station pressure, m, wherever it lands: the NWS formula
+/// ([`nws_pressure_altitude_ft`] in metres, to the bit) inside -5 km to 11 km, where it is the
+/// published figure, and outside that band the standard atmosphere's own (geopotential)
+/// altitude of the pressure, walking the same ICAO layers [`air_at`] walks: the troposphere's
+/// lapse below -5 km, isothermal from 11 km, warming from 20 km and 32 km, isothermal again
+/// from 47 km, cooling from 51 km and 71 km, the last layer's lapse continuing above 84 km.
+/// Each layer's base pressure is chained from 101325 Pa by the layer formula, so standard
+/// pressure at any height reads that height.
+///
+/// Every pressure above 0 has a finite pressure altitude, below 178.3 km (where the last
+/// layer's lapse reaches 0 K). At the band's edges the two differ by the few metres the NWS
+/// constants and the ICAO troposphere part by: the NWS formula reads 22615.3 Pa as 11000 m and
+/// the standard atmosphere reads it as 11005 m, so the figure steps up by 5 m there as the
+/// pressure falls, and at the bottom edge (177725 Pa) it steps down by 2 m as the pressure
+/// rises. It never falls as the pressure falls. A NaN pressure gives NaN.
+///
+/// ```
+/// use ballistics_engine::atmosphere::{nws_pressure_altitude_ft, pressure_altitude_m};
+///
+/// // Inside the band, the NWS formula to the bit.
+/// assert_eq!(pressure_altitude_m(850.0).to_bits(), (nws_pressure_altitude_ft(850.0) * 0.3048).to_bits());
+/// // Standard pressure at 20 km reads 20 km.
+/// assert!((pressure_altitude_m(54.7489) - 20_000.0).abs() < 1.0);
+/// // A near vacuum still has an altitude.
+/// assert!(pressure_altitude_m(0.01).is_finite());
+/// ```
+pub fn pressure_altitude_m(station_pressure_hpa: f64) -> f64 {
+    let nws_m = nws_pressure_altitude_ft(station_pressure_hpa) * DA_FT_TO_M;
+    if nws_m.is_nan() || (LOWEST_PRESSURE_ALTITUDE_M..=TROPOSPHERE_TOP_M).contains(&nws_m) {
+        return nws_m;
+    }
+    standard_pressure_altitude_m(station_pressure_hpa * 100.0)
+}
+
+/// The standard atmosphere's geopotential altitude, m, of a pressure in pascals: the ICAO layers
+/// walked from sea level, each base pressure chained by the layer formula, the troposphere's
+/// lapse continued below sea level and the last layer's above 84 km.
+fn standard_pressure_altitude_m(pressure_pa: f64) -> f64 {
+    let sea_level = &ICAO_LAYERS[0];
+    let mut base_pressure = sea_level.base_pressure;
+    for (index, layer) in ICAO_LAYERS.iter().enumerate() {
+        let (base, base_temperature, lapse) = (
+            layer.base_altitude,
+            layer.base_temperature,
+            layer.lapse_rate,
+        );
+        let isothermal = lapse.abs() < 1e-10;
+        let scale_height = R_AIR * base_temperature / G_ACCEL_MPS2;
+        let top = ICAO_LAYERS
+            .get(index + 1)
+            .map_or(f64::INFINITY, |next| next.base_altitude);
+        let top_pressure = if top.is_infinite() {
+            0.0
+        } else if isothermal {
+            base_pressure * (-(top - base) / scale_height).exp()
+        } else {
+            base_pressure
+                * (1.0 + lapse * (top - base) / base_temperature)
+                    .powf(-G_ACCEL_MPS2 / (lapse * R_AIR))
+        };
+        if pressure_pa >= top_pressure || top.is_infinite() {
+            return if isothermal {
+                base + scale_height * (base_pressure / pressure_pa).ln()
+            } else {
+                let temperature = base_temperature
+                    * (pressure_pa / base_pressure).powf(-lapse * R_AIR / G_ACCEL_MPS2);
+                base + (temperature - base_temperature) / lapse
+            };
+        }
+        base_pressure = top_pressure;
+    }
+    unreachable!("the last layer has no top")
 }
 
 /// Density altitude by the FAA rule of thumb, feet: NWS pressure altitude plus 120 ft for
@@ -730,6 +812,11 @@ pub fn nws_pressure_altitude_ft(station_pressure_hpa: f64) -> f64 {
 /// humidity-aware forward could be inverted just as well given the run's humidity, the way
 /// temperature already is; it would change every printed card and what an entered density
 /// altitude resolves to.
+///
+/// Outside the troposphere this still starts from [`nws_pressure_altitude_ft`], not the
+/// layered [`pressure_altitude_m`] reported by the bridge. Both the NWS pressure formula and
+/// this temperature correction continue there, preserving the inverse used for density-altitude
+/// entry. They do not become the standard atmosphere's pressure or density altitude.
 ///
 /// It is not the National Weather Service's density altitude either, despite the NWS pressure
 /// altitude inside it: the NWS calculator uses virtual temperature, so it includes humidity
@@ -978,6 +1065,74 @@ pub fn resolve_atmosphere_for_density_altitude(
     let altitude_m = pressure_alt_ft * DA_FT_TO_M;
 
     (altitude_m, temperature_c, pressure_hpa)
+}
+
+/// The NWS station pressure, hPa, at a pressure altitude in feet, when it is finite and above 0:
+/// the inverse of [`nws_pressure_altitude_ft`], as [`resolve_atmosphere_for_density_altitude`]
+/// evaluates it. `None` at or above 145366.45 ft, where the formula's lapse reaches 0 K, and
+/// where it overflows far below sea level.
+fn nws_station_pressure_hpa(pressure_altitude_ft: f64) -> Option<f64> {
+    let pressure_hpa = DA_NWS_SEA_LEVEL_HPA
+        * (1.0 - pressure_altitude_ft / DA_NWS_PRESSURE_ALT_FT).powf(1.0 / DA_NWS_EXPONENT);
+    (pressure_hpa.is_finite() && pressure_hpa > 0.0).then_some(pressure_hpa)
+}
+
+/// The station a density altitude gives ([`resolve_atmosphere_for_density_altitude`], bit for
+/// bit), or the refusal of a density altitude no air has: the one rule every surface that takes
+/// a density altitude applies. A density altitude flies when it is finite and the station the
+/// FAA rule's inverse gives for it can exist; nothing narrower. The station is checked as any
+/// other is afterwards (its humidity, and air that cannot exist), by [`StationAir::new`].
+///
+/// ```
+/// use ballistics_engine::atmosphere::station_for_density_altitude;
+///
+/// assert!(station_for_density_altitude(-10_000.0, None).is_ok()); // far below sea level
+/// assert!(station_for_density_altitude(40_000.0, None).is_ok()); // far above the troposphere
+/// assert!(station_for_density_altitude(50_000.0, None).is_err()); // below 0 K by the rule
+/// assert!(station_for_density_altitude(50_000.0, Some(40.0)).is_ok()); // hot air that thin
+/// ```
+///
+/// # Errors
+///
+/// - `density_altitude_m` not finite: [`AtmosphereErrorReason::NotFinite`] on
+///   `density_altitude_m`.
+/// - an `explicit_temperature_c` the one temperature rule refuses
+///   ([`check_station_temperature_c`]), on `temperature_c`.
+/// - no air at it: [`AtmosphereErrorReason::NoAirAtDensityAltitude`] on `density_altitude_m`,
+///   whose [`AtmosphereError::altitude_m`] is its pressure altitude by the FAA rule.
+pub fn station_for_density_altitude(
+    density_altitude_m: f64,
+    explicit_temperature_c: Option<f64>,
+) -> Result<(f64, f64, f64), AtmosphereError> {
+    const FIELD: &str = "density_altitude_m";
+    if !density_altitude_m.is_finite() {
+        return Err(AtmosphereError::new(
+            FIELD,
+            density_altitude_m,
+            AtmosphereErrorReason::NotFinite,
+        ));
+    }
+    if let Some(temperature_c) = explicit_temperature_c {
+        check_station_temperature_c(temperature_c)?;
+    }
+    let (altitude_m, temperature_c, pressure_hpa) =
+        resolve_atmosphere_for_density_altitude(density_altitude_m, explicit_temperature_c);
+    let exists = altitude_m.is_finite()
+        && pressure_hpa.is_finite()
+        && pressure_hpa > 0.0
+        && temperature_c.is_finite()
+        && temperature_c > ABSOLUTE_ZERO_C;
+    if !exists {
+        return Err(AtmosphereError {
+            altitude_m: Some(altitude_m),
+            ..AtmosphereError::new(
+                FIELD,
+                density_altitude_m,
+                AtmosphereErrorReason::NoAirAtDensityAltitude,
+            )
+        });
+    }
+    Ok((altitude_m, temperature_c, pressure_hpa))
 }
 
 /// Enhanced atmospheric calculation with ICAO Standard Atmosphere.
@@ -1792,8 +1947,9 @@ pub enum AtmosphereErrorReason {
     /// more, that is more vapour pressure than the air's total pressure; or the air is humid
     /// above water's critical point (647.096 K), where no saturation vapour pressure, and so no
     /// relative humidity, is defined; or, dry above that point, it is too hot for the CIPM-2007
-    /// density to stay finite and positive. Dry air at any lower temperature above absolute
-    /// zero exists. The same refusal the `atmosphere.density_altitude` service makes.
+    /// density to stay finite and positive; or its pressure is so far beyond any air's (above
+    /// about 4e156 Pa) that the density does not either. Dry air at any lower temperature above
+    /// absolute zero exists. The same refusal the `atmosphere.density_altitude` service makes.
     ImpossibleAir,
     /// A station density ratio (density / 1.225 kg/m³) outside `(0, 2)`.
     DensityRatioOutOfRange,
@@ -1810,6 +1966,13 @@ pub enum AtmosphereErrorReason {
     /// [`AtmosphereError::altitude_m`] is where the air reaches 0 K. A flight that stays below
     /// that height flies.
     AirAloftBelowAbsoluteZero,
+    /// A density altitude no air has by the FAA rule its entry inverts
+    /// ([`station_for_density_altitude`]): at its pressure altitude by that rule
+    /// ([`AtmosphereError::altitude_m`]) the NWS pressure formula gives no finite pressure above
+    /// 0 (at or above 145366.45 ft, 44308 m), or, with no temperature given, the rule's standard
+    /// temperature is at or below absolute zero (at or above 145286 ft, 44283 m). On the field
+    /// `density_altitude_m`.
+    NoAirAtDensityAltitude,
 }
 
 impl fmt::Display for AtmosphereErrorReason {
@@ -1830,13 +1993,13 @@ impl fmt::Display for AtmosphereErrorReason {
                     humidity_fraction_range()
                 )
             }
-            Self::AtOrBelowAbsoluteZero => "temperature must be above absolute zero (-273.15 C)",
+            Self::AtOrBelowAbsoluteZero => "temperature must be above absolute zero (-273.15 °C)",
             Self::NonPositivePressure => "pressure must be greater than 0",
             Self::ImpossibleAir => {
                 "no such air exists: at this temperature and pressure the humidity needs a \
-                 water-vapour mole fraction of 1 or more (more vapour pressure than the air's \
-                 total pressure), or the air is humid above water's critical point, or too hot \
-                 to have a density"
+                 water-vapour mole fraction of 1 or more (more vapour pressure than the total), \
+                 or the air is humid above water's critical point, or too hot or too dense to \
+                 have a density"
             }
             Self::DensityRatioOutOfRange => {
                 "density ratio (density / 1.225 kg/m^3) must be greater than 0 and less than 2"
@@ -1849,6 +2012,7 @@ impl fmt::Display for AtmosphereErrorReason {
                 "an atmosphere zone's until_distance_m must be greater than 0"
             }
             Self::AirAloftBelowAbsoluteZero => "the air aloft would fall below absolute zero",
+            Self::NoAirAtDensityAltitude => "no air has this density altitude by the FAA rule",
         })
     }
 }
@@ -1878,6 +2042,48 @@ pub struct AtmosphereError {
 }
 
 impl AtmosphereError {
+    /// Find a typed atmosphere refusal through a service's error chain.
+    /// Keep the cause until the boundary can name the reading in its own units.
+    pub fn in_error<'a>(error: &'a (dyn std::error::Error + 'static)) -> Option<&'a Self> {
+        let mut current = Some(error);
+        while let Some(error) = current {
+            if let Some(air) = error.downcast_ref::<Self>() {
+                return Some(air);
+            }
+            current = error.source();
+        }
+        None
+    }
+
+    /// Name a refusal discovered aloft using the same temperature source as the station check.
+    pub fn temperature_refusal(&self, field: AirField<'_>, units: AirUnits) -> AirRefusal {
+        self.temperature_refusal_from(field, units, StationTemperatureOrigin::Reading)
+    }
+
+    /// Like [`Self::temperature_refusal`], retaining a density altitude's derived temperature.
+    pub fn temperature_refusal_from(
+        &self,
+        field: AirField<'_>,
+        units: AirUnits,
+        origin: StationTemperatureOrigin,
+    ) -> AirRefusal {
+        let reading = match origin {
+            StationTemperatureOrigin::Reading => {
+                format!("{} = {}", field.name, units.temperature.text(self.value))
+            }
+            StationTemperatureOrigin::DensityAltitude => format!(
+                "{} gives a station temperature of {}",
+                field.name,
+                units.temperature.text(self.value)
+            ),
+        };
+        AirRefusal {
+            path: field.path.to_string(),
+            message: format!("{reading}: {}", self.explanation_in(units.altitude)),
+            reason: self.reason,
+        }
+    }
+
     fn new(field: &'static str, value: f64, reason: AtmosphereErrorReason) -> Self {
         Self {
             field: Cow::Borrowed(field),
@@ -1944,6 +2150,22 @@ impl AtmosphereError {
                     None => reason.to_string(),
                 }
             }
+            (AtmosphereErrorReason::NoAirAtDensityAltitude, _) => match self.altitude_m {
+                Some(pressure_altitude_m) => {
+                    let cause =
+                        if nws_station_pressure_hpa(pressure_altitude_m / DA_FT_TO_M).is_some() {
+                            "the rule's standard temperature is at or below absolute zero"
+                        } else {
+                            "the NWS pressure formula gives no finite pressure above 0"
+                        };
+                    format!(
+                        "no air has this density altitude: at its pressure altitude by the FAA \
+                         rule, {}, {cause} (check the density altitude and its unit)",
+                        altitude_unit.text(pressure_altitude_m)
+                    )
+                }
+                None => AtmosphereErrorReason::NoAirAtDensityAltitude.to_string(),
+            },
             (reason, _) => reason.to_string(),
         }
     }
@@ -1980,23 +2202,34 @@ impl AtmosphereError {
 
 impl fmt::Display for AtmosphereError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} = {}: {}", self.field, self.value, self.explanation())
+        write!(
+            f,
+            "{} = {}: {}",
+            self.field,
+            echo_number(self.value),
+            self.explanation()
+        )
     }
 }
 
 impl std::error::Error for AtmosphereError {}
 
-/// The lowest pressure altitude a station can plausibly sit at, m: the bottom of the ICAO table.
+/// The bottom of the band the NWS pressure-altitude formula is read in, m: the bottom of the
+/// ICAO table.
 pub(crate) const LOWEST_PRESSURE_ALTITUDE_M: f64 = -5_000.0;
-/// The top of the standard atmosphere's troposphere, m. A station pressure whose pressure
-/// altitude is outside [`LOWEST_PRESSURE_ALTITUDE_M`]..=this is not a reading of the air anyone
-/// shoots in but a unit mistake (hPa sent as pascals is 25 km up).
+/// The top of the standard atmosphere's troposphere, m, and of the band the NWS
+/// pressure-altitude formula is read in ([`pressure_altitude_m`]). No reading is refused for a
+/// pressure altitude outside the band; it only decides which reading air that cannot exist is
+/// blamed on ([`AtmosphereError::refusal_in`]), since a station pressure there is far likelier a
+/// unit mistake (hPa sent as pascals is 25 km up) than a humidity.
 pub(crate) const TROPOSPHERE_TOP_M: f64 = 11_000.0;
 
-/// The NWS pressure altitude of a station pressure, m, when it lies outside the troposphere.
+/// The pressure altitude of a station pressure, m ([`pressure_altitude_m`]), when it lies
+/// outside the troposphere's band.
 pub(crate) fn pressure_altitude_outside_troposphere_m(station_pressure_hpa: f64) -> Option<f64> {
-    let altitude_m = nws_pressure_altitude_ft(station_pressure_hpa) * 0.3048;
-    (!(LOWEST_PRESSURE_ALTITUDE_M..=TROPOSPHERE_TOP_M).contains(&altitude_m)).then_some(altitude_m)
+    let nws_m = nws_pressure_altitude_ft(station_pressure_hpa) * DA_FT_TO_M;
+    (!(LOWEST_PRESSURE_ALTITUDE_M..=TROPOSPHERE_TOP_M).contains(&nws_m))
+        .then(|| pressure_altitude_m(station_pressure_hpa))
 }
 
 /// °C to K.
@@ -2031,8 +2264,8 @@ pub(crate) fn outside_humid_air_model_range(temperature_k: f64) -> bool {
 /// when it was a station reading, the altitude when the pressure was the altitude's.
 ///
 /// Every surface decides it one way, through [`Self::of`] (or [`Self::resolving`], from what a
-/// presence-aware resolution was handed), and `atmosphere.density_altitude` locates its own
-/// troposphere refusal by the same rule.
+/// presence-aware resolution was handed), or, for a station a density altitude gave,
+/// [`Self::DensityAltitude`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StationPressureOrigin {
     /// A station pressure reading, or a QNH that is itself outside the troposphere (hPa sent as
@@ -2045,6 +2278,10 @@ pub enum StationPressureOrigin {
     /// A QNH that is itself a plausible sea-level pressure, reduced to the station altitude: the
     /// altitude is to blame.
     Qnh,
+    /// A density altitude's station ([`station_for_density_altitude`]): the density altitude is
+    /// to blame. A surface names the derived pressure by the density altitude's field,
+    /// so the refusal blames [`AirSpelling::pressure`] even if the altitude was overridden.
+    DensityAltitude,
 }
 
 impl StationPressureOrigin {
@@ -2079,6 +2316,84 @@ impl StationPressureOrigin {
     }
 }
 
+/// Where the station temperature a solve flies came from, so air that cannot exist, blamed on
+/// the temperature, names the reading that carried it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StationTemperatureOrigin {
+    /// A temperature reading, or, when none was given, the ICAO standard temperature at the
+    /// station altitude (which never leaves the range the humid-air formulas hold for, so no
+    /// refusal blames it).
+    #[default]
+    Reading,
+    /// The temperature of a density altitude's station, given no temperature
+    /// ([`station_for_density_altitude`]): the density altitude is to blame. A surface that
+    /// flies one names the temperature by the density altitude's field.
+    DensityAltitude,
+}
+
+/// Where a station's pressure and temperature came from, as a surface that resolved the station
+/// itself states them to a refusal of its air
+/// ([`crate::cli_api::AtmosphericConditions::air_refusal_from`]): the reading to blame, and the
+/// QNH as it was given when the pressure was one, so the refusal quotes what was sent, never the
+/// station pressure reduced from it as if it had been sent.
+///
+/// Build one with [`Self::of`] or [`Self::resolving`] (from the pressure as given, a QNH before
+/// its reduction) or [`Self::density_altitude`].
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct StationOrigin {
+    /// Where the station pressure came from.
+    pub pressure: StationPressureOrigin,
+    /// The QNH, hPa, the station pressure was reduced from, when the pressure was given as one;
+    /// `None` for a station pressure reading, an omitted pressure and a density altitude's.
+    pub qnh_hpa: Option<f64>,
+    /// Where the station temperature came from.
+    pub temperature: StationTemperatureOrigin,
+}
+
+impl StationOrigin {
+    /// [`StationPressureOrigin::of`], keeping `given_hpa` as the QNH when `mode` declares it
+    /// one. The temperature is a reading.
+    pub fn of(given_hpa: Option<f64>, mode: PressureReferenceMode) -> Self {
+        Self {
+            pressure: StationPressureOrigin::of(given_hpa, mode),
+            qnh_hpa: given_hpa.filter(|_| mode == PressureReferenceMode::Qnh),
+            temperature: StationTemperatureOrigin::Reading,
+        }
+    }
+
+    /// [`StationPressureOrigin::resolving`], keeping `pressure_hpa` as the QNH when `mode`
+    /// declares it one (a QNH is always reduced, so always given). The temperature is a reading.
+    pub fn resolving(
+        pressure_hpa: f64,
+        altitude_m: f64,
+        mode: PressureReferenceMode,
+        presence: StationAtmospherePresence,
+    ) -> Self {
+        let pressure = StationPressureOrigin::resolving(pressure_hpa, altitude_m, mode, presence);
+        Self {
+            pressure,
+            qnh_hpa: (mode == PressureReferenceMode::Qnh
+                && pressure != StationPressureOrigin::Standard)
+                .then_some(pressure_hpa),
+            temperature: StationTemperatureOrigin::Reading,
+        }
+    }
+
+    /// A density altitude's station: its pressure (and altitude) are the density altitude's, and
+    /// so is its temperature unless one was given (`temperature_given`).
+    pub fn density_altitude(temperature_given: bool) -> Self {
+        Self {
+            pressure: StationPressureOrigin::DensityAltitude,
+            qnh_hpa: None,
+            temperature: if temperature_given {
+                StationTemperatureOrigin::Reading
+            } else {
+                StationTemperatureOrigin::DensityAltitude
+            },
+        }
+    }
+}
+
 /// One station reading as a surface names it: the `name` its messages use and the `path` its
 /// machine-readable refusal points at. A CLI uses the flag for both (`--humidity`); a JSON
 /// command uses the member's name and its path (`humidity`, `$.humidity`).
@@ -2108,22 +2423,47 @@ pub struct AirSpelling<'a> {
     pub temperature: AirField<'a>,
     /// The station pressure.
     pub pressure: AirField<'a>,
-    /// The station altitude.
+    /// The station altitude, or, for a station a density altitude gave, the density altitude
+    /// (a density altitude no air has is refused at this field, in `altitude_unit`).
     pub altitude: AirField<'a>,
     /// The humidity as the surface was sent it, in its own unit (a percent, or the SI wire's
     /// fraction).
     pub humidity_sent: f64,
     /// The station temperature the solve flies, with its unit: `"212 °F"`, `"373.15 K"`.
     pub temperature_text: String,
+    /// The unit the surface states a temperature in: the unit of `temperature_text`, in which a
+    /// refusal of a temperature at or below absolute zero states where absolute zero is, and a
+    /// refusal that blames the temperature states the range the humid-air formulas hold for.
+    pub temperature_unit: TemperatureUnit,
+    /// Where the station temperature came from: a reading, named by `temperature` as the
+    /// reading it is (`temperature = 214 °F`), or a density altitude, named by `temperature` as
+    /// the reading that gave it (`density_altitude gives a station temperature of ...`).
+    pub temperature_origin: StationTemperatureOrigin,
     /// The station pressure the solve flies, with its unit: `"29.92 inHg"`, `"100000 Pa"`.
     pub pressure_text: String,
-    /// Where that pressure came from: a reading, the standard pressure at the altitude, or a
-    /// QNH reduced there. It decides whether a station pressure outside the troposphere is the
-    /// pressure's fault or the altitude's.
+    /// Where that pressure came from: a reading, the standard pressure at the altitude, a QNH
+    /// reduced there, or a density altitude. It decides whether a station pressure outside the
+    /// troposphere is the pressure's fault, the altitude's or the density altitude's.
     pub pressure_origin: StationPressureOrigin,
+    /// When the pressure was given as a QNH, the QNH as the surface was sent it, with its unit
+    /// (`"1013.25 Pa"`, `"5 hPa"`); `None` otherwise. A refusal that names the pressure's field
+    /// quotes this, the reading that was sent, and says it was reduced to `pressure_text`, never
+    /// the station pressure as if it had been sent.
+    pub qnh_text: Option<String>,
     /// The unit the surface states an altitude in: every altitude a refusal quotes (a pressure
     /// altitude, the troposphere's bounds, the station altitude, where air aloft reaches 0 K).
     pub altitude_unit: AltitudeUnit,
+}
+
+impl AirSpelling<'_> {
+    /// The pressure's field, said to be a QNH, quoting it as it was sent when the surface gave
+    /// it: `"--pressure is a QNH of 5 hPa"`, or `"--pressure is a QNH"`.
+    fn qnh_named(&self) -> String {
+        match &self.qnh_text {
+            Some(qnh) => format!("{} is a QNH of {qnh}", self.pressure.name),
+            None => format!("{} is a QNH", self.pressure.name),
+        }
+    }
 }
 
 /// The unit a surface states an altitude in, in a refusal of its air: metres (the default, and
@@ -2139,18 +2479,128 @@ pub enum AltitudeUnit {
 
 impl AltitudeUnit {
     /// An altitude given in metres, stated in this unit to the nearest whole unit: `"1539 m"`,
-    /// `"5049 ft"`.
+    /// `"5049 ft"`; from 10^7 units on, in exponent form to six significant digits
+    /// (`"-3.28813e34 m"`), never dozens of digits.
     pub fn text(self, altitude_m: f64) -> String {
+        let (value, unit) = match self {
+            Self::Meters => (altitude_m, "m"),
+            Self::Feet => (altitude_m / 0.3048, "ft"),
+        };
+        if value.is_finite() && value.abs() >= EXPONENT_FROM {
+            format!("{} {unit}", exponent_text(value))
+        } else {
+            format!("{value:.0} {unit}")
+        }
+    }
+
+    /// A reading of an altitude given in metres, stated in this unit as a refusal quotes a
+    /// reading ([`reading_text`]): `"200000 ft"`, `"44500 m"`, `"NaN ft"`.
+    pub fn reading(self, altitude_m: f64) -> String {
         match self {
-            Self::Meters => format!("{altitude_m:.0} m"),
-            Self::Feet => format!("{:.0} ft", altitude_m / 0.3048),
+            Self::Meters => reading_text(altitude_m, "m"),
+            Self::Feet => reading_text(altitude_m / 0.3048, "ft"),
         }
     }
 }
 
+/// The unit a surface states a temperature in, in a refusal of its air.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TemperatureUnit {
+    /// Degrees Celsius: `15 °C`.
+    #[default]
+    Celsius,
+    /// Degrees Fahrenheit: `59 °F`.
+    Fahrenheit,
+    /// Kelvin, as the SI wire states it: `288.15 K`.
+    Kelvin,
+}
+
+impl TemperatureUnit {
+    /// A temperature given in °C, stated in this unit as a refusal quotes a reading
+    /// ([`reading_text`]): `"212 °F"`, `"373.15 K"`.
+    pub fn text(self, temperature_c: f64) -> String {
+        match self {
+            Self::Celsius => reading_text(temperature_c, "°C"),
+            Self::Fahrenheit => reading_text(temperature_c * 9.0 / 5.0 + 32.0, "°F"),
+            Self::Kelvin => reading_text(temperature_c + KELVIN_OFFSET, "K"),
+        }
+    }
+
+    /// Absolute zero in this unit: `"-273.15 °C"`, `"-459.67 °F"`, `"0 K"`.
+    pub fn absolute_zero_text(self) -> &'static str {
+        match self {
+            Self::Celsius => "-273.15 °C",
+            Self::Fahrenheit => "-459.67 °F",
+            Self::Kelvin => "0 K",
+        }
+    }
+}
+
+/// The unit a surface states a pressure in, in a refusal of its air.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PressureUnit {
+    /// Hectopascals: `1013.25 hPa`.
+    #[default]
+    Hectopascals,
+    /// Inches of mercury, `inHg × 33.8639 = hPa`: `29.92 inHg`.
+    InchesOfMercury,
+}
+
+impl PressureUnit {
+    /// A pressure given in hPa, stated in this unit as a refusal quotes a reading
+    /// ([`reading_text`]): `"29.92 inHg"`, `"1013.25 hPa"`, `"1e160 hPa"`. A pressure that is
+    /// not 0 is never stated as 0: one that rounds to 0 at two decimals is written in exponent
+    /// form, `"1e-300 hPa"`. (A pressure converts between units by a factor, never an offset,
+    /// so a pressure that small is a reading, not rounding left over from a conversion.)
+    pub fn text(self, pressure_hpa: f64) -> String {
+        let (value, unit) = match self {
+            Self::Hectopascals => (pressure_hpa, "hPa"),
+            Self::InchesOfMercury => (pressure_hpa / 33.8639, "inHg"),
+        };
+        let text = reading_text(value, unit);
+        if value != 0.0 && value.is_finite() && text == format!("0 {unit}") {
+            format!("{} {unit}", exponent_text(value))
+        } else {
+            text
+        }
+    }
+}
+
+/// The units a surface states its station readings in, in a refusal of its air: the
+/// temperature, the pressure and every altitude the refusal quotes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AirUnits {
+    /// The temperature's unit.
+    pub temperature: TemperatureUnit,
+    /// The pressure's unit.
+    pub pressure: PressureUnit,
+    /// The altitude's unit.
+    pub altitude: AltitudeUnit,
+}
+
+impl AirUnits {
+    /// °C, hPa and metres.
+    pub const METRIC: Self = Self {
+        temperature: TemperatureUnit::Celsius,
+        pressure: PressureUnit::Hectopascals,
+        altitude: AltitudeUnit::Meters,
+    };
+    /// °F, inHg and feet.
+    pub const IMPERIAL: Self = Self {
+        temperature: TemperatureUnit::Fahrenheit,
+        pressure: PressureUnit::InchesOfMercury,
+        altitude: AltitudeUnit::Feet,
+    };
+}
+
 /// A reading in a refusal message: rounded to 2 decimals with the trailing zeros dropped (so a
 /// temperature converted to °C and back reads `212`, not `212.00000000000003`), then its unit.
+/// From a magnitude of 10^7 on it is written in exponent form to six significant digits
+/// (`1e160 hPa`), so an absurd reading reads in a few characters, never hundreds of digits.
 pub fn reading_text(value: f64, unit: &str) -> String {
+    if value.is_finite() && value.abs() >= EXPONENT_FROM {
+        return format!("{} {unit}", exponent_text(value));
+    }
     let rounded = format!("{value:.2}");
     let trimmed = if rounded.contains('.') {
         rounded.trim_end_matches('0').trim_end_matches('.')
@@ -2159,6 +2609,36 @@ pub fn reading_text(value: f64, unit: &str) -> String {
     };
     let trimmed = if trimmed == "-0" { "0" } else { trimmed };
     format!("{trimmed} {unit}")
+}
+
+/// The magnitude from which a refusal writes a number in exponent form ([`reading_text`],
+/// [`AltitudeUnit::text`], [`echo_number`]): `1e160`, not 161 digits.
+const EXPONENT_FROM: f64 = 1e7;
+
+/// `value` in exponent form to six significant digits, trailing zeros dropped: `1e160`,
+/// `-3.28813e34`, `1e-300`. For a figure a refusal states that is too large (or, for a
+/// pressure, too small) to write out.
+fn exponent_text(value: f64) -> String {
+    let text = format!("{value:.5e}");
+    match text.split_once('e') {
+        Some((mantissa, exponent)) if mantissa.contains('.') => format!(
+            "{}e{exponent}",
+            mantissa.trim_end_matches('0').trim_end_matches('.')
+        ),
+        _ => text,
+    }
+}
+
+/// A number a refusal echoes as it was given: exactly, in its shortest form (`106`, `29.92`,
+/// `-0.5`), or in exponent form when its magnitude is 10^7 or more, or below 0.001 and not 0
+/// (`1e300`, `-1e-300`), so an absurd reading reads in a few characters, never hundreds of
+/// digits. The SI wire's echo (`solve_v1::echo_si`) is this.
+pub fn echo_number(value: f64) -> String {
+    if value == 0.0 || !value.is_finite() || (1e-3..EXPONENT_FROM).contains(&value.abs()) {
+        format!("{value}")
+    } else {
+        format!("{value:e}")
+    }
 }
 
 /// Station air refused in one surface's own words: the field to blame, as that surface locates
@@ -2174,22 +2654,12 @@ pub struct AirRefusal {
     path: String,
     message: String,
     reason: AtmosphereErrorReason,
-    humidity_rule: bool,
 }
 
 impl AirRefusal {
     /// Why the air was refused.
     pub fn reason(&self) -> AtmosphereErrorReason {
         self.reason
-    }
-
-    /// Whether this is a refusal by one of the humidity rules: a humidity outside the sensor
-    /// band or not finite, or air that cannot exist. The surfaces that refuse air up front, in
-    /// their own words, refuse these; a station reading refused for another reason (a pressure
-    /// at or below 0, a temperature at or below absolute zero) is left to each surface's own
-    /// checks of that reading, which name it where it came from.
-    pub fn is_humidity_rule(&self) -> bool {
-        self.humidity_rule
     }
 
     /// Where the reading to blame sits in the surface's input, as the surface's
@@ -2218,22 +2688,33 @@ impl AtmosphereError {
     /// `spelling` names the surface's readings and carries their values in its units;
     /// `station_altitude_m`, `station_temperature_c` and `station_pressure_hpa` are the station
     /// the solve resolved. A refusal for any reason but air that cannot exist blames the reading
-    /// this error names. Air that cannot exist is blamed by one rule on every surface, and
-    /// `atmosphere.density_altitude` checks its own troposphere band in the same order (after a
-    /// refusal this rule blames on the temperature, before the others), so that command and
-    /// `solve` locate the same air at the same path:
+    /// this error names, in the surface's units (a temperature at or below absolute zero states
+    /// absolute zero in [`AirSpelling::temperature_unit`]; a density altitude no air has is the
+    /// field [`AirSpelling::altitude`] names, since a surface that flies one names its altitude by
+    /// it). Air that cannot exist is blamed by one rule on every surface, so every surface
+    /// locates the same air at the same reading:
     ///
     /// 1. the temperature, when the air is humid above water's critical point (647.096 K), or
     ///    the temperature is outside 173.15 K to 373.15 K (-100 °C to 100 °C, where the humid-air
     ///    formulas hold). Such a temperature is refused by no surface on its own (the humidity
-    ///    terms are extrapolated there); with air that cannot exist it is the likelier mistake;
+    ///    terms are extrapolated there); with air that cannot exist it is the likelier mistake.
+    ///    The message names it where it came from ([`AirSpelling::temperature_origin`]): the
+    ///    reading (`; temperature = 214 °F is outside -148 °F to 212 °F, ...: check the
+    ///    temperature and its unit`), or the density altitude that gave it (`; density_altitude
+    ///    gives a station temperature of ...: check the density altitude's unit`);
     /// 2. when the station pressure's pressure altitude is outside the troposphere, the reading
     ///    that put it there ([`AirSpelling::pressure_origin`]): the pressure when it was a
     ///    reading, because a pressure in the wrong unit (hPa sent as pascals) is far likelier
     ///    than a humidity of 50 % in air 25 km up, and the altitude when the pressure was the
-    ///    standard pressure there or a plausible QNH reduced there (feet sent as metres). The
-    ///    message says which unit to check;
+    ///    standard pressure there or a plausible QNH reduced there (feet sent as metres), the
+    ///    density altitude when a density altitude gave it. The message says which unit to
+    ///    check, and quotes a QNH as it was sent ([`AirSpelling::qnh_text`]), with the station
+    ///    pressure it was reduced to;
     /// 3. otherwise the humidity.
+    ///
+    /// A QNH the altimeter-setting relation leaves no station pressure for is quoted as it was
+    /// sent too, never as the NaN it reduced to: blamed on the altitude when it is a plausible
+    /// sea-level pressure, on the pressure otherwise.
     pub fn refusal_in(
         &self,
         spelling: &AirSpelling<'_>,
@@ -2251,8 +2732,6 @@ impl AtmosphereError {
             path,
             message,
             reason: self.reason,
-            humidity_rule: self.humidity_unit.is_some()
-                || self.reason == AtmosphereErrorReason::ImpossibleAir,
         }
     }
 
@@ -2269,7 +2748,7 @@ impl AtmosphereError {
             let air = format!(
                 "{} = {} at {} and {}: {explanation}",
                 spelling.humidity.name,
-                spelling.humidity_sent,
+                echo_number(spelling.humidity_sent),
                 spelling.temperature_text,
                 spelling.pressure_text
             );
@@ -2280,7 +2759,33 @@ impl AtmosphereError {
             if self.field == "temperature_c"
                 || outside_humid_air_model_range(station_temperature_c + KELVIN_OFFSET)
             {
-                return (spelling.temperature.path.to_string(), air);
+                // Named where it came from, as every other blamed reading is. Humid air above
+                // water's critical point, and dry air too hot to have a density, are outside
+                // the range too.
+                let range = format!(
+                    "outside {} to {}, where the humid-air formulas hold",
+                    spelling
+                        .temperature_unit
+                        .text(HUMID_AIR_MODEL_MIN_K - KELVIN_OFFSET),
+                    spelling
+                        .temperature_unit
+                        .text(HUMID_AIR_MODEL_MAX_K - KELVIN_OFFSET)
+                );
+                let blame = match spelling.temperature_origin {
+                    StationTemperatureOrigin::Reading => format!(
+                        "{} = {} is {range}: check the temperature and its unit",
+                        spelling.temperature.name, spelling.temperature_text
+                    ),
+                    StationTemperatureOrigin::DensityAltitude => format!(
+                        "{} gives a station temperature of {}, {range}: check the density \
+                         altitude's unit",
+                        spelling.temperature.name, spelling.temperature_text
+                    ),
+                };
+                return (
+                    spelling.temperature.path.to_string(),
+                    format!("{air}; {blame}"),
+                );
             }
             if let Some(altitude_m) = pressure_altitude_outside_troposphere_m(station_pressure_hpa)
             {
@@ -2290,7 +2795,21 @@ impl AtmosphereError {
                     altitude(LOWEST_PRESSURE_ALTITUDE_M),
                     altitude(TROPOSPHERE_TOP_M)
                 );
+                // A QNH is quoted as it was sent, and said to be reduced, never as if the station
+                // pressure reduced from it had been sent.
+                let reduced = |unit: &str| {
+                    format!(
+                        "{air}; {}, and reduced to the station altitude of {} it is a station \
+                         pressure of {}, {troposphere}: check the {unit}'s unit",
+                        spelling.qnh_named(),
+                        altitude(station_altitude_m),
+                        spelling.pressure_text
+                    )
+                };
                 return match spelling.pressure_origin {
+                    StationPressureOrigin::Reading if spelling.qnh_text.is_some() => {
+                        (spelling.pressure.path.to_string(), reduced("pressure"))
+                    }
                     StationPressureOrigin::Reading => (
                         spelling.pressure.path.to_string(),
                         format!(
@@ -2307,24 +2826,93 @@ impl AtmosphereError {
                             altitude(station_altitude_m)
                         ),
                     ),
-                    StationPressureOrigin::Qnh => (
-                        spelling.altitude.path.to_string(),
+                    StationPressureOrigin::Qnh => {
+                        (spelling.altitude.path.to_string(), reduced("altitude"))
+                    }
+                    StationPressureOrigin::DensityAltitude => (
+                        spelling.pressure.path.to_string(),
                         format!(
-                            "{air}; {} is a QNH, and reduced to the station altitude of {} it is \
-                             {troposphere}: check the altitude's unit",
-                            spelling.pressure.name,
-                            altitude(station_altitude_m)
+                            "{air}; {} gives a station pressure of {}, {troposphere}: check the \
+                             density altitude's unit",
+                            spelling.pressure.name, spelling.pressure_text
                         ),
                     ),
                 };
             }
             return (spelling.humidity.path.to_string(), air);
         }
+        // A QNH whose reduction to the station altitude leaves no station pressure (the
+        // altimeter-setting relation has none that high) is quoted as it was sent, never as the
+        // NaN it reduced to: the altitude's fault when the QNH is itself a plausible sea-level
+        // pressure, as on the SI wire, and the pressure's when it is not.
+        if self.field == "pressure_hpa"
+            && matches!(
+                self.reason,
+                AtmosphereErrorReason::NotFinite | AtmosphereErrorReason::NonPositivePressure
+            )
+            && (spelling.pressure_origin == StationPressureOrigin::Qnh
+                || spelling.qnh_text.is_some())
+        {
+            let (path, unit) = if spelling.pressure_origin == StationPressureOrigin::Qnh {
+                (spelling.altitude.path, "altitude")
+            } else {
+                (spelling.pressure.path, "pressure")
+            };
+            return (
+                path.to_string(),
+                format!(
+                    "{}, and reduced to the station altitude of {} it leaves no station \
+                     pressure: the altimeter-setting relation has none that high (check the \
+                     {unit}'s unit)",
+                    spelling.qnh_named(),
+                    altitude(station_altitude_m)
+                ),
+            );
+        }
+        // Absolute zero in the surface's own unit, as its reading is.
+        let explanation = match self.reason {
+            AtmosphereErrorReason::AtOrBelowAbsoluteZero => format!(
+                "temperature must be above absolute zero ({})",
+                spelling.temperature_unit.absolute_zero_text()
+            ),
+            _ => explanation,
+        };
         let (field, value) = match &*self.field {
+            // A temperature or a pressure a density altitude gave is named as that density
+            // altitude's, never as if it had been sent as the reading.
+            "temperature_c"
+                if spelling.temperature_origin == StationTemperatureOrigin::DensityAltitude =>
+            {
+                return (
+                    spelling.temperature.path.to_string(),
+                    format!(
+                        "{} gives a station temperature of {}: {explanation}",
+                        spelling.temperature.name, spelling.temperature_text
+                    ),
+                );
+            }
+            "pressure_hpa"
+                if spelling.pressure_origin == StationPressureOrigin::DensityAltitude =>
+            {
+                return (
+                    spelling.pressure.path.to_string(),
+                    format!(
+                        "{} gives a station pressure of {}: {explanation}",
+                        spelling.pressure.name, spelling.pressure_text
+                    ),
+                );
+            }
             "temperature_c" => (spelling.temperature, spelling.temperature_text.clone()),
             "pressure_hpa" => (spelling.pressure, spelling.pressure_text.clone()),
-            "altitude_m" => (spelling.altitude, self.value.to_string()),
-            _ => (spelling.humidity, self.value.to_string()),
+            // An altitude is refused only when it is not finite, which needs no unit.
+            "altitude_m" => (spelling.altitude, echo_number(self.value)),
+            // A density altitude flies as the station's altitude, and a surface that flies one
+            // names the altitude by the density altitude's field, in the surface's unit.
+            "density_altitude_m" => (
+                spelling.altitude,
+                spelling.altitude_unit.reading(self.value),
+            ),
+            _ => (spelling.humidity, echo_number(self.value)),
         };
         (
             field.path.to_string(),
@@ -2403,7 +2991,8 @@ impl StationAir {
     ///   [`AtmosphereErrorReason::ImpossibleAir`], on `humidity_percent`, or on
     ///   `temperature_c` for humid air above water's critical point (647.096 K), and for dry air
     ///   there too hot for the CIPM-2007 density to stay positive (about 90,000 K at
-    ///   1013.25 hPa).
+    ///   1013.25 hPa); or on `pressure_hpa` for a pressure so far beyond any air's (above about
+    ///   4e156 Pa) that the density is not finite and positive.
     ///
     /// Those are the only temperatures refused ([`check_station_temperature_c`] is the rule on
     /// its own): outside 173.15-373.15 K (-100 °C to 100 °C) the humidity terms are extrapolated,
@@ -2628,24 +3217,39 @@ pub fn check_temperature_flag(flag: &str, value: f64, fahrenheit: bool) -> Resul
         (value, "C", "-273.15 C")
     };
     check_station_temperature_c(celsius).map_err(|error| match error.reason() {
-        AtmosphereErrorReason::NotFinite => format!("{flag} {value} {unit} is not a finite number"),
-        _ => format!("{flag} {value} {unit} is at or below absolute zero ({absolute_zero})"),
+        AtmosphereErrorReason::NotFinite => {
+            format!(
+                "{flag} {} {unit} is not a finite number",
+                echo_number(value)
+            )
+        }
+        _ => format!(
+            "{flag} {} {unit} is at or below absolute zero ({absolute_zero})",
+            echo_number(value)
+        ),
     })
 }
 
-fn check_station_state(
-    altitude_m: f64,
-    temperature_c: f64,
-    pressure_hpa: f64,
-) -> Result<(), AtmosphereError> {
-    if !altitude_m.is_finite() {
-        return Err(AtmosphereError::new(
-            "altitude_m",
-            altitude_m,
-            AtmosphereErrorReason::NotFinite,
-        ));
-    }
-    check_station_temperature_c(temperature_c)?;
+/// The one rule a station pressure, hPa, is held to on its own, on every surface: finite and
+/// above 0. Nothing narrower: a near vacuum and twice sea level fly. [`StationAir::new`] applies
+/// it, and then the impossible-air rule, which is the only other reason a pressure is refused. A
+/// surface that checks a reading as it is typed applies this same function
+/// ([`check_pressure_flag`]), so a reading is accepted or refused alike everywhere.
+///
+/// ```
+/// use ballistics_engine::atmosphere::check_station_pressure_hpa;
+///
+/// assert!(check_station_pressure_hpa(0.01).is_ok()); // 1 Pa
+/// assert!(check_station_pressure_hpa(2000.0).is_ok());
+/// assert!(check_station_pressure_hpa(0.0).is_err());
+/// assert!(check_station_pressure_hpa(f64::NAN).is_err());
+/// ```
+///
+/// # Errors
+///
+/// [`AtmosphereErrorReason::NotFinite`] or [`AtmosphereErrorReason::NonPositivePressure`], on
+/// `pressure_hpa`.
+pub fn check_station_pressure_hpa(pressure_hpa: f64) -> Result<(), AtmosphereError> {
     if !pressure_hpa.is_finite() {
         return Err(AtmosphereError::new(
             "pressure_hpa",
@@ -2661,6 +3265,93 @@ fn check_station_state(
         ));
     }
     Ok(())
+}
+
+/// [`check_station_pressure_hpa`] for a pressure typed into a flag (`flag`, such as
+/// `--pressure`) in inHg (`inhg`) or hPa, refused in the flag's own words and unit:
+/// `"--pressure -1 inHg is at or below zero"`, `"--pressure NaN hPa is not a finite number"`.
+/// The reading is converted to hPa exactly as the CLI and the browser terminal fly it
+/// (`inHg × 33.8639`), so the flag refuses precisely the readings the solve would.
+///
+/// ```
+/// use ballistics_engine::atmosphere::check_pressure_flag;
+///
+/// assert!(check_pressure_flag("--pressure", 5.0, true).is_ok()); // the stratosphere
+/// assert_eq!(
+///     check_pressure_flag("--pressure", -1.0, true).unwrap_err(),
+///     "--pressure -1 inHg is at or below zero"
+/// );
+/// ```
+///
+/// # Errors
+///
+/// The refusal, in the flag's words, of a reading [`check_station_pressure_hpa`] refuses.
+pub fn check_pressure_flag(flag: &str, value: f64, inhg: bool) -> Result<(), String> {
+    let (hpa, unit) = if inhg {
+        (value * 33.8639, "inHg")
+    } else {
+        (value, "hPa")
+    };
+    check_station_pressure_hpa(hpa).map_err(|error| match error.reason() {
+        AtmosphereErrorReason::NotFinite => {
+            format!(
+                "{flag} {} {unit} is not a finite number",
+                echo_number(value)
+            )
+        }
+        _ => format!("{flag} {} {unit} is at or below zero", echo_number(value)),
+    })
+}
+
+/// The one rule a station altitude or a density altitude typed into a flag (`flag`, such as
+/// `--altitude`) is held to on its own, in feet (`feet`) or metres: a finite number, refused in
+/// the flag's own words and unit otherwise (`"--altitude NaN ft is not a finite number"`). A
+/// density altitude is held to the rest of its rule where its station is resolved
+/// ([`station_for_density_altitude`]), since that depends on the temperature.
+///
+/// ```
+/// use ballistics_engine::atmosphere::check_altitude_flag;
+///
+/// assert!(check_altitude_flag("--altitude", 300_000.0, true).is_ok());
+/// assert_eq!(
+///     check_altitude_flag("--altitude", f64::NAN, true).unwrap_err(),
+///     "--altitude NaN ft is not a finite number"
+/// );
+/// ```
+///
+/// # Errors
+///
+/// The refusal of a value that is not a finite number once converted to metres.
+pub fn check_altitude_flag(flag: &str, value: f64, feet: bool) -> Result<(), String> {
+    let (metres, unit) = if feet {
+        (value * DA_FT_TO_M, "ft")
+    } else {
+        (value, "m")
+    };
+    if metres.is_finite() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{flag} {} {unit} is not a finite number",
+            echo_number(value)
+        ))
+    }
+}
+
+fn check_station_state(
+    altitude_m: f64,
+    temperature_c: f64,
+    pressure_hpa: f64,
+) -> Result<(), AtmosphereError> {
+    if !altitude_m.is_finite() {
+        return Err(AtmosphereError::new(
+            "altitude_m",
+            altitude_m,
+            AtmosphereErrorReason::NotFinite,
+        ));
+    }
+    check_station_temperature_c(temperature_c)?;
+    check_station_pressure_hpa(pressure_hpa)
 }
 
 /// The impossible-air rule every station and zone is held to (and the `atmosphere.density_altitude`
@@ -2687,20 +3378,30 @@ fn refuse_impossible_air(
             AtmosphereErrorReason::ImpossibleAir,
         ));
     }
-    // Dry air above water's critical point holds no vapour (its mole fraction is exactly 0) and
-    // flies. Its CIPM-2007 compressibility is a virial fit carried far past its range there, and
-    // far enough above it (about 90,000 K at 1013.25 hPa) it gives no positive density at all:
-    // air the density model cannot describe is refused at its temperature. Below the critical
-    // point this rule is the two tests above alone, as it always was.
-    if temperature_c + KELVIN_OFFSET > WATER_CRITICAL_TEMPERATURE_K {
-        let density = calculate_air_density_cimp(temperature_c, pressure_hpa, humidity.percent());
-        if !(density.is_finite() && density > 0.0) {
-            return Err(AtmosphereError::new(
+    // Air the CIPM-2007 density cannot describe is refused. Dry air above water's critical point
+    // holds no vapour (its mole fraction is exactly 0) and flies, but its compressibility is a
+    // virial fit carried far past its range there, and far enough above it (about 90,000 K at
+    // 1013.25 hPa) it gives no positive density at all: refused at its temperature. At any lower
+    // temperature only a pressure far beyond any air's (above about 4e156 Pa, where the fit's
+    // squared pressure term overflows and the density comes out 0, which a flight would take for
+    // a vacuum) does that: refused at its pressure. For every other station the density is
+    // finite and positive, and the rule is the two tests above.
+    let density = calculate_air_density_cimp(temperature_c, pressure_hpa, humidity.percent());
+    if !(density.is_finite() && density > 0.0) {
+        let hot = temperature_c + KELVIN_OFFSET > WATER_CRITICAL_TEMPERATURE_K;
+        return Err(if hot {
+            AtmosphereError::new(
                 "temperature_c",
                 temperature_c,
                 AtmosphereErrorReason::ImpossibleAir,
-            ));
-        }
+            )
+        } else {
+            AtmosphereError::new(
+                "pressure_hpa",
+                pressure_hpa,
+                AtmosphereErrorReason::ImpossibleAir,
+            )
+        });
     }
     Ok(())
 }
