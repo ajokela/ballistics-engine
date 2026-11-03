@@ -175,9 +175,31 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 [[package]]
 name = "ballistics-engine"
 version = "0.49.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "963ccb10ced8a5caea141e511d78cf25f7576b978ccb558b45f2a84ef00aeaca"
+dependencies = [
+ "getrandom 0.4.3",
+ "js-sys",
+ "nalgebra",
+ "ndarray",
+ "ndarray-npy",
+ "rand",
+ "rand_distr",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "thiserror",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
+name = "ballistics-engine"
+version = "0.50.0"
 dependencies = [
  "approx",
- "ballistics-engine 0.49.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "ballistics-engine 0.49.0",
  "clap",
  "clap_complete",
  "criterion",
@@ -202,28 +224,6 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
- "web-sys",
-]
-
-[[package]]
-name = "ballistics-engine"
-version = "0.49.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "963ccb10ced8a5caea141e511d78cf25f7576b978ccb558b45f2a84ef00aeaca"
-dependencies = [
- "getrandom 0.4.3",
- "js-sys",
- "nalgebra",
- "ndarray",
- "ndarray-npy",
- "rand",
- "rand_distr",
- "serde",
- "serde-wasm-bindgen",
- "serde_json",
- "thiserror",
- "wasm-bindgen",
- "wasm-bindgen-futures",
  "web-sys",
 ]
 
