@@ -5499,30 +5499,20 @@ impl UnitConverter {
     /// Resolve the temperature CLI argument AFTER --units is known.
     ///
     /// `None` -> the per-unit standard temperature (59 F / 15 C).
-    /// `Some(v)` -> validated against a plausible range in the user's own unit
-    /// and returned IN USER UNITS (the caller still applies `temperature_to_metric`).
+    /// `Some(v)` -> checked by the one station-temperature rule every surface applies (finite
+    /// and above absolute zero, `check_temperature_flag`; outside -100..100 C the humidity terms
+    /// are extrapolated, never refused) and returned IN USER UNITS (the caller still applies
+    /// `temperature_to_metric`).
     fn resolve_temperature(val: Option<f64>, units: UnitSystem) -> Result<f64, String> {
         match (val, units) {
             (None, UnitSystem::Imperial) => Ok(59.0),
             (None, UnitSystem::Metric) => Ok(15.0),
-            (Some(v), UnitSystem::Imperial) => {
-                if !(-148.0..=392.0).contains(&v) {
-                    Err(format!(
-                        "--temperature {v} F is out of range (expected ~-148..392 F for imperial units)"
-                    ))
-                } else {
-                    Ok(v)
-                }
-            }
-            (Some(v), UnitSystem::Metric) => {
-                if !(-100.0..=200.0).contains(&v) {
-                    Err(format!(
-                        "--temperature {v} C is out of range (expected ~-100..200 C for metric units)"
-                    ))
-                } else {
-                    Ok(v)
-                }
-            }
+            (Some(v), units) => ballistics_engine::atmosphere::check_temperature_flag(
+                "--temperature",
+                v,
+                matches!(units, UnitSystem::Imperial),
+            )
+            .map(|()| v),
         }
     }
 
@@ -7917,7 +7907,40 @@ fn run() -> Result<(), Box<dyn Error>> {
     // `--humidity 50` from the clap defaults; see `trajectory_flag_typed`.
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    // A refusal of air that cannot exist aloft, which a solve finds only in flight, is stated in
+    // the CLI's words and units like every other refusal of its air. A command that knows where
+    // its temperature came from (a saved profile's field, a --location CSV column, the zero
+    // day's own flag) has already named it so; any other is the station's --temperature.
+    let units = cli.units;
+    run_command(cli, matches).map_err(|error| in_the_clis_words(error, units, "--temperature"))
+}
 
+/// A failed command's error as the CLI states it: a refusal of air that cannot exist aloft
+/// names the temperature by `temperature_label`, in the run's `units`
+/// ([`ballistics_engine::BallisticsError::in_terminal_words`]); any other error, and one
+/// already stated so, unchanged.
+fn in_the_clis_words(
+    error: Box<dyn Error>,
+    units: UnitSystem,
+    temperature_label: &str,
+) -> Box<dyn Error> {
+    use ballistics_engine::moving_target::LeadError;
+    match error.downcast::<ballistics_engine::BallisticsError>() {
+        Ok(error) => Box::new(error.in_terminal_words(units, temperature_label)),
+        Err(error) => match error.downcast::<LeadError>() {
+            Ok(error) => match *error {
+                LeadError::Solver(error) => Box::new(LeadError::Solver(
+                    error.in_terminal_words(units, temperature_label),
+                )),
+                error => Box::new(error),
+            },
+            Err(error) => error,
+        },
+    }
+}
+
+/// The command `cli` names, run; `matches` are the arguments it was parsed from.
+fn run_command(cli: Cli, matches: clap::ArgMatches) -> Result<(), Box<dyn Error>> {
     match cli.command {
         Commands::SolveJson => std::process::exit(solve_json_command::run_stdio()),
 
@@ -8392,6 +8415,15 @@ fn run() -> Result<(), Box<dyn Error>> {
             // validated, and snapped to the end it flies as, by the resolver. The fallback is
             // the one default. So this is the humidity the run flies, and every echo of it says
             // so.
+            // The zero day's typed temperature is held to the same one rule, in its own flag's
+            // words, so a reading is accepted or refused alike whichever flag carries it.
+            if let Some(t) = zero_temperature {
+                ballistics_engine::atmosphere::check_temperature_flag(
+                    "--zero-temperature",
+                    t,
+                    matches!(cli.units, UnitSystem::Imperial),
+                )?;
+            }
             let run_station = TypedStation {
                 temperature: match temperature {
                     Some(t) => Some(UnitConverter::resolve_temperature(Some(t), cli.units)?),
@@ -9601,13 +9633,21 @@ fn run() -> Result<(), Box<dyn Error>> {
                     humidity: zero_humidity_value,
                     altitude: zero_altitude_metric,
                 };
+                // A zero trial that climbs into air that cannot exist aloft names the zero
+                // day's temperature where it came from, as the refusal of its air above does.
+                let zero_temperature_label = if zero_temperature.is_some() {
+                    ZERO_AIR_FLAGS[1]
+                } else {
+                    shot_air_labels[1].as_str()
+                };
                 let zero_angle = ballistics_engine::calculate_zero_angle_with_resolved_conditions(
                     zero_inputs,
                     zero_distance_metric,
                     bore_height_metric + sight_height_metric,
                     zero_wind,
                     zero_atmosphere,
-                )?;
+                )
+                .map_err(|error| error.in_terminal_words(cli.units, zero_temperature_label))?;
 
                 // Convert to degrees for the trajectory function
                 zero_angle.to_degrees()
@@ -10107,7 +10147,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                                 eprintln!("Warning: API request failed: {}", e);
                                 eprintln!("Falling back to local calculation...\n");
 
-                                run_trajectory(&traj_config)?;
+                                run_trajectory(&traj_config).map_err(|error| {
+                                    in_the_clis_words(error, cli.units, &shot_air_labels[1])
+                                })?;
                             } else {
                                 eprintln!("Error: API request failed: {}", e);
                                 eprintln!("Hint: Use --offline-fallback to use local calculation on API failure");
@@ -10117,14 +10159,17 @@ fn run() -> Result<(), Box<dyn Error>> {
                     }
                 } else {
                     // Local calculation (default)
-                    run_trajectory(&traj_config)?;
+                    run_trajectory(&traj_config).map_err(|error| {
+                        in_the_clis_words(error, cli.units, &shot_air_labels[1])
+                    })?;
                 }
             }
 
             // Non-online feature: just run local calculation
             #[cfg(not(feature = "online"))]
             {
-                run_trajectory(&traj_config)?;
+                run_trajectory(&traj_config)
+                    .map_err(|error| in_the_clis_words(error, cli.units, &shot_air_labels[1]))?;
             }
         }
 
@@ -10567,7 +10612,15 @@ fn run() -> Result<(), Box<dyn Error>> {
             let diameter_metric = UnitConverter::diameter_to_metric(diameter, cli.units);
 
             // Atmosphere the data was measured at — BC is only meaningful relative to air
-            // density, so this must match the dope card's conditions (defaults = ICAO std).
+            // density, so this must match the dope card's conditions (defaults = ICAO std). A
+            // typed temperature is held to the one rule `--temperature` is everywhere.
+            if let Some(t) = temperature {
+                ballistics_engine::atmosphere::check_temperature_flag(
+                    "--temperature",
+                    t,
+                    matches!(cli.units, UnitSystem::Imperial),
+                )?;
+            }
             let (atmosphere, station_presence) = estimate_bc_station_air(
                 temperature,
                 pressure,

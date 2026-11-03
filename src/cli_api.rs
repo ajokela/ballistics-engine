@@ -91,6 +91,46 @@ pub const BC_REFERENCE_STANDARD_INERT_WARNING: &str =
 #[derive(Debug)]
 pub struct BallisticsError {
     message: String,
+    atmosphere: Option<crate::atmosphere::AtmosphereError>,
+}
+
+impl BallisticsError {
+    /// The atmosphere refusal behind this error, when a solve refused its air: today, air that
+    /// cannot exist aloft ([`crate::AtmosphereErrorReason::AirAloftBelowAbsoluteZero`]), which a
+    /// trajectory kernel finds only in flight. A surface that names its readings states it in its
+    /// own words with [`crate::AtmosphereError::refusal_in`]; the message is its `Display`.
+    pub fn atmosphere_error(&self) -> Option<&crate::atmosphere::AtmosphereError> {
+        self.atmosphere.as_ref()
+    }
+
+    /// This error as a terminal (the native CLI, the browser terminal) states it, as it states
+    /// every refusal of its air ([`AtmosphericConditions::air_refusal_named`]): a refusal of air
+    /// that cannot exist aloft names the temperature by `temperature_label` (the flag, saved
+    /// profile field or CSV column it came from), in the run's `units`, with the height in feet
+    /// or metres:
+    ///
+    /// ```text
+    /// --temperature = -441.67 °F: the air aloft would fall below absolute zero: from this
+    /// temperature the standard lapse reaches 0 K at 5049 ft above mean sea level, which this
+    /// flight reaches (check the temperature and its unit)
+    /// ```
+    ///
+    /// Any other error, and one already stated in a terminal's words, is returned unchanged;
+    /// [`Self::atmosphere_error`] still carries the refusal.
+    pub fn in_terminal_words(mut self, units: UnitSystem, temperature_label: &str) -> Self {
+        if let Some(error) = &self.atmosphere {
+            if error.reason() == crate::AtmosphereErrorReason::AirAloftBelowAbsoluteZero
+                && self.message == error.to_string()
+            {
+                self.message = format!(
+                    "{temperature_label} = {}: {}",
+                    terminal_temperature_text(error.value(), units),
+                    error.explanation_in(terminal_altitude_unit(units))
+                );
+            }
+        }
+        self
+    }
 }
 
 impl fmt::Display for BallisticsError {
@@ -103,7 +143,10 @@ impl Error for BallisticsError {}
 
 impl From<String> for BallisticsError {
     fn from(msg: String) -> Self {
-        BallisticsError { message: msg }
+        BallisticsError {
+            message: msg,
+            atmosphere: None,
+        }
     }
 }
 
@@ -111,6 +154,16 @@ impl From<&str> for BallisticsError {
     fn from(msg: &str) -> Self {
         BallisticsError {
             message: msg.to_string(),
+            atmosphere: None,
+        }
+    }
+}
+
+impl From<crate::atmosphere::AtmosphereError> for BallisticsError {
+    fn from(error: crate::atmosphere::AtmosphereError) -> Self {
+        BallisticsError {
+            message: error.to_string(),
+            atmosphere: Some(error),
         }
     }
 }
@@ -893,19 +946,17 @@ impl AtmosphericConditions {
         labels: [&str; 4],
     ) -> Option<crate::atmosphere::AirRefusal> {
         use crate::atmosphere::{reading_text, AirField};
-        self.air_refusal_from(
+        self.air_refusal_spelled(
             presence,
             origin,
             labels.map(AirField::named),
             self.humidity,
-            |celsius| match units {
-                UnitSystem::Imperial => reading_text(celsius * 9.0 / 5.0 + 32.0, "°F"),
-                UnitSystem::Metric => reading_text(celsius, "°C"),
-            },
+            |celsius| terminal_temperature_text(celsius, units),
             |hpa| match units {
                 UnitSystem::Imperial => reading_text(hpa / 33.8639, "inHg"),
                 UnitSystem::Metric => reading_text(hpa, "hPa"),
             },
+            terminal_altitude_unit(units),
         )
         .filter(crate::atmosphere::AirRefusal::is_humidity_rule)
     }
@@ -945,6 +996,29 @@ impl AtmosphericConditions {
         temperature_text: impl Fn(f64) -> String,
         pressure_text: impl Fn(f64) -> String,
     ) -> Option<crate::atmosphere::AirRefusal> {
+        self.air_refusal_spelled(
+            presence,
+            origin,
+            fields,
+            humidity_sent,
+            temperature_text,
+            pressure_text,
+            crate::atmosphere::AltitudeUnit::Meters,
+        )
+    }
+
+    /// [`Self::air_refusal_from`] with every altitude the refusal quotes in `altitude_unit`.
+    #[allow(clippy::too_many_arguments)]
+    fn air_refusal_spelled(
+        &self,
+        presence: StationAtmospherePresence,
+        origin: StationPressureOrigin,
+        fields: [crate::atmosphere::AirField<'_>; 4],
+        humidity_sent: f64,
+        temperature_text: impl Fn(f64) -> String,
+        pressure_text: impl Fn(f64) -> String,
+        altitude_unit: crate::atmosphere::AltitudeUnit,
+    ) -> Option<crate::atmosphere::AirRefusal> {
         let error = self.station_air(presence).err()?;
         let (temperature_c, pressure_hpa) = self.resolved_station(presence);
         let [humidity, temperature, pressure, altitude] = fields;
@@ -958,11 +1032,31 @@ impl AtmosphericConditions {
                 temperature_text: temperature_text(temperature_c),
                 pressure_text: pressure_text(pressure_hpa),
                 pressure_origin: origin,
+                altitude_unit,
             },
             self.altitude,
             temperature_c,
             pressure_hpa,
         ))
+    }
+}
+
+/// A station temperature, °C, as a terminal (the native CLI, the browser terminal) states it in
+/// a refusal: in °F or °C by the run's `units`, `"-441.67 °F"`.
+fn terminal_temperature_text(temperature_c: f64, units: UnitSystem) -> String {
+    match units {
+        UnitSystem::Imperial => {
+            crate::atmosphere::reading_text(temperature_c * 9.0 / 5.0 + 32.0, "°F")
+        }
+        UnitSystem::Metric => crate::atmosphere::reading_text(temperature_c, "°C"),
+    }
+}
+
+/// The unit a terminal states an altitude in, by the run's `units`: feet, or metres.
+fn terminal_altitude_unit(units: UnitSystem) -> crate::atmosphere::AltitudeUnit {
+    match units {
+        UnitSystem::Imperial => crate::atmosphere::AltitudeUnit::Feet,
+        UnitSystem::Metric => crate::atmosphere::AltitudeUnit::Meters,
     }
 }
 
@@ -1460,6 +1554,10 @@ impl TrajectorySolver {
                     // bracket in the same steps the undershoot branch raises the top, down to
                     // 45 degrees. A trial that ends short of the target distance (the ground
                     // stop) is below the target too, exactly as the bisection below treats it.
+                    //
+                    // A trial that flies into air that cannot exist aloft ends the search with
+                    // that refusal: no zero exists in air that exists that way, and "the target
+                    // is below the trajectory" would name the wrong cause.
                     let mut expanded = false;
                     for multiplier in [1.0, 2.0, 3.0, 4.0] {
                         let new_low = (-0.2_f64 * multiplier).max(-0.785);
@@ -1471,6 +1569,7 @@ impl TrajectorySolver {
                                 expanded = true;
                                 break;
                             }
+                            Err(error) if error.atmosphere_error().is_some() => return Err(error),
                             Err(_) => {}
                         }
                     }
@@ -1479,17 +1578,19 @@ impl TrajectorySolver {
                     }
                 } else if low_error < 0.0 && high_error < 0.0 {
                     // Both angles undershoot. Preserve the historical expansion up to 45 degrees.
+                    // A steeper trial that climbs into air that cannot exist aloft ends the
+                    // search with that refusal, not "beyond effective range".
                     let mut expanded = false;
                     for multiplier in [2.0, 3.0, 4.0] {
                         let new_high = (high_angle * multiplier).min(0.785);
-                        if let Ok(Some(height)) =
-                            self.zero_trial_height_at(new_high, target_distance_m, frame)
-                        {
-                            if height - target_height_m > 0.0 {
+                        match self.zero_trial_height_at(new_high, target_distance_m, frame) {
+                            Ok(Some(height)) if height - target_height_m > 0.0 => {
                                 high_angle = new_high;
                                 expanded = true;
                                 break;
                             }
+                            Err(error) if error.atmosphere_error().is_some() => return Err(error),
+                            _ => {}
                         }
                         if new_high >= 0.785 {
                             break;
@@ -2185,6 +2286,49 @@ impl TrajectorySolver {
             )));
         }
         Ok(())
+    }
+
+    /// The refusal of a step that failed to a non-finite state because it flew into air that
+    /// cannot exist: from the station's (or the covering zone's) temperature the lapse reaches
+    /// absolute zero within the step's reach of `step_start`, where there is no air at all
+    /// ([`crate::atmosphere::air_aloft_refusal`]). Any other failure is `error`, unchanged.
+    ///
+    /// The step's reach is `step_s` at the speed budget ([`Self::speed_budget`] at `end_time`),
+    /// at least twice any speed the flight can have, so it covers every stage the step
+    /// evaluated. Called only once a step has failed: a flight that stays below that height flies
+    /// exactly as it did.
+    #[allow(clippy::too_many_arguments)]
+    fn refusal_of_failed_step(
+        &self,
+        error: BallisticsError,
+        station: &StationAir,
+        step_start: &Vector3<f64>,
+        position: &Vector3<f64>,
+        velocity: &Vector3<f64>,
+        step_s: f64,
+        end_time: f64,
+    ) -> BallisticsError {
+        if position
+            .iter()
+            .chain(velocity.iter())
+            .all(|value| value.is_finite())
+        {
+            return error;
+        }
+        let altitude_m = crate::atmosphere::shot_frame_altitude(
+            self.atmosphere.altitude,
+            step_start.x,
+            step_start.y,
+            self.inputs.shooting_angle,
+        );
+        crate::atmosphere::air_aloft_refusal(
+            &KernelAtmosphere::Station(*station),
+            self.atmo_sock.as_ref(),
+            step_start.x,
+            altitude_m,
+            step_s * self.speed_budget(end_time),
+        )
+        .map_or(error, BallisticsError::from)
     }
 
     /// Ceiling on ground-frame speed a physical trajectory can reach by time `t` (see
@@ -3001,10 +3145,22 @@ impl TrajectorySolver {
                 self.calculate_acceleration(&position, &velocity, &wind_vector, &station);
 
             // Update state
+            let step_start = position;
             velocity += acceleration * self.time_step;
             position += velocity * self.time_step;
             time += self.time_step;
-            self.validate_integration_state(&position, &velocity, time)?;
+            self.validate_integration_state(&position, &velocity, time)
+                .map_err(|error| {
+                    self.refusal_of_failed_step(
+                        error,
+                        &station,
+                        &step_start,
+                        &position,
+                        &velocity,
+                        self.time_step,
+                        time,
+                    )
+                })?;
         }
 
         let termination = self.append_terminal_endpoint(
@@ -3252,10 +3408,22 @@ impl TrajectorySolver {
             let acc4 = self.calculate_acceleration(&pos4, &vel4, &wind_vector, &station);
 
             // Update position and velocity
+            let step_start = position;
             position += (velocity + vel2 * 2.0 + vel3 * 2.0 + vel4) * (dt / 6.0);
             velocity += (acc1 + acc2 * 2.0 + acc3 * 2.0 + acc4) * (dt / 6.0);
             time += dt;
-            self.validate_integration_state(&position, &velocity, time)?;
+            self.validate_integration_state(&position, &velocity, time)
+                .map_err(|error| {
+                    self.refusal_of_failed_step(
+                        error,
+                        &station,
+                        &step_start,
+                        &position,
+                        &velocity,
+                        dt,
+                        time,
+                    )
+                })?;
         }
 
         let termination = self.append_terminal_endpoint(
@@ -3479,10 +3647,22 @@ impl TrajectorySolver {
                 }
             }
 
+            let step_start = position;
             position = accepted_step.position;
             velocity = accepted_step.velocity;
             time += accepted_step.used_dt;
-            self.validate_integration_state(&position, &velocity, time)?;
+            self.validate_integration_state(&position, &velocity, time)
+                .map_err(|error| {
+                    self.refusal_of_failed_step(
+                        error,
+                        &station,
+                        &step_start,
+                        &position,
+                        &velocity,
+                        accepted_step.used_dt,
+                        time,
+                    )
+                })?;
 
             // Adapt the step size for the NEXT iteration.
             dt = accepted_step.next_dt;

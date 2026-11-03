@@ -1541,16 +1541,20 @@ pub(crate) fn station_pressure_origin(
 /// the reading to blame, stated in the wire's own units.
 ///
 /// One function for both commands that read a solve-json v1 `atmosphere`: the solve calls it
-/// before any flight, and `atmosphere.density_altitude` after its own model-range checks.
-/// [`crate::atmosphere::AtmosphereError::refusal_in`] blames in the order those checks do, so
-/// whatever atmosphere the solve refuses, that command refuses with the same code and path: the
-/// temperature at `$.atmosphere.temperature_k` outside 173.15-373.15 K; when the station
-/// pressure is outside the troposphere, `$.atmosphere.pressure_pa` for a pressure sent as a
-/// station reading (hPa sent as pascals) and `$.atmosphere.altitude_m` for one omitted or sent
-/// as a plausible QNH ([`station_pressure_origin`]), each with a hint to check that unit; and
-/// otherwise `$.atmosphere.relative_humidity`. Where both commands reach this function the
-/// message is the same word for word: `"relative_humidity = 1 at 373.15 K and 100000 Pa: no
-/// such air exists: ..."`. The station is built exactly as the solve's `TrajectorySolver`
+/// before any flight, and `atmosphere.density_altitude` first of all its checks, returning a
+/// refusal blamed on the temperature before its own station-pressure check and any other after
+/// it. [`crate::atmosphere::AtmosphereError::refusal_in`] blames in that same order, so whatever
+/// atmosphere the solve refuses, that command refuses with the same code and path. A
+/// temperature at or below absolute zero is blamed at `$.atmosphere.temperature_k`, and so is
+/// air that cannot exist when it is humid above water's critical point or its temperature is
+/// outside 173.15-373.15 K (where the humid-air formulas are extrapolated, a temperature is the
+/// likelier mistake). Otherwise impossible air at a station pressure outside the troposphere is
+/// blamed at `$.atmosphere.pressure_pa` for a pressure sent as a station reading (hPa sent as
+/// pascals) and at `$.atmosphere.altitude_m` for one omitted or sent as a plausible QNH
+/// ([`station_pressure_origin`]), each with a hint to check that unit; and any other at
+/// `$.atmosphere.relative_humidity`. Where both commands reach this function the message is the
+/// same word for word: `"relative_humidity = 1 at 373.15 K and 100000 Pa: no such air exists:
+/// ..."`. The station is built exactly as the solve's `TrajectorySolver`
 /// builds it ([`AtmosphericConditions::station_air`] with both readings supplied, as the
 /// resolved request carries them).
 pub(crate) fn resolved_station_air(
@@ -1590,6 +1594,7 @@ pub(crate) fn resolved_station_air(
                 temperature_text: format!("{} K", echo_si(resolved.temperature_k)),
                 pressure_text: format!("{} Pa", echo_si(resolved.pressure_pa)),
                 pressure_origin: station_pressure_origin(sent),
+                altitude_unit: crate::atmosphere::AltitudeUnit::Meters,
             };
             let refusal = error.refusal_in(
                 &spelling,
@@ -2295,6 +2300,21 @@ fn resolve_reticle_hold(
 // the identical `BallisticsError` -> `SolveErrorEnvelopeV1` conversion `solve_v1` uses for the
 // same call, so both report a solve failure in the same shape.
 pub(crate) fn solve_failed(error: BallisticsError) -> SolveErrorEnvelopeV1 {
+    // Air that cannot exist aloft is a refusal of the station temperature that only the flight
+    // can find (the lapse from it reaches absolute zero at a height the flight gets to): the wire
+    // locates it at the temperature, in kelvin, as it does every other refusal of the air.
+    if let Some(refusal) = error.atmosphere_error().filter(|refusal| {
+        refusal.reason() == crate::atmosphere::AtmosphereErrorReason::AirAloftBelowAbsoluteZero
+    }) {
+        return invalid_value(
+            "$.atmosphere.temperature_k",
+            format!(
+                "temperature_k = {}: {}",
+                crate::atmosphere::reading_text(refusal.value() + KELVIN_OFFSET_C, "K"),
+                refusal.explanation()
+            ),
+        );
+    }
     solve_failed_message(error.to_string())
 }
 

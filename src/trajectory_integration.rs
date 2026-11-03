@@ -578,6 +578,12 @@ fn interpolate_target_crossing(
 /// vector precomputation, or producing any trajectory points, so a caller can never receive a
 /// poisoned trajectory. A wind error's `index` refers to the caller's own segment ordering.
 /// The station itself is valid by construction ([`KernelAtmosphere`]).
+///
+/// A flight that reaches air that cannot exist aloft (the station's, or a zone's, lapse takes
+/// it to absolute zero at a height the flight gets to) is refused too, at the step that gets
+/// there: [`KernelInputError::Atmosphere`] with
+/// [`crate::AtmosphereErrorReason::AirAloftBelowAbsoluteZero`] on the temperature. A flight that
+/// stays below that height is [`integrate_trajectory`]'s, bit for bit.
 pub fn try_integrate_trajectory(
     initial_state: [f64; 6],
     t_span: (f64, f64),
@@ -590,14 +596,20 @@ pub fn try_integrate_trajectory(
     if let Some(sock) = &params.atmo_sock {
         sock.validate()?;
     }
-    Ok(integrate_trajectory(
+    let flight = integrate_trajectory_flight(
         initial_state,
         t_span,
         params,
         method,
         tolerance,
         max_step,
-    ))
+        Gravity::EARTH,
+        0.0,
+    );
+    match flight.refusal {
+        Some(refusal) => Err(KernelInputError::Atmosphere(refusal)),
+        None => Ok(flight.trajectory),
+    }
 }
 
 /// Main trajectory integration function
@@ -607,6 +619,10 @@ pub fn try_integrate_trajectory(
 /// is `params.atmo_sock`: an unvalidated zone humidity outside 0-100 is clamped, and a NaN one
 /// flies NaN air, never steam. Prefer [`try_integrate_trajectory`], which rejects
 /// malformed segments and zones with a typed error before any integration work.
+///
+/// A step that fails to a non-finite state (the RK4 method's; RK45 never accepts one) ends the
+/// trajectory at the state before it, as RK45 always did, so no NaN state is returned; when that
+/// is air that cannot exist aloft, [`try_integrate_trajectory`] says so.
 pub fn integrate_trajectory(
     initial_state: [f64; 6],
     t_span: (f64, f64),
@@ -661,13 +677,53 @@ pub(crate) fn integrate_trajectory_with_gravity(
 pub(crate) fn integrate_trajectory_from_muzzle_height(
     initial_state: [f64; 6],
     t_span: (f64, f64),
-    mut params: TrajectoryParams,
+    params: TrajectoryParams,
     method: &str,
     tolerance: f64,
     max_step: f64,
     gravity: Gravity,
     muzzle_height_m: f64,
 ) -> Vec<(f64, Vector6<f64>)> {
+    integrate_trajectory_flight(
+        initial_state,
+        t_span,
+        params,
+        method,
+        tolerance,
+        max_step,
+        gravity,
+        muzzle_height_m,
+    )
+    .trajectory
+}
+
+/// A flight from [`integrate_trajectory_flight`]: the trajectory it flew, and how it ended when a
+/// step failed.
+pub(crate) struct Flight {
+    /// The accepted states, never a non-finite one.
+    pub(crate) trajectory: Vec<(f64, Vector6<f64>)>,
+    /// Whether a step failed to a non-finite state, ending the flight before it, for any cause.
+    pub(crate) failed_step: bool,
+    /// When that step failed because it reached air that cannot exist aloft, its refusal.
+    pub(crate) refusal: Option<AtmosphereError>,
+}
+
+/// The flight behind [`integrate_trajectory_from_muzzle_height`], with how it ended when a step
+/// failed to a non-finite state ([`Flight::failed_step`], for any cause), and the refusal of air
+/// that cannot exist aloft when that is why: the step's start, and every stage it evaluated,
+/// within twice its span at the start's speed (plus 10 m/s), are where
+/// [`crate::atmosphere::air_aloft_refusal`] looks for air at absolute zero.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn integrate_trajectory_flight(
+    initial_state: [f64; 6],
+    t_span: (f64, f64),
+    mut params: TrajectoryParams,
+    method: &str,
+    tolerance: f64,
+    max_step: f64,
+    gravity: Gravity,
+    muzzle_height_m: f64,
+) -> Flight {
     // Normalize once before build_inputs reads the first zone and before any RK stage performs a
     // first-match lookup. Callers may supply zones in any order.
     crate::wind::sort_wind_segments_by_distance(&mut params.wind_segments);
@@ -688,7 +744,11 @@ pub(crate) fn integrate_trajectory_from_muzzle_height(
     let mut trajectory = Vec::with_capacity(10000);
     trajectory.push((t, state));
     if state[0] >= params.target_distance_m {
-        return trajectory;
+        return Flight {
+            trajectory,
+            failed_step: false,
+            refusal: None,
+        };
     }
 
     // Build the (loop-invariant) derivative inputs once for the whole integration, instead of
@@ -701,6 +761,27 @@ pub(crate) fn integrate_trajectory_from_muzzle_height(
     // shear height in compute_derivatives_vec_with_gravity reads it.
     inputs.muzzle_height = muzzle_height_m;
 
+    // The refusal of a step from `state` over `dt` that failed: air below absolute zero within
+    // its reach, at the altitude the derivative kernel measures (the station plus the state's
+    // world-vertical height).
+    let aloft_refusal = |state: &Vector6<f64>, dt: f64| {
+        let speed = Vector3::new(state[3], state[4], state[5]).norm();
+        crate::atmosphere::air_aloft_refusal(
+            &params.atmosphere,
+            params.atmo_sock.as_ref(),
+            state[0],
+            crate::atmosphere::shot_frame_altitude(
+                params.atmosphere.reference_altitude_m(inputs.altitude),
+                state[0],
+                state[1],
+                inputs.shooting_angle,
+            ),
+            2.0 * dt * (speed + 10.0),
+        )
+    };
+    let mut refusal = None;
+    let mut failed_step = false;
+
     match method {
         "RK4" => {
             // Fixed step RK4 with target detection
@@ -712,6 +793,14 @@ pub(crate) fn integrate_trajectory_from_muzzle_height(
                 }
 
                 let new_state = rk4_step_with_gravity(&state, t, dt, &params, &inputs, gravity);
+
+                // A step that failed to a non-finite state ends the trajectory before it, as
+                // RK45's does; never a NaN state.
+                if !new_state.iter().all(|value| value.is_finite()) {
+                    failed_step = true;
+                    refusal = aloft_refusal(&state, dt);
+                    break;
+                }
 
                 // Check if we're about to pass the target (X is downrange, McCoy)
                 if state[0] < params.target_distance_m && new_state[0] >= params.target_distance_m {
@@ -769,7 +858,11 @@ pub(crate) fn integrate_trajectory_from_muzzle_height(
                 };
             if !effective_max_step.is_finite() || effective_max_step <= 0.0 {
                 eprintln!("WARNING: RK45 max_step must be finite and positive");
-                return trajectory;
+                return Flight {
+                    trajectory,
+                    failed_step: false,
+                    refusal: None,
+                };
             }
             let min_step = RK45_MIN_STEP.min(effective_max_step);
 
@@ -798,8 +891,14 @@ pub(crate) fn integrate_trajectory_from_muzzle_height(
                     Ok(accepted) => accepted,
                     Err(trials) => {
                         iteration_count += trials;
+                        // Short of the trial budget, no finite step was found even at the
+                        // minimum step: a failed step.
                         if iteration_count < max_iterations {
-                            eprintln!("WARNING: RK45 minimum-step trial was non-finite");
+                            failed_step = true;
+                            refusal = aloft_refusal(&state, dt);
+                            if refusal.is_none() {
+                                eprintln!("WARNING: RK45 minimum-step trial was non-finite");
+                            }
                         }
                         break;
                     }
@@ -867,7 +966,11 @@ pub(crate) fn integrate_trajectory_from_muzzle_height(
         }
     }
 
-    trajectory
+    Flight {
+        trajectory,
+        failed_step,
+        refusal,
+    }
 }
 
 /// Checked sibling of [`solve_trajectory_rust`] (MBA-1338): rejects malformed wind

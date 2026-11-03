@@ -8,8 +8,9 @@
 //! critical point, where the saturation pressure itself is NaN, even at 0 %.
 //!
 //! The one vapour-fraction cap now keeps a NaN a NaN, so every primitive answers NaN for a NaN
-//! humidity and for air above the critical point, and every finite answer is bit for bit what
-//! it was: the cap differs from `.min(1.0)` for a NaN only.
+//! humidity and for humid air above the critical point, and every finite answer is bit for bit
+//! what it was: the cap differs from `.min(1.0)` for a NaN only. Dry air above that point holds
+//! no vapour (its mole fraction is exactly 0), so it is dry air, not NaN.
 
 use super::*;
 
@@ -88,24 +89,42 @@ fn a_nan_zone_humidity_flies_nan_air_at_every_height_not_steam() {
 }
 
 #[test]
-fn above_waters_critical_point_the_vapour_model_answers_nan_not_steam() {
+fn above_waters_critical_point_dry_air_is_dry_and_humid_air_is_nan_not_steam() {
     // 400 °C is above 647.096 K, where the Wagner-Pruss saturation pressure is undefined.
     // Before 0.50.0 the cap read its NaN as pure steam, 0.293 kg/m³ and 591 m/s, at any
-    // humidity, 0 % included.
-    for humidity in [0.0, 50.0] {
+    // humidity, 0 % included. Humid air there cannot exist, so the vapour model answers NaN.
+    for humidity in [1.0, 50.0] {
         let (density, sound) = calculate_atmosphere(0.0, Some(400.0), Some(1013.25), humidity);
         assert!(
             density.is_nan() && sound.is_nan(),
             "{humidity} % at 400 °C: ({density}, {sound})"
         );
+        let error = StationAir::new(
+            0.0,
+            400.0,
+            1013.25,
+            RelativeHumidity::try_percent(humidity).unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(error.reason(), AtmosphereErrorReason::ImpossibleAir);
+        assert_eq!(error.field(), "temperature_c");
     }
-    // Every surface that builds a station refuses it, as before.
+    // Dry air holds no vapour at any temperature: its mole fraction is exactly 0, so it is the
+    // dry air of the CIPM density and the dry sound speed, to the bit, and every surface that
+    // builds a station flies it.
+    let (density, sound) = calculate_atmosphere(0.0, Some(400.0), Some(1013.25), 0.0);
     assert_eq!(
-        StationAir::new(0.0, 400.0, 1013.25, RelativeHumidity::DRY)
-            .unwrap_err()
-            .reason(),
-        AtmosphereErrorReason::ImpossibleAir
+        density.to_bits(),
+        calculate_air_density_cimp(400.0, 1013.25, 0.0).to_bits()
     );
+    assert!(density.is_finite() && density > 0.0, "{density}");
+    assert_eq!(
+        sound.to_bits(),
+        (GAMMA * R_AIR * (400.0 + 273.15)).sqrt().to_bits()
+    );
+    let station = StationAir::new(0.0, 400.0, 1013.25, RelativeHumidity::DRY).expect("dry air");
+    assert_eq!(station.density_kg_m3().to_bits(), density.to_bits());
+    assert_eq!(station.speed_of_sound_mps().to_bits(), sound.to_bits());
 }
 
 #[test]

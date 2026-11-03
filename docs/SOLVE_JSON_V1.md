@@ -143,8 +143,20 @@ All dimensional input and result fields use SI units, made explicit by their suf
   the troposphere, and `$.atmosphere.altitude_m` for one omitted or sent as a plausible QNH
   (feet sent as meters). A QNH that leaves no station pressure at all at its altitude is located
   the same way. `atmosphere.density_altitude` refuses every such atmosphere with the same code
-  and path, and with the same message except where its own range checks refuse it first
-  ([ATMOSPHERE_DENSITY_ALTITUDE.md](ATMOSPHERE_DENSITY_ALTITUDE.md#errors)).
+  and path, and with the same message except where its own station-pressure check refuses it
+  first ([ATMOSPHERE_DENSITY_ALTITUDE.md](ATMOSPHERE_DENSITY_ALTITUDE.md#errors)). Every
+  atmosphere `solve` flies, that command answers for, except a station pressure whose pressure
+  altitude is outside the troposphere; it reports a density altitude wherever it lands.
+- `temperature_k` is held to one rule (0.50.0), the one every surface applies: above 0 K, and
+  air that can exist. Nothing narrower: outside 173.15–373.15 K the humidity terms are
+  extrapolated, never refused, and dry air (`relative_humidity` 0) flies even above water's
+  critical point (647.096 K), where humid air cannot exist. A station whose standard lapse takes
+  the air to absolute zero at a height the flight reaches is refused at the step that reaches
+  it, as an `invalid_value` at `$.atmosphere.temperature_k`: `temperature_k = 10 K: the air
+  aloft would fall below absolute zero: from this temperature the standard lapse reaches 0 K at
+  1539 m above mean sea level, which this flight reaches (check the temperature and its unit)`.
+  0.49.0 failed such a flight as `solve_failed`, a non-finite integration state that pointed
+  first at the bore height.
 - Wind angles are wind-from directions relative to the shot axis: `0` is a headwind and positive
   `pi / 2` is wind from the shooter's right.
 - `drop_m` is positive below the line of sight.

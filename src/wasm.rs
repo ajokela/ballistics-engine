@@ -360,6 +360,14 @@ fn refuse_terminal_air(
     }
 }
 
+/// A station temperature typed into `flag` in the terminal's `units`, checked by the one rule
+/// every surface applies ([`crate::atmosphere::check_temperature_flag`]: finite and above
+/// absolute zero, nothing narrower), refused in the native CLI's own words.
+fn check_temperature_flag_js(flag: &str, value: f64, units: UnitSystem) -> Result<(), JsValue> {
+    crate::atmosphere::check_temperature_flag(flag, value, units == UnitSystem::Imperial)
+        .map_err(|refusal| JsValue::from_str(&refusal))
+}
+
 /// [`refuse_terminal_air`] for a command that resolved its station itself (a QNH reduced, the
 /// presence rule applied, a density altitude's derived triple): `resolved` flies as given, and
 /// `origin` says where its pressure came from, so a station pressure outside the troposphere is
@@ -387,6 +395,15 @@ enum UnitSystem {
 }
 
 impl UnitSystem {
+    /// The engine's own unit system, for the engine's terminal wording
+    /// ([`crate::BallisticsError::in_terminal_words`]).
+    fn engine(self) -> crate::cli_api::UnitSystem {
+        match self {
+            UnitSystem::Imperial => crate::cli_api::UnitSystem::Imperial,
+            UnitSystem::Metric => crate::cli_api::UnitSystem::Metric,
+        }
+    }
+
     fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "metric" => UnitSystem::Metric,
@@ -1743,6 +1760,7 @@ impl WasmBallistics {
                         temperature = args[i + 1]
                             .parse()
                             .map_err(|_| JsValue::from_str("Invalid temperature"))?;
+                        check_temperature_flag_js("--temperature", temperature, units)?;
                         temperature_supplied = true;
                         i += 1;
                     }
@@ -1998,11 +2016,11 @@ impl WasmBallistics {
                 }
                 "--zero-temperature" => {
                     if i + 1 < args.len() {
-                        zero_temperature = Some(
-                            args[i + 1]
-                                .parse()
-                                .map_err(|_| JsValue::from_str("Invalid zero temperature"))?,
-                        );
+                        let value = args[i + 1]
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid zero temperature"))?;
+                        check_temperature_flag_js("--zero-temperature", value, units)?;
+                        zero_temperature = Some(value);
                         i += 1;
                     }
                 }
@@ -2782,13 +2800,18 @@ impl WasmBallistics {
                     ),
                 ],
             )?;
+            // A zero trial that climbs into air that cannot exist aloft names the zero day's
+            // temperature by its flag, in the terminal's units, as the refusal above does.
             let zero_solve_result = calculate_zero_angle_with_resolved_conditions(
                 zero_inputs.clone(),
                 zero_distance_m,
                 zero_target_height,
                 wind.clone(),
                 resolved_zero_atmosphere,
-            );
+            )
+            .map_err(|error| {
+                error.in_terminal_words(units.engine(), flag(zero_temperature.is_some(), 1))
+            });
             match zero_solve_result {
                 Ok(zero_angle) => {
                     inputs.muzzle_angle = zero_angle;
@@ -3197,6 +3220,8 @@ impl WasmBallistics {
             // and a returned "Error: ..." string read as a success, and was not JSON under
             // -o json (the npm Calculator reported it as a JSON parse error).
             Err(e) => {
+                // Air that cannot exist aloft, found in flight, in the terminal's words.
+                let e = e.in_terminal_words(units.engine(), SHOT_AIR_FLAGS[1]);
                 let mut combined = format!("Error: {}", e);
                 // MBA-1386 (0.28.1 sweep): the Ok arm above prepends bc5d_coercion_warning
                 // (table-only, like every other human-readable block here); the Err arm was
@@ -3413,11 +3438,11 @@ impl WasmBallistics {
                 }
                 "--temperature" => {
                     if i + 1 < args.len() {
-                        temperature = Some(
-                            args[i + 1]
-                                .parse()
-                                .map_err(|_| JsValue::from_str("Invalid temperature"))?,
-                        );
+                        let value = args[i + 1]
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid temperature"))?;
+                        check_temperature_flag_js("--temperature", value, units)?;
+                        temperature = Some(value);
                         i += 1;
                     }
                 }
@@ -3724,7 +3749,8 @@ impl WasmBallistics {
                 los_height,
                 WindConditions::default(),
                 resolved_atmosphere,
-            );
+            )
+            .map_err(|error| error.in_terminal_words(units.engine(), SHOT_AIR_FLAGS[1]));
             match zero_result {
                 Ok(zero_angle) => {
                     let zero_degrees = zero_angle * 180.0 / std::f64::consts::PI;
@@ -3917,11 +3943,11 @@ impl WasmBallistics {
                 }
                 "--temperature" => {
                     if i + 1 < args.len() {
-                        temperature = Some(
-                            args[i + 1]
-                                .parse()
-                                .map_err(|_| JsValue::from_str("Invalid temperature"))?,
-                        );
+                        let value = args[i + 1]
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid temperature"))?;
+                        check_temperature_flag_js("--temperature", value, units)?;
+                        temperature = Some(value);
                         i += 1;
                     }
                 }
@@ -4351,6 +4377,13 @@ impl WasmBallistics {
                     sol.iterations
                 ))
             }
+            // Air that cannot exist aloft, found in flight, in the terminal's words.
+            Err(crate::moving_target::LeadError::Solver(e)) => Err(JsValue::from_str(&format!(
+                "Error calculating lead: {}",
+                crate::moving_target::LeadError::Solver(
+                    e.in_terminal_words(units.engine(), SHOT_AIR_FLAGS[1])
+                )
+            ))),
             Err(e) => Err(JsValue::from_str(&format!("Error calculating lead: {}", e))),
         }
     }
@@ -4850,11 +4883,12 @@ impl WasmBallistics {
                     velocity_unit,
                 )
             }
-            // Thrown, not returned as text, like every other refusal here.
+            // Thrown, not returned as text, like every other refusal here; air that cannot exist
+            // aloft in the terminal's words.
             Err(e) => {
                 return Err(JsValue::from_str(&format!(
                     "Error running Monte Carlo simulation: {}",
-                    e
+                    e.in_terminal_words(units.engine(), SHOT_AIR_FLAGS[1])
                 )))
             }
         };
@@ -5299,20 +5333,8 @@ impl WasmBallistics {
         let temperature = match (temperature, units) {
             (None, UnitSystem::Imperial) => 59.0,
             (None, UnitSystem::Metric) => 15.0,
-            (Some(v), UnitSystem::Imperial) => {
-                if !(-148.0..=392.0).contains(&v) {
-                    return Err(JsValue::from_str(&format!(
-                        "--temperature {v} F is out of range (expected ~-148..392 F for imperial units)"
-                    )));
-                }
-                v
-            }
-            (Some(v), UnitSystem::Metric) => {
-                if !(-100.0..=200.0).contains(&v) {
-                    return Err(JsValue::from_str(&format!(
-                        "--temperature {v} C is out of range (expected ~-100..200 C for metric units)"
-                    )));
-                }
+            (Some(v), units) => {
+                check_temperature_flag_js("--temperature", v, units)?;
                 v
             }
         };
@@ -5814,20 +5836,8 @@ impl WasmBallistics {
         let temperature = match (temperature, units) {
             (None, UnitSystem::Imperial) => 59.0,
             (None, UnitSystem::Metric) => 15.0,
-            (Some(v), UnitSystem::Imperial) => {
-                if !(-148.0..=392.0).contains(&v) {
-                    return Err(JsValue::from_str(&format!(
-                        "--temperature {v} F is out of range (expected ~-148..392 F for imperial units)"
-                    )));
-                }
-                v
-            }
-            (Some(v), UnitSystem::Metric) => {
-                if !(-100.0..=200.0).contains(&v) {
-                    return Err(JsValue::from_str(&format!(
-                        "--temperature {v} C is out of range (expected ~-100..200 C for metric units)"
-                    )));
-                }
+            (Some(v), units) => {
+                check_temperature_flag_js("--temperature", v, units)?;
                 v
             }
         };
@@ -6101,11 +6111,11 @@ impl WasmBallistics {
                 }
                 "--temperature" => {
                     if i + 1 < args.len() {
-                        temperature = Some(
-                            args[i + 1]
-                                .parse()
-                                .map_err(|_| JsValue::from_str("Invalid temperature"))?,
-                        );
+                        let value = args[i + 1]
+                            .parse()
+                            .map_err(|_| JsValue::from_str("Invalid temperature"))?;
+                        check_temperature_flag_js("--temperature", value, units)?;
+                        temperature = Some(value);
                         i += 1;
                     }
                 }

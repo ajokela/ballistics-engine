@@ -67,8 +67,9 @@ humidity, altitude, density altitude), field by field. In 0.49.0 only `trajector
       above 0; `fast_integrate` already refused it);
     - a negative pressure, flown on its ratio alone, is `NonPositivePressure`;
     - a temperature at or below -273.15 °C is `AtOrBelowAbsoluteZero`;
-    - a temperature above water's critical point (373.946 °C) is `ImpossibleAir` even dry,
-      where 0.49.0 flew pure steam's sound speed;
+    - a temperature above water's critical point (373.946 °C) is `ImpossibleAir` when the air
+      is humid, where 0.49.0 flew pure steam's sound speed at any humidity. Dry air there flies
+      (see Changed (behaviour));
     - air that cannot exist at the stated humidity is `ImpossibleAir`. 0.49.0's kernels flew
       every station dry, so they never saw it.
   - A finite ratio of 0 or less still means "not supplied" and flies 1.0.
@@ -136,6 +137,11 @@ humidity, altitude, density altitude), field by field. In 0.49.0 only `trajector
   `StationPressureOrigin` (exported from the crate root) says where a station pressure came
   from (a reading, the standard pressure at the altitude, a QNH reduced there), so every
   surface blames a station above the troposphere on the reading that put it there.
+  `AirSpelling::altitude_unit` (an `AltitudeUnit`, `Meters` or `Feet`, exported from the crate
+  root) is the unit every altitude a refusal quotes is stated in, and
+  `AtmosphereError::explanation_in` gives the reason with its altitude in a chosen unit.
+  `BallisticsError::in_terminal_words` states a refusal of air aloft, found in flight, the way a
+  terminal states every refusal of its air.
 
 ### Changed (physics): one vapour model aloft, on every surface
 - **What changed.** In 0.49.0 the air away from the station's height modelled its water vapour
@@ -437,10 +443,11 @@ table outputs round the change away.
     that is itself outside the troposphere, and `altitude_m` for one omitted or sent as a
     plausible QNH ("no pressure_pa was given, and the standard pressure at the station
     altitude of 20000 m is a pressure altitude of ... m, outside the troposphere (-5000 m to
-    11000 m): check the altitude's unit"). That is the order `atmosphere.density_altitude`'s own
-    range checks blame in, so the two commands give the same code and path for every
-    atmosphere `solve` refuses, and the same message wherever that command's own range checks
-    pass. `solve-json` exits 2 for it, as for any invalid value.
+    11000 m): check the altitude's unit"). `atmosphere.density_altitude` asks the same rule
+    first, and runs its own station-pressure check after a refusal blamed on the temperature
+    and before any other, so the two commands give the same code and path for every atmosphere
+    `solve` refuses, and the same message wherever that check passes. `solve-json` exits 2 for
+    it, as for any invalid value.
   - A QNH that leaves no station pressure at its altitude (MBA-1605: its pressure altitude plus
     the station height at or past 44,331 m, such as 500 hPa at 40 km) is refused by `solve` and
     `atmosphere.density_altitude` alike, with one message: "a QNH of 50000 Pa leaves no station
@@ -482,6 +489,103 @@ table outputs round the change away.
     `calculateTrajectory` and `getFullTrajectory` throw refused station air naming the setter
     (`setTemperature`, `setPressure`, `setAltitude`), never a "JSON parse error" around the
     terminal's text.
+- **BEHAVIOUR CHANGE: one air-temperature rule on every surface.** A station temperature is
+  refused on its own only when it is not finite or is at or below absolute zero
+  (`atmosphere::check_station_temperature_c`, which `StationAir::new` applies), and otherwise only
+  when the air it describes cannot exist. Nothing narrower anywhere, so a reading flies, or is
+  refused, alike wherever it enters. Each narrower bound 0.49.0 had is gone:
+  - the CLI's `--temperature` range, -148..392 °F (-100..200 °C), on `trajectory`, `zero`,
+    `true-velocity`, `true-wind`, `plan-truing`, `mpbr`, `come-ups`, `lead`, `wind-card`,
+    `stability`, `range-table`, `compare`, `hold-corridor`, `mark-to-range`, `bdc-match`,
+    `optimal-zero`, `adaptive-card`, `reticle hold` and `profile save`. A `--zero-temperature`,
+    a `--location` CSV cell, a saved profile and `estimate-bc` flew such a reading already;
+  - the browser terminal's same range on `true-velocity` and `true-wind` (its `trajectory`,
+    `zero`, `lead` and `estimate-bc` flew such a reading already);
+  - `atmosphere.density_altitude`'s 173.15-373.15 K, and its refusal of a density altitude
+    outside -5000 m to 11000 m at `$.atmosphere`, which refused air `solve` flies for its
+    temperature (100 K, 150 K and 173.15 K at sea level; 647 K and 700 K dry at any station
+    pressure). It now answers for every temperature `solve` flies (`solve` required only more
+    than 0 K), with both density altitudes wherever they land: °C sent as `temperature_k`
+    (15 K) reads `faa_rule` -9991 m and `density_matched` -44505 m, dry air at 700 K 15064 m
+    and 8337 m. Air that cannot exist, which it blamed on the temperature with a message of its
+    own, now gets `solve`'s message, at the same path. Its one check of its own left is about
+    the pressure: a station pressure whose pressure altitude is outside the troposphere (hPa
+    sent as pascals) is refused at the reading to blame, as before, whatever the temperature,
+    and its message now reads "a station pressure is read only between -5000 m and 11000 m of
+    pressure altitude".
+
+  `atmosphere::density_matched_altitude_m`, behind `density_matched`, now follows the standard
+  atmosphere's upper layers for air thinner than the standard tropopause's, so standard air
+  reads its own altitude in every layer: 0.49.0's closed-form troposphere read standard air at
+  20 km as 20453 m, where it now reads 20002 m. Up to 11 km it is the closed form, bit for bit.
+
+  Under `--units imperial`, the CLI's and the browser terminal's refusals of their air state
+  every altitude they quote in feet: a pressure altitude outside the troposphere, the
+  troposphere's bounds (-16404 ft to 36089 ft) and the station altitude. They were in metres.
+
+  One temperature bound is left, and it is a file format's, not the air's:
+  `profile.export_a7p` refuses a temperature outside -100..100 °C, the range the `.a7p`
+  ecosystem's validator accepts, because a file outside it cannot be opened by its recipient.
+
+  Every flag that takes a station temperature refuses what the rule refuses, up front and in its
+  own words and unit: `--temperature -500 F is at or below absolute zero (-459.67 F)`,
+  `--temperature NaN F is not a finite number`. `--zero-temperature`, `estimate-bc
+  --temperature` and the browser terminal's `trajectory`, `zero`, `lead` and `estimate-bc`
+  temperature flags now refuse such a reading that way too, before any work, where they left it
+  to the solver. `atmosphere::check_temperature_flag` is the shared check. Outside -100 °C to 100 °C
+  (173.15-373.15 K) the humidity terms are extrapolated, not refused: below -100 °C the
+  saturation vapour pressure and the CIPM-2007 compressibility are evaluated at -100 °C (they
+  clamp their temperature there), and above 100 °C they are carried past the range they are
+  fitted to. Engine output: `trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300
+  --temperature 482 --humidity 0` (250 °C) reaches 300 yd at 2350.18 fps, where 0.49.0 refused
+  the flag.
+- **BEHAVIOUR CHANGE: dry air above water's critical point flies.** At 0 % the water-vapour
+  mole fraction is exactly 0 at any temperature, so dry air above 647.096 K (373.946 °C) is
+  ordinary hot air, no longer air that cannot exist: at 400 °C and 1013.25 hPa, 0.52498 kg/m³
+  (within 0.2 % of the ideal gas) and 520.117 m/s, the dry sound speed. 0.49.0 flew it as pure
+  steam, 0.29325 kg/m³ and 591.326 m/s, at any humidity. Humid air there cannot exist and is
+  `ImpossibleAir` on the temperature, whose message now reads "... or the air is humid above
+  water's critical point, or too hot to have a density". The last clause is dry air the
+  CIPM-2007 compressibility gives no positive density, from about 90,000 K at 1013.25 hPa, which
+  is refused at the temperature too. Below the critical point every result is bit-identical:
+  the zero-humidity vapour fraction is the very value the full formula gave.
+- **BEHAVIOUR CHANGE: a flight into air that cannot exist aloft is refused, naming the
+  temperature.** The standard lapse from a station temperature (6.5 K per km in the troposphere)
+  reaches 0 K at a finite height: 183 km above 15 °C at sea level, but 1539 m above a 10 K
+  station. A flight that reaches it is refused at the step that gets there, on every kernel,
+  with the new `AtmosphereErrorReason::AirAloftBelowAbsoluteZero` on the temperature
+  (`AtmosphereError::altitude_m` is where the air reaches 0 K). A flight that stays below that
+  height flies bit for bit as before: the check runs only once a step has failed.
+  - `TrajectorySolver`, and so the C ABI and the bridge: the error is `temperature_c = -263.15:
+    the air aloft would fall below absolute zero: from this temperature the standard lapse
+    reaches 0 K at 1539 m above mean sea level, which this flight reaches (check the temperature
+    and its unit)`, and the new `BallisticsError::atmosphere_error` carries the refusal. 0.49.0
+    failed with "trajectory integration produced a non-finite state (often from physically
+    extreme inputs — e.g. an absurd bore/muzzle height ...)".
+  - The CLI and the browser terminal state it in their own words and units, as they state every
+    refusal of their air: `--temperature = -263.15 °C: ... at 1539 m above mean sea level ...`,
+    and under `--units imperial` `--temperature = -441.67 °F: ... at 5049 ft above mean sea level
+    ...` (the new `BallisticsError::in_terminal_words`). The CLI's `trajectory` names a saved
+    profile's field or a `--location` column where the reading came from one, and the zero day's
+    own temperature as `--zero-temperature`.
+  - A zero search whose steeper trials climb there is refused with it too. It used to discard
+    those trials and report "Cannot find zero angle: target beyond effective range even at
+    maximum angle".
+  - `solve`: `invalid_value` at `$.atmosphere.temperature_k`, `temperature_k = 10 K: the air
+    aloft would fall below absolute zero: ...`, where 0.49.0 gave `solve_failed` with no path.
+  - `try_integrate_trajectory`: `KernelInputError::Atmosphere`. 0.49.0 returned the climb up
+    to that height as a trajectory (RK45) or 60 s of NaN states (RK4).
+  - `fast_integrate` and `fast_integrate_with_segments`: a failed solution (`success = false`)
+    holding the states before that step. 0.49.0 returned NaN states with `success = true`. Any
+    step that fails to a non-finite state, for any cause, now ends both the same way:
+    `fast_integrate_with_segments` used to stop its RK45 flight there and still report
+    `success = true` (a muzzle velocity of 1e200 m/s, which overflows the drag, is one).
+  - The lean Monte Carlo (`monte_carlo::solve_trajectory_for_monte_carlo*`): an `Err` with the
+    refusal, where 0.49.0 returned a NaN impact.
+  - The unchecked `integrate_trajectory`, `try_solve_trajectory_rust` and
+    `solve_trajectory_rust` end the trajectory at the state before the failing step, so they
+    return no NaN state (RK45 always stopped there; RK4 ran on). `try_solve_trajectory_rust`
+    cannot name the cause: its error type is still `WindSegmentError`.
 
 ### Fixed
 - **A profile re-save no longer drops stored data.** In 0.49.0, a profile that failed to load
@@ -676,6 +780,9 @@ These consumers pin or embed the engine and are not changed here:
     disclosed.
   - Give `get_local_atmosphere` a humidity.
   - Expose `station_speed_of_sound_mps`.
+  - Surface a `fast_integrate*` solution's `success = false`: a flight into air that cannot exist
+    aloft, or any step that fails to a non-finite state, now ends there instead of returning NaN
+    states.
 - **ballistics-engine-rb**: compiles unchanged. Its `monte_carlo` should map the atmosphere hash
   into the inputs instead of ignoring it.
 - **handbook**: describe the engine's vapour model. Replace the Arden Buck saturation pressure

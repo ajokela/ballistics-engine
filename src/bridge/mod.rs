@@ -120,12 +120,13 @@
 //! fraction, optional `pressure_reference` — decoded by the solve's own shape validator and
 //! resolved by the solve's own `resolve_atmosphere`. Validation errors, ICAO defaults
 //! (announced in `assumptions`) and the QNH reduction are therefore the solve's: the air
-//! described is the air solved through. On top of that it refuses air the solve does not yet
-//! refuse — a temperature outside −100..100 °C, a pressure or density altitude outside the
-//! troposphere — which is what °C sent as kelvin or hPa sent as pascals looks like. A humidity
-//! beyond the total pressure (air that cannot exist) is refused by both, by one rule
-//! (`StationAir::new`'s), at one path: the solve blames such air in the order these checks
-//! do.
+//! described is the air solved through. Air that cannot exist (a temperature at or below
+//! absolute zero, a humidity beyond the total pressure, humid air above water's critical point)
+//! is refused by both, by one rule (`StationAir::new`'s), at one path: the solve blames such air
+//! in the order this command's checks run. It refuses no temperature the solve flies, and
+//! reports both density altitudes wherever they land. Its one check of its own is about the
+//! pressure: a station pressure whose pressure altitude is outside the troposphere, which is
+//! what hPa sent as pascals looks like, is refused at the reading to blame.
 //!
 //! The result reports pressure altitude, the CIPM-2007 air density the solver uses, and
 //! density altitude under TWO names, never one: `faa_rule` (NWS pressure altitude plus the
@@ -2295,19 +2296,46 @@ mod tests {
         );
     }
 
+    /// °C sent as kelvin: 15 K air flies in a solve (the one temperature rule refuses only a
+    /// temperature at or below absolute zero, or air that cannot exist), so this command
+    /// answers for it too, with the engine's own figures for that air: density altitudes about
+    /// 10 km (the FAA rule) and 44 km (equal density) below sea level, and the solver's density.
+    /// It used to refuse the temperature, and then the figures, as outside the troposphere.
     #[test]
-    fn density_altitude_refuses_celsius_sent_as_kelvin() {
+    fn density_altitude_answers_celsius_sent_as_kelvin_as_a_solve_flies_it() {
+        let atmosphere = json!({"temperature_k": 15.0});
         let out = call(json!({
             "api_version": 1,
             "command": "atmosphere.density_altitude",
-            "request": {"atmosphere": {"temperature_k": 15.0}},
+            "request": {"atmosphere": atmosphere},
         }));
-        assert_eq!(out["ok"], false, "{out}");
-        assert_eq!(out["error"]["code"], "command_failed");
-        assert_eq!(
-            out["error"]["details"]["error"]["path"],
-            "$.atmosphere.temperature_k"
+        assert_eq!(out["ok"], true, "{out}");
+        let result = &out["result"];
+        let temperature_c = 15.0 - crate::solve_v1::KELVIN_OFFSET_C;
+        let faa_rule_ft = crate::atmosphere::faa_rule_density_altitude_ft(
+            1013.25,
+            temperature_c * 9.0 / 5.0 + 32.0,
         );
+        let density_matched_m =
+            crate::atmosphere::density_matched_altitude_m(temperature_c, 1013.25, 50.0);
+        assert_eq!(
+            result["density_altitude"]["faa_rule"]["ft"].as_f64(),
+            Some(faa_rule_ft),
+            "{out}"
+        );
+        assert_eq!(
+            result["density_altitude"]["density_matched"]["m"].as_f64(),
+            Some(density_matched_m),
+            "{out}"
+        );
+        assert!(
+            (-10_000.0..-9_900.0).contains(&(faa_rule_ft * 0.3048)),
+            "{out}"
+        );
+        assert!((-45_000.0..-43_000.0).contains(&density_matched_m), "{out}");
+        let (density, _) =
+            crate::atmosphere::calculate_atmosphere(0.0, Some(temperature_c), Some(1013.25), 50.0);
+        assert_eq!(result["air_density_kg_m3"].as_f64(), Some(density), "{out}");
     }
 
     #[test]

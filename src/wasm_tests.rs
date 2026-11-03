@@ -4508,6 +4508,92 @@ Impact Velocity: 2510 fps\n";
         }
     }
 
+    /// One air-temperature rule on every command, as on the native CLI: a station temperature is
+    /// refused on its own only at or below absolute zero, in the flag's own words, and every
+    /// other reading flies (482 °F, 250 °C, dry). `true-velocity` and `true-wind` used to refuse
+    /// it as "out of range (expected ~-148..392 F)", while `trajectory`, `zero`, `lead` and
+    /// `estimate-bc` flew it and refused -500 °F only in flight.
+    #[wasm_bindgen_test]
+    fn every_command_with_a_temperature_applies_the_one_temperature_rule() {
+        let wasm = WasmBallistics::new();
+        let commands = [
+            (
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308",
+                "--temperature",
+            ),
+            (
+                "trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --auto-zero 100",
+                "--zero-temperature",
+            ),
+            (
+                "zero -v 2700 -b 0.475 -m 168 -d 0.308 --target-distance 300",
+                "--temperature",
+            ),
+            (
+                "lead -v 2700 -b 0.475 -m 168 -d 0.308 --target-speed 5 --range 400",
+                "--temperature",
+            ),
+            (
+                "true-velocity --measured-drop 30 --range 500 -b 0.243 -m 175 -d 0.308 --offline",
+                "--temperature",
+            ),
+            (
+                "true-wind --miss 600:12 --twist-rate 10 -v 2700 -b 0.243 --drag-model g7 -m 175 \
+                 -d 0.308",
+                "--temperature",
+            ),
+            (
+                "estimate-bc -v 2700 -m 168 -d 0.308 --data \"100,2.5;200,10.2;300,23.5\"",
+                "--temperature",
+            ),
+        ];
+        for (base, temperature) in commands {
+            let flown = wasm
+                .run_command(&format!("{base} {temperature} 482 --humidity 0"))
+                .unwrap_or_else(|e| panic!("`{base}` at 482 F dry flies: {e:?}"));
+            assert!(
+                !flown.trim_start().starts_with("Error"),
+                "`{base}` at 482 F dry flies: {flown}"
+            );
+            let message = match wasm.run_command(&format!("{base} {temperature} -500")) {
+                Err(err) => err.as_string().unwrap_or_default(),
+                Ok(text) => panic!("`{base}` at -500 F must be refused by a throw:\n{text}"),
+            };
+            assert_eq!(
+                message,
+                format!("{temperature} -500 F is at or below absolute zero (-459.67 F)"),
+                "`{base}`"
+            );
+        }
+        // A lob from a 10 K station under 250 hPa reaches air below absolute zero: refused by a
+        // throw naming the temperature by its flag, in the run's units, as the native CLI does,
+        // never as a non-finite integration state. It used to read `temperature_c = -263.15` and
+        // give the height in metres whatever --units said.
+        for (command, refusal) in [
+            (
+                "trajectory --units metric -v 823 -b 1.05 -m 48.6 -d 12.7 --drag-model g1 \
+                 --max-range 20000 --angle 40 --temperature -263.15 --pressure 250 --humidity 0",
+                "--temperature = -263.15 °C: the air aloft would fall below absolute zero: from \
+                 this temperature the standard lapse reaches 0 K at 1539 m above mean sea level, \
+                 which this flight reaches (check the temperature and its unit)",
+            ),
+            (
+                "trajectory -v 2700 -b 1.05 -m 750 -d 0.5 --drag-model g1 --max-range 21872 \
+                 --angle 40 --temperature -441.67 --pressure 8 --humidity 0",
+                "--temperature = -441.67 °F: the air aloft would fall below absolute zero: from \
+                 this temperature the standard lapse reaches 0 K at 5049 ft above mean sea level, \
+                 which this flight reaches (check the temperature and its unit)",
+            ),
+        ] {
+            let message = match wasm.run_command(command) {
+                Err(err) => err.as_string().unwrap_or_default(),
+                Ok(text) => panic!("`{command}` must be refused by a throw:\n{text}"),
+            };
+            assert!(message.contains(refusal), "`{command}`:\n{message}");
+            assert!(!message.contains("non-finite"), "`{command}`:\n{message}");
+        }
+    }
+
     /// A station above the troposphere because no pressure was given is the altitude's fault,
     /// as on the native CLI: the refusal says to check the altitude's unit, never the
     /// unit of a `--pressure` nobody typed. 65617 ft is 20 km, about 55 hPa of standard

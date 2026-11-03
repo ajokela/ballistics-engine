@@ -569,12 +569,20 @@ fn merged_moist_speed_of_sound_keeps_the_old_total_function_guards() {
             "c at {temp_k} K, {pressure_pa} Pa, {humidity}%: merged {merged} old {old}"
         );
     }
-    // The inputs whose water-vapour mole fraction is NaN (a NaN
-    // humidity, a NaN pressure, and air above water's critical point, 647.096 K, even at 0 %)
-    // are NaN now. 0.49.0's `x_v.min(1.0)` read the NaN as 1 and returned pure steam's sound
-    // speed (603.0 m/s at 700 K, 386.9 m/s at 15 °C).
+    // The inputs whose water-vapour mole fraction is NaN (a NaN humidity, a NaN pressure, and
+    // humid air above water's critical point, 647.096 K) are NaN now. 0.49.0's `x_v.min(1.0)`
+    // read the NaN as 1 and returned pure steam's sound speed (603.0 m/s at 700 K, 386.9 m/s at
+    // 15 °C), at 0 % too. Dry air above that point holds no vapour: its mole fraction is exactly
+    // 0, and its sound speed the dry one, to the bit.
+    let old = moist_speed_of_sound_0_49(700.0, 101_325.0, 0.0);
+    assert!(old.is_finite(), "0.49.0 flew 700 K / 0 % as steam: {old}");
+    assert_eq!(
+        moist_speed_of_sound(700.0, 101_325.0, 0.0).to_bits(),
+        (GAMMA * R_AIR * 700.0).sqrt().to_bits(),
+        "dry air at 700 K has the dry sound speed"
+    );
     for (temp_k, pressure_pa, humidity) in [
-        (700.0, 101_325.0, 0.0),
+        (700.0, 101_325.0, 1.0),
         (288.15, 101_325.0, f64::NAN),
         (288.15, f64::NAN, 50.0),
     ] {
@@ -1658,6 +1666,7 @@ fn impossible_air_is_blamed_on_one_reading_in_one_order() {
             temperature_text: format!("{temperature_c} °C"),
             pressure_text: format!("{pressure_hpa} hPa"),
             pressure_origin: origin,
+            altitude_unit: AltitudeUnit::Meters,
         };
         let refusal = error.refusal_in(&spelling, 0.0, temperature_c, pressure_hpa);
         (refusal.path().to_string(), refusal.message().to_string())

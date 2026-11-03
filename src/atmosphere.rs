@@ -795,11 +795,18 @@ const DENSITY_MATCH_REFERENCE_PRESSURE_HPA: f64 = 1013.25;
 ///
 /// # Scope
 ///
-/// The closed-form troposphere, with no geopotential correction — the same plain-height
-/// convention as the FAA-rule figure and the DA entry mode. That covers every shooting
-/// condition on Earth, but the arithmetic does not know where it stops: above 11 km it keeps
-/// answering, wrongly. Callers bound it; the bridge command refuses conditions outside
-/// -5 km..11 km (`crate::atmosphere_service`).
+/// Heights are the standard atmosphere's own (geopotential), with no correction to geometric
+/// height — the same plain-height convention as the FAA-rule figure and the DA entry mode.
+///
+/// Up to 11 km this is the closed-form troposphere above, which covers every shooting condition
+/// on Earth; below sea level it continues the troposphere's lapse, as the standard atmosphere
+/// does. Air thinner than the standard tropopause's (hot air, or a low station pressure) reads
+/// its altitude in the standard atmosphere's upper layers, the ICAO table [`air_at`] walks:
+/// isothermal from 11 km, warming from 20 km and 32 km, isothermal again from 47 km, cooling from
+/// 51 km and 71 km, the last layer's lapse continuing above 84 km. So the figure is the standard
+/// atmosphere's altitude of equal density for any finite positive density: standard air reads
+/// its own altitude in every layer, and it falls steadily as the air thins. Up to 11 km the
+/// result is the closed form above to the bit.
 ///
 /// A raw primitive: `humidity_percent` is not validated. A number outside 0-100 is clamped
 /// into it, and a NaN propagates to a NaN result, never to pure steam. Validate a reading with
@@ -822,8 +829,60 @@ pub fn density_matched_altitude_m(
         Some(DENSITY_MATCH_REFERENCE_PRESSURE_HPA),
         0.0,
     );
+    let ratio = density / reference;
     let exponent = G_ACCEL_MPS2 / (R_AIR * ISA_LAPSE_K_PER_M) - 1.0;
-    (ISA_SEA_LEVEL_TEMP_K / ISA_LAPSE_K_PER_M) * (1.0 - (density / reference).powf(1.0 / exponent))
+    let troposphere =
+        (ISA_SEA_LEVEL_TEMP_K / ISA_LAPSE_K_PER_M) * (1.0 - ratio.powf(1.0 / exponent));
+    // NaN, and every figure up to the tropopause, is the closed form's, to the bit.
+    if troposphere.is_nan() || troposphere <= TROPOSPHERE_TOP_M {
+        return troposphere;
+    }
+    standard_altitude_above_tropopause_m(ratio, exponent)
+}
+
+/// The standard atmosphere's altitude, m (geopotential), of the density ratio `ratio` (to ICAO
+/// sea level) thinner than the tropopause's: the ICAO layers above the troposphere walked up from
+/// 11 km, the last one's lapse continuing above 84 km, as [`air_at`] walks them.
+/// `troposphere_exponent` is the troposphere's density exponent `g0 / (R L) - 1`, which sets the
+/// tropopause's ratio, `(T(11 km) / T0)^n`. Any ratio from 0 up to the tropopause's has a finite
+/// altitude: the last layer cools to 0 K, and to no density, at 178.3 km.
+fn standard_altitude_above_tropopause_m(ratio: f64, troposphere_exponent: f64) -> f64 {
+    let sea_level = &ICAO_LAYERS[0];
+    let mut base_ratio =
+        (ICAO_LAYERS[1].base_temperature / sea_level.base_temperature).powf(troposphere_exponent);
+    for (index, layer) in ICAO_LAYERS.iter().enumerate().skip(1) {
+        let (base, base_temperature, lapse) = (
+            layer.base_altitude,
+            layer.base_temperature,
+            layer.lapse_rate,
+        );
+        // The density ratio within this layer, relative to its base: isothermal, or the power
+        // law of a lapse.
+        let isothermal = lapse.abs() < 1e-10;
+        let scale_height = R_AIR * base_temperature / G_ACCEL_MPS2;
+        let density_exponent = -G_ACCEL_MPS2 / (R_AIR * lapse) - 1.0;
+        let top = ICAO_LAYERS
+            .get(index + 1)
+            .map_or(f64::INFINITY, |next| next.base_altitude);
+        let top_ratio = if top.is_infinite() {
+            0.0
+        } else if isothermal {
+            base_ratio * (-(top - base) / scale_height).exp()
+        } else {
+            base_ratio * (1.0 + lapse * (top - base) / base_temperature).powf(density_exponent)
+        };
+        if ratio >= top_ratio || top.is_infinite() {
+            return if isothermal {
+                base + scale_height * (base_ratio / ratio).ln()
+            } else {
+                let temperature =
+                    base_temperature * (ratio / base_ratio).powf(1.0 / density_exponent);
+                base + (temperature - base_temperature) / lapse
+            };
+        }
+        base_ratio = top_ratio;
+    }
+    unreachable!("the last layer has no top")
 }
 
 /// Back-solve an ISA-equivalent station altitude/temperature/pressure from a directly-declared
@@ -1193,13 +1252,25 @@ fn moist_air_vapor_mole_fraction(temp_k: f64, pressure_pa: f64, humidity_percent
 /// operation order, so they cannot drift apart. `p_sv_hpa` is in hPa and `p_pa` in Pa; the
 /// humidity is clamped into `[0, 100]` as a total-function guard for the unvalidated legacy
 /// entry points (validated callers pass a [`RelativeHumidity`], already in range), and a NaN
-/// humidity, or a NaN `p_sv_hpa` above water's critical point, gives a NaN `x_v`, which
-/// [`capped_vapor_mole_fraction`] keeps.
+/// humidity, or a NaN `p_sv_hpa` above water's critical point at any humidity above 0, gives a
+/// NaN `x_v`, which [`capped_vapor_mole_fraction`] keeps.
+///
+/// Dry air holds no water vapour at any temperature: at 0 % `x_v` is exactly 0 whatever
+/// `p_sv_hpa` is, so dry air above water's critical point (647.096 K, where `p_sv_hpa` is NaN)
+/// is dry air, not air that cannot exist. Wherever `p_sv_hpa` is a number (below that point)
+/// this is the very value the full formula gives, bit for bit: the same zero, with its sign,
+/// and NaN for a NaN temperature or pressure (through `f`).
 #[inline(always)]
 pub(crate) fn vapor_mole_fraction(p_sv_hpa: f64, f: f64, humidity_percent: f64, p_pa: f64) -> f64 {
+    let humidity_percent = humidity_percent.clamp(0.0, 100.0);
+    if humidity_percent == 0.0 {
+        // The full formula without its positive, finite p_sv factor (and the exact factors 100
+        // and 1/100, which move no zero): the same signed zero, or NaN, as ever.
+        return humidity_percent * f / p_pa;
+    }
     // Vapor pressure with clamping. p_sv is in hPa (enhanced_saturation_vapor_pressure
     // returns hPa — its critical-pressure constant is 220640 hPa), so p_v is in hPa too.
-    let p_v = humidity_percent.clamp(0.0, 100.0) / 100.0 * f * p_sv_hpa;
+    let p_v = humidity_percent / 100.0 * f * p_sv_hpa;
 
     // Convert the vapor pressure to Pa BEFORE forming the mole fraction: the divisor below
     // is in Pa. Dividing the hPa p_v by the Pa total made x_v 100x too small, which erased
@@ -1718,9 +1789,11 @@ pub enum AtmosphereErrorReason {
     /// A pressure at or below zero.
     NonPositivePressure,
     /// Air that cannot exist: the stated humidity needs a water-vapour mole fraction of 1 or
-    /// more, that is more vapour pressure than the air's total pressure, or the temperature is
-    /// above water's critical point, where the vapour-pressure formula is undefined. The same
-    /// refusal the `atmosphere.density_altitude` service makes.
+    /// more, that is more vapour pressure than the air's total pressure; or the air is humid
+    /// above water's critical point (647.096 K), where no saturation vapour pressure, and so no
+    /// relative humidity, is defined; or, dry above that point, it is too hot for the CIPM-2007
+    /// density to stay finite and positive. Dry air at any lower temperature above absolute
+    /// zero exists. The same refusal the `atmosphere.density_altitude` service makes.
     ImpossibleAir,
     /// A station density ratio (density / 1.225 kg/m³) outside `(0, 2)`.
     DensityRatioOutOfRange,
@@ -1730,6 +1803,13 @@ pub enum AtmosphereErrorReason {
     UniformSpeedOfSoundOutOfRange,
     /// A downrange atmosphere zone whose `until_distance_m` is not above 0.
     NonPositiveZoneThreshold,
+    /// Air that cannot exist aloft: from this station (or downrange zone) temperature the
+    /// standard lapse takes the air to absolute zero, at an altitude the flight reaches. Every
+    /// trajectory kernel refuses the flight at the step that gets there, with this reason on the
+    /// temperature ([`AtmosphereError::field`] `temperature_c`, the governing air's temperature);
+    /// [`AtmosphereError::altitude_m`] is where the air reaches 0 K. A flight that stays below
+    /// that height flies.
+    AirAloftBelowAbsoluteZero,
 }
 
 impl fmt::Display for AtmosphereErrorReason {
@@ -1755,7 +1835,8 @@ impl fmt::Display for AtmosphereErrorReason {
             Self::ImpossibleAir => {
                 "no such air exists: at this temperature and pressure the humidity needs a \
                  water-vapour mole fraction of 1 or more (more vapour pressure than the air's \
-                 total pressure), or the temperature is above water's critical point"
+                 total pressure), or the air is humid above water's critical point, or too hot \
+                 to have a density"
             }
             Self::DensityRatioOutOfRange => {
                 "density ratio (density / 1.225 kg/m^3) must be greater than 0 and less than 2"
@@ -1767,6 +1848,7 @@ impl fmt::Display for AtmosphereErrorReason {
             Self::NonPositiveZoneThreshold => {
                 "an atmosphere zone's until_distance_m must be greater than 0"
             }
+            Self::AirAloftBelowAbsoluteZero => "the air aloft would fall below absolute zero",
         })
     }
 }
@@ -1791,6 +1873,8 @@ pub struct AtmosphereError {
     value: f64,
     reason: AtmosphereErrorReason,
     humidity_unit: Option<HumidityUnit>,
+    /// Where air that cannot exist aloft reaches absolute zero, m above mean sea level.
+    altitude_m: Option<f64>,
 }
 
 impl AtmosphereError {
@@ -1800,6 +1884,21 @@ impl AtmosphereError {
             value,
             reason,
             humidity_unit: None,
+            altitude_m: None,
+        }
+    }
+
+    /// Air that cannot exist aloft: from the governing air's `temperature_c` the standard lapse
+    /// reaches absolute zero at `altitude_m` (geometric, above mean sea level), which the flight
+    /// reaches.
+    fn aloft(temperature_c: f64, altitude_m: f64) -> Self {
+        Self {
+            altitude_m: Some(altitude_m),
+            ..Self::new(
+                "temperature_c",
+                temperature_c,
+                AtmosphereErrorReason::AirAloftBelowAbsoluteZero,
+            )
         }
     }
 
@@ -1815,8 +1914,16 @@ impl AtmosphereError {
     /// from -5 to 105 is read as 0 or 100)", not a bare "must be finite"; every other refusal is
     /// its [`AtmosphereErrorReason`]'s text.
     ///
-    /// For a caller that names the field itself (a flag parser).
+    /// For a caller that names the field itself (a flag parser). Any altitude it quotes is in
+    /// metres; [`Self::explanation_in`] states it in another unit.
     pub fn explanation(&self) -> String {
+        self.explanation_in(AltitudeUnit::Meters)
+    }
+
+    /// [`Self::explanation`] with any altitude it quotes (where air that cannot exist aloft
+    /// reaches absolute zero) in `altitude_unit`: `"... reaches 0 K at 5049 ft above mean sea
+    /// level ..."` in feet.
+    pub fn explanation_in(&self, altitude_unit: AltitudeUnit) -> String {
         match (self.reason, self.humidity_unit) {
             (AtmosphereErrorReason::NotFinite, Some(HumidityUnit::Percent)) => format!(
                 "relative humidity must be a finite {}",
@@ -1826,8 +1933,26 @@ impl AtmosphereError {
                 "relative humidity must be a finite {}",
                 humidity_fraction_range()
             ),
+            (reason @ AtmosphereErrorReason::AirAloftBelowAbsoluteZero, _) => {
+                match self.altitude_m {
+                    Some(altitude_m) => format!(
+                        "{reason}: from this temperature the standard lapse reaches 0 K at {} \
+                         above mean sea level, which this flight reaches (check the temperature \
+                         and its unit)",
+                        altitude_unit.text(altitude_m)
+                    ),
+                    None => reason.to_string(),
+                }
+            }
             (reason, _) => reason.to_string(),
         }
+    }
+
+    /// For air that cannot exist aloft ([`AtmosphereErrorReason::AirAloftBelowAbsoluteZero`]),
+    /// the geometric altitude above mean sea level, m, at which the lapse from the refused
+    /// temperature reaches absolute zero; `None` for every other refusal.
+    pub fn altitude_m(&self) -> Option<f64> {
+        self.altitude_m
     }
 
     /// The refused field's name or path.
@@ -1877,16 +2002,26 @@ pub(crate) fn pressure_altitude_outside_troposphere_m(station_pressure_hpa: f64)
 /// °C to K.
 const KELVIN_OFFSET: f64 = 273.15;
 
+/// Water's critical temperature, K: above it no saturation vapour pressure (and so no relative
+/// humidity) is defined, and only dry air exists.
+const WATER_CRITICAL_TEMPERATURE_K: f64 = 647.096;
+
 /// −100 °C. The engine's saturation-vapour-pressure and CIPM compressibility formulas clamp
-/// their temperature here, so below it a density would mix a clamped and an unclamped term.
+/// their temperature here: below it the humidity terms are extrapolated (evaluated at this
+/// temperature), while the rest of the density is the air's own.
 pub(crate) const HUMID_AIR_MODEL_MIN_K: f64 = 173.15;
 /// 100 °C. Above the boiling point the saturation-vapour-pressure formula stops describing a
-/// stable atmosphere, and above water's critical point (647 K) it is not defined at all.
+/// stable atmosphere, and above water's critical point (647.096 K) it is not defined at all:
+/// there only dry air exists.
 pub(crate) const HUMID_AIR_MODEL_MAX_K: f64 = 373.15;
 
 /// Whether a station temperature, K, lies outside [`HUMID_AIR_MODEL_MIN_K`] to
-/// [`HUMID_AIR_MODEL_MAX_K`] (both edges inside). `atmosphere.density_altitude` refuses such a
-/// temperature; every surface blames air that cannot exist at one on the temperature.
+/// [`HUMID_AIR_MODEL_MAX_K`] (both edges inside), where the humid-air terms are extrapolated.
+///
+/// Not a refusal: no surface refuses a temperature for lying outside this range. It only
+/// decides which reading air that cannot exist is blamed on ([`AtmosphereError::refusal_in`]):
+/// outside the range the formulas hold for, the temperature is the likelier mistake (°F typed as
+/// °C, °C sent as kelvin) than the humidity.
 pub(crate) fn outside_humid_air_model_range(temperature_k: f64) -> bool {
     !(HUMID_AIR_MODEL_MIN_K..=HUMID_AIR_MODEL_MAX_K).contains(&temperature_k)
 }
@@ -1986,6 +2121,31 @@ pub struct AirSpelling<'a> {
     /// QNH reduced there. It decides whether a station pressure outside the troposphere is the
     /// pressure's fault or the altitude's.
     pub pressure_origin: StationPressureOrigin,
+    /// The unit the surface states an altitude in: every altitude a refusal quotes (a pressure
+    /// altitude, the troposphere's bounds, the station altitude, where air aloft reaches 0 K).
+    pub altitude_unit: AltitudeUnit,
+}
+
+/// The unit a surface states an altitude in, in a refusal of its air: metres (the default, and
+/// every SI surface's), or feet (a terminal run with `--units imperial`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AltitudeUnit {
+    /// Metres: `1539 m`.
+    #[default]
+    Meters,
+    /// Feet: `5049 ft`.
+    Feet,
+}
+
+impl AltitudeUnit {
+    /// An altitude given in metres, stated in this unit to the nearest whole unit: `"1539 m"`,
+    /// `"5049 ft"`.
+    pub fn text(self, altitude_m: f64) -> String {
+        match self {
+            Self::Meters => format!("{altitude_m:.0} m"),
+            Self::Feet => format!("{:.0} ft", altitude_m / 0.3048),
+        }
+    }
 }
 
 /// A reading in a refusal message: rounded to 2 decimals with the trailing zeros dropped (so a
@@ -2058,12 +2218,15 @@ impl AtmosphereError {
     /// `spelling` names the surface's readings and carries their values in its units;
     /// `station_altitude_m`, `station_temperature_c` and `station_pressure_hpa` are the station
     /// the solve resolved. A refusal for any reason but air that cannot exist blames the reading
-    /// this error names. Air that cannot exist is blamed by one rule on every surface, in the
-    /// order `atmosphere.density_altitude`'s own range checks blame in, so that command and
+    /// this error names. Air that cannot exist is blamed by one rule on every surface, and
+    /// `atmosphere.density_altitude` checks its own troposphere band in the same order (after a
+    /// refusal this rule blames on the temperature, before the others), so that command and
     /// `solve` locate the same air at the same path:
     ///
-    /// 1. the temperature, when it is outside 173.15 K to 373.15 K (-100 °C to 100 °C, where
-    ///    the humid-air formulas hold; water's critical point, 647 K, is far beyond);
+    /// 1. the temperature, when the air is humid above water's critical point (647.096 K), or
+    ///    the temperature is outside 173.15 K to 373.15 K (-100 °C to 100 °C, where the humid-air
+    ///    formulas hold). Such a temperature is refused by no surface on its own (the humidity
+    ///    terms are extrapolated there); with air that cannot exist it is the likelier mistake;
     /// 2. when the station pressure's pressure altitude is outside the troposphere, the reading
     ///    that put it there ([`AirSpelling::pressure_origin`]): the pressure when it was a
     ///    reading, because a pressure in the wrong unit (hPa sent as pascals) is far likelier
@@ -2100,7 +2263,8 @@ impl AtmosphereError {
         station_temperature_c: f64,
         station_pressure_hpa: f64,
     ) -> (String, String) {
-        let explanation = self.explanation();
+        let explanation = self.explanation_in(spelling.altitude_unit);
+        let altitude = |altitude_m: f64| spelling.altitude_unit.text(altitude_m);
         if self.reason == AtmosphereErrorReason::ImpossibleAir {
             let air = format!(
                 "{} = {} at {} and {}: {explanation}",
@@ -2121,8 +2285,10 @@ impl AtmosphereError {
             if let Some(altitude_m) = pressure_altitude_outside_troposphere_m(station_pressure_hpa)
             {
                 let troposphere = format!(
-                    "a pressure altitude of {altitude_m:.0} m, outside the troposphere \
-                     ({LOWEST_PRESSURE_ALTITUDE_M} m to {TROPOSPHERE_TOP_M} m)"
+                    "a pressure altitude of {}, outside the troposphere ({} to {})",
+                    altitude(altitude_m),
+                    altitude(LOWEST_PRESSURE_ALTITUDE_M),
+                    altitude(TROPOSPHERE_TOP_M)
                 );
                 return match spelling.pressure_origin {
                     StationPressureOrigin::Reading => (
@@ -2136,18 +2302,18 @@ impl AtmosphereError {
                         spelling.altitude.path.to_string(),
                         format!(
                             "{air}; no {} was given, and the standard pressure at the station \
-                             altitude of {station_altitude_m:.0} m is {troposphere}: check the \
-                             altitude's unit",
-                            spelling.pressure.name
+                             altitude of {} is {troposphere}: check the altitude's unit",
+                            spelling.pressure.name,
+                            altitude(station_altitude_m)
                         ),
                     ),
                     StationPressureOrigin::Qnh => (
                         spelling.altitude.path.to_string(),
                         format!(
-                            "{air}; {} is a QNH, and reduced to the station altitude of \
-                             {station_altitude_m:.0} m it is {troposphere}: check the altitude's \
-                             unit",
-                            spelling.pressure.name
+                            "{air}; {} is a QNH, and reduced to the station altitude of {} it is \
+                             {troposphere}: check the altitude's unit",
+                            spelling.pressure.name,
+                            altitude(station_altitude_m)
                         ),
                     ),
                 };
@@ -2235,7 +2401,18 @@ impl StationAir {
     /// - Impossible air, refused by exactly the `atmosphere.density_altitude` service's test
     ///   (an uncapped water-vapour mole fraction that is NaN or at least 1):
     ///   [`AtmosphereErrorReason::ImpossibleAir`], on `humidity_percent`, or on
-    ///   `temperature_c` above water's critical point.
+    ///   `temperature_c` for humid air above water's critical point (647.096 K), and for dry air
+    ///   there too hot for the CIPM-2007 density to stay positive (about 90,000 K at
+    ///   1013.25 hPa).
+    ///
+    /// Those are the only temperatures refused ([`check_station_temperature_c`] is the rule on
+    /// its own): outside 173.15-373.15 K (-100 °C to 100 °C) the humidity terms are extrapolated,
+    /// never refused. Below 173.15 K the saturation vapour pressure and the CIPM compressibility
+    /// are evaluated at 173.15 K (they clamp their temperature there), and above 373.15 K they
+    /// are carried past the range they are fitted to. Dry air holds no vapour at any
+    /// temperature, so at 0 % neither term is reached. A station whose lapse takes the air to
+    /// absolute zero aloft is accepted here and refused by the flight that reaches that height
+    /// ([`AtmosphereErrorReason::AirAloftBelowAbsoluteZero`]).
     pub fn new(
         altitude_m: f64,
         temperature_c: f64,
@@ -2385,18 +2562,28 @@ impl StationAir {
     }
 }
 
-fn check_station_state(
-    altitude_m: f64,
-    temperature_c: f64,
-    pressure_hpa: f64,
-) -> Result<(), AtmosphereError> {
-    if !altitude_m.is_finite() {
-        return Err(AtmosphereError::new(
-            "altitude_m",
-            altitude_m,
-            AtmosphereErrorReason::NotFinite,
-        ));
-    }
+/// The one rule a station temperature, °C, is held to on its own, on every surface: finite and
+/// above absolute zero (-273.15 °C). Nothing narrower: outside 173.15-373.15 K (-100 °C to
+/// 100 °C) the humidity terms are extrapolated, never refused. [`StationAir::new`] applies it,
+/// and then the impossible-air rule, which is the only other reason a temperature is refused (in
+/// flight too: [`AtmosphereErrorReason::AirAloftBelowAbsoluteZero`]). A surface that checks a
+/// reading as it is typed (a CLI flag, converted to °C) applies this same function, so a reading
+/// is accepted or refused alike everywhere.
+///
+/// ```
+/// use ballistics_engine::atmosphere::check_station_temperature_c;
+///
+/// assert!(check_station_temperature_c(250.0).is_ok()); // extrapolated, not refused
+/// assert!(check_station_temperature_c(-150.0).is_ok());
+/// assert!(check_station_temperature_c(-273.15).is_err()); // absolute zero
+/// assert!(check_station_temperature_c(f64::NAN).is_err());
+/// ```
+///
+/// # Errors
+///
+/// [`AtmosphereErrorReason::NotFinite`] or [`AtmosphereErrorReason::AtOrBelowAbsoluteZero`],
+/// on `temperature_c`.
+pub fn check_station_temperature_c(temperature_c: f64) -> Result<(), AtmosphereError> {
     if !temperature_c.is_finite() {
         return Err(AtmosphereError::new(
             "temperature_c",
@@ -2411,6 +2598,54 @@ fn check_station_state(
             AtmosphereErrorReason::AtOrBelowAbsoluteZero,
         ));
     }
+    Ok(())
+}
+
+/// [`check_station_temperature_c`] for a temperature typed into a flag (`flag`, such as
+/// `--temperature`) in °F (`fahrenheit`) or °C, refused in the flag's own words and unit:
+/// `"--temperature -500 F is at or below absolute zero (-459.67 F)"`, `"--temperature NaN C is
+/// not a finite number"`. The reading is converted to °C exactly as the CLI and the browser
+/// terminal fly it, `(F - 32) · 5 / 9`, so the flag refuses precisely the readings the solve
+/// would.
+///
+/// ```
+/// use ballistics_engine::atmosphere::check_temperature_flag;
+///
+/// assert!(check_temperature_flag("--temperature", 482.0, true).is_ok()); // 250 °C
+/// assert_eq!(
+///     check_temperature_flag("--temperature", -500.0, true).unwrap_err(),
+///     "--temperature -500 F is at or below absolute zero (-459.67 F)"
+/// );
+/// ```
+///
+/// # Errors
+///
+/// The refusal, in the flag's words, of a reading [`check_station_temperature_c`] refuses.
+pub fn check_temperature_flag(flag: &str, value: f64, fahrenheit: bool) -> Result<(), String> {
+    let (celsius, unit, absolute_zero) = if fahrenheit {
+        ((value - 32.0) * 5.0 / 9.0, "F", "-459.67 F")
+    } else {
+        (value, "C", "-273.15 C")
+    };
+    check_station_temperature_c(celsius).map_err(|error| match error.reason() {
+        AtmosphereErrorReason::NotFinite => format!("{flag} {value} {unit} is not a finite number"),
+        _ => format!("{flag} {value} {unit} is at or below absolute zero ({absolute_zero})"),
+    })
+}
+
+fn check_station_state(
+    altitude_m: f64,
+    temperature_c: f64,
+    pressure_hpa: f64,
+) -> Result<(), AtmosphereError> {
+    if !altitude_m.is_finite() {
+        return Err(AtmosphereError::new(
+            "altitude_m",
+            altitude_m,
+            AtmosphereErrorReason::NotFinite,
+        ));
+    }
+    check_station_temperature_c(temperature_c)?;
     if !pressure_hpa.is_finite() {
         return Err(AtmosphereError::new(
             "pressure_hpa",
@@ -2428,8 +2663,10 @@ fn check_station_state(
     Ok(())
 }
 
-/// The `atmosphere.density_altitude` service's impossible-air test: an uncapped vapour mole
-/// fraction that is NaN (above water's critical point) or at least 1.
+/// The impossible-air rule every station and zone is held to (and the `atmosphere.density_altitude`
+/// service through it): an uncapped vapour mole fraction that is NaN (humid air above water's
+/// critical point) or at least 1; and, above that point, where only dry air gets this far, a
+/// CIPM-2007 density that is not finite and positive.
 fn refuse_impossible_air(
     temperature_c: f64,
     pressure_hpa: f64,
@@ -2449,6 +2686,21 @@ fn refuse_impossible_air(
             humidity.percent(),
             AtmosphereErrorReason::ImpossibleAir,
         ));
+    }
+    // Dry air above water's critical point holds no vapour (its mole fraction is exactly 0) and
+    // flies. Its CIPM-2007 compressibility is a virial fit carried far past its range there, and
+    // far enough above it (about 90,000 K at 1013.25 hPa) it gives no positive density at all:
+    // air the density model cannot describe is refused at its temperature. Below the critical
+    // point this rule is the two tests above alone, as it always was.
+    if temperature_c + KELVIN_OFFSET > WATER_CRITICAL_TEMPERATURE_K {
+        let density = calculate_air_density_cimp(temperature_c, pressure_hpa, humidity.percent());
+        if !(density.is_finite() && density > 0.0) {
+            return Err(AtmosphereError::new(
+                "temperature_c",
+                temperature_c,
+                AtmosphereErrorReason::ImpossibleAir,
+            ));
+        }
     }
     Ok(())
 }
@@ -2709,6 +2961,11 @@ impl GoverningAir {
 /// checks them once ([`crate::trajectory_integration::try_integrate_trajectory`],
 /// `TrajectorySolver`, `fast_integrate*`). This per-step lookup does not: an unvalidated zone
 /// humidity outside 0-100 is clamped into it, and a NaN one gives NaN air, never steam.
+///
+/// Where the lapse from the base temperature reaches absolute zero (183 km above 15 °C at sea
+/// level, 1.54 km above a 10 K station) there is no air: from that height the result is not
+/// finite. Every trajectory kernel refuses a flight that reaches it, at the step that gets
+/// there, as [`AtmosphereErrorReason::AirAloftBelowAbsoluteZero`] on the temperature.
 pub fn air_at(
     atmosphere: &KernelAtmosphere,
     zones: Option<&AtmoSock>,
@@ -2752,6 +3009,129 @@ pub(crate) fn air_at_with_gravity(
             air
         }
     }
+}
+
+/// The geometric altitudes above mean sea level, m, between which the lapse from `base_temp_k`
+/// at `base_alt_m` keeps the air above absolute zero: `(floor, ceiling)`, with
+/// `-inf` / `+inf` where it never gets there.
+///
+/// The temperature [`air_at`] flies is piecewise linear in geopotential height, the base
+/// temperature carried through the ICAO lapse rates exactly as [`integrate_local_atmosphere_layers`]
+/// walks them (the last layer's lapse continuing above 84.852 km, the troposphere's below 0 m),
+/// so each edge is where one layer's line reaches 0 K. Every realistic station has a ceiling too:
+/// 15 °C at sea level reaches 0 K about 183 km up.
+fn absolute_zero_altitudes_m(base_temp_k: f64, base_alt_m: f64) -> (f64, f64) {
+    let base = geometric_to_geopotential_height_m(base_alt_m);
+    let to_geometric = |geopotential_m: f64| {
+        if geopotential_m >= GEOPOTENTIAL_EARTH_RADIUS_M {
+            f64::INFINITY
+        } else {
+            GEOPOTENTIAL_EARTH_RADIUS_M * geopotential_m
+                / (GEOPOTENTIAL_EARTH_RADIUS_M - geopotential_m)
+        }
+    };
+
+    // Up: at an exact boundary, ascent starts in the higher layer.
+    let mut ceiling = f64::INFINITY;
+    let (mut height, mut temperature) = (base, base_temp_k);
+    let mut index = ICAO_LAYERS
+        .iter()
+        .rposition(|layer| height >= layer.base_altitude)
+        .unwrap_or(0);
+    loop {
+        let lapse = ICAO_LAYERS[index].lapse_rate;
+        let end = ICAO_LAYERS
+            .get(index + 1)
+            .map_or(f64::INFINITY, |next| next.base_altitude);
+        if lapse < 0.0 {
+            let zero = height + temperature / -lapse;
+            if zero <= end {
+                ceiling = to_geometric(zero);
+                break;
+            }
+        }
+        if end.is_infinite() {
+            break;
+        }
+        temperature += lapse * (end - height);
+        height = end;
+        index += 1;
+    }
+
+    // Down: at an exact boundary, descent starts in the lower layer. The troposphere's lapse
+    // warms the air below its base, so only a warming layer above it (the stratosphere's) can
+    // take a cold enough base to 0 K on the way down.
+    let mut floor = f64::NEG_INFINITY;
+    let (mut height, mut temperature) = (base, base_temp_k);
+    let mut index = ICAO_LAYERS
+        .iter()
+        .rposition(|layer| height > layer.base_altitude)
+        .unwrap_or(0);
+    loop {
+        let lapse = ICAO_LAYERS[index].lapse_rate;
+        let end = if index == 0 {
+            f64::NEG_INFINITY
+        } else {
+            ICAO_LAYERS[index].base_altitude
+        };
+        if lapse > 0.0 {
+            let zero = height - temperature / lapse;
+            if zero >= end {
+                floor = to_geometric(zero);
+                break;
+            }
+        }
+        if index == 0 {
+            break;
+        }
+        temperature -= lapse * (height - end);
+        height = end;
+        index -= 1;
+    }
+    (floor, ceiling)
+}
+
+/// The refusal of a flight that went where its air cannot exist: the step that started at
+/// `downrange_m` and `altitude_m` (the last state a kernel accepted, geometric altitude above
+/// mean sea level) failed to a non-finite state, and the air within `reach_m` of where it started
+/// (the farthest any stage of that step could lie from it) falls to absolute zero, where
+/// [`air_at`] has no air at all.
+///
+/// The governing air is the zone that covers the step (at its start, or as far downrange as it
+/// could reach) or the station. `None` when that air stays above 0 K within the step's reach,
+/// so a step that failed for any other reason keeps its own error, and for uniform air, which
+/// does not lapse. Kernels call this only once a step has failed, so a flight that stays below
+/// the height its air reaches 0 K flies exactly as it did.
+pub(crate) fn air_aloft_refusal(
+    atmosphere: &KernelAtmosphere,
+    zones: Option<&AtmoSock>,
+    downrange_m: f64,
+    altitude_m: f64,
+    reach_m: f64,
+) -> Option<AtmosphereError> {
+    let KernelAtmosphere::Station(station) = atmosphere else {
+        return None;
+    };
+    if !(downrange_m.is_finite() && altitude_m.is_finite() && reach_m.is_finite()) {
+        return None;
+    }
+    let reach_m = reach_m.abs();
+    [downrange_m, downrange_m + reach_m]
+        .into_iter()
+        .find_map(|downrange_m| {
+            let temperature_c = zones
+                .and_then(|sock| sock.governing_air_for_range(downrange_m))
+                .map_or(station.temperature_c, |zone| zone.temperature_c);
+            let (floor, ceiling) =
+                absolute_zero_altitudes_m(temperature_c + KELVIN_OFFSET, station.altitude_m);
+            if altitude_m + reach_m >= ceiling {
+                Some(AtmosphereError::aloft(temperature_c, ceiling))
+            } else if altitude_m - reach_m <= floor {
+                Some(AtmosphereError::aloft(temperature_c, floor))
+            } else {
+                None
+            }
+        })
 }
 
 /// The composition behind [`air_at`] and the legacy `get_local_atmosphere*` wrappers,
@@ -3341,6 +3721,9 @@ mod nan_humidity_tests;
 
 #[cfg(test)]
 mod held_vapour_tests;
+
+#[cfg(test)]
+mod temperature_rule_tests;
 
 #[cfg(test)]
 mod tests {

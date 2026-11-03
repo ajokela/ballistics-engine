@@ -6,7 +6,7 @@
 //! MBA-157: Upstreamed from ballistics_rust for shared use across the ecosystem
 
 use crate::atmosphere::{KernelAtmosphere, RelativeHumidity, StationAir};
-use crate::fast_trajectory::{fast_integrate, FastIntegrationParams};
+use crate::fast_trajectory::{fast_integrate_flight, FastIntegrationParams};
 use crate::wind::WindSock;
 use crate::BallisticInputs;
 use nalgebra::Vector3;
@@ -145,8 +145,13 @@ pub fn solve_trajectory_for_monte_carlo_with_station_presence(
         atmo_sock: None,
     };
 
-    // Solve trajectory
-    let solution = fast_integrate(inputs, &wind_sock, params);
+    // Solve trajectory. A flight into air that cannot exist aloft is refused as that, never
+    // reported as a NaN impact.
+    let (solution, refusal) =
+        fast_integrate_flight(inputs, &wind_sock, params, crate::gravity::Gravity::EARTH);
+    if let Some(refusal) = refusal {
+        return Err(refusal.to_string());
+    }
 
     if solution.t.is_empty() {
         return Err("Empty trajectory solution".to_string());

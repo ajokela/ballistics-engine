@@ -99,6 +99,7 @@ pub fn a7p_air_refusal(doc: &super::A7pDocument) -> Option<crate::atmosphere::Ai
         pressure_text: reading_text(pressure_hpa, "hPa"),
         // A file carries its pressure as a station reading.
         pressure_origin: crate::atmosphere::StationPressureOrigin::Reading,
+        altitude_unit: crate::atmosphere::AltitudeUnit::Meters,
     };
     let humidity = match RelativeHumidity::try_percent(src.air_humidity_pct) {
         Ok(humidity) => humidity,

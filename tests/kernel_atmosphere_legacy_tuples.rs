@@ -118,10 +118,17 @@ const FLOWN_BY_0_49_0: &[(&str, Tuple, f64, Now)] = &[
         Refused("temperature_c", R::AtOrBelowAbsoluteZero),
     ),
     // 0.49.0 read the NaN saturation pressure above 647.096 K as pure steam, at any humidity.
+    // Dry air there holds no vapour and is ordinary hot air; humid air there cannot exist.
     (
-        "standard temperature above water's critical point",
+        "standard temperature above water's critical point, dry",
         (0.0, 400.0, 1013.25, 1.0),
         0.0,
+        Flies,
+    ),
+    (
+        "standard temperature above water's critical point, humid",
+        (0.0, 400.0, 1013.25, 1.0),
+        1.0,
         Refused("temperature_c", R::ImpossibleAir),
     ),
     // 0.49.0's kernel flew every station dry, so it never saw the humidity; 0.50.0 flies it.

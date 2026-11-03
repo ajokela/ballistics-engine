@@ -17,9 +17,9 @@
 // Re-export the main types and functions
 pub use atmosphere::{
     air_at, resolve_station_conditions_with_presence, AirField, AirRefusal, AirSpelling,
-    AtmoSegment, AtmoSock, AtmosphereError, AtmosphereErrorReason, KernelAtmosphere, LocalAir,
-    RelativeHumidity, StationAir, StationAtmospherePresence, StationPressureOrigin, StationReading,
-    DEFAULT_HUMIDITY_PERCENT, HUMIDITY_SENSOR_TOLERANCE_PERCENT,
+    AltitudeUnit, AtmoSegment, AtmoSock, AtmosphereError, AtmosphereErrorReason, KernelAtmosphere,
+    LocalAir, RelativeHumidity, StationAir, StationAtmospherePresence, StationPressureOrigin,
+    StationReading, DEFAULT_HUMIDITY_PERCENT, HUMIDITY_SENSOR_TOLERANCE_PERCENT,
 };
 pub use cli_api::{
     calculate_zero_angle, calculate_zero_angle_with_conditions,

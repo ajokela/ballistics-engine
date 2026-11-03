@@ -500,7 +500,7 @@ is no percent alias.
 
   ```
   $ ballistics trajectory -u metric -v 823 -b 0.475 -m 10.9 -d 7.82 --max-range 300 --temperature 101 --humidity 100
-  Error: --humidity = 100 at 101 °C and 1013.25 hPa: no such air exists: at this temperature and pressure the humidity needs a water-vapour mole fraction of 1 or more (more vapour pressure than the air's total pressure), or the temperature is above water's critical point
+  Error: --humidity = 100 at 101 °C and 1013.25 hPa: no such air exists: at this temperature and pressure the humidity needs a water-vapour mole fraction of 1 or more (more vapour pressure than the air's total pressure), or the air is humid above water's critical point, or too hot to have a density
   ```
 
   A command that solves many rows or candidates (`lead`, `plan-truing`, `optimal-zero`,
@@ -513,7 +513,9 @@ is no percent alias.
   troposphere is blamed on the altitude, with the unit to check:
   `no --pressure was given, and the standard pressure at the station altitude of 20000 m is a
   pressure altitude of ... m, outside the troposphere (-5000 m to 11000 m): check the
-  altitude's unit`. The bridge and the browser terminal blame the same reading.
+  altitude's unit`. Under `--units imperial` every altitude in it is in feet (`... the station
+  altitude of 65617 ft is a pressure altitude of ... ft, outside the troposphere (-16404 ft to
+  36089 ft) ...`, since 0.50.0). The bridge and the browser terminal blame the same reading.
 - **One echo rule for a reading in the band (0.50.0).** What reports the air a run FLIES states
   the end it flies as: `trajectory`'s stderr `Effective values` line says `humidity=100.0%` for
   a `--humidity 102`, a `--location` CSV cell of 102 or a saved profile storing 102, and
@@ -573,6 +575,57 @@ rule, Litz's spin-drift fit and the published Miller calculators give. A humid c
 multiply Sg by 1.0032 at 15 °C / 50 %, 1.0080 at 30 °C / 50 % and 1.0192 at 35 °C / 90 %. For a
 .308 175 gr at 2600 fps (1:10 twist), spin drift at 1000 yd would move from 13.04 to 13.07 in at
 15 °C / 50 %, and from 12.83 to 13.00 in at 35 °C / 90 %.
+
+#### Temperature: one rule on every command (0.50.0)
+
+A station temperature is held to one rule wherever it comes from: `--temperature`,
+`--zero-temperature`, a `--location` CSV cell, a saved profile, a request file, the bridge and the
+browser terminal. It must be a finite number above absolute zero, and the air it describes must
+be able to exist (the humidity rule above). Nothing narrower: the same reading flies, or is
+refused, alike everywhere. Before 0.50.0 `--temperature` refused readings outside -148..392 °F
+(-100..200 °C) on most commands and on the browser terminal's `true-velocity` and `true-wind`,
+while `--zero-temperature`, a CSV cell, `estimate-bc` and the terminal's other commands flew them,
+and the bridge's `atmosphere.density_altitude` refused anything outside 173.15-373.15 K. That
+command now answers for every temperature a solve flies, wherever its density altitudes land.
+
+- **Outside -100 °C to 100 °C the humidity terms are extrapolated.** Below -100 °C the saturation
+  vapour pressure and the CIPM compressibility are evaluated at -100 °C (they clamp their
+  temperature there); above 100 °C they are carried past the range they are fitted to. Dry air
+  holds no vapour at any temperature, so it flies even above water's critical point (374 °C),
+  until the CIPM compressibility gives no positive density (about 90,000 K at 1013.25 hPa).
+  Humid air above the critical point cannot exist and is refused at the temperature.
+
+  ```
+  $ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --temperature 482 --humidity 0 | grep Impact
+  ║ Impact Velocity:    2350.18 fps       ║
+  ║ Impact Energy:      2060.04 ft-lb     ║
+  $ ballistics trajectory -v 2700 -b 0.475 -m 168 -d 0.308 --max-range 300 --temperature=-500
+  Error: --temperature -500 F is at or below absolute zero (-459.67 F)
+  ```
+
+  A NaN or infinite reading says `--temperature NaN F is not a finite number`. Write a negative
+  reading as `--temperature=-40`, so it is not read as a flag.
+- **Air that cannot exist aloft.** The air a flight meets above the station follows the standard
+  lapse from the station's temperature (6.5 K per km in the troposphere). From a cold enough
+  station it reaches absolute zero within reach of a flight: 10 K (-263.15 °C) at sea level
+  reaches 0 K 1539 m up. A flight that climbs there is refused at the step that reaches it,
+  naming the temperature by its flag in the run's units, never as a failed integration or a
+  trajectory of NaN. (`trajectory` names a reading from a saved profile or a `--location` CSV by
+  its field or column, as its other refusals of the air do, and the zero day's own temperature
+  as `--zero-temperature`.) A zero search whose steeper trials would climb there is refused the
+  same way:
+
+  ```
+  $ ballistics trajectory -u metric -v 823 -b 1.05 -m 48.6 -d 12.7 --drag-model g1 --max-range 20000 --angle 40 --temperature=-263.15 --pressure 250 --humidity 0
+  Error: --temperature = -263.15 °C: the air aloft would fall below absolute zero: from this temperature the standard lapse reaches 0 K at 1539 m above mean sea level, which this flight reaches (check the temperature and its unit)
+  ```
+
+  Under `--units imperial` the same refusal reads `--temperature = -441.67 °F: ... at 5049 ft
+  above mean sea level ...`.
+
+  The same station flies a flat shot (`--angle 1`: 693 m, apex 6.1 m) as it always did. Over a
+  realistic station the air reaches 0 K only far above any flight: 183 km above 15 °C at sea
+  level.
 
 #### Pressure Reference: Absolute vs. QNH (`--pressure-type`)
 

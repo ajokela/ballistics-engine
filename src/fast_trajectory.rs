@@ -302,10 +302,25 @@ pub(crate) fn fast_integrate_with_gravity(
     params: FastIntegrationParams,
     gravity: Gravity,
 ) -> FastSolution {
+    fast_integrate_flight(inputs, wind_sock, params, gravity).0
+}
+
+/// [`fast_integrate_with_gravity`], with the refusal of air that cannot exist aloft when that is
+/// why the flight failed: a step that fails to a non-finite state ends the flight there, as a
+/// failed solution (`success = false`) holding the states before it, never a NaN state; when the
+/// air within that step's reach falls to absolute zero
+/// ([`crate::atmosphere::air_aloft_refusal`]), the refusal says so. The lean Monte Carlo
+/// reports it; the public entry points report the failed solution.
+pub(crate) fn fast_integrate_flight(
+    inputs: &BallisticInputs,
+    wind_sock: &WindSock,
+    params: FastIntegrationParams,
+    gravity: Gravity,
+) -> (FastSolution, Option<crate::atmosphere::AtmosphereError>) {
     // Malformed wind or invalid zones would otherwise silently stub or poison the run. The
     // station is valid by construction (KernelAtmosphere).
     if wind_sock.validate_segments().is_err() || !atmo_sock_is_valid(params.atmo_sock.as_ref()) {
-        return FastSolution::degenerate(&params.initial_state);
+        return (FastSolution::degenerate(&params.initial_state), None);
     }
     let mut effective_inputs = inputs.clone();
     // MBA-1415: this is a public entry point that external bindings call directly, bypassing
@@ -453,6 +468,8 @@ pub(crate) fn fast_integrate_with_gravity(
     // Integration loop
     let mut hit_target = false;
     let mut hit_ground = false;
+    let mut failed = false;
+    let mut refusal = None;
     let mut max_ord_time = None;
     let mut max_ord_y = 0.0;
     let ground_threshold = inputs.ground_threshold;
@@ -565,6 +582,27 @@ pub(crate) fn fast_integrate_with_gravity(
             new_state[j] = state[j] + dt * (k1[j] + 2.0 * k2[j] + 2.0 * k3[j] + k4[j]) / 6.0;
         }
 
+        // A step that fails to a non-finite state ends the flight: a failed solution, never a
+        // NaN state. Every stage it evaluated lies within the step at twice this speed (plus
+        // 10 m/s of slack) of `pos`, which is how far air below absolute zero is looked for.
+        if !new_state.iter().all(|value| value.is_finite()) {
+            failed = true;
+            let speed = (state[3] * state[3] + state[4] * state[4] + state[5] * state[5]).sqrt();
+            refusal = crate::atmosphere::air_aloft_refusal(
+                atmosphere,
+                atmo_sock,
+                pos.x,
+                crate::atmosphere::shot_frame_altitude(
+                    atmosphere.reference_altitude_m(inputs.altitude),
+                    pos.x,
+                    pos.y,
+                    inputs.shooting_angle,
+                ),
+                2.0 * dt * (speed + 10.0),
+            );
+            break;
+        }
+
         if state[0] < params.horiz && new_state[0] >= params.horiz {
             // Keep every terminal metric on the requested target plane. The former top-of-loop
             // check retained this full-step endpoint, biasing time, drop, and velocity past it.
@@ -623,7 +661,9 @@ pub(crate) fn fast_integrate_with_gravity(
         }
     }
 
-    FastSolution::from_trajectory_data(times, states, t_events)
+    let mut solution = FastSolution::from_trajectory_data(times, states, t_events);
+    solution.success = !failed;
+    (solution, refusal)
 }
 
 fn fast_magnus_acceleration(
@@ -959,9 +999,7 @@ pub(crate) fn fast_integrate_with_segments_with_gravity(
     gravity: Gravity,
 ) -> FastSolution {
     // Use the RK45 implementation from trajectory_integration module
-    use crate::trajectory_integration::{
-        integrate_trajectory_from_muzzle_height, TrajectoryParams,
-    };
+    use crate::trajectory_integration::{integrate_trajectory_flight, TrajectoryParams};
 
     // Malformed wind or invalid zones would otherwise silently stub or poison the run. The
     // station is valid by construction (KernelAtmosphere).
@@ -1059,8 +1097,9 @@ pub(crate) fn fast_integrate_with_segments_with_gravity(
 
     // Use RK45 adaptive integration. The launch state's y is measured from the level
     // `muzzle_height` is measured from, as for plain fast_integrate, so the kernel's shear
-    // height starts from the same datum.
-    let trajectory = integrate_trajectory_from_muzzle_height(
+    // height starts from the same datum. A flight into air that cannot exist aloft ends at the
+    // step that reaches it, as a failed solution.
+    let flight = integrate_trajectory_flight(
         initial_state,
         params.t_span,
         traj_params,
@@ -1070,6 +1109,7 @@ pub(crate) fn fast_integrate_with_segments_with_gravity(
         gravity,
         inputs.muzzle_height,
     );
+    let (trajectory, failed_step) = (flight.trajectory, flight.failed_step);
 
     // Convert trajectory to FastSolution format
     let n_points = trajectory.len();
@@ -1167,7 +1207,11 @@ pub(crate) fn fast_integrate_with_segments_with_gravity(
         }
     }
 
-    FastSolution::from_trajectory_data(times, states, t_events)
+    // Any step that failed to a non-finite state, for any cause, fails the solution, as it
+    // does `fast_integrate`'s.
+    let mut solution = FastSolution::from_trajectory_data(times, states, t_events);
+    solution.success = !failed_step;
+    solution
 }
 
 #[cfg(test)]

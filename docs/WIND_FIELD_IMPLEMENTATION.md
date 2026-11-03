@@ -18,8 +18,8 @@ they are. No API is renamed, removed, or re-conventioned.
 
 - **Additive only.** Existing wind APIs (`WindSock`, `WindSegment`,
   `wind_vector`, `WindSegmentField`, etc.) must not change signature or
-  behaviour. Downstream (rockets-engine, moving-batteries) must compile
-  unchanged against the result.
+  behaviour. Downstream (rockets-engine, and a downstream artillery
+  simulation) must compile unchanged against the result.
 - **Determinism.** No network, no wall clock, no unseeded randomness, no
   `std::time`. Same inputs → same outputs, bit-exact.
 - **no_std-compatible shape.** `alloc::vec::Vec` and `nalgebra::Vector3` are
