@@ -1,4 +1,4 @@
-//! R3 (whole-branch review C3, C11): the relative-humidity axis of `error-budget --sigma` and
+//! The relative-humidity axis of `error-budget --sigma` and
 //! `tolerance --domain` says its unit, refuses a value no fraction can be, and can be searched
 //! from a saturated or a dry nominal.
 //!

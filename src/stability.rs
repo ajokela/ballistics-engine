@@ -15,7 +15,7 @@ use crate::InternalBallisticInputs as BallisticInputs;
 /// stability, Litz spin drift and the Litz aerodynamic jump on every surface, so all of them stay
 /// on the published numbers.
 ///
-/// What a humid correction would change, measured with the engine (S7, 0.50.0): the factor
+/// What a humid correction would change, measured with the engine (0.50.0): the factor
 /// `ρ_dry / ρ_moist` (CIPM-2007, same T and P, 1013.25 hPa) would multiply Sg by 1.0032 at
 /// 15 °C / 50 %, 1.0064 at 15 °C / 100 %, 1.0080 at 30 °C / 50 % and 1.0192 at 35 °C / 90 %.
 /// For a .308 175 gr at 2600 fps (1:10, 1.24 in; Sg 2.398 at 15 °C) that moves Litz spin

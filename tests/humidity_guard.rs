@@ -1,4 +1,4 @@
-//! Source guard for the humidity-consistency train (plan C2): no in-crate production path may
+//! Source guard for the 0.50.0 humidity work: no in-crate production path may
 //! compute its own per-step air, fly dry sound, or pair a density with an RH of its own.
 //!
 //! `src/atmosphere.rs` owns humid air: `StationAir`, `KernelAtmosphere` and `air_at` are the
@@ -16,9 +16,9 @@
 //! - a per-step acceleration file (`cli_api.rs`, `derivatives.rs`, `fast_trajectory.rs`) that
 //!   does not call `air_at`;
 //! - a fixed sound speed (`340.29`, `343.0`) outside its allowlisted, documented sites;
-//! - a humidity scaled by 100 or clamped into a 0-1 fraction by hand (plan C3, H5): a Rust
+//! - a humidity scaled by 100 or clamped into a 0-1 fraction by hand: a Rust
 //!   humidity is a percent, and a wire fraction converts through `RelativeHumidity`;
-//! - a humidity bounded by hand (S5b): a range, an ordering comparison, `min`/`max` or a
+//! - a humidity bounded by hand: a range, an ordering comparison, `min`/`max` or a
 //!   low-high argument pair against 0, 1, 100 or a sensor-band edge, on a line or in an
 //!   expression that names a humidity (in a string too, such as a wire path). The one range is
 //!   `RelativeHumidity`'s.
@@ -419,7 +419,7 @@ fn every_per_step_acceleration_file_calls_air_at() {
 
 #[test]
 fn only_station_air_decides_whether_air_can_exist() {
-    // H10, plan C5: one impossible-air rule. Whether a temperature, pressure and humidity
+    // One impossible-air rule. Whether a temperature, pressure and humidity
     // describe air that can exist (an uncapped water-vapour mole fraction below 1, and a
     // temperature below water's critical point) is decided by `StationAir::new` alone, and every
     // surface that refuses such air asks it. 0.49.0's `atmosphere.density_altitude` service
@@ -580,14 +580,14 @@ fn the_scaling_finder_finds_scalings_only() {
 
 #[test]
 fn no_production_path_converts_a_humidity_by_hand() {
-    // H5: one unit per contract. Rust types and functions carry a relative humidity as a
+    // One unit per contract. Rust types and functions carry a relative humidity as a
     // PERCENT (`BallisticInputs.humidity_percent`, `AtmosphericConditions.humidity`), and the
     // fraction<->percent conversion is `RelativeHumidity::try_fraction` / `fraction()`, so no
     // production line outside src/atmosphere.rs scales a humidity by 100 itself, or clamps one
     // into a 0-1 fraction. 0.49.0 did both at every site that wrote the old fraction field.
     //
     // No site is allowed: the last one, the `atmosphere.density_altitude` service's SI-wire
-    // fraction, converts through `RelativeHumidity::try_fraction` since plan C5 (step S6).
+    // fraction, converts through `RelativeHumidity::try_fraction` since 0.50.0.
     let allowed: BTreeMap<&str, usize> = BTreeMap::new();
     let mut found: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (path, text, production) in production_sources() {
@@ -761,7 +761,7 @@ fn the_default_finder_finds_humidity_defaults_only() {
 
 #[test]
 fn every_production_humidity_default_is_the_one_constant() {
-    // Plan C4, H8: one default. An omitted humidity means `DEFAULT_HUMIDITY_PERCENT` (and
+    // One default. An omitted humidity means `DEFAULT_HUMIDITY_PERCENT` (and
     // `RelativeHumidity::DEFAULT`) on every surface, so no production line outside
     // src/atmosphere.rs writes its own 50.0 for one, nor its own 0.5 for the SI wire's fraction
     // (solve v1's default is `RelativeHumidity::DEFAULT.fraction()`). (clap's
@@ -785,9 +785,9 @@ fn every_production_humidity_default_is_the_one_constant() {
 
 #[test]
 fn no_production_path_clamps_a_humidity_into_range() {
-    // Plan C4, H9: out-of-range input is REJECTED with a field-named error, never clamped. The
+    // Out-of-range input is REJECTED with a field-named error, never clamped. The
     // only clamps left are inside src/atmosphere.rs: the sensor band's snap of a reading to the
-    // end it reads as (S5b, `RelativeHumidity`'s one rule), and the total-function guards behind
+    // end it reads as (`RelativeHumidity`'s one rule), and the total-function guards behind
     // validated input and the legacy wrappers.
     let mut offenders = Vec::new();
     for (path, text, production) in production_sources() {
@@ -1018,7 +1018,8 @@ fn hand_written_humidity_bounds(text: &str) -> Vec<usize> {
 #[test]
 fn the_bound_finder_finds_hand_written_humidity_bounds_only() {
     for (code, count) in [
-        // The perturbation layer's S5b domain check, as first written, on one line and on two.
+        // The perturbation layer's sensor-band domain check, as first written, on one line and on
+        // two.
         (
             "if axis == InputAxis::RelativeHumidity && !(0.0..=1.0).contains(&value) {}",
             2,
@@ -1086,14 +1087,14 @@ fn the_bound_finder_finds_hand_written_humidity_bounds_only() {
 
 #[test]
 fn no_production_path_bounds_a_humidity_by_hand() {
-    // S5b (owner decision 2026-11-01): a relative humidity has ONE range, RelativeHumidity's
-    // in src/atmosphere.rs: the sensor band a reading may lie in
-    // (HUMIDITY_SENSOR_TOLERANCE_PERCENT, `RelativeHumidity::FRACTION_BAND`) and the 0..=1
-    // physical humidity it snaps into (`RelativeHumidity::is_physical_fraction`). So no
-    // production line or expression outside src/atmosphere.rs that names a humidity checks one
-    // against 0, 1, 100 or a band edge itself (a range, an ordering comparison, `min`/`max`,
-    // or a call with two such bounds). A second range would drift from the band; one did in
-    // S5b's first draft (the perturbation layer's `(0.0..=1.0).contains`), and solve v1's 0.49
+    // The sensor band (owner decision 2026-11-01): a relative humidity has ONE range,
+    // RelativeHumidity's in src/atmosphere.rs: the sensor band a reading may lie in
+    // (HUMIDITY_SENSOR_TOLERANCE_PERCENT, `RelativeHumidity::FRACTION_BAND`) and the 0..=1 physical
+    // humidity it snaps into (`RelativeHumidity::is_physical_fraction`). So no production line or
+    // expression outside src/atmosphere.rs that names a humidity checks one against 0, 1, 100 or a
+    // band edge itself (a range, an ordering comparison, `min`/`max`, or a call with two such
+    // bounds). A second range would drift from the band; one did while the band was being
+    // written (the perturbation layer's `(0.0..=1.0).contains`), and solve v1's 0.49
     // `require_range(.., 0.0, 1.0)` was another.
     let mut offenders = Vec::new();
     for (path, text, _) in production_sources() {
@@ -1117,7 +1118,7 @@ fn no_production_path_bounds_a_humidity_by_hand() {
 
 #[test]
 fn every_wasm_terminal_humidity_flag_goes_through_the_one_validator() {
-    // Plan C4, H9: 0.49.0's browser terminal range-checked `--humidity` only in true-velocity
+    // 0.49.0's browser terminal range-checked `--humidity` only in true-velocity
     // and true-wind; every other command flew 150 % clamped. Every `--humidity`-family arm in
     // src/wasm.rs must parse its value with `humidity_value`, the terminal's wrapper over
     // `atmosphere::parse_humidity_percent_arg` (the one validator, natively tested).

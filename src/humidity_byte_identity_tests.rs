@@ -1,5 +1,5 @@
-//! In-crate byte-identity pins for the humidity-consistency train (0.50.0), step S1 (plan step
-//! C0a): the `pub(crate)` entry points `tests/humidity_byte_identity.rs` cannot reach.
+//! In-crate byte-identity pins for the 0.50.0 humidity work: the `pub(crate)` entry points
+//! `tests/humidity_byte_identity.rs` cannot reach.
 //!
 //! These are the gravity-aware variants every public entry point calls with Earth gravity,
 //! pinned here at the Moon's 1.62 m/s² and at 0 m/s² so a change to how gravity reaches the
@@ -7,7 +7,7 @@
 //! CIPM vapour mole fraction the density-altitude refusal reads.
 //!
 //! The rules are those of `tests/humidity_byte_identity.rs`: pins are only ever migrated to
-//! renamed APIs, never edited; each group's header says which later step may change it; kernel
+//! renamed APIs, never edited; each group's header says what in 0.50.0 may change it; kernel
 //! outputs at RH > 0 are not pinned. Values were generated on 261c1eb (ballistics-engine 0.49.0)
 //! on macOS (aarch64) with
 //!
@@ -17,7 +17,7 @@
 //!
 //! and confirmed identical in Linux (glibc) containers on aarch64 and x86_64.
 //!
-//! S8 (the unified aloft vapour model, plan C7) re-pinned `LOCAL_AIR_HUMID_GRAVITY`, the one
+//! The unified aloft vapour model re-pinned `LOCAL_AIR_HUMID_GRAVITY`, the one
 //! group here it may change; its note gives the old -> new shifts. The new bits were confirmed
 //! the same way, on macOS (aarch64) and in Linux glibc containers on aarch64 and x86_64.
 //!
@@ -32,7 +32,7 @@
 //!
 //! - bit for bit on the platforms the pins were captured and checked on ([`exact_bit_platform`]:
 //!   macOS aarch64, and Linux glibc on aarch64 and x86_64), kernel standard mode at RH 0 included (it was
-//!   compared to a relative 1e-15 until 0.50.0's R5; the bits never moved);
+//!   compared to a relative 1e-15 until 0.50.0; the bits never moved);
 //! - on any other platform, each float within [`UNVERIFIED_LIBM_ULPS`] of its pin and each count
 //!   exactly. A libm may round a `pow` or `exp` a last bit apart: FreeBSD's moved
 //!   `VAPOR_MOLE_FRACTION` (three values at -10 °C) and `LOCAL_AIR_HUMID_GRAVITY` by one or two
@@ -84,7 +84,7 @@ fn exact_bit_platform() -> bool {
 }
 
 /// How far, in units in the last place, a float may lie from its pin on any other platform:
-/// the largest distance measured in 0.50.0's R5 on FreeBSD 14.3, NetBSD 10.1 and OpenBSD 7.8
+/// the largest distance measured in 0.50.0 on FreeBSD 14.3, NetBSD 10.1 and OpenBSD 7.8
 /// (amd64), Alpine musl on aarch64 and x86_64, and Windows 11 (x86_64, UCRT). It is the
 /// bound `tests/humidity_byte_identity.rs` uses, where the measurement is described.
 const UNVERIFIED_LIBM_ULPS: u64 = 2;
@@ -261,7 +261,7 @@ fn wind_segments() -> Vec<WindSegment> {
     vec![WindSegment::new(14.4, 90.0, 2000.0)]
 }
 
-/// The pinned kernel atmospheres were written as legacy tuples; S3 moved the kernels onto
+/// The pinned kernel atmospheres were written as legacy tuples; 0.50.0 moved the kernels onto
 /// `KernelAtmosphere`, and `from_legacy_params` at 0 % RH is the one-line migration (a dry
 /// station keeps its tuple's ratio verbatim; the direct sentinel becomes uniform air).
 fn kernel_atmosphere(atmos_params: (f64, f64, f64, f64)) -> KernelAtmosphere {
@@ -483,7 +483,7 @@ fn kernel_standard_mode_at_rh0_and_non_earth_gravity_is_byte_identical() {
 
 /// `get_local_atmosphere_humid_with_gravity` at 1.62 and 0 m/s², RH 0.
 ///
-/// IMMUTABLE: no later step may change it, S8 included.
+/// IMMUTABLE: nothing in 0.50.0 may change it, the aloft vapour model included.
 #[rustfmt::skip]
 const LOCAL_AIR_DRY_GRAVITY: Pins = &[
     (
@@ -522,15 +522,15 @@ const LOCAL_AIR_DRY_GRAVITY: Pins = &[
 
 /// As `LOCAL_AIR_DRY_GRAVITY`, at RH 37.5, 50 and 100.
 ///
-/// MAY CHANGE ONLY IN S8 (the unified aloft vapour model, plan C7): byte-identical through every
-/// other step.
+/// MAY CHANGE ONLY WITH THE ALOFT VAPOUR MODEL: byte-identical through every other change in
+/// 0.50.0.
 ///
-/// Re-pinned in S8 (0.50.0, plan C7, owner-approved): the unified aloft vapour model holds the
+/// Re-pinned by the aloft vapour model (0.50.0): the unified aloft vapour model holds the
 /// governing air's (the station's or the zone's) water-vapour mole fraction for the lapse, the
 /// density and the sound speed, with a virtual-temperature lapse. 90 of 120 values moved, all in
 /// cases with a humidity above 0 and all off the station's own height; every RH-0 and
-/// station-height value is unchanged. The largest float shift of each moved case, pinned before S8
-/// -> pinned now:
+/// station-height value is unchanged. The largest float shift of each moved case,
+/// pinned before the aloft vapour model -> pinned now:
 /// - `g1.62/0m/15C/1013.25hPa/rh37.5` +12000m.speed_of_sound: 295.07029682688534 -> 295.3647829860783 (+9.98e-04)
 /// - `g1.62/0m/15C/1013.25hPa/rh50` +12000m.speed_of_sound: 295.07052519493107 -> 295.4630462416408 (+1.33e-03)
 /// - `g1.62/0m/15C/1013.25hPa/rh100` +12000m.speed_of_sound: 295.0714386636874 -> 295.85546512189603 (+2.66e-03)
@@ -645,7 +645,7 @@ const LOCAL_AIR_HUMID_GRAVITY: Pins = &[
 
 /// The uncapped CIPM-2007 vapour mole fraction (the density-altitude refusal's predicate).
 ///
-/// IMMUTABLE: no later step may change it, S8 included.
+/// IMMUTABLE: nothing in 0.50.0 may change it, the aloft vapour model included.
 #[rustfmt::skip]
 const VAPOR_MOLE_FRACTION: Pins = &[
     (
@@ -662,7 +662,7 @@ const VAPOR_MOLE_FRACTION: Pins = &[
 /// Kernel direct (uniform) mode at 1.62 and 0 m/s²: `compute_derivatives_with_gravity`,
 /// `integrate_trajectory_with_gravity` (RK45) and `fast_integrate_with_gravity`.
 ///
-/// IMMUTABLE: no later step may change it, S8 included.
+/// IMMUTABLE: nothing in 0.50.0 may change it, the aloft vapour model included.
 #[rustfmt::skip]
 const KERNEL_DIRECT_GRAVITY: Pins = &[
     (
@@ -743,9 +743,9 @@ const KERNEL_DIRECT_GRAVITY: Pins = &[
 
 /// Kernel standard mode at RH 0 and 1.62 and 0 m/s², the same families, at both station bases.
 ///
-/// IMMUTABLE: no later step may change it, S8 included.
+/// IMMUTABLE: nothing in 0.50.0 may change it, the aloft vapour model included.
 ///
-/// Compared to a relative 1e-15 until 0.50.0's R5, which made it bits like every other group: no
+/// Compared to a relative 1e-15 until 0.50.0, which made it bits like every other group: no
 /// last-ulp movement ever happened.
 #[rustfmt::skip]
 const KERNEL_STANDARD_RH0_GRAVITY: Pins = &[

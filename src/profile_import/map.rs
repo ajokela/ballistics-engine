@@ -354,13 +354,13 @@ pub fn map_a7p_to_profile(
         format!("{:.1} hPa", src.air_pressure_hpa),
         "pressure",
     );
-    // The engine's one humidity validator (plan C4): a malformed file's humidity is refused at
+    // The engine's one humidity validator: a malformed file's humidity is refused at
     // import, like a malformed CUSTOM curve, rather than saved and refused at every later load.
     // An ABSENT field is 0 %, not the engine's 50 % default: a proto3 int32 cannot tell absent
     // from 0, and the format writes 0 % by omitting the field.
-    // A reading within the sensor band (S5b, HUMIDITY_SENSOR_TOLERANCE_PERCENT: a meter's
+    // A reading within the sensor band (HUMIDITY_SENSOR_TOLERANCE_PERCENT: a meter's
     // 102 % in fog) is imported as the end it reads as, the value a `profile save` of it stores.
-    // R2: and air that cannot exist is refused too, by the rule every flight of the imported
+    // And air that cannot exist is refused too, by the rule every flight of the imported
     // profile applies, in the file's own words (`a7p_air_refusal`).
     if let Some(refusal) = a7p_air_refusal(doc) {
         return Err(refusal.message().to_string());

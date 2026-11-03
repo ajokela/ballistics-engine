@@ -1,4 +1,4 @@
-//! R3 (whole-branch review API-1): what 0.50.0 makes of every legacy kernel 4-tuple 0.49.0 flew.
+//! What 0.50.0 makes of every legacy kernel 4-tuple 0.49.0 flew.
 //!
 //! 0.49.0's kernels took the air as a bare `(f64, f64, f64, f64)`: `(density, sound speed, 0,
 //! 0)` in direct mode, `(altitude, temperature, pressure, density ratio)` otherwise. 0.50.0

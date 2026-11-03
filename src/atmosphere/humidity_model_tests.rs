@@ -16,7 +16,7 @@ use super::*;
 // Grids
 // =================================================================================================
 
-/// Station temperatures (C) spanning the plan's -40..45 C grid plus the hot and cold edges.
+/// Station temperatures (C) over -40..45 C, with 60 C beyond it as a hot edge.
 const TEMPS_C: [f64; 12] = [
     -40.0, -12.3, -10.0, 0.0, 7.9, 15.0, 21.7, 30.0, 33.3, 35.0, 45.0, 60.0,
 ];
@@ -101,7 +101,7 @@ fn negative_zero_percent_is_dry_air_with_positive_zero_bits() {
 
 #[test]
 fn try_percent_rejects_out_of_range_and_non_finite_values_without_clamping() {
-    // S5b: a reading within 5 points of the range is saturated or dry air (the band tests
+    // A reading within 5 points of the range is saturated or dry air (the band tests
     // above); only a value beyond the band is refused, and it is refused unchanged.
     let out_of_range = [-5.000_000_1, 105.000_000_1, 150.0, 1e300];
     for percent in out_of_range {
@@ -207,7 +207,7 @@ fn fraction_round_trips_are_exact_at_the_ends_and_within_one_ulp_elsewhere() {
 }
 
 // =================================================================================================
-// The sensor-tolerance band (owner decision 2026-11-01, step S5b)
+// The sensor-tolerance band (owner decision 2026-11-01)
 // =================================================================================================
 
 /// Percents a humidity SENSOR can report around saturated air: within 5 points above 100,
@@ -260,7 +260,7 @@ fn the_sensor_band_is_five_points_either_side_in_both_units() {
     }
 }
 
-/// S5b: the two other places a humidity's range is needed take it from the one rule rather than
+/// The two other places a humidity's range is needed take it from the one rule rather than
 /// writing a second one. The MCP schema publishes `RelativeHumidity::FRACTION_BAND`, which is
 /// the band `try_fraction` enforces; and the perturbation layer's physical domain is
 /// `is_physical_fraction`, the fractions the band leaves where it found them, which is exactly
@@ -494,7 +494,7 @@ fn atmosphere_error_names_its_field_and_value_and_can_be_relabelled_at_a_boundar
 }
 
 // =================================================================================================
-// One vapour mole fraction (H24 merge)
+// One vapour mole fraction for the density and the sound speed
 // =================================================================================================
 
 /// 0.49.0's inline vapour mole fraction from `moist_speed_of_sound`, verbatim, before its
@@ -569,7 +569,7 @@ fn merged_moist_speed_of_sound_keeps_the_old_total_function_guards() {
             "c at {temp_k} K, {pressure_pa} Pa, {humidity}%: merged {merged} old {old}"
         );
     }
-    // R3 (review PHYS-1, C10): the inputs whose water-vapour mole fraction is NaN (a NaN
+    // The inputs whose water-vapour mole fraction is NaN (a NaN
     // humidity, a NaN pressure, and air above water's critical point, 647.096 K, even at 0 %)
     // are NaN now. 0.49.0's `x_v.min(1.0)` read the NaN as 1 and returned pure steam's sound
     // speed (603.0 m/s at 700 K, 386.9 m/s at 15 °C).
@@ -767,7 +767,9 @@ fn station_air_refuses_non_finite_and_unphysical_state_naming_the_field() {
 
 #[test]
 fn station_air_refuses_the_impossible_air_that_density_altitude_refuses() {
-    // The two cases the plan names, refused at every RH-carrying constructor.
+    // Saturated air at 100 C and 1013.25 hPa (boiling water at sea level) and at 95 C and
+    // 500 hPa: each needs a water-vapour mole fraction of 1 or more, so every RH-carrying
+    // constructor refuses it.
     for (temp_c, pressure_hpa) in [(100.0, 1013.25), (95.0, 500.0)] {
         let error = StationAir::new(0.0, temp_c, pressure_hpa, rh(100.0)).expect_err("steam");
         assert_eq!(error.field(), "humidity_percent");
@@ -881,7 +883,7 @@ fn with_density_ratio_refuses_ratios_outside_zero_to_two() {
 
 #[test]
 fn the_solver_station_is_station_air_new_and_refuses_what_0_49_clamped() {
-    // TrajectorySolver resolves its station through StationAir::new (plan C4), the interim
+    // TrajectorySolver resolves its station through StationAir::new, the interim
     // crate-private `legacy_clamped` constructor is gone. A valid station is still exactly
     // calculate_atmosphere at the given humidity, to the bit; the inputs 0.49.0 flew clamped or
     // capped (an RH beyond the sensor band around [0, 100], impossible air, a pressure of 0) are
@@ -938,7 +940,7 @@ fn uniform_accepts_todays_direct_mode_range() {
 
 #[test]
 fn uniform_rejects_what_the_direct_mode_kernels_reject() {
-    // R3 (review API-1): 0 and -0 are a vacuum, which 0.49.0's compute_derivatives flew, so
+    // 0 and -0 are a vacuum, which 0.49.0's compute_derivatives flew, so
     // they are accepted (tests/kernel_atmosphere_legacy_tuples.rs pins the vacuum's drag at
     // exactly 0); the smallest negative density is refused, as every negative one is.
     for vacuum in [0.0, -0.0] {
@@ -992,7 +994,7 @@ fn from_legacy_params_maps_the_direct_sentinel_to_uniform() {
         KernelAtmosphere::from_legacy_params((1.1, 330.0, -0.0, -0.0), RelativeHumidity::DRY)
             .expect("direct sentinel");
     assert_eq!(atmosphere, KernelAtmosphere::uniform(1.1, 330.0).unwrap());
-    // R3 (review API-1): a density of exactly 0 is the vacuum 0.49.0's compute_derivatives flew,
+    // A density of exactly 0 is the vacuum 0.49.0's compute_derivatives flew,
     // so it converts; the nearest negative density does not.
     assert_eq!(
         KernelAtmosphere::from_legacy_params((0.0, 340.0, 0.0, 0.0), RelativeHumidity::DRY)
@@ -1100,7 +1102,7 @@ fn air_at_station_is_the_legacy_humid_lookup_bit_for_bit() {
                             humidity,
                         );
                         // The lapse at the station's own vapour mole fraction, held aloft
-                        // (S8: the virtual-temperature lapse; dry at 0 %).
+                        // (the virtual-temperature lapse; dry at 0 %).
                         let (temp_k, pressure_pa, density_again) =
                             local_temp_pressure_density_with_gravity(
                                 altitude_m,
@@ -1531,8 +1533,8 @@ fn the_deprecated_dry_lookup_is_the_shared_composition_at_zero_humidity() {
 
 #[test]
 fn a_terminal_humidity_flag_parses_through_the_one_validator() {
-    // The WASM terminal's parser for every humidity flag (plan C4): a percent in [0, 100], a
-    // sensor reading within 5 points of it read as the end (S5b), anything farther out refused
+    // The WASM terminal's parser for every humidity flag: a percent in [0, 100], a
+    // sensor reading within 5 points of it read as the end, anything farther out refused
     // (never clamped), with the flag named in the error.
     for (raw, percent) in [("0", 0.0), ("100", 100.0), ("37.5", 37.5), (" 50 ", 50.0)] {
         assert_eq!(
@@ -1550,7 +1552,7 @@ fn a_terminal_humidity_flag_parses_through_the_one_validator() {
             .to_bits(),
         0.0f64.to_bits()
     );
-    // R2: the refusal states the band it enforces, not a bare 0-100 a 103 contradicts.
+    // The refusal states the band it enforces, not a bare 0-100 a 103 contradicts.
     assert_eq!(
         parse_humidity_percent_arg("--humidity", "150").unwrap_err(),
         "--humidity = 150: relative humidity must be a percent from 0 to 100 (a sensor reading \
@@ -1588,7 +1590,7 @@ fn a_terminal_humidity_flag_parses_through_the_one_validator() {
             "{raw}: {error}"
         );
     }
-    // R2: a NaN or an infinity is told what it had to be, not a bare "must be finite".
+    // A NaN or an infinity is told what it had to be, not a bare "must be finite".
     for raw in ["nan", "inf", "-inf"] {
         let error = parse_humidity_percent_arg("--humidity", raw).unwrap_err();
         assert!(
@@ -1604,7 +1606,7 @@ fn a_terminal_humidity_flag_parses_through_the_one_validator() {
 }
 
 // =================================================================================================
-// Which reading impossible air is blamed on (gate R2)
+// Which reading impossible air is blamed on
 // =================================================================================================
 
 /// Where a station pressure came from, from what a presence-aware resolution is handed: a

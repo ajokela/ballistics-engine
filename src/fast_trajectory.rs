@@ -186,9 +186,10 @@ pub struct FastIntegrationParams {
     /// converts with [`KernelAtmosphere::from_legacy_params`].
     pub atmosphere: KernelAtmosphere,
     /// MBA-1137: optional downrange-segmented atmosphere. When `Some` and non-empty, each
-    /// substep's air uses the zone at the current downrange distance (its T/P and its RH, for
-    /// density and sound speed) as the base before the altitude lapse. `None` or an empty sock is
-    /// the station. A sock that [`AtmoSock::validate`] refuses gives a failed solution.
+    /// substep's air uses the zone at the current downrange distance as the base: its T/P and
+    /// its RH, whose water-vapour mole fraction is held at every height for the lapse, the
+    /// density and the sound speed. `None` or an empty sock is the station. A sock that
+    /// [`AtmoSock::validate`] refuses gives a failed solution.
     pub atmo_sock: Option<AtmoSock>,
 }
 
@@ -376,7 +377,8 @@ pub(crate) fn fast_integrate_with_gravity(
 
     // Uniform (direct-mode) air is a fixed density and speed of sound. Station air is lapsed to
     // every substep's altitude through air_at, the station (or the active zone) giving the base
-    // humidity for density and sound speed alike.
+    // air, whose water-vapour mole fraction is held at every height for the lapse, the density
+    // and the sound speed alike.
     let atmosphere = &params.atmosphere;
 
     // MBA-1137: borrow the optional downrange-segmented atmosphere once (queried 4x per step).
@@ -840,9 +842,9 @@ pub(crate) fn compute_derivatives_with_gravity(
 
         // The LOCAL air at this substep, from air_at: uniform air's fixed density and sound
         // speed, or the station (or the zone at pos.x, MBA-1137) lapsed to this altitude, with
-        // the base humidity in the density and the sound speed alike, exactly as
-        // TrajectorySolver flies it. The local density (not a flight-constant one, the
-        // MBA-1137 density-freeze fix) drives `density_scale` below.
+        // the base air's water-vapour mole fraction held for the lapse, the density and the
+        // sound speed alike, exactly as TrajectorySolver flies it. The local density (not a
+        // flight-constant one, the MBA-1137 density-freeze fix) drives `density_scale` below.
         let local_air = substep_air(inputs, atmosphere, atmo_sock, &pos, gravity);
         let (local_density, speed_of_sound) =
             (local_air.density_kg_m3, local_air.speed_of_sound_mps);

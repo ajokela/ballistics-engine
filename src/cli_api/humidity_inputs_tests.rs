@@ -1,6 +1,5 @@
-//! H5 builder pins (humidity-consistency train, plan C3): every builder of a `BallisticInputs`
-//! leaves the relative humidity in `BallisticInputs.humidity_percent` as the PERCENT the rest of
-//! the engine flies, exactly.
+//! Builder pins: every builder of a `BallisticInputs` leaves the relative humidity in
+//! `BallisticInputs.humidity_percent` as the PERCENT the rest of the engine flies, exactly.
 //!
 //! 0.49.0's `BallisticInputs.humidity` was a 0-1 FRACTION that some builders filled with a
 //! percent (read back through the clamping `humidity_percent()` method as 100 %) and others

@@ -685,7 +685,7 @@ mod tests {
         );
     }
 
-    /// R3 (review C12): the trajectory help gives the zero day's air and the pressure mode an
+    /// The trajectory help gives the zero day's air and the pressure mode an
     /// entry each; they used to appear only inside `--zero-density-altitude`'s description, or
     /// not at all. `tests/wasm_help_drift.rs` checks every command's flags against its help.
     #[wasm_bindgen_test]
@@ -1455,21 +1455,19 @@ mod tests {
     /// (serde_json::to_string_pretty); the table format string ends with exactly one.
     ///
     /// The two JSON goldens were re-captured once, in 0.50.0, from a
-    /// `wasm-pack test --headless --chrome` run of the unified aloft vapour model (humidity
-    /// train S8): `lead` flies the default 50 %, and the air off the station's height now holds
-    /// the station's water-vapour mole fraction with a virtual-temperature lapse. Every
-    /// changed field moved by the same relative step, -1.8e-8 imperial and -1.5e-8 metric.
-    /// Old -> new, imperial: `lead` 1.267051911310233 -> 1.2670518888402127, `lead_mil`
-    /// 3.1676393318758076 -> 3.167639275700587, `lead_moa` 10.890344022989026 ->
-    /// 10.890343829858619, `lead_smoa` 11.403501594752907 -> 11.403501392522115, `tof_s`
-    /// 0.5183409815796777 -> 0.5183409723873689. Metric: `lead` 1.4774105669002737 ->
-    /// 1.4774105441766052, `lead_mil` 4.221173048286496 -> 4.221172983361729, `lead_moa`
-    /// 14.512392940008974 -> 14.512392716797626, `lead_smoa` 15.196222973831386 ->
-    /// 15.196222740102225, `tof_s` 0.49247018896675787 -> 0.4924701813922017. Nothing else
-    /// moved, and the table is still the c805229 literal: it rounds the change away. The
-    /// native CLI (`lead ... --start 350 --end 350 -o json`) prints the same metric values bit
-    /// for bit, before and after; its imperial run differs from this surface's by about 4e-6,
-    /// on 0.49.0 as on 0.50.0.
+    /// `wasm-pack test --headless --chrome` run of the unified aloft vapour model: `lead` flies the
+    /// default 50 %, and the air off the station's height now holds the station's water-vapour mole
+    /// fraction with a virtual-temperature lapse. Every changed field moved by the same relative
+    /// step, -1.8e-8 imperial and -1.5e-8 metric. Old -> new, imperial: `lead` 1.267051911310233 ->
+    /// 1.2670518888402127, `lead_mil` 3.1676393318758076 -> 3.167639275700587, `lead_moa`
+    /// 10.890344022989026 -> 10.890343829858619, `lead_smoa` 11.403501594752907 ->
+    /// 11.403501392522115, `tof_s` 0.5183409815796777 -> 0.5183409723873689. Metric: `lead`
+    /// 1.4774105669002737 -> 1.4774105441766052, `lead_mil` 4.221173048286496 -> 4.221172983361729,
+    /// `lead_moa` 14.512392940008974 -> 14.512392716797626, `lead_smoa` 15.196222973831386 ->
+    /// 15.196222740102225, `tof_s` 0.49247018896675787 -> 0.4924701813922017. Nothing else moved,
+    /// and the table is still the c805229 literal: it rounds the change away. The native CLI (`lead
+    /// ... --start 350 --end 350 -o json`) prints the same metric values bit for bit, before and
+    /// after; its imperial run differs from this surface's by about 4e-6, on 0.49.0 as on 0.50.0.
     #[wasm_bindgen_test]
     fn lead_no_env_flags_output_is_byte_identical_to_its_goldens() {
         const GOLDEN_IMPERIAL_JSON: &str = r#"{
@@ -2230,7 +2228,7 @@ Impact Velocity: 2510 fps\n";
     }
 
     /// The same pairing requirement applies to the `--wez` sweep path (a separate compute
-    /// core, `crate::wez::compute_wez`, from the base monte-carlo path above).
+    /// core, `crate::wez::compute_wez_with_humidity`, from the base monte-carlo path above).
     #[wasm_bindgen_test]
     fn cd_scale_without_a_loaded_drag_table_errors_on_wez() {
         let err = WasmBallistics::new()
@@ -3635,7 +3633,7 @@ Impact Velocity: 2510 fps\n";
     /// up front, but the `Err` arm was dropping it on the floor instead of carrying it like
     /// the `Ok` arm does. Table-only, same as every warning in this formatter.
     ///
-    /// R2: the failed solve is THROWN (it was returned as `Ok` text, a success to a caller and
+    /// The failed solve is THROWN (it was returned as `Ok` text, a success to a caller and
     /// no JSON under `-o json`), and the thrown message carries the warning exactly as the
     /// returned text did.
     #[wasm_bindgen_test]
@@ -4342,7 +4340,7 @@ Impact Velocity: 2510 fps\n";
         }
     }
 
-    // --- humidity-consistency train, plan C4: one validator, one default, every command ---
+    // --- one validator, one default, every command ---
 
     /// Every terminal command that takes a humidity, as `(base command, flag)`. 0.49.0
     /// range-checked only `true-velocity` and `true-wind`; every other command flew 150 % as
@@ -4384,14 +4382,14 @@ Impact Velocity: 2510 fps\n";
     fn every_humidity_flag_refuses_a_value_outside_zero_to_one_hundred() {
         let wasm = WasmBallistics::new();
         for (base, flag) in HUMIDITY_COMMANDS {
-            // Beyond the 5-point sensor band (S5b: -5 and 100.0001 are readings, the next
+            // Beyond the 5-point sensor band (-5 and 100.0001 are readings, the next
             // test's).
             for bad in ["150", "-5.0000001", "105.0000001", "nan", "inf"] {
                 let err = wasm
                     .run_command(&format!("{base} {flag} {bad}"))
                     .expect_err(&format!("`{base} {flag} {bad}` must be refused"));
                 let message = err.as_string().unwrap_or_default();
-                // R2: the refusal states the band it enforces, NaN and infinities included.
+                // The refusal states the band it enforces, NaN and infinities included.
                 let band = "percent from 0 to 100 (a sensor reading from -5 to 105 is read as 0 \
                             or 100)";
                 assert!(
@@ -4409,9 +4407,9 @@ Impact Velocity: 2510 fps\n";
         }
     }
 
-    /// S5b (owner decision 2026-11-01): every humidity flag reads a sensor reading within 5
-    /// points of the range as the end it reads as, so each command's output is the end's, byte
-    /// for byte. `monte-carlo` is left out of the comparison (its draws are unseeded here) but
+    /// The sensor band (owner decision 2026-11-01): every humidity flag reads a sensor reading
+    /// within 5 points of the range as the end it reads as, so each command's output is the end's,
+    /// byte for byte. `monte-carlo` is left out of the comparison (its draws are unseeded here) but
     /// must fly the reading.
     #[wasm_bindgen_test]
     fn every_humidity_flag_flies_a_sensor_reading_as_the_end_it_reads_as() {
@@ -4440,7 +4438,7 @@ Impact Velocity: 2510 fps\n";
     /// Every command that takes a station temperature refuses air that cannot exist (212 °F,
     /// 29.92 inHg, 100 %: saturated air at the boiling point) with the solver's one rule, the
     /// way the native CLI does, and flies the same air at 50 %. `monte-carlo` has no
-    /// `--temperature`, so it always flies 15 °C, where every humidity exists. R2: the refusal
+    /// `--temperature`, so it always flies 15 °C, where every humidity exists. The refusal
     /// is THROWN on every command (`trajectory` used to return it as an `Error...` line in place
     /// of the output, a success to a caller and no JSON under `-o json`), up front, naming the
     /// flag and the air: `--humidity = 100 at 212 °F and 29.92 inHg: no such air exists`, the
@@ -4511,7 +4509,7 @@ Impact Velocity: 2510 fps\n";
     }
 
     /// A station above the troposphere because no pressure was given is the altitude's fault,
-    /// as on the native CLI (gate R2): the refusal says to check the altitude's unit, never the
+    /// as on the native CLI: the refusal says to check the altitude's unit, never the
     /// unit of a `--pressure` nobody typed. 65617 ft is 20 km, about 55 hPa of standard
     /// atmosphere, which saturated air at 104 °F exceeds. The zero day names each reading where
     /// it came from: its own flag when one was given, the shot day's when it is inherited.
@@ -4617,7 +4615,7 @@ mod minimal_surface_tests {
             .expect("field is a number")
     }
 
-    /// R2: the `Calculator` refuses air that cannot exist with the engine's own message, named
+    /// The `Calculator` refuses air that cannot exist with the engine's own message, named
     /// by its setters, thrown from `calculateTrajectory` and `getFullTrajectory` alike (it was a
     /// "JSON parse error" wrapping a returned `Error: ...` string), and `setHumidity` refuses a
     /// humidity beyond the sensor band itself, naming itself rather than a terminal flag.
@@ -4704,7 +4702,7 @@ mod minimal_surface_tests {
         }
     }
 
-    /// R2: the terminal's `trajectory -o json` either answers with JSON or throws; a solve
+    /// The terminal's `trajectory -o json` either answers with JSON or throws; a solve
     /// failure is never a returned `Error: ...` string a JSON reader cannot parse.
     #[wasm_bindgen_test]
     fn trajectory_json_failures_are_thrown_never_returned_as_text() {
@@ -5173,7 +5171,7 @@ mod station_presence_tests {
         // Captured from ab4eb0c with the sentinels compiled out: 1013 hPa typed at 150 m.
         // ab4eb0c flew ICAO 995.36 hPa there: -29.092691771258945, the omitted run's value.
         // Re-captured once, in 0.50.0, from a headless-Chrome run of the unified aloft vapour
-        // model (humidity train S8; this solve flies the default 50 %): -28.989396602165147 ->
+        // model (this solve flies the default 50 %): -28.989396602165147 ->
         // -28.98939660215317 (+4.1e-13 relative). The native CLI gives the same bits, before
         // and after.
         assert_eq!(

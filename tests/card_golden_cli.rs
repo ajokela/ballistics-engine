@@ -24,7 +24,7 @@
 // golden file(s) with the same invocation (see each test) and say so in the commit
 // message — silent drift is exactly what this file exists to catch.
 //
-// Regenerated in 0.50.0 (humidity train S8, the unified aloft vapour model): these runs fly the
+// Regenerated in 0.50.0 (the unified aloft vapour model): these runs fly the
 // default 50 % RH, and the air off the station's height now holds the station's water-vapour
 // mole fraction with a virtual-temperature lapse. Only the four `*_json.txt` files moved (the
 // table and CSV forms round the change away), every value by at most 1.6e-6 relative and

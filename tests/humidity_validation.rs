@@ -1,9 +1,9 @@
-//! Humidity-consistency train, plan C4: one validator, one default and one impossible-air rule at
+//! One validator, one default and one impossible-air rule at
 //! every input boundary.
 //!
 //! A relative humidity is a PERCENT in `[0, 100]` on every Rust and app surface (a FRACTION in
-//! `[0, 1]` only on the SI JSON wire). A sensor reading within 5 points of that range (S5b,
-//! `HUMIDITY_SENSOR_TOLERANCE_PERCENT`) is the saturated or dry air it reads and flies exactly as
+//! `[0, 1]` only on the SI JSON wire). A sensor reading within 5 points of that range
+//! (`HUMIDITY_SENSOR_TOLERANCE_PERCENT`) is the saturated or dry air it reads and flies exactly as
 //! the end; a value beyond the band, a non-finite one, or air that cannot exist is REJECTED
 //! with a field-named error. 0.49.0 clamped it instead on most
 //! surfaces (150 flew as 100 %, -5 as 0 %), and every solve capped impossible air while
@@ -14,7 +14,7 @@
 //! parse step and refuse impossible air through the solver's one rule; both refusals are pinned
 //! here per surface, so a surface that stopped reaching either check is seen.
 //!
-//! The sensor-tolerance band (step S5b, owner decision 2026-11-01): weather is an input source,
+//! The sensor-tolerance band (owner decision 2026-11-01): weather is an input source,
 //! never a gate, so a READING within 5 points of the range (a Kestrel at 101.7 % in fog, a
 //! phone at -2 % in desert air) is the saturated or dry air it reads, on every surface, and
 //! flies that end to the bit. Only a value beyond the band (`BAD_PERCENTS`) is refused.
@@ -30,8 +30,8 @@ use ballistics_engine::{
 };
 
 /// Percents every boundary must refuse: beyond the 5-point sensor band on either side, by a
-/// little and by a lot, and not finite. (Before S5b this held -5, -0.0001 and 100.0001, which are
-/// now sensor readings: see [`SENSOR_READINGS`].)
+/// little and by a lot, and not finite. (Before the sensor band this held -5, -0.0001 and 100.0001,
+/// which are now sensor readings: see [`SENSOR_READINGS`].)
 const BAD_PERCENTS: [f64; 7] = [
     -5.000_000_1,
     150.0,
@@ -80,7 +80,7 @@ fn assert_impossible_air_refusal(label: &str, message: &str) {
 }
 
 /// Whether `message` is `RelativeHumidity`'s own refusal: the range rule, or (for NaN and the
-/// infinities) the finiteness rule, each stating the sensor band it enforces (R2), derived here
+/// infinities) the finiteness rule, each stating the sensor band it enforces, derived here
 /// from the constant.
 fn names_the_humidity_rule(message: &str) -> bool {
     let t = ballistics_engine::HUMIDITY_SENSOR_TOLERANCE_PERCENT;
@@ -185,7 +185,7 @@ fn trajectory_solver_refuses_impossible_air_by_the_one_shared_rule() {
     solver(load(), atmosphere(95.0, 1013.25, 50.0))
         .solve()
         .expect("95 C / 1013.25 hPa / 50 % exists");
-    // S5b: the sensor band does not relax it. Saturated air at the boiling point read as a
+    // The sensor band does not relax it. Saturated air at the boiling point read as a
     // sensor's 102 % is the 100 % that cannot exist.
     for reading in [101.7, 105.0] {
         let message = solver(load(), atmosphere(100.0, 1013.25, reading))
@@ -308,7 +308,7 @@ fn the_bc_estimator_names_the_air_it_refuses() {
             StationAtmospherePresence::BOTH,
         )
     };
-    // 0.49.0 and the first S5 round swallowed every trial's refusal and reported "Unable to
+    // 0.49.0 and the first draft of the fix swallowed every trial's refusal and reported "Unable to
     // estimate BC from provided data", which blames the data for the air.
     for air in IMPOSSIBLE_AIR {
         let (temperature, pressure, humidity) = air;
@@ -402,7 +402,7 @@ fn impossible_air_is_refused_identically_by_the_station_the_solve_solve_v1_and_d
             })
             .map_err(|e| serde_json::to_value(&e).unwrap());
         let density_altitude_error = density_altitude.expect_err("density_altitude refuses it too");
-        // R2: refused identically, envelope and all: one code, one path, one message.
+        // Refused identically, envelope and all: one code, one path, one message.
         assert_eq!(
             solve_error["error"]["code"], "invalid_value",
             "{solve_error}"
@@ -420,7 +420,7 @@ fn impossible_air_is_refused_identically_by_the_station_the_solve_solve_v1_and_d
 
 #[test]
 fn solve_v1_keeps_refusing_a_humidity_fraction_outside_zero_to_one() {
-    // Beyond the 0.05 sensor band (S5b moved 1.0001, a saturated-air reading, to the band test).
+    // Beyond the 0.05 sensor band (1.0001, a saturated-air reading, is the band test's).
     for fraction in [1.5, -0.1, 50.0, 1.050_000_1, -0.050_000_1] {
         let decoded = ballistics_engine::solve_json::decode_solve_request_v1(
             &serde_json::json!({
@@ -765,7 +765,7 @@ fn bridge_true_commands_reject_through_the_shared_validator() {
         );
         assert_eq!(out["ok"], false, "true.dsf RH {humidity} must fail: {out}");
         let message = out["error"]["message"].as_str().unwrap_or_default();
-        // R2: the refusal states the band it enforces.
+        // The refusal states the band it enforces.
         assert!(
             message.contains("humidity_pct = ") && names_the_humidity_rule(message),
             "true.dsf: the one validator's error: {message}"
@@ -952,7 +952,7 @@ mod ffi {
         }
     }
 
-    /// S5b: the C ABI reads a sensor reading within 5 points of the range as the end it reads
+    /// The C ABI reads a sensor reading within 5 points of the range as the end it reads
     /// as: the single solve and the zero angle are the end's to the bit, and the Monte Carlo
     /// flies it.
     #[test]
@@ -1049,13 +1049,13 @@ mod a7p {
 
     #[test]
     fn an_out_of_range_a7p_humidity_is_refused_at_import() {
-        // Beyond the 5-point sensor band (S5b: -5 and 101 are readings, the next test's).
+        // Beyond the 5-point sensor band (-5 and 101 are readings, the next test's).
         for humidity in [150, -6, 106] {
             let doc = parse_a7p(&a7p(Some(humidity))).expect("the envelope parses");
             let error = map_a7p_to_profile(&doc, None, None)
                 .err()
                 .unwrap_or_else(|| panic!("RH {humidity} must be refused at import"));
-            // R2: the refusal names the file's field and states the band it enforces.
+            // The refusal names the file's field and states the band it enforces.
             assert!(
                 error.starts_with("c_zero_air_humidity = ")
                     && super::names_the_humidity_rule(&error),
@@ -1069,7 +1069,7 @@ mod a7p {
         }
     }
 
-    /// S5b: a file's humidity within 5 points of the range is a sensor reading, imported as the
+    /// A file's humidity within 5 points of the range is a sensor reading, imported as the
     /// end it reads as.
     #[test]
     fn an_a7p_humidity_within_five_points_of_the_range_imports_as_the_end() {
@@ -1187,7 +1187,7 @@ fn the_online_client_sends_the_humidity_at_full_precision() {
     }
 }
 
-// --- the sensor band, surface by surface (S5b) --------------------------------------------------
+// --- the sensor band, surface by surface --------------------------------------------------
 
 /// Every trajectory point of `solver`'s solve, as bits.
 fn flight_bits(mut solver: TrajectorySolver) -> Vec<u64> {
@@ -1370,7 +1370,7 @@ fn solve_v1_and_density_altitude_read_a_sensor_fraction_as_the_end_it_reads_as()
             "density_altitude at relative_humidity {reading}"
         );
     }
-    // Beyond the band: the same path and code as before S5b.
+    // Beyond the band: the same path and code as 0.49.0 gave.
     for fraction in [1.06, 1.050_000_1, -0.06, -0.050_000_1] {
         let refused = solve_v1_json(serde_json::json!({"relative_humidity": fraction}))
             .expect_err("beyond the band");

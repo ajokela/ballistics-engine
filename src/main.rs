@@ -95,7 +95,9 @@ use ballistics_engine::truing_service::{
     derive_dsf_point_from_solve_v1, tall_target_v1, DsfServiceErrorV1, TallTargetErrorV1,
     TallTargetRequestV1,
 };
-use ballistics_engine::wez::{compute_wez, parse_target_size, TargetSizeMetric, WezResult, WezRow};
+use ballistics_engine::wez::{
+    compute_wez_with_humidity, parse_target_size, TargetSizeMetric, WezResult, WezRow,
+};
 // MBA-1372: SAAMI free-recoil and power-factor calculators.
 use ballistics_engine::atmosphere::{
     resolve_station_conditions_with_presence, PressureReferenceMode, StationAtmospherePresence,
@@ -438,7 +440,7 @@ impl clap::builder::TypedValueParser for F64RangeParser {
     }
 }
 
-/// The value parser of every `--humidity`-family flag (humidity-consistency train, S5b): a
+/// The value parser of every `--humidity`-family flag: a
 /// relative humidity PERCENT through the engine's one rule, [`RelativeHumidity::try_percent`].
 /// A sensor reading up to `HUMIDITY_SENSOR_TOLERANCE_PERCENT` (5) outside 0-100 parses as the
 /// end it reads as (`--humidity 101.7` is 100, `--humidity -2` is 0), so every command flies,
@@ -463,7 +465,7 @@ const ZERO_AIR_FLAGS: [&str; 4] = [
 ];
 
 /// Refuse the station air a command is about to fly, in the CLI's own words, before it does
-/// any work (R2).
+/// any work.
 ///
 /// `atmosphere` and `presence` are exactly what the command hands its solver, so this refuses
 /// what every solve of them would refuse ([`AtmosphericConditions::station_air`]), and nothing
@@ -4301,7 +4303,7 @@ impl InverseSolverLoadArgs {
             wind_direction_deg: self.wind_direction.degrees,
             station_presence,
         };
-        // R2: the air refused up front, in the CLI's words, before any of the four inverse
+        // The air refused up front, in the CLI's words, before any of the four inverse
         // solvers searches: one whose every trial fails on the air would otherwise blame a
         // flag (`--end`), a fitted zero no search found, or a mark.
         refuse_cli_air(
@@ -5830,7 +5832,7 @@ fn load_csv_row(path: &PathBuf, row_name: &str) -> Result<HashMap<String, String
         let record = record?;
         if let Some(name) = record.get(0) {
             if name.eq_ignore_ascii_case(row_name) {
-                // R3: every cell is trimmed here, once, so every reader (the numbers, the
+                // Every cell is trimmed here, once, so every reader (the numbers, the
                 // provenance checks, the names) sees one token, the token `--humidity` and
                 // the other flags see; a cell left empty, or holding only spaces, is absent.
                 let mut map = HashMap::new();
@@ -5850,7 +5852,7 @@ fn load_csv_row(path: &PathBuf, row_name: &str) -> Result<HashMap<String, String
 }
 
 /// One numeric cell of a `--profile` or `--location` CSV row, read the one way every numeric
-/// column is (R3, review C2 and VAL-1).
+/// column is.
 ///
 /// `keys` are the column's accepted names, in precedence order; the first one the row has
 /// decides. `None` means the row has none of them: no such column, or a cell left empty (which
@@ -6049,11 +6051,11 @@ fn load_profile(name: &str) -> Result<ProfileData, Box<dyn Error>> {
     if let Some(cf) = profile.windage_cf {
         validate_tracking_cf(cf, "profile field windage_cf")?;
     }
-    // Humidity train (plan C4): the stored humidity goes through the one validator ON LOAD too,
+    // The stored humidity goes through the one validator ON LOAD too,
     // so a hand-edited 150 % is a named error, never a clamped flight. The error names the file
     // the fix is made in. This loader is for flights only (`profile show` and the zero-set
     // commands read the stored file through `inspect_profile`), so it keeps the humidity the
-    // flight flies (R3, review C8): a stored band reading of 102 is 100 here, and every echo
+    // flight flies: a stored band reading of 102 is 100 here, and every echo
     // of the air a run flies says 100.
     let mut profile = profile;
     profile.humidity = profile
@@ -6063,7 +6065,7 @@ fn load_profile(name: &str) -> Result<ProfileData, Box<dyn Error>> {
 }
 
 /// Loads a saved profile to SHOW or manage it (`profile show`, `profile zero-set`), not to fly
-/// it (R2): none of [`load_profile`]'s flight checks refuse it, so a profile whose stored
+/// it: none of [`load_profile`]'s flight checks refuse it, so a profile whose stored
 /// humidity a flight would refuse can still be read, which is what the refusal tells the user
 /// to do. Every check a flight or `profile.validate` would make is printed to stderr instead,
 /// as a `warning:` beside the stored values, with the file the fix is made in.
@@ -6089,7 +6091,7 @@ fn inspect_profile(name: &str) -> Result<ProfileData, Box<dyn Error>> {
 ///
 /// It reads the file with none of [`load_profile`]'s field checks, so a stored value a load
 /// refuses never makes the existing profile look absent; that would silently drop every field
-/// the save carries forward (gate G17: a stored humidity of 150 %, which the save overwrites
+/// the save carries forward (a stored humidity of 150 %, which the save overwrites
 /// from its own range-checked `--humidity` anyway). Two cases still refuse the save, so that
 /// nothing is lost:
 /// - a stored profile that cannot be read or parsed is never overwritten;
@@ -6534,9 +6536,10 @@ fn pressure_reference_profile_field(value: PressureReferenceMode) -> Option<Stri
 /// Pre-apply the MBA-1365 ASM->ICAO BC conversion for call sites that take a raw `bc: f64`
 /// and have no `BcReferenceStandard` field to carry through to `TrajectorySolver::new` (the
 /// single normalization boundary every other surface uses). Currently only the WEZ sweep
-/// (`compute_wez`), which owns its own independent solve plumbing. Exactly the same
+/// (`compute_wez_with_humidity`), which owns its own independent solve plumbing. Exactly the same
 /// constant `TrajectorySolver::new` applies, so this is one multiply, not a second one —
-/// `compute_wez` always builds inputs at the `Icao` default, so nothing downstream repeats it.
+/// `compute_wez_with_humidity` always builds inputs at the `Icao` default, so nothing downstream
+/// repeats it.
 fn resolve_bc_for_reference_standard(bc: f64, standard: BcReferenceStandard) -> f64 {
     match standard {
         BcReferenceStandard::Icao => bc,
@@ -7393,7 +7396,7 @@ fn online_render(result: Result<serde_json::Value, ballistics_engine::api_client
     }
 }
 
-/// Runs the command line and reports a failure the way a person reads it (R2): `Error: ` and
+/// Runs the command line and reports a failure the way a person reads it: `Error: ` and
 /// the error's own message (`Display`), never the Rust `Debug` dump `main` returning a
 /// `Result` prints (`Error: BallisticsError { message: ... }`, a quoted and escaped `"..."`, a
 /// typed error's every field), then exit status 1, as before.
@@ -7769,7 +7772,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 } else {
                     HashMap::new()
                 };
-            // R3: every numeric cell either CSV row supplies, read once, before any is used;
+            // Every numeric cell either CSV row supplies, read once, before any is used;
             // one that cannot be read stops the run here, naming its column.
             let profile_csv = ProfileCsvNumbers::read(&profile_data)?;
             let location_csv = LocationCsvNumbers::read(&location_data)?;
@@ -7928,9 +7931,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             // A typed `--altitude 0` / `--humidity 50` is a value, not the clap default.
             let altitude_typed = trajectory_flag_typed(&matches, "altitude");
             let humidity_typed = trajectory_flag_typed(&matches, "humidity");
-            // Humidity train (plan C4): a --location CSV humidity goes through the one validator
+            // A --location CSV humidity goes through the one validator
             // (`LocationCsvNumbers::read`): a sensor reading within 5 points of 0-100 flies as
-            // the end it reads as (S5b), and a value farther out, or a cell that is no number,
+            // the end it reads as, and a value farther out, or a cell that is no number,
             // is refused with its source named, never clamped or skipped. A saved profile's was
             // validated, and snapped to the end it flies as, when it loaded. The fallback is the
             // one default. So this is the humidity the run flies, and every echo of it says so.
@@ -8039,7 +8042,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 temperature_supplied,
                 pressure_supplied && final_density_altitude.is_none(),
             );
-            // R2: the shot day's air refused up front, before any note, warning or solve, in
+            // The shot day's air refused up front, before any note, warning or solve, in
             // the CLI's words: the station `run_trajectory` resolves (a density altitude's
             // derived triple as it stands, otherwise by presence and pressure mode), with the
             // humidity named where it came from.
@@ -8581,7 +8584,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     final_velocity, trued_velocity, bc_info
                 );
                 if !location_data.is_empty() {
-                    // R3 (review C2, C8): the air the run flies, humidity included, so a CSV
+                    // The air the run flies, humidity included, so a CSV
                     // cell that fell back or a band reading shows here as the value flown.
                     eprintln!(
                         "                  altitude={:.0}, temp={:.1}, pressure={:.2}, humidity={:.1}%",
@@ -8959,7 +8962,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                         eprintln!("{w}");
                     }
                 }
-                // R2: the zero day's air refused up front, before the note below, under the
+                // The zero day's air refused up front, before the note below, under the
                 // zero day's own flags: the station `zero_atmosphere` below resolves.
                 {
                     let (temperature, pressure) = resolve_station_conditions_with_presence(
@@ -9759,9 +9762,10 @@ fn run() -> Result<(), Box<dyn Error>> {
                 // MBA-1352 review I2: --confidence/--seed are genuine no-ops here (the sweep's
                 // per-row p_hit carries no interval at all, and `run_monte_carlo_wez` seeds
                 // itself internally) -- disclosed rather than silent, since an unseeded WEZ run
-                // is itself reproducible run-to-run (compute_wez has no per-call randomness of
-                // its own to seed), which would otherwise make --seed look honored when tested
-                // the obvious way. Additive stderr only; the run still succeeds unchanged.
+                // is itself reproducible run-to-run (compute_wez_with_humidity has no per-call
+                // randomness of its own to seed), which would otherwise make --seed look honored
+                // when tested the obvious way. Additive stderr only; the run still succeeds
+                // unchanged.
                 if confidence.is_some() {
                     eprintln!(
                         "note: --confidence has no effect with --wez (the sweep reports a bare hit probability, no confidence interval)"
@@ -9784,7 +9788,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 let wez_end_metric = UnitConverter::distance_to_metric(wez_end, cli.units);
                 let wez_step_metric = UnitConverter::distance_to_metric(wez_step, cli.units);
 
-                // MBA-1365: `compute_wez` owns its own solve plumbing and has no
+                // MBA-1365: `compute_wez_with_humidity` owns its own solve plumbing and has no
                 // `BcReferenceStandard` field to carry the conversion through, so apply the
                 // one ASM->ICAO multiply here instead — to both the mean and its std dev,
                 // which is linear-equivalent to converting every sampled BC downstream
@@ -10107,7 +10111,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 altitude,
                 cli.units,
             );
-            // R2: the air refused up front, before any trial of the fit; a search whose every
+            // The air refused up front, before any trial of the fit; a search whose every
             // trial fails on the air would otherwise blame the data.
             refuse_cli_air(&atmosphere, station_presence, cli.units, SHOT_AIR_FLAGS)?;
             // Zero range (dope-card frame) and sight height, in meters.
@@ -10444,7 +10448,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 UnitSystem::Imperial => altitude,
                 UnitSystem::Metric => altitude / 0.3048, // meters to feet
             };
-            // R2: the air refused up front, before any table download, chronograph correction
+            // The air refused up front, before any table download, chronograph correction
             // or progress line, in the CLI's words.
             refuse_truing_cli_air(
                 temp_f,
@@ -11020,7 +11024,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 UnitSystem::Imperial => altitude,
                 UnitSystem::Metric => altitude / 0.3048,
             };
-            // R2: the air refused up front, before the back-solve's progress line.
+            // The air refused up front, before the back-solve's progress line.
             refuse_truing_cli_air(
                 temp_f,
                 press_inhg,
@@ -11376,7 +11380,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 measurement_sigma_1sd: measurement_resolution,
                 drop_unit,
             };
-            // R2: the air refused up front, before the progress line, in the CLI's words and
+            // The air refused up front, before the progress line, in the CLI's words and
             // naming where the humidity came from; the planner would otherwise report it as a
             // request it cannot plan.
             let humidity_label = match (&humidity_flag, profile_data.as_ref()) {
@@ -11730,7 +11734,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 });
-            // R2: the profile's OWN air, which `dsf` flies, refused up front in the profile's
+            // The profile's OWN air, which `dsf` flies, refused up front in the profile's
             // words (`ProfileData::air_refusal`, the stored-air resolution this solve uses).
             if let Some(refusal) = profile.air_refusal() {
                 return Err(refusal.message().into());
@@ -12221,7 +12225,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 _ => drag_model,
             };
 
-            // Parse wind speeds. R3 (the class of review C2): an entry that is no finite number
+            // Parse wind speeds. An entry that is no finite number
             // stops the run naming it, as `--wind-angles` does, where it used to be dropped (a
             // typo'd `5,1O,15` silently printed a two-column card).
             let mut ws_vec: Vec<f64> = Vec::new();
@@ -13092,7 +13096,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                             .map_err(|e| format!("optic profile: {e}"))?;
                     }
 
-                    // R2: air no solve could fly is never saved: the impossible-air rule every
+                    // Air no solve could fly is never saved: the impossible-air rule every
                     // flight of this profile applies, in the words of the flags it came from.
                     if let Some(refusal) = profile.air_refusal_in(
                         SHOT_AIR_FLAGS.map(ballistics_engine::atmosphere::AirField::named),
@@ -13341,7 +13345,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                             "inHg"
                         }
                     );
-                    // The stored value (R3, review C8), signless at zero, and what a stored
+                    // The stored value, signless at zero, and what a stored
                     // band reading flies as.
                     println!(
                         "║  Humidity:      {:>10.1}%            ║",
@@ -15676,7 +15680,7 @@ fn run_monte_carlo_wez(
     output: MonteCarloOutput,
     units: UnitSystem,
 ) -> Result<(), Box<dyn Error>> {
-    let result = compute_wez(
+    let result = compute_wez_with_humidity(
         velocity,
         angle,
         bc,
@@ -16318,7 +16322,7 @@ fn run_zero_calculation(
         humidity,
         altitude,
     };
-    // R2: the air refused up front, in the CLI's words, before any solve.
+    // The air refused up front, in the CLI's words, before any solve.
     refuse_resolved_cli_air(
         &atmosphere,
         StationPressureOrigin::resolving(pressure, altitude, pressure_type, station_presence),
@@ -16552,7 +16556,7 @@ fn run_zero_range_calculation(
         humidity,
         altitude,
     };
-    // R2: the air refused up front, in the CLI's words, before any solve.
+    // The air refused up front, in the CLI's words, before any solve.
     refuse_resolved_cli_air(
         &atmosphere,
         StationPressureOrigin::resolving(pressure, altitude, pressure_type, station_presence),
@@ -18597,7 +18601,7 @@ fn handle_mpbr(
     };
     let half_vital_m = vital_zone_m / 2.0;
 
-    // R2: the air refused up front, in the CLI's words, before the search: a search whose
+    // The air refused up front, in the CLI's words, before the search: a search whose
     // every trial fails on the air would otherwise report a zero it never found.
     refuse_cli_air(
         &AtmosphericConditions {
@@ -19144,7 +19148,7 @@ fn handle_come_ups(
         humidity,
         altitude: altitude_m,
     };
-    // R2: the air refused up front, in the CLI's words, before any solve.
+    // The air refused up front, in the CLI's words, before any solve.
     refuse_cli_air(&atmosphere, station_presence, units, SHOT_AIR_FLAGS)?;
 
     let zero_angle = ballistics_engine::calculate_zero_angle_with_station_presence(
@@ -20129,7 +20133,7 @@ fn handle_lead(
         // MBA-1396: lead exposes no --sight-offset flag (not a zero-solving command).
         0.0,
     );
-    // R2: the air refused up front, so a lead table whose every row would fail on it exits 1
+    // The air refused up front, so a lead table whose every row would fail on it exits 1
     // with the cause instead of printing a table of failed rows and exiting 0.
     refuse_cli_air(&atmosphere, station_presence, units, SHOT_AIR_FLAGS)?;
 
@@ -20488,7 +20492,7 @@ fn handle_wind_card(
         humidity,
         altitude: altitude_m,
     };
-    // R2: the air refused up front, in the CLI's words, before any solve.
+    // The air refused up front, in the CLI's words, before any solve.
     refuse_cli_air(&atmosphere, station_presence, units, SHOT_AIR_FLAGS)?;
 
     let zero_angle = ballistics_engine::calculate_zero_angle_with_station_presence(
@@ -21020,7 +21024,7 @@ fn handle_range_table(
         humidity,
         altitude: altitude_m,
     };
-    // R2: the air refused up front, in the CLI's words, before any solve.
+    // The air refused up front, in the CLI's words, before any solve.
     refuse_cli_air(&atmosphere, station_presence, units, SHOT_AIR_FLAGS)?;
 
     let zero_angle = ballistics_engine::calculate_zero_angle_with_station_presence(
@@ -21433,7 +21437,7 @@ fn handle_compare(
         humidity,
         altitude: altitude_m,
     };
-    // R2: the air refused up front, in the CLI's words, before any solve.
+    // The air refused up front, in the CLI's words, before any solve.
     refuse_cli_air(&atmosphere, station_presence, units, SHOT_AIR_FLAGS)?;
 
     // Thin per-load result: the shared `ranges` grid below indexes both `rows` here and
@@ -25138,7 +25142,7 @@ fn handle_hold_corridor(
             station_presence,
         },
     };
-    // R2: the air refused up front, in the CLI's words, before any scenario is solved.
+    // The air refused up front, in the CLI's words, before any scenario is solved.
     refuse_cli_air(
         &AtmosphericConditions {
             temperature: request.load.temperature_c,
@@ -25800,7 +25804,7 @@ fn handle_optimal_zero(
                 UnitConverter::distance_from_metric(best_zero_m, units),
             )
         } else {
-            // R2: no candidate zero solved, so no zero was fitted; the cause leads.
+            // No candidate zero solved, so no zero was fitted; the cause leads.
             format!(
                 "{cause}; no zero distance from {:.1} to {:.1} {distance_unit} could be solved",
                 UnitConverter::distance_from_metric(searched.0, units),
@@ -26251,7 +26255,7 @@ fn handle_reticle(action: ReticleAction, units: UnitSystem) -> Result<(), Box<dy
                         wind_direction_deg: wind_direction.degrees,
                         station_presence,
                     };
-                    // R2: the air refused up front, in the CLI's words, before the solve (it
+                    // The air refused up front, in the CLI's words, before the solve (it
                     // read "atmosphere.humidity = 100: ...", the solver's internal name).
                     refuse_cli_air(
                         &AtmosphericConditions {
@@ -26626,7 +26630,7 @@ fn parse_input_axis(s: &str) -> Result<InputAxis, String> {
 /// The physical unit `axis`'s resolved value (and any `--domain` bound for it) is expressed
 /// in on this CLI surface -- `""` for a dimensionless or categorical axis. The relative
 /// humidity's is `fraction`: these commands take a solve-json request FILE, whose humidity is a
-/// fraction (0.5 = 50 %), unlike every `--humidity` flag (R3, review C3).
+/// fraction (0.5 = 50 %), unlike every `--humidity` flag.
 fn axis_unit_suffix(axis: InputAxis) -> &'static str {
     match axis_meta(axis).kind {
         AxisKind::Continuous { unit, .. } => unit,
@@ -26688,7 +26692,7 @@ fn parse_sigma_arg(s: &str) -> Result<(InputAxis, f64), String> {
             axis_kebab_name(axis)
         ));
     }
-    // R3 (review C3): a one-sigma uncertainty as wide as an axis's whole physical range is no
+    // A one-sigma uncertainty as wide as an axis's whole physical range is no
     // uncertainty of it. For the relative humidity, a request-file fraction, it is a percent
     // typed by mistake: `relative-humidity=5` was a 500-point sigma that took over the ranking.
     if let Some(range) = ballistics_engine::perturbation::physical_domain(axis) {
@@ -26802,7 +26806,7 @@ fn handle_explain(
 /// able to tell apart (an axis unavailable at all is handled by the caller, one level up, since
 /// it never reaches a per-direction search): a real bound, no bound within the configured
 /// domain, no measurable effect at all, a direction with nothing to search because the nominal
-/// is at the axis's physical boundary (a saturated or dry humidity, a calm wind; R3), and (via
+/// is at the axis's physical boundary (a saturated or dry humidity, a calm wind), and (via
 /// the caller's own early return before this is called) the nominal itself sitting outside the
 /// target.
 fn render_tolerance_direction(
@@ -26814,7 +26818,7 @@ fn render_tolerance_direction(
 ) -> String {
     let unit_sp = if unit.is_empty() { "" } else { " " };
     if at_physical_boundary {
-        // R3 (review C11): a saturated or dry humidity, or a calm wind, has nothing past it.
+        // A saturated or dry humidity, or a calm wind, has nothing past it.
         "not searched -- the nominal is at the axis's physical boundary (nothing lies past it)"
             .to_string()
     } else if let Some(v) = bound {
@@ -28154,7 +28158,7 @@ fn handle_adaptive_card(
     };
     // The one HoldCurve::solve refusal --end supplies the value of (a non-finite or
     // non-positive range, e.g. `--end inf`) is named with the flag, the same "name the flag" gap
-    // N-3 fixed for the budget flags. Every other refusal is about the load, not --end (R2: air
+    // N-3 fixed for the budget flags. Every other refusal is about the load, not --end (air
     // that cannot exist used to read "--end 800.000 yd: atmosphere.humidity = 100: ..."), and
     // surfaces as itself.
     let curve = HoldCurve::solve(&load, max_solve_range_m).map_err(|e| -> Box<dyn Error> {
@@ -28515,7 +28519,7 @@ mod adaptive_card_row_tests {
     }
 }
 
-/// Humidity-consistency train, plan C4: every `--humidity`-family flag of the native CLI is a
+/// Every `--humidity`-family flag of the native CLI is a
 /// PERCENT with one range rule and one default. clap needs a string literal for a default, so
 /// this pins every literal to `DEFAULT_HUMIDITY_PERCENT`, and every flag's parser to the
 /// 0-100 range and its sensor band (0.49.0 left `wind-card --humidity` and `compare
@@ -28575,7 +28579,7 @@ mod humidity_flag_tests {
             );
             let mut unchecked = Vec::new();
             for (path, arg) in &args {
-                // Beyond the 5-point sensor band (S5b: -5, 100.0001 and -0.0001 are readings,
+                // Beyond the 5-point sensor band (-5, 100.0001 and -0.0001 are readings,
                 // the next test's).
                 for bad in ["150", "-5.0000001", "105.0000001", "-20", "nan", "inf"] {
                     if accepts(arg, bad) {
@@ -28607,9 +28611,9 @@ mod humidity_flag_tests {
             .expect("a parsed humidity")
     }
 
-    /// S5b (owner decision 2026-11-01): every humidity flag reads a sensor reading within 5
-    /// points of the range as the end it reads as, so the value the command flies, echoes and
-    /// saves is the end itself, and takes a negative reading without `=`.
+    /// The sensor band (owner decision 2026-11-01): every humidity flag reads a sensor reading
+    /// within 5 points of the range as the end it reads as, so the value the command flies, echoes
+    /// and saves is the end itself, and takes a negative reading without `=`.
     #[test]
     fn every_humidity_flag_reads_a_sensor_reading_as_the_end_it_reads_as() {
         on_a_big_stack(|| {
@@ -28716,7 +28720,7 @@ mod profile_air_refusal_tests {
         serde_json::from_value(doc).expect("a stored profile")
     }
 
-    /// R2: `ProfileData::air_refusal`, which `profile.validate`, `.a7p` export, `profile save`
+    /// `ProfileData::air_refusal`, which `profile.validate`, `.a7p` export, `profile save`
     /// and `dsf --saved-profile` apply to a stored profile's air, refuses exactly the air the
     /// profile's own flight refuses, in every way a profile stores its air: readings marked
     /// supplied, a profile without markers (the legacy omitted-value rule at a real altitude),

@@ -29,7 +29,7 @@ const TARGET_M: f64 = 457.2; // 500 yd
 
 /// Parity tolerance, m/s. Chosen from measurement, not taste. At this range, on identical inputs,
 /// the solver and the fast path differ by 7.5e-4 m/s (`fast_integrate`) and 1.3e-4 m/s
-/// (`fast_integrate_with_segments`) in 0.50.0's R5: the integrators alone, since every family
+/// (`fast_integrate_with_segments`) in 0.50.0: the integrators alone, since every family
 /// flies the same air. Skipping the BC reference conversion moves impact velocity by 4.15 m/s.
 /// 0.01 sits about 13x above the integrator gap and far below the skipped conversion, so the
 /// test tolerates integrator differences and nothing else. It also catches a fast path that

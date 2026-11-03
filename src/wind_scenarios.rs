@@ -626,8 +626,8 @@ impl RobustHoldRequest {
                 return Err(WindScenarioError::InvalidLoad { field, value });
             }
         }
-        // The documented 0-100 percent and its sensor band, enforced by the one validator (plan
-        // C4, S5b); 0.49.0 checked only finiteness and flew 150 as 100 %.
+        // The documented 0-100 percent and its sensor band, enforced by the one validator;
+        // 0.49.0 checked only finiteness and flew 150 as 100 %.
         crate::atmosphere::RelativeHumidity::try_percent(load.humidity_pct)
             .map_err(|error| WindScenarioError::InvalidHumidity(error.at_field("humidity_pct")))?;
         Ok(())

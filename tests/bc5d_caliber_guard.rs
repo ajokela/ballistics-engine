@@ -250,9 +250,9 @@ const GOLDEN_SEGMENT_BC: f64 = 0.320_000_004_768_371_6;
 /// same pre-guard commit. Compared with `==` on purpose: these are the numbers the guard
 /// must not move.
 ///
-/// Re-captured in 0.50.0 (humidity train S8, the unified aloft vapour model: the card flies the
+/// Re-captured in 0.50.0 (the unified aloft vapour model: the card flies the
 /// default 50 % RH, and the air off the station's height now holds the station's water-vapour
-/// mole fraction with a virtual-temperature lapse). Pinned before S8, old -> new:
+/// mole fraction with a virtual-temperature lapse). Pinned before the aloft change, old -> new:
 /// `2.5931407417184065e-5 -> 2.593194334216907e-5` (+5.4e-10 mil), `0.5584010682074667 ->
 /// 0.5584010712699691`, `1.3847192689837515 -> 1.3847192737654472`, `2.407150226123941 ->
 /// 2.4071502156769298`, `3.6454048443069325 -> 3.6454047560526184` and `5.1437992792782845 ->
@@ -267,8 +267,8 @@ const GOLDEN_CARD_DROP_ADJ: [f64; 6] = [
 ];
 
 /// Terminal sampled drop (m) for the solve path with the matching table, same provenance.
-/// Re-captured in S8 like the card above: `2.822094036583238 -> 2.822093873404193` (-0.16 um,
-/// -5.8e-8 relative).
+/// Re-captured with the aloft change like the card above: `2.822094036583238 -> 2.822093873404193`
+/// (-0.16 um, -5.8e-8 relative).
 const GOLDEN_SOLVE_TERMINAL_DROP_M: f64 = 2.822_093_873_404_193;
 
 #[test]

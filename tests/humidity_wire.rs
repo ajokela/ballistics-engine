@@ -1,4 +1,4 @@
-//! Humidity-consistency train, plan C5 (step S6): the SI JSON wire.
+//! Humidity on the SI JSON wire.
 //!
 //! The SI JSON wire family is solve v1 (the CLI's `solve-json`, the bridge's `solve`, the MCP
 //! `solve` tool), the perturbation kernel, `explain`, the error budget, the resolved request's
@@ -11,7 +11,7 @@
 //!
 //! - a round trip: the fraction sent is the fraction echoed (to the bit), the echo sent back
 //!   flies the same bits, and the air flown is `StationAir`'s at `try_fraction(f)`;
-//! - the sensor band (S5b, the owner's decision of 2026-11-01): a reading up to 0.05 outside
+//! - the sensor band (the owner's decision of 2026-11-01): a reading up to 0.05 outside
 //!   0-1, such as a phone or a Kestrel above 100 % in fog, is the saturated or dry air it reads,
 //!   and flies exactly as 1 or 0, so a high reading never fails a calculation;
 //! - the refusal: a value beyond the band (a percent sent as a fraction, a typo) is refused at
@@ -232,7 +232,7 @@ fn the_perturbation_axis_is_the_wire_fraction_in_and_out() {
     assert_eq!(meta.group, InputGroup::Atmosphere);
     match meta.kind {
         AxisKind::Continuous { unit, .. } => {
-            // R3 (review C3): the wire fraction, named so the CLI prints it.
+            // The wire fraction, named so the CLI prints it.
             assert_eq!(unit, "fraction", "the axis is the wire's fraction")
         }
         AxisKind::Categorical => panic!("relative humidity is continuous"),
@@ -480,7 +480,7 @@ fn the_wire_refuses_impossible_air_for_the_one_shared_reason() {
         solve["atmosphere"] = atmosphere;
         let request = decode_solve_request_v1(&solve.to_string()).unwrap();
         let error = refused(request);
-        // R2: one envelope, not only one reason. The solve refuses this air before any flight
+        // One envelope, not only one reason. The solve refuses this air before any flight
         // as `invalid_value` at the humidity's path, with density_altitude's message word for
         // word (it was `solve_failed` with no path, in percent, from inside the zero search).
         assert_eq!(error.code, SolveErrorCodeV1::InvalidValue);
@@ -1149,7 +1149,7 @@ mod bridge_units {
 
 /// A stored humidity within 5 points of 0-100 % (a profile saved from a sensor in fog) is the
 /// saturated or dry air it reads, so it exports as that end, exactly as the engine flies it and
-/// as `.a7p` import reads such a file. Before S6 the export refused 102 % outright.
+/// as `.a7p` import reads such a file. Before 0.50.0 the export refused 102 % outright.
 #[cfg(feature = "profile-export")]
 #[test]
 fn a7p_export_writes_a_sensor_reading_as_the_end_it_reads_as() {

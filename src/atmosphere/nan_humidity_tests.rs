@@ -1,4 +1,4 @@
-//! R3 (whole-branch review PHYS-1, C10): a humidity that is not a number never becomes steam.
+//! A humidity that is not a number never becomes steam.
 //!
 //! The engine's raw humidity primitives take a bare `f64` percent. They clamp a number outside
 //! 0-100 into it, a total-function guard for unvalidated callers, but before 0.50.0 they also

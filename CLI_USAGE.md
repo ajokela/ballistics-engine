@@ -395,8 +395,10 @@ warning: station pressure 29.92 inHg is 1.202 times the ICAO standard pressure a
 
 Every `--humidity` and `--zero-humidity` is a relative humidity in **percent**, 0 to 100. Leave
 it out and the run flies **50 %**, the same default on every command, in the browser terminal,
-over the bridge and through the C ABI (0.50.0 made this one rule everywhere). The one CLI
-humidity that is not a percent is the request-file axis of `error-budget --sigma` and
+over the bridge and through the C ABI, unless another reading supplies it (a saved profile, the
+shot day for `--zero-humidity`), with two exceptions: an `.a7p` file's absent humidity is 0 %
+(the format's own meaning), and the bridge's `true.*` commands require `humidity_pct`. The one
+CLI humidity that is not a percent is the request-file axis of `error-budget --sigma` and
 `tolerance --domain`: those commands read a solve-json request, whose humidity is a fraction,
 and their axes take the request's own units. A percent typed there (`--sigma
 relative-humidity=5`, `--domain relative-humidity=20:80`) is refused with the unit named; there
@@ -501,11 +503,13 @@ from a 1500 m station at 35 °C / 90 %; see the CHANGELOG).
   `M_m / M_a = 1 - x_v (1 - M_v / M_a)`, so humid air's pressure falls a little more slowly
   with height. The density keeps the station's composition, and the sound speed is the formula
   above at the local temperature and the station's `x_v`. A downrange atmosphere zone is the
-  governing air inside its stretch of range, with its own `x_v`. Held aloft, `x_v` can exceed
-  saturation at the colder heights; condensation is not modelled. At 0 % this is exactly the
-  dry model. Before 0.50.0 the sound speed kept the station's relative humidity instead,
-  re-deriving `x_v` at the local temperature and pressure, and the lapse was dry; see the
-  CHANGELOG for what that moves (mostly high-angle fire).
+  governing air inside its stretch of range, with its own `x_v`. Held aloft, `x_v` exceeds
+  saturation in the colder air: at every height above a saturated station, and from about 2.2 km
+  above a 15 °C / 50 % station and 0.4 km above a 35 °C / 90 % one. At +3 km it is 1.35 times
+  saturation over the first and 2.06 times over the second, and at +10 km 34 and 29 times.
+  Condensation is not modelled. At 0 % this is exactly the dry model. Before 0.50.0 the sound speed
+  kept the station's relative humidity instead, re-deriving `x_v` at the local temperature and
+  pressure, and the lapse was dry; see the CHANGELOG for what that moves (mostly high-angle fire).
 
 Humid air is lighter than dry air, so it gives less drag. It also carries sound faster, which
 lowers the Mach number at a given speed and so moves the drag coefficient along the drag curve.

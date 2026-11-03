@@ -481,7 +481,7 @@ mod station_presence_exports {
     #[test]
     fn trajectory_export_is_the_legacy_one_with_flags_0_and_flies_a_supplied_pressure() {
         // captured at ab4eb0c (legacy export, in-band 1013.0 hPa at 150 m)
-        // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the
+        // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the
         // station's water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
         // 496.4039781654643 -> 496.40407051538887 (+1.9e-7), 0.12929012777614302 ->
         // 0.12929012746272325 (-2.4e-9), 647.3738723015441 -> 647.3738655023416 (-1.1e-8),
@@ -589,7 +589,7 @@ mod station_presence_exports {
     #[test]
     fn monte_carlo_export_is_the_legacy_one_with_flags_0_and_flies_a_supplied_pressure() {
         // captured at ab4eb0c
-        // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the
+        // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the
         // station's water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
         // range 510.40641841997 -> 510.40631936045986 (-1.9e-7), velocity 538.5846534556614 ->
         // 538.5844740696717 (-3.3e-7).

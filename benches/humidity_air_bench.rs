@@ -1,4 +1,4 @@
-//! What humid air costs a flight (R4, review HR-2), in pairs: `fast_integrate`, the lean Monte
+//! What humid air costs a flight, in pairs: `fast_integrate`, the lean Monte
 //! Carlo trial and `TrajectorySolver` RK4 and RK45, each at 0 % and 50 % relative humidity.
 //!
 //! Every kernel looks up its air at every step through `air_at`. The governing air's

@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 /// are now that build's output, no longer an independent pre-1519 oracle. A conversion that
 /// moves them by one ulp still fails here.
 ///
-/// Re-captured once since, in 0.50.0 (humidity train S8, the unified aloft vapour model): the
+/// Re-captured once since, in 0.50.0 (the unified aloft vapour model): the
 /// cards fly the default 50 % RH, and the air off the station's height now holds the station's
 /// water-vapour mole fraction with a virtual-temperature lapse. Only row values moved, every one
 /// by at most 6e-7 relative; the largest, old -> new, are the 600 yd energy (imperial come-ups

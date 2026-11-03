@@ -1,4 +1,4 @@
-//! R3 (whole-branch review C12): the browser terminal's help lists every flag its parser takes.
+//! The browser terminal's help lists every flag its parser takes.
 //!
 //! `src/wasm.rs` parses each command's flags by hand and writes its help by hand, and the two
 //! drifted: `trajectory` parsed `--zero-humidity`, `--zero-temperature`, `--zero-pressure`,

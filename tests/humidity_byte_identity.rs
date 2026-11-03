@@ -1,38 +1,38 @@
-//! Byte-identity pins for the humidity-consistency train (0.50.0), step S1 (plan step C0a).
+//! Byte-identity pins for the 0.50.0 humidity work, captured on 0.49.0 before any of it.
 //!
 //! # Why this file exists
 //!
-//! The humidity train routes every solver family through one air lookup and gives the kernel
-//! API a type that cannot describe an atmosphere without its relative humidity. Its Phase 1
-//! promise is that every `TrajectorySolver`-backed surface stays BYTE-IDENTICAL at every
-//! valid RH, and so do direct ("uniform") mode on every family, station density and sound
-//! speed, the muzzle Miller Sg, Litz spin drift, aerodynamic jump and density altitude. These
-//! pins hold the train to that promise with `f64::to_bits` equality. A refactor that moves
-//! one of them has changed physics, whatever its description says.
+//! 0.50.0 routes every solver family through one air lookup and gives the kernel API a type
+//! that cannot describe an atmosphere without its relative humidity. Its promise is that every
+//! `TrajectorySolver`-backed surface stays BYTE-IDENTICAL at every valid RH, and so do direct
+//! ("uniform") mode on every family, station density and sound speed, the muzzle Miller Sg,
+//! Litz spin drift, aerodynamic jump and density altitude. These pins hold 0.50.0 to that
+//! promise with `f64::to_bits` equality. A refactor that moves one of them has changed physics,
+//! whatever its description says.
 //!
-//! # Rules for later steps
+//! # Rules
 //!
 //! - A pin is never edited. It may only be MIGRATED: when an API it calls is renamed or
 //!   retyped (for example the kernel atmosphere tuple becoming `KernelAtmosphere`), the call
 //!   changes and the pinned constant does not.
-//! - Each group's header says which later step may change it. Two words are used:
-//!   - `IMMUTABLE`: must pass unchanged through every step, S8 included.
-//!   - `MAY CHANGE ONLY IN S8`: the unified aloft vapour model (plan C7) may re-pin it, and
-//!     no other step may. Every such group involves a relative humidity above zero, at the
-//!     station or in a zone; at RH 0 the plan claims S8 is bit-identical, so the RH-0 cases
+//! - Each group's header says what in 0.50.0 may change it. Two words are used:
+//!   - `IMMUTABLE`: must pass unchanged through all of 0.50.0, the aloft vapour model included.
+//!   - `MAY CHANGE ONLY WITH THE ALOFT VAPOUR MODEL`: the unified aloft vapour model may re-pin
+//!     it, and no other change may. Every such group involves a relative humidity above zero,
+//!     at the station or in a zone; at RH 0 the aloft model is bit-identical, so the RH-0 cases
 //!     live in separate `IMMUTABLE` groups.
-//!   - S8 has landed. It re-pinned every `MAY CHANGE ONLY IN S8` group that moved
-//!     (`ZERO_HUMID` did not: its trial heights kept their signs), and each re-pinned group
-//!     carries a note with its count of moved values and, for every moved case, its largest
-//!     shift, old -> new. No RH-0 value and no value at the station's own height moved, and
-//!     every `IMMUTABLE` group passed S8 unchanged.
+//!   - The aloft vapour model re-pinned every such group that moved (`ZERO_HUMID` did not: its
+//!     trial heights kept their signs), and each re-pinned group carries a note with its count
+//!     of moved values and, for every moved case, its largest shift, old -> new. No RH-0 value
+//!     and no value at the station's own height moved, and every `IMMUTABLE` group passed it
+//!     unchanged.
 //! - Kernel outputs at RH > 0 (`compute_derivatives`, `try_integrate_trajectory`,
 //!   `try_solve_trajectory_rust`, `fast_integrate*`, the lean Monte Carlo) are deliberately NOT
-//!   pinned: they flew the dry speed of sound at any RH until S3 fixed that.
-//! - Kernel STANDARD mode at RH 0 is pinned bit for bit like everything else. The plan allowed
-//!   it a relative 1e-15 (S3 moved the kernels onto `air_at`, and fast_integrate lost a
-//!   `ratio * 1.225 / 1.225` round trip), but the bits held through every step on every
-//!   platform measured, so the tolerance went in 0.50.0's R5.
+//!   pinned: they flew the dry speed of sound at any RH until 0.50.0 fixed that.
+//! - Kernel STANDARD mode at RH 0 is pinned bit for bit like everything else. It was first
+//!   allowed a relative 1e-15 (0.50.0 moved the kernels onto `air_at`, and fast_integrate lost
+//!   a `ratio * 1.225 / 1.225` round trip), but the bits held through every change on every
+//!   platform measured, so 0.50.0 dropped the tolerance.
 //!
 //! In-crate pins for the `pub(crate)` gravity-aware entry points live in
 //! `src/humidity_byte_identity_tests.rs` under the same rules.
@@ -42,7 +42,8 @@
 //! A libm may round a `pow`, `exp` or `log` a last bit apart from another, and one such bit can
 //! reach a pinned value. Bits captured on one machine are therefore not bits on every machine:
 //! the BSDs' libms moved some of these pins even where 0.50.0 computes exactly what 0.49.0 does
-//! (FreeBSD's even on the unchanged 0.49.0 code), and musl's moved two S8 groups. So each group
+//! (FreeBSD's even on the unchanged 0.49.0 code), and musl's moved two of the aloft model's
+//! groups. So each group
 //! is held in one of two ways (`Check`):
 //!
 //! - **`Check::Released049`: against the released 0.49.0, on every platform.** A group whose
@@ -53,20 +54,20 @@
 //!   engine. They must agree bit for bit in every value, digests included, on whatever platform
 //!   runs the test, so these groups need no table of libm alternates. On an exact-bit platform
 //!   (below) they must also match their literal pins bit for bit.
-//! - **`Check::Pinned`: against the literal pins only.** These are the groups S8 moved (no
-//!   engine computes their new values but this one), plus `ZERO_HUMID`, which S8 was allowed to
-//!   move, and the IMMUTABLE groups 0.49.0 has no public entry for: `FFI_TRAJECTORY_DRY` (0.49.0's
-//!   C ABI cannot be linked beside this crate's). On an exact-bit platform every value must
-//!   match its pin bit for bit, or, on glibc, the glibc bits recorded in `LIBM_ALTERNATES`. On
-//!   any other platform each float must lie within `UNVERIFIED_LIBM_ULPS` of its pin, every
-//!   count, flag and text hash must match exactly, and digests are not compared (a digest
-//!   cannot be compared within a tolerance; its trajectory's explicit indices still are).
+//! - **`Check::Pinned`: against the literal pins only.** These are the groups the aloft vapour
+//!   model moved (no engine computes their new values but this one), plus `ZERO_HUMID`, which
+//!   it was allowed to move, and the IMMUTABLE groups 0.49.0 has no public entry for:
+//!   `FFI_TRAJECTORY_DRY` (0.49.0's C ABI cannot be linked beside this crate's). On an exact-bit
+//!   platform every value must match its pin bit for bit, or, on glibc, the glibc bits recorded in
+//!   `LIBM_ALTERNATES`. On any other platform each float must lie within `UNVERIFIED_LIBM_ULPS` of
+//!   its pin, every count, flag and text hash must match exactly, and digests are not compared (a
+//!   digest cannot be compared within a tolerance; its trajectory's explicit indices still are).
 //!
 //! The exact-bit platforms are the ones the literal pins were captured or checked on (`Libm`):
 //! macOS aarch64 (Apple's libm, where they were captured) and Linux glibc on aarch64 and x86_64
 //! (the CI platform). Every other platform is unverified, macOS x86_64 included: Apple's x86_64
 //! libm rounds some values apart from its aarch64 one. The bound there, `UNVERIFIED_LIBM_ULPS`,
-//! is 2 ulps: the largest distance any `Check::Pinned` float showed when 0.50.0's R5 ran these
+//! is 2 ulps: the largest distance any `Check::Pinned` float showed when 0.50.0 ran these
 //! pins on FreeBSD 14.3, NetBSD 10.1 and OpenBSD 7.8 (amd64), Alpine Linux musl (aarch64 and
 //! x86_64), macOS x86_64 (Rosetta 2) and Windows 11 (x86_64 MSVC, the UCRT's own x64 code). No
 //! count, flag or text hash moved on any of them. Its doc has the details.
@@ -74,15 +75,16 @@
 //! # How the pinned values were generated
 //!
 //! By running this file's own probes against the engine at 261c1eb (ballistics-engine
-//! 0.49.0, the commit this train branched from) and pasting the printed constants verbatim:
+//! 0.49.0, the commit the humidity work started from) and pasting the printed constants verbatim:
 //!
 //! ```text
 //! cargo test --test humidity_byte_identity -- --ignored --nocapture print_current_pin_values
 //! ```
 //!
 //! They were captured on macOS (aarch64), and the identical file then passed in Linux glibc
-//! containers on aarch64 and x86_64 (the CI platform). S8 re-pinned its groups the same way, and
-//! glibc's bits for the seven values where it differed are in `LIBM_ALTERNATES`.
+//! containers on aarch64 and x86_64 (the CI platform). The aloft vapour model re-pinned its
+//! groups the same way, and glibc's bits for the seven values where it differed are in
+//! `LIBM_ALTERNATES`.
 //!
 //! Each value is the IEEE-754 bit pattern of an `f64` (`f64::to_bits`), or an exact count.
 //! A `*.is_some` entry is 1 or 0. A `text` entry is the FNV-1a hash of a string such as a
@@ -244,7 +246,7 @@ impl Libm {
 /// The widest distance, in units in the last place, a float of a `Check::Pinned` group may lie
 /// from its pin on a platform that is not an exact-bit one ([`Libm`]).
 ///
-/// Measured, not chosen. In 0.50.0's R5 this file's pins (then all compared bit for bit) were run
+/// Measured, not chosen. In 0.50.0 this file's pins (then all compared bit for bit) were run
 /// with the 0.50.0 engine on FreeBSD 14.3, NetBSD 10.1 and OpenBSD 7.8 (amd64, rustc 1.93 and
 /// 1.90), Alpine Linux musl on aarch64 and x86_64, macOS x86_64 (under Rosetta 2) and Windows 11
 /// (x86_64 MSVC with the UCRT linked statically, so its own x64 math code ran, under x86_64
@@ -258,13 +260,13 @@ impl Libm {
 /// `density_matched_altitude_m`'s bisection, which amplifies a last-bit difference), which is
 /// why those groups are compared to 0.49.0 there instead; 0.49.0 matched this engine bit for bit
 /// on every platform. Following be60e2b, the bound sits far below a physics change: every float
-/// S8 re-pinned moved by 327 ulps or more, and its only smaller changes were
+/// the aloft vapour model re-pinned moved by 327 ulps or more, and its only smaller changes were
 /// two trajectory point counts, which every platform compares exactly.
 const UNVERIFIED_LIBM_ULPS: u64 = 2;
 
 /// The bit patterns another libm gives a few pinned values: `(group, case, label, libm, bits)`.
 ///
-/// S8 (the unified aloft vapour model) re-pinned its groups from macOS (aarch64). In the Linux
+/// The unified aloft vapour model re-pinned its groups from macOS (aarch64). In the Linux
 /// glibc containers, aarch64 and x86_64 alike, every re-pinned value then matched except these
 /// seven: glibc's `pow` rounds the virtual-temperature lapse a last bit apart from Apple's at some
 /// state of the RK4 30-degree lob at 50 %, and that ulp reaches the lob's final point (its speed,
@@ -656,7 +658,7 @@ mod current {
         use engine::{KernelAtmosphere, RelativeHumidity};
         use std::collections::HashMap;
 
-        /// The pinned kernel atmospheres were written as legacy tuples; S3 moved the kernels
+        /// The pinned kernel atmospheres were written as legacy tuples; 0.50.0 moved the kernels
         /// onto `KernelAtmosphere`, and `from_legacy_params` at 0 % RH is the one-line migration
         /// (a dry station keeps its tuple's ratio verbatim; the direct sentinel becomes uniform
         /// air).
@@ -910,7 +912,7 @@ mod current {
 
 /// The same probes on the released 0.49.0 crate. Its kernels still take the legacy atmosphere
 /// tuple and its inputs a humidity fraction, so its shim passes them through unchanged: exactly
-/// the calls the S1 probes made when these pins were generated on 0.49.0.
+/// the calls the byte-identity probes made when these pins were generated on 0.49.0.
 #[cfg(not(target_arch = "wasm32"))]
 mod released_0_49_0 {
     #![allow(dead_code)]
@@ -1071,9 +1073,10 @@ struct Group {
     feature: Option<&'static str>,
 }
 
-const IMMUTABLE: &str = "IMMUTABLE: no later step may change it, S8 included.";
-const S8_ONLY: &str = "MAY CHANGE ONLY IN S8 (the unified aloft vapour model, plan C7): \
-                       byte-identical through every other step.";
+const IMMUTABLE: &str = "IMMUTABLE: nothing in 0.50.0 may change it, the aloft vapour model \
+                         included.";
+const ALOFT_MODEL_ONLY: &str = "MAY CHANGE ONLY WITH THE ALOFT VAPOUR MODEL: byte-identical \
+                                through every other change in 0.50.0.";
 
 /// Every pinned group, in file order.
 fn groups() -> Vec<Group> {
@@ -1166,7 +1169,7 @@ fn groups() -> Vec<Group> {
             "STATION_AIR",
             "Station density and sound speed: `calculate_atmosphere` over altitude, T/P override \
              and RH, plus `calculate_air_density_cimp` and `moist_speed_of_sound`. Station air \
-             is not part of the aloft model, so this holds through S8 at every RH.",
+             is not part of the aloft model, so this holds through it at every RH.",
             current::probe_station_air,
             STATION_AIR,
             released!(probe_station_air),
@@ -1197,10 +1200,10 @@ fn groups() -> Vec<Group> {
         ),
         group(
             "STABILITY_SPIN_JUMP",
-            "Muzzle Miller Sg (the published dry T/P correction, kept deliberately: plan C8 was \
-             rejected), Litz spin drift, the fast path's aerodynamic-jump offset, and \
-             `TrajectorySolver`'s aerodynamic-jump components, which depend on station T/P only \
-             and so are pinned at every RH.",
+            "Muzzle Miller Sg (the published dry T/P correction, kept deliberately; a humid \
+             correction was rejected), Litz spin drift, the fast path's aerodynamic-jump offset, \
+             and `TrajectorySolver`'s aerodynamic-jump components, which depend on station T/P \
+             only and so are pinned at every RH.",
             current::probe_stability_spin_jump,
             STABILITY_SPIN_JUMP,
             released!(probe_stability_spin_jump),
@@ -1210,7 +1213,7 @@ fn groups() -> Vec<Group> {
             "Kernel direct (uniform) mode, density 1.1 kg/m3 and sound speed 335 m/s: \
              `compute_derivatives`, `try_integrate_trajectory` RK4 and RK45, \
              `try_solve_trajectory_rust`, `fast_integrate` and `fast_integrate_with_segments`. \
-             S3 migrates the tuple to the uniform `KernelAtmosphere`; the values do not move.",
+             0.50.0 migrates the tuple to the uniform `KernelAtmosphere`; the values do not move.",
             current::probe_kernel_direct,
             KERNEL_DIRECT,
             released!(probe_kernel_direct),
@@ -1293,9 +1296,10 @@ fn groups() -> Vec<Group> {
     groups
 }
 
-/// Whether a group's constant may change in S8: every group whose cases involve an RH above
+/// Whether a group's constant may change with the aloft vapour model: every group whose cases
+/// involve an RH above
 /// zero, at the station or in a zone, except the station-air and stability groups.
-fn s8_may_change(name: &str) -> bool {
+fn aloft_model_may_change(name: &str) -> bool {
     name.ends_with("_HUMID") || name == "MONTE_CARLO_DEFAULT_HUMIDITY"
 }
 
@@ -1362,8 +1366,8 @@ fn print_current_pin_values() {
         let probe = (group.probe)();
         print_doc(group.header);
         println!("///");
-        print_doc(if s8_may_change(group.name) {
-            S8_ONLY
+        print_doc(if aloft_model_may_change(group.name) {
+            ALOFT_MODEL_ONLY
         } else {
             IMMUTABLE
         });
@@ -1444,14 +1448,19 @@ fn every_group_has_a_test() {
 }
 
 /// The groups held to 0.49.0 are exactly the ones whose promise is "0.50.0 equals 0.49.0": never
-/// a group S8 may change (0.49.0 is not its oracle), and every IMMUTABLE group except the one
+/// a group the aloft vapour model may change (0.49.0 is not its oracle), and every IMMUTABLE
+/// group except the one
 /// 0.49.0 cannot be linked for (its C ABI).
 #[test]
 fn every_immutable_group_with_a_0_49_0_entry_is_held_to_0_49_0() {
     for group in groups() {
         let held_to_released = matches!(group.check, Check::Released049(_));
-        if s8_may_change(group.name) {
-            assert!(!held_to_released, "{}: S8 may change it", group.name);
+        if aloft_model_may_change(group.name) {
+            assert!(
+                !held_to_released,
+                "{}: the aloft model may change it",
+                group.name
+            );
         } else if group.name != "FFI_TRAJECTORY_DRY" {
             assert!(
                 held_to_released,
@@ -1462,7 +1471,8 @@ fn every_immutable_group_with_a_0_49_0_entry_is_held_to_0_49_0() {
     }
 }
 
-/// The released crate really is another engine: where S8 moved the physics, it disagrees with
+/// The released crate really is another engine: where the aloft vapour model moved the physics,
+/// it disagrees with
 /// this one. (Were the dev-dependency ever resolved to this crate itself, every
 /// `Check::Released049` comparison would pass vacuously.)
 #[cfg(not(target_arch = "wasm32"))]
@@ -1529,13 +1539,17 @@ fn the_release_bump_moves_only_this_crate_and_never_the_0_49_0_oracle() {
     );
 }
 
-/// Each `LIBM_ALTERNATES` entry names a value the probe records, in a group S8 may re-pin, and
+/// Each `LIBM_ALTERNATES` entry names a value the probe records, in a group the aloft vapour
+/// model may re-pin, and
 /// differs from that value's primary pin, so no alternate can widen a pin that does not need it
 /// or outlive the pin it was recorded for.
 #[test]
 fn every_libm_alternate_names_a_pinned_value_it_differs_from() {
     for &(group_name, case, label, _, bits) in LIBM_ALTERNATES {
-        assert!(s8_may_change(group_name), "{group_name} is IMMUTABLE");
+        assert!(
+            aloft_model_may_change(group_name),
+            "{group_name} is IMMUTABLE"
+        );
         let group = group_named(group_name);
         let probe = (group.probe)();
         let (case_index, (_, pins)) = probe
@@ -1577,7 +1591,7 @@ fn ulps_apart_counts_representable_values() {
 /// level (presence-blind) and at 1500 m, 25 C, 830 hPa (presence-aware), without zones and with two
 /// dry zones. RH 0 throughout.
 ///
-/// IMMUTABLE: no later step may change it, S8 included.
+/// IMMUTABLE: nothing in 0.50.0 may change it, the aloft vapour model included.
 #[rustfmt::skip]
 const TS_FLAT_DRY: Pinned = &[
     (
@@ -1813,15 +1827,15 @@ const TS_FLAT_DRY: Pinned = &[
 /// `TrajectorySolver::solve`, flat fire, the same methods and stations: station RH 0 under humid
 /// zones (RH 20 then 80), and station RH 50 and 100 with and without those zones.
 ///
-/// MAY CHANGE ONLY IN S8 (the unified aloft vapour model, plan C7): byte-identical through every
-/// other step.
+/// MAY CHANGE ONLY WITH THE ALOFT VAPOUR MODEL: byte-identical through every other change in
+/// 0.50.0.
 ///
-/// Re-pinned in S8 (0.50.0, plan C7, owner-approved): the unified aloft vapour model holds the
+/// Re-pinned by the aloft vapour model (0.50.0): the unified aloft vapour model holds the
 /// governing air's (the station's or the zone's) water-vapour mole fraction for the lapse, the
 /// density and the sound speed, with a virtual-temperature lapse. 925 of 1620 values moved, all in
 /// cases with a humidity above 0 and all off the station's own height; every RH-0 and
-/// station-height value is unchanged. The largest float shift of each moved case, pinned before S8
-/// -> pinned now:
+/// station-height value is unchanged. The largest float shift of each moved case,
+/// pinned before the aloft vapour model -> pinned now:
 /// - `flat/euler/icao-sea-level/rh0/zones-rh20-rh80` points[1964].drag_coefficient: 0.21625498159624057 -> 0.21625065852669897 (-2.00e-05)
 /// - `flat/euler/icao-sea-level/rh50/no-zones` points[1964].drag_coefficient: 0.22335507451629613 -> 0.22335131439114955 (-1.68e-05)
 /// - `flat/euler/icao-sea-level/rh50/zones-rh20-rh80` points[1964].drag_coefficient: 0.21316524983232532 -> 0.21316121741649008 (-1.89e-05)
@@ -2429,7 +2443,7 @@ const TS_FLAT_HUMID: Pinned = &[
 /// `TrajectorySolver::solve`, the 30-degree lob to ground impact, Euler, RK4 and RK45 at both
 /// stations, RH 0, no zones.
 ///
-/// IMMUTABLE: no later step may change it, S8 included.
+/// IMMUTABLE: nothing in 0.50.0 may change it, the aloft vapour model included.
 #[rustfmt::skip]
 const TS_LOB_DRY: Pinned = &[
     (
@@ -2551,15 +2565,15 @@ const TS_LOB_DRY: Pinned = &[
 /// `TrajectorySolver::solve`, the 30-degree lob: RH 50 and 100 without zones, and RH 50 under humid
 /// zones.
 ///
-/// MAY CHANGE ONLY IN S8 (the unified aloft vapour model, plan C7): byte-identical through every
-/// other step.
+/// MAY CHANGE ONLY WITH THE ALOFT VAPOUR MODEL: byte-identical through every other change in
+/// 0.50.0.
 ///
-/// Re-pinned in S8 (0.50.0, plan C7, owner-approved): the unified aloft vapour model holds the
+/// Re-pinned by the aloft vapour model (0.50.0): the unified aloft vapour model holds the
 /// governing air's (the station's or the zone's) water-vapour mole fraction for the lapse, the
 /// density and the sound speed, with a virtual-temperature lapse. 589 of 954 values moved, all in
 /// cases with a humidity above 0 and all off the station's own height; every RH-0 and
-/// station-height value is unchanged. The largest float shift of each moved case, pinned before S8
-/// -> pinned now:
+/// station-height value is unchanged. The largest float shift of each moved case,
+/// pinned before the aloft vapour model -> pinned now:
 /// - `lob30/euler/icao-sea-level/rh50/no-zones` mach_0_9_distance_m: 965.3861958282084 -> 965.6329488435597 (+2.56e-04)
 /// - `lob30/euler/icao-sea-level/rh100/no-zones` points[22446].speed: 127.5594013596002 -> 127.52526950945204 (-2.68e-04)
 /// - `lob30/euler/icao-sea-level/rh50/zones-rh20-rh80` mach_0_9_distance_m: 957.0403448161148 -> 957.288978457813 (+2.60e-04)
@@ -2929,7 +2943,7 @@ const TS_LOB_HUMID: Pinned = &[
 /// `TrajectorySolver::solve` (RK4, flat) with Litz spin drift plus aerodynamic jump, and with
 /// Magnus, at both stations, RH 0.
 ///
-/// IMMUTABLE: no later step may change it, S8 included.
+/// IMMUTABLE: nothing in 0.50.0 may change it, the aloft vapour model included.
 #[rustfmt::skip]
 const TS_EFFECTS_DRY: Pinned = &[
     (
@@ -3012,15 +3026,15 @@ const TS_EFFECTS_DRY: Pinned = &[
 
 /// As `TS_EFFECTS_DRY`, at RH 50 and 100.
 ///
-/// MAY CHANGE ONLY IN S8 (the unified aloft vapour model, plan C7): byte-identical through every
-/// other step.
+/// MAY CHANGE ONLY WITH THE ALOFT VAPOUR MODEL: byte-identical through every other change in
+/// 0.50.0.
 ///
-/// Re-pinned in S8 (0.50.0, plan C7, owner-approved): the unified aloft vapour model holds the
+/// Re-pinned by the aloft vapour model (0.50.0): the unified aloft vapour model holds the
 /// governing air's (the station's or the zone's) water-vapour mole fraction for the lapse, the
 /// density and the sound speed, with a virtual-temperature lapse. 260 of 432 values moved, all in
 /// cases with a humidity above 0 and all off the station's own height; every RH-0 and
-/// station-height value is unchanged. The largest float shift of each moved case, pinned before S8
-/// -> pinned now:
+/// station-height value is unchanged. The largest float shift of each moved case,
+/// pinned before the aloft vapour model -> pinned now:
 /// - `spin-drift+aerodynamic-jump/rk4/icao-sea-level/rh50` points[1963].drag_coefficient: 0.22457961110519453 -> 0.22457579017393242 (-1.70e-05)
 /// - `magnus/rk4/icao-sea-level/rh50` points[1963].drag_coefficient: 0.22457761861610434 -> 0.22457378373250123 (-1.71e-05)
 /// - `spin-drift+aerodynamic-jump/rk4/icao-sea-level/rh100` points[1960].drag_coefficient: 0.2270644023671422 -> 0.2270565787292812 (-3.45e-05)
@@ -3190,7 +3204,7 @@ const TS_EFFECTS_HUMID: Pinned = &[
 /// 1e-7 rad, so a zero pin moves only when a trial height changes sign; the flight groups are the
 /// sensitive ones.
 ///
-/// IMMUTABLE: no later step may change it, S8 included.
+/// IMMUTABLE: nothing in 0.50.0 may change it, the aloft vapour model included.
 #[rustfmt::skip]
 const ZERO_DRY: Pinned = &[
     (
@@ -3233,8 +3247,8 @@ const ZERO_DRY: Pinned = &[
 
 /// As `ZERO_DRY`, at RH 50 and 100.
 ///
-/// MAY CHANGE ONLY IN S8 (the unified aloft vapour model, plan C7): byte-identical through every
-/// other step.
+/// MAY CHANGE ONLY WITH THE ALOFT VAPOUR MODEL: byte-identical through every other change in
+/// 0.50.0.
 #[rustfmt::skip]
 const ZERO_HUMID: Pinned = &[
     (
@@ -3315,15 +3329,15 @@ const ZERO_HUMID: Pinned = &[
 /// CLI's seeded entry at ICAO sea level, and the presence-aware entry the FFI Monte Carlo runs on,
 /// at 1500 m.
 ///
-/// MAY CHANGE ONLY IN S8 (the unified aloft vapour model, plan C7): byte-identical through every
-/// other step.
+/// MAY CHANGE ONLY WITH THE ALOFT VAPOUR MODEL: byte-identical through every other change in
+/// 0.50.0.
 ///
-/// Re-pinned in S8 (0.50.0, plan C7, owner-approved): the unified aloft vapour model holds the
+/// Re-pinned by the aloft vapour model (0.50.0): the unified aloft vapour model holds the
 /// governing air's (the station's or the zone's) water-vapour mole fraction for the lapse, the
 /// density and the sound speed, with a virtual-temperature lapse. 14 of 18 values moved, all in
 /// cases with a humidity above 0 and all off the station's own height; every RH-0 and
-/// station-height value is unchanged. The largest float shift of each moved case, pinned before S8
-/// -> pinned now:
+/// station-height value is unchanged. The largest float shift of each moved case,
+/// pinned before the aloft vapour model -> pinned now:
 /// - `seeded/icao-sea-level/default-rh` impact_positions[0].z: 0.11563447090134216 -> 0.11563411086056596 (-3.11e-06)
 /// - `seeded/1500m-25C-830hPa/default-rh` impact_velocities[0]: 563.6048728741576 -> 563.6045855884292 (-5.10e-07)
 ///
@@ -3350,9 +3364,9 @@ const MONTE_CARLO_DEFAULT_HUMIDITY: Pinned = &[
 
 /// Station density and sound speed: `calculate_atmosphere` over altitude, T/P override and RH, plus
 /// `calculate_air_density_cimp` and `moist_speed_of_sound`. Station air is not part of the aloft
-/// model, so this holds through S8 at every RH.
+/// model, so this holds through the aloft vapour model at every RH.
 ///
-/// IMMUTABLE: no later step may change it, S8 included.
+/// IMMUTABLE: nothing in 0.50.0 may change it, the aloft vapour model included.
 #[rustfmt::skip]
 const STATION_AIR: Pinned = &[
     (
@@ -3548,7 +3562,7 @@ const STATION_AIR: Pinned = &[
 
 /// `get_local_atmosphere_humid` from 200 m below each station base to 25 km above it, RH 0.
 ///
-/// IMMUTABLE: no later step may change it, S8 included.
+/// IMMUTABLE: nothing in 0.50.0 may change it, the aloft vapour model included.
 #[rustfmt::skip]
 const LOCAL_AIR_DRY: Pinned = &[
     (
@@ -3583,15 +3597,15 @@ const LOCAL_AIR_DRY: Pinned = &[
 /// As `LOCAL_AIR_DRY`, at RH 37.5, 50 and 100. The legacy wrapper shares `air_at`'s composition, so
 /// the aloft model reaches it.
 ///
-/// MAY CHANGE ONLY IN S8 (the unified aloft vapour model, plan C7): byte-identical through every
-/// other step.
+/// MAY CHANGE ONLY WITH THE ALOFT VAPOUR MODEL: byte-identical through every other change in
+/// 0.50.0.
 ///
-/// Re-pinned in S8 (0.50.0, plan C7, owner-approved): the unified aloft vapour model holds the
+/// Re-pinned by the aloft vapour model (0.50.0): the unified aloft vapour model holds the
 /// governing air's (the station's or the zone's) water-vapour mole fraction for the lapse, the
 /// density and the sound speed, with a virtual-temperature lapse. 108 of 135 values moved, all in
 /// cases with a humidity above 0 and all off the station's own height; every RH-0 and
-/// station-height value is unchanged. The largest float shift of each moved case, pinned before S8
-/// -> pinned now:
+/// station-height value is unchanged. The largest float shift of each moved case,
+/// pinned before the aloft vapour model -> pinned now:
 /// - `get_local_atmosphere_humid/0m/15C/1013.25hPa/rh37.5` +25000m.density: 0.04000548848073421 -> 0.04036000743432573 (+8.86e-03)
 /// - `get_local_atmosphere_humid/0m/15C/1013.25hPa/rh50` +25000m.density: 0.0399736963957377 -> 0.04044670891224762 (+1.18e-02)
 /// - `get_local_atmosphere_humid/0m/15C/1013.25hPa/rh100` +25000m.density: 0.03984673206914066 -> 0.04079533176434715 (+2.38e-02)
@@ -3689,7 +3703,7 @@ const LOCAL_AIR_HUMID: Pinned = &[
 /// NWS pressure altitude, the FAA-rule and density-matched density altitudes, the density-altitude
 /// entry inverse, and the `atmosphere.density_altitude` service.
 ///
-/// IMMUTABLE: no later step may change it, S8 included.
+/// IMMUTABLE: nothing in 0.50.0 may change it, the aloft vapour model included.
 #[rustfmt::skip]
 const DENSITY_ALTITUDE: Pinned = &[
     (
@@ -3744,11 +3758,11 @@ const DENSITY_ALTITUDE: Pinned = &[
     ),
 ];
 
-/// Muzzle Miller Sg (the published dry T/P correction, kept deliberately: plan C8 was rejected),
-/// Litz spin drift, the fast path's aerodynamic-jump offset, and `TrajectorySolver`'s
+/// Muzzle Miller Sg (the published dry T/P correction, kept deliberately; a humid correction was
+/// rejected), Litz spin drift, the fast path's aerodynamic-jump offset, and `TrajectorySolver`'s
 /// aerodynamic-jump components, which depend on station T/P only and so are pinned at every RH.
 ///
-/// IMMUTABLE: no later step may change it, S8 included.
+/// IMMUTABLE: nothing in 0.50.0 may change it, the aloft vapour model included.
 #[rustfmt::skip]
 const STABILITY_SPIN_JUMP: Pinned = &[
     (
@@ -3812,10 +3826,10 @@ const STABILITY_SPIN_JUMP: Pinned = &[
 
 /// Kernel direct (uniform) mode, density 1.1 kg/m3 and sound speed 335 m/s: `compute_derivatives`,
 /// `try_integrate_trajectory` RK4 and RK45, `try_solve_trajectory_rust`, `fast_integrate` and
-/// `fast_integrate_with_segments`. S3 migrates the tuple to the uniform `KernelAtmosphere`; the
+/// `fast_integrate_with_segments`. 0.50.0 migrates the tuple to the uniform `KernelAtmosphere`; the
 /// values do not move.
 ///
-/// IMMUTABLE: no later step may change it, S8 included.
+/// IMMUTABLE: nothing in 0.50.0 may change it, the aloft vapour model included.
 #[rustfmt::skip]
 const KERNEL_DIRECT: Pinned = &[
     (
@@ -3917,10 +3931,11 @@ const KERNEL_DIRECT: Pinned = &[
 /// Kernel standard mode at RH 0, station and zones dry, the same families plus the lean Monte
 /// Carlo, at both stations.
 ///
-/// IMMUTABLE: no later step may change it, S8 included.
+/// IMMUTABLE: nothing in 0.50.0 may change it, the aloft vapour model included.
 ///
-/// Compared to a relative 1e-15 until 0.50.0's R5, which made it bits like every other group: the
-/// plan allowed last-ulp movement here when S3 moved the kernels onto `air_at`, but none happened.
+/// Compared to a relative 1e-15 until 0.50.0, which made it bits like every other group: a
+/// last-ulp movement was thought possible here when 0.50.0 moved the kernels onto `air_at`, but
+/// none happened.
 #[rustfmt::skip]
 const KERNEL_STANDARD_RH0: Pinned = &[
     (
@@ -4286,7 +4301,7 @@ const KERNEL_STANDARD_RH0: Pinned = &[
 /// One in-process call through each JSON front end, RH 0: solve-json decoded and run by `solve_v1`
 /// (Euler at sea level, RK45 at 1500 m), and `card_service::come_ups_v1` at both stations.
 ///
-/// IMMUTABLE: no later step may change it, S8 included.
+/// IMMUTABLE: nothing in 0.50.0 may change it, the aloft vapour model included.
 #[rustfmt::skip]
 const FRONT_ENDS_DRY: Pinned = &[
     (
@@ -4404,15 +4419,15 @@ const FRONT_ENDS_DRY: Pinned = &[
 /// As `FRONT_ENDS_DRY` with humidity: solve-json at RH 0.5 (RK4, sea level) and 0.9 (RK45, 1500 m),
 /// and the come-ups card at 50 and 100 %.
 ///
-/// MAY CHANGE ONLY IN S8 (the unified aloft vapour model, plan C7): byte-identical through every
-/// other step.
+/// MAY CHANGE ONLY WITH THE ALOFT VAPOUR MODEL: byte-identical through every other change in
+/// 0.50.0.
 ///
-/// Re-pinned in S8 (0.50.0, plan C7, owner-approved): the unified aloft vapour model holds the
+/// Re-pinned by the aloft vapour model (0.50.0): the unified aloft vapour model holds the
 /// governing air's (the station's or the zone's) water-vapour mole fraction for the lapse, the
 /// density and the sound speed, with a virtual-temperature lapse. 202 of 638 values moved, all in
 /// cases with a humidity above 0 and all off the station's own height; every RH-0 and
-/// station-height value is unchanged. The largest float shift of each moved case, pinned before S8
-/// -> pinned now:
+/// station-height value is unchanged. The largest float shift of each moved case,
+/// pinned before the aloft vapour model -> pinned now:
 /// - `solve_v1/rk4/icao-sea-level/rh0.5` samples[6].windage_m: -0.1662096260304339 -> -0.1662097665282316 (+8.45e-07)
 /// - `solve_v1/rk45/1500m-25C-830hPa/rh0.9` samples[1].windage_m: -0.0029060136027916706 -> -0.0029060236587567126 (+3.46e-06)
 /// - `card.come_ups/icao-sea-level/rh50` rows[0].drop_adj: 4.782293688882372e-06 -> 4.782677659831119e-06 (+8.03e-05)
@@ -4619,7 +4634,7 @@ const FRONT_ENDS_HUMID: Pinned = &[
 
 /// The bridge `solve` command (`bridge_call`) on the `FRONT_ENDS_DRY` requests.
 ///
-/// IMMUTABLE: no later step may change it, S8 included.
+/// IMMUTABLE: nothing in 0.50.0 may change it, the aloft vapour model included.
 #[cfg(feature = "bridge")]
 #[rustfmt::skip]
 const BRIDGE_SOLVE_DRY: Pinned = &[
@@ -4653,15 +4668,15 @@ const BRIDGE_SOLVE_DRY: Pinned = &[
 
 /// The bridge `solve` command on the `FRONT_ENDS_HUMID` requests.
 ///
-/// MAY CHANGE ONLY IN S8 (the unified aloft vapour model, plan C7): byte-identical through every
-/// other step.
+/// MAY CHANGE ONLY WITH THE ALOFT VAPOUR MODEL: byte-identical through every other change in
+/// 0.50.0.
 ///
-/// Re-pinned in S8 (0.50.0, plan C7, owner-approved): the unified aloft vapour model holds the
+/// Re-pinned by the aloft vapour model (0.50.0): the unified aloft vapour model holds the
 /// governing air's (the station's or the zone's) water-vapour mole fraction for the lapse, the
 /// density and the sound speed, with a virtual-temperature lapse. 42 of 58 values moved, all in
 /// cases with a humidity above 0 and all off the station's own height; every RH-0 and
-/// station-height value is unchanged. The largest float shift of each moved case, pinned before S8
-/// -> pinned now:
+/// station-height value is unchanged. The largest float shift of each moved case,
+/// pinned before the aloft vapour model -> pinned now:
 /// - `bridge-solve/rk4/icao-sea-level/rh0.5` samples[6].windage_m: -0.1662096260304339 -> -0.1662097665282316 (+8.45e-07)
 /// - `bridge-solve/rk45/1500m-25C-830hPa/rh0.9` samples[1].windage_m: -0.0029060136027916706 -> -0.0029060236587567126 (+3.46e-06)
 #[cfg(feature = "bridge")]
@@ -4698,7 +4713,7 @@ const BRIDGE_SOLVE_HUMID: Pinned = &[
 /// The FFI single solve `ballistics_calculate_trajectory` (RK4, sampling and spin drift on) at both
 /// stations, RH 0.
 ///
-/// IMMUTABLE: no later step may change it, S8 included.
+/// IMMUTABLE: nothing in 0.50.0 may change it, the aloft vapour model included.
 #[cfg(feature = "ffi")]
 #[rustfmt::skip]
 const FFI_TRAJECTORY_DRY: Pinned = &[
@@ -4726,15 +4741,15 @@ const FFI_TRAJECTORY_DRY: Pinned = &[
 
 /// As `FFI_TRAJECTORY_DRY`, at RH 50 and 100.
 ///
-/// MAY CHANGE ONLY IN S8 (the unified aloft vapour model, plan C7): byte-identical through every
-/// other step.
+/// MAY CHANGE ONLY WITH THE ALOFT VAPOUR MODEL: byte-identical through every other change in
+/// 0.50.0.
 ///
-/// Re-pinned in S8 (0.50.0, plan C7, owner-approved): the unified aloft vapour model holds the
+/// Re-pinned by the aloft vapour model (0.50.0): the unified aloft vapour model holds the
 /// governing air's (the station's or the zone's) water-vapour mole fraction for the lapse, the
 /// density and the sound speed, with a virtual-temperature lapse. 48 of 68 values moved, all in
 /// cases with a humidity above 0 and all off the station's own height; every RH-0 and
-/// station-height value is unchanged. The largest float shift of each moved case, pinned before S8
-/// -> pinned now:
+/// station-height value is unchanged. The largest float shift of each moved case,
+/// pinned before the aloft vapour model -> pinned now:
 /// - `ffi-trajectory/rk4/icao-sea-level/rh50` impact_energy: 1360.9028469099487 -> 1360.9033619221536 (+3.78e-07)
 /// - `ffi-trajectory/rk4/icao-sea-level/rh100` impact_energy: 1365.0156018568925 -> 1365.0166285531138 (+7.52e-07)
 /// - `ffi-trajectory/rk4/1500m-25C-830hPa/rh50` impact_energy: 1721.766284074095 -> 1721.7671717118649 (+5.16e-07)

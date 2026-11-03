@@ -141,7 +141,7 @@ pub struct ApiTrajectoryPoint {
 }
 
 /// The humidity a request sends, checked by the engine's whole humidity rule before anything
-/// goes over the network (R3, review UX-6): the sensor band
+/// goes over the network: the sensor band
 /// ([`crate::RelativeHumidity::try_percent`]) AND the impossible-air test every local solve
 /// applies ([`crate::StationAir::new`], through
 /// [`crate::AtmosphericConditions::air_refusal`]), on the station the request describes.
@@ -458,7 +458,7 @@ impl ApiClient {
         if request.pressure_supplied == Some(true) {
             req = req.query("pressure_supplied", "true");
         }
-        // Full precision, the shortest decimal that round-trips (humidity train, plan C4): a
+        // Full precision, the shortest decimal that round-trips: a
         // relative humidity is a percent on both sides, and `{:.1}` sent 37.375 as 37.4.
         if let Some(humidity) = humidity {
             req = req.query("humidity", humidity.to_string());
@@ -1237,7 +1237,7 @@ mod tests {
         assert!(ApiError::ServerError(500, "x".into()).cli_hint().is_none());
     }
 
-    /// R3 (whole-branch review UX-6): the client applies the engine's whole humidity rule, the
+    /// The client applies the engine's whole humidity rule, the
     /// sensor band AND the impossible-air test, before any byte goes over the network.
     /// 192.0.2.1 is TEST-NET-1 (RFC 5737) and never routed, so a request that tried to connect
     /// would come back as a timeout or a network error, never as a `RequestError`.

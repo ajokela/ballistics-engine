@@ -28,15 +28,21 @@
 //!   molar-mass ratio `M_m / M_a = 1 - x_v (1 - M_v / M_a)`, the factor the CIPM-2007 density
 //!   applies, so moist air's pressure falls more slowly with height. The density scales the
 //!   governing air's by `(T_0 · P) / (P_0 · T)`, and the sound speed is the formula above at the
-//!   local temperature and the governing `x_v`. Held aloft, `x_v` can exceed saturation at the
-//!   colder heights (no condensation is modelled). At 0 % every term is the dry one, bit for
-//!   bit. Until 0.50.0 the sound speed held the relative humidity instead (re-deriving `x_v` at
-//!   the local temperature and pressure) and the lapse was dry.
+//!   local temperature and the governing `x_v`. Held aloft, `x_v` exceeds saturation in the colder
+//!   air: at every height above a saturated station, and from about 2.2 km above a 15 °C / 50 %
+//!   station and 0.4 km above a 35 °C / 90 % one. At +3 km it is 1.35 times saturation over the
+//!   first and 2.06 times over the second, and at +10 km 34 and 29 times. Condensation is not
+//!   modelled. At 0 % every term is the dry one, bit for bit. Until 0.50.0 the sound speed held the
+//!   relative humidity instead (re-deriving `x_v` at the local temperature and pressure) and the
+//!   lapse was dry.
 //! - **Units.** [`RelativeHumidity`] stores a percent. Every Rust field and function takes a
 //!   percent (`AtmosphericConditions::humidity`, `BallisticInputs::humidity_percent`, an
 //!   [`AtmoSegment`]'s slot 2); only the SI JSON wire (`relative_humidity`) carries a fraction,
 //!   and it converts through [`RelativeHumidity::try_fraction`].
-//! - **Default.** An omitted humidity is [`DEFAULT_HUMIDITY_PERCENT`], 50 %, on every surface.
+//! - **Default.** An omitted humidity is [`DEFAULT_HUMIDITY_PERCENT`], 50 %, unless another reading
+//!   supplies it (a saved profile, the shot day for `--zero-humidity`), with two exceptions: an
+//!   `.a7p` file's absent humidity is 0 % (the format's own meaning), and the bridge's `true.*`
+//!   commands require `humidity_pct`.
 //! - **Validation.** One rule, [`RelativeHumidity::try_percent`] / [`RelativeHumidity::try_fraction`]:
 //!   a reading up to [`HUMIDITY_SENSOR_TOLERANCE_PERCENT`] (5 points) outside 0-100 % is the
 //!   saturated or dry air it measures and flies exactly as 100 % or 0 %; anything farther out,
@@ -795,7 +801,7 @@ const DENSITY_MATCH_REFERENCE_PRESSURE_HPA: f64 = 1013.25;
 /// answering, wrongly. Callers bound it; the bridge command refuses conditions outside
 /// -5 km..11 km (`crate::atmosphere_service`).
 ///
-/// A raw primitive (R3): `humidity_percent` is not validated. A number outside 0-100 is clamped
+/// A raw primitive: `humidity_percent` is not validated. A number outside 0-100 is clamped
 /// into it, and a NaN propagates to a NaN result, never to pure steam. Validate a reading with
 /// [`RelativeHumidity::try_percent`] and build the station with [`StationAir::new`], which
 /// refuse what this computes.
@@ -926,7 +932,7 @@ pub fn resolve_atmosphere_for_density_altitude(
 /// # Returns
 /// Tuple of (air_density_kg_m3, speed_of_sound_mps)
 ///
-/// A raw primitive (R3): `humidity_percent` is not validated. A number outside 0-100 is clamped
+/// A raw primitive: `humidity_percent` is not validated. A number outside 0-100 is clamped
 /// into it, and a NaN propagates to a NaN result, never to pure steam. Validate a reading with
 /// [`RelativeHumidity::try_percent`] and build the station with [`StationAir::new`], which
 /// refuse what this computes.
@@ -1008,7 +1014,12 @@ pub fn calculate_atmosphere(
 /// # Returns
 /// Speed of sound in m/s
 ///
-/// A raw primitive (R3): `humidity_percent` is not validated. A number outside 0-100 is clamped
+/// Its gas constant, `287.0531 (1 + 0.378 x_v)`, is first order in `x_v`: it differs from the exact
+/// `R_AIR / (M_m / M_a)` the lapse uses by -1.1e-5 at 15 °C / 50 % and -1.3e-3 at 45 °C / 100 %
+/// (1013.25 hPa), where the sound speed is 0.24 m/s (0.065 %) below what the lapse's gas constant
+/// gives. The gap grows as the pressure falls: 0.50 m/s at 45 °C / 100 % and 700 hPa.
+///
+/// A raw primitive: `humidity_percent` is not validated. A number outside 0-100 is clamped
 /// into it, and a NaN propagates to a NaN result, never to pure steam. Validate a reading with
 /// [`RelativeHumidity::try_percent`] and build the station with [`StationAir::new`], which
 /// refuse what this computes.
@@ -1043,9 +1054,13 @@ fn moist_sound_speed_at_mole_fraction(temp_k: f64, mole_fraction_vapor: f64) -> 
 /// The moist-air molar-mass ratio `M_m / M_a = 1 - x_v (1 - M_v / M_a)`, where
 /// `M_m = (1 - x_v) M_a + x_v M_v` is the molar mass of air holding a water-vapour mole fraction
 /// `x_v`. The CIPM-2007 density ([`calculate_air_density_cimp`]) multiplies by it, and the
-/// virtual-temperature lapse of [`air_at`] scales the dry hydrostatic exponent by it, so the
-/// pressure aloft falls as the density the projectile flies says it must. Exactly 1 at
-/// `x_v = 0`.
+/// virtual-temperature lapse of [`air_at`] scales the dry hydrostatic exponent by it, so the lapse
+/// and the density carry the same humidity term. Exactly 1 at `x_v = 0`.
+///
+/// The two gas constants still differ a little, dry air included: the lapse's ideal-gas `R_AIR /
+/// (M_m / M_a)` and the `Z R / M_m` the CIPM-2007 density implies (its compressibility `Z`, and its
+/// `R / M_a = 287.0478` against `R_AIR = 287.0531`) differ by 1.2e-4 to 9.0e-4 from -20 to 45 °C,
+/// 700 to 1013.25 hPa and 0 to 100 %.
 #[inline(always)]
 fn moist_molar_mass_ratio(mole_fraction_vapor: f64) -> f64 {
     1.0 - mole_fraction_vapor * (1.0 - M_V / M_A)
@@ -1075,7 +1090,7 @@ fn governing_vapor_mole_fraction(temp_c: f64, pressure_hpa: f64, humidity_percen
 /// Every capped `x_v` in the engine goes through it ([`calculate_air_density_cimp`],
 /// [`moist_speed_of_sound`], the governing air's `x_v` aloft), so a NaN humidity, or air above
 /// water's critical point (647.096 K, where the saturation pressure is undefined), gives NaN
-/// air everywhere instead of steam (R3, review PHYS-1 and C10). A cap is reached only by air
+/// air everywhere instead of steam. A cap is reached only by air
 /// that cannot exist, which every validated boundary refuses before it gets here.
 #[inline(always)]
 fn capped_vapor_mole_fraction(mole_fraction_vapor: f64) -> f64 {
@@ -1096,7 +1111,7 @@ fn capped_vapor_mole_fraction(mole_fraction_vapor: f64) -> f64 {
 /// # Returns
 /// Air density in kg/m³
 ///
-/// A raw primitive (R3): `humidity_percent` is not validated. A number outside 0-100 is clamped
+/// A raw primitive: `humidity_percent` is not validated. A number outside 0-100 is clamped
 /// into it, and a NaN propagates to a NaN result, never to pure steam. Validate a reading with
 /// [`RelativeHumidity::try_percent`] and build the station with [`StationAir::new`], which
 /// refuse what this computes.
@@ -1288,8 +1303,11 @@ pub(crate) fn shot_frame_altitude(
 /// Local DRY air: [`get_local_atmosphere_humid`] at 0 % relative humidity.
 ///
 /// Dry by contract, which is why it is deprecated: a flight's air has a humidity, and
-/// [`air_at`] over a [`StationAir`] flies it. The density is the same as every other path's (the
-/// base ratio scaled by the lapse); the sound speed is the engine's one dry value,
+/// [`air_at`] over a [`StationAir`] flies it. The replacement is
+/// `air_at(&KernelAtmosphere::Station(StationAir::new(base_alt, base_temp_c, base_press_hpa,
+/// humidity)?), None, 0.0, altitude_m)`; a caller that holds its own density ratio builds the
+/// station with [`StationAir::with_density_ratio`] instead. The density is the same as every other
+/// path's (the base ratio scaled by the lapse); the sound speed is the engine's one dry value,
 /// `sqrt(1.4 · 287.0531 · T)`, the shared composition at [`RelativeHumidity::DRY`]. Until 0.50.0
 /// this function used a second dry constant, `sqrt(401.874 · T)`, 4.2e-7 slower.
 ///
@@ -1304,7 +1322,7 @@ pub(crate) fn shot_frame_altitude(
 /// Tuple of (air_density_kg_m3, speed_of_sound_mps)
 #[deprecated(
     since = "0.50.0",
-    note = "dry air by contract; use air_at with a StationAir, which carries the humidity"
+    note = "dry air by contract; use air_at(&KernelAtmosphere::Station(StationAir::new(..)?), None, 0.0, altitude_m), or StationAir::with_density_ratio for a caller-held density ratio"
 )]
 pub fn get_local_atmosphere(
     altitude_m: f64,
@@ -2180,12 +2198,12 @@ pub struct StationAir {
     speed_of_sound_mps: f64,
     /// The station's water-vapour mole fraction, which [`air_at`] holds at every height:
     /// [`governing_vapor_mole_fraction`] at the fields above, computed once here rather than at
-    /// every step of every flight (R4, review HR-2). A cache of the other fields, not state of
+    /// every step of every flight. A cache of the other fields, not state of
     /// its own, so `Debug` leaves it out.
     vapor_mole_fraction: f64,
 }
 
-// The derive's output before R4, field for field: the held vapour mole fraction is a cache.
+// The derive's output before the vapour mole fraction was held, field for field: it is a cache.
 impl fmt::Debug for StationAir {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StationAir")
@@ -2496,7 +2514,7 @@ impl KernelAtmosphere {
     /// Direct-mode air: one density and speed of sound at every point.
     ///
     /// A density of exactly 0 is a vacuum: the flight feels gravity and nothing else, exactly as
-    /// 0.49.0's `compute_derivatives` flew the `(0, c, 0, 0)` tuple (R3, review API-1). `-0.0`
+    /// 0.49.0's `compute_derivatives` flew the `(0, c, 0, 0)` tuple. `-0.0`
     /// is the same vacuum and is stored as `0.0`.
     ///
     /// ```
@@ -2593,9 +2611,9 @@ impl KernelAtmosphere {
 /// downrange [`AtmoSock`] zone's. Everything in it is fixed for the whole flight, its
 /// water-vapour mole fraction and density ratio included, so it is computed once, when the
 /// station ([`StationAir`]) or the zones ([`AtmoSock::new`]) are built, and the per-step lookup
-/// only reads it (R4, review HR-2: recomputing the vapour mole fraction, and a zone's CIPM
-/// density, at every step made `fast_integrate`, the lean Monte Carlo and `TrajectorySolver`'s
-/// RK4 and RK45 4-10 % slower than 0.49.0, for no change in any bit).
+/// only reads it (recomputing the vapour mole fraction, and a zone's CIPM density, at every
+/// step made `fast_integrate`, the lean Monte Carlo and `TrajectorySolver`'s RK4 and RK45
+/// 4-10 % slower than 0.49.0, for no change in any bit).
 #[derive(Debug, Clone, Copy)]
 struct GoverningAir {
     /// Base temperature, °C.
@@ -2676,6 +2694,11 @@ impl GoverningAir {
 ///   height this is that air exactly (the sound speed is [`StationAir::speed_of_sound_mps`] to
 ///   the bit); at 0 % every step is the dry one, `sqrt(1.4 · 287.0531 · T)` for the sound
 ///   speed.
+///
+///   Held aloft, `x_v` exceeds saturation in the colder air: at every height above a saturated
+///   station, and from about 2.2 km above a 15 °C / 50 % station and 0.4 km above a 35 °C / 90 %
+///   one. At +3 km it is 1.35 times saturation over the first and 2.06 times over the second, and
+///   at +10 km 34 and 29 times. Condensation is not modelled.
 ///
 ///   The base `x_v`, and a zone's density ratio, are fixed for the flight, so they are computed
 ///   once, when the station ([`StationAir::new`]) or the zones ([`AtmoSock::new`]) are built.
@@ -2788,8 +2811,9 @@ fn compose_local_air(
 }
 
 /// Test-only record of every per-step air composition, for the humidity class tests: which base
-/// (station or zone) a path composed from, the relative humidity it gave the sound speed, and the
-/// air it got. Compiled out of every non-test build.
+/// (station or zone) a path composed from, the base humidity whose water-vapour mole fraction it
+/// held at every height for the lapse, the density and the sound speed, and the air it got.
+/// Compiled out of every non-test build.
 #[cfg(test)]
 pub(crate) mod air_trace {
     use super::LocalAir;
@@ -3144,7 +3168,7 @@ pub fn get_direct_atmosphere(density: f64, speed_of_sound: f64) -> (f64, f64) {
 
 /// Legacy function name for backwards compatibility: [`calculate_air_density_cimp`].
 ///
-/// A raw primitive (R3): `humidity_percent` is not validated. A number outside 0-100 is clamped
+/// A raw primitive: `humidity_percent` is not validated. A number outside 0-100 is clamped
 /// into it, and a NaN propagates to a NaN result, never to pure steam. Validate a reading with
 /// [`RelativeHumidity::try_percent`] and build the station with [`StationAir::new`], which
 /// refuse what this computes.
@@ -3176,12 +3200,12 @@ pub struct AtmoSock {
     /// Zones sorted ascending by `until_distance_m` (segment slot 3).
     segments: Vec<AtmoSegment>,
     /// Each zone's governing air (its density ratio and water-vapour mole fraction), in
-    /// `segments`' order, computed once in [`Self::new`] rather than at every step (R4, review
-    /// HR-2). A cache of `segments`, so `Debug` leaves it out.
+    /// `segments`' order, computed once in [`Self::new`] rather than at every step. A cache of
+    /// `segments`, so `Debug` leaves it out.
     governing: Vec<GoverningAir>,
 }
 
-// The derive's output before R4: the zones' governing air is a cache of the zones.
+// The derive's output before the zones' governing air was held: it is a cache of the zones.
 impl fmt::Debug for AtmoSock {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AtmoSock")
@@ -3438,7 +3462,7 @@ mod tests {
     /// rank 9: local-atmosphere reference values (base: 500 m, 10 C, 950 hPa, ratio 1.05).
     /// The 1500 m values include the geometric-to-geopotential height conversion.
     ///
-    /// Re-baselined in 0.50.0 (humidity train, H11): the dry sound speed is the engine's one dry
+    /// Re-baselined in 0.50.0: the dry sound speed is the engine's one dry
     /// constant, sqrt(1.4 * 287.0531 * T), the moist formula at 0 % RH, instead of a second
     /// sqrt(401.874 * T). That moves c by +4.23e-7 relative (+1.43e-4 m/s here); the density and
     /// the tolerance are unchanged.

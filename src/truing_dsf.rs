@@ -464,6 +464,9 @@ pub struct DsfSolveInputs {
     /// An omitted reading keeps the legacy default-sentinel rule.
     pub pressure_inhg: StationReading,
     /// Relative humidity, percent (0 through 100).
+    /// A sensor reading within [`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`] of that range (101.7 in
+    /// fog) flies as the end it reads as; a value beyond it, or one that is not finite, is refused
+    /// through [`crate::RelativeHumidity`], never clamped.
     pub humidity_pct: f64,
     /// Altitude, feet.
     pub altitude_ft: f64,
@@ -648,7 +651,7 @@ pub fn solve_for_dsf(
 
 /// What [`solve_for_dsf`] flies, before its zero: the solver's inputs, wind, atmosphere and
 /// station presence, and the line-of-sight height the zero aims at. A separate builder so the
-/// units it writes are testable (humidity-consistency train, H5).
+/// units it writes are testable.
 pub(crate) struct DsfFlight {
     pub(crate) inputs: BallisticInputs,
     pub(crate) wind: WindConditions,

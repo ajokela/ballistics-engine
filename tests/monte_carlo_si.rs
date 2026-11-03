@@ -57,7 +57,7 @@ fn monte_carlo_agrees_with_cli_api_on_si_inputs() {
     );
 
     // The two independent solvers fly the same air (the station at the default 50 %), so only
-    // their integrators differ. Measured on this shot (0.50.0's R5): velocity 2.1e-6 and energy
+    // their integrators differ. Measured on this shot (0.50.0): velocity 2.1e-6 and energy
     // 4.3e-6 relative, drop 1.15e-4 m. The bounds below are about 10x, 10x and 2.6x those. The
     // lean Monte Carlo of 0.49.0 flew the station's sound speed dry and missed by 2.3e-4,
     // 4.7e-4 and 4.5e-4 m, so each bound catches it; the 5 % (and 5 mm) this test allowed

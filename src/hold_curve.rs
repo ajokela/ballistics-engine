@@ -73,7 +73,7 @@ pub fn build_trajectory_components(
         altitude,
         temperature,
         pressure,
-        // A percent, the unit of both structs (H5).
+        // A percent, the unit of both structs.
         humidity_percent: humidity,
         wind_speed,
         wind_angle: wind_direction_rad,
@@ -588,7 +588,7 @@ impl HoldCurve {
         if !max_range_m.is_finite() || max_range_m <= 0.0 {
             return Err("hold curve max range must be finite and greater than zero".into());
         }
-        // The engine's one humidity validator (plan C4), with the load's own field name.
+        // The engine's one humidity validator, with the load's own field name.
         let humidity = crate::atmosphere::RelativeHumidity::try_percent(load.humidity)
             .map_err(|error| error.at_field("hold curve load humidity"))?
             .percent();

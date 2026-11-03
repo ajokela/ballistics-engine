@@ -342,10 +342,11 @@ pub struct TrajectoryParams {
     /// historical default — effectively "no early ground impact" for normal flat-fire shots.
     pub ground_threshold: f64,
     /// MBA-1137: optional downrange-segmented atmosphere. When `Some` and non-empty,
-    /// `compute_derivatives` swaps the station base for the zone selected by downrange distance
-    /// (its T/P and its RH, for density and sound speed) before the altitude lapse. `None` or an
-    /// empty sock is the station; uniform air ignores it. [`try_integrate_trajectory`] refuses a
-    /// sock that [`crate::AtmoSock::validate`] refuses.
+    /// `compute_derivatives` swaps the station base for the zone selected by downrange distance:
+    /// its T/P and its RH, whose water-vapour mole fraction is held at every height for the
+    /// lapse, the density and the sound speed. `None` or an empty sock is the station; uniform air
+    /// ignores it. [`try_integrate_trajectory`] refuses a sock that [`crate::AtmoSock::validate`]
+    /// refuses.
     pub atmo_sock: Option<crate::atmosphere::AtmoSock>,
 }
 
@@ -604,7 +605,7 @@ pub fn try_integrate_trajectory(
 /// **Legacy/unchecked entry point** (MBA-1338): wind segments are sorted and consumed
 /// without validation, so non-finite fields silently poison the returned trajectory, and so
 /// is `params.atmo_sock`: an unvalidated zone humidity outside 0-100 is clamped, and a NaN one
-/// flies NaN air (R3), never steam. Prefer [`try_integrate_trajectory`], which rejects
+/// flies NaN air, never steam. Prefer [`try_integrate_trajectory`], which rejects
 /// malformed segments and zones with a typed error before any integration work.
 pub fn integrate_trajectory(
     initial_state: [f64; 6],

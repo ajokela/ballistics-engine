@@ -481,7 +481,7 @@ pub(crate) fn prepare_request(
     let shot = resolve_shot(&request.shot, &rifle, &mut assumptions, &mut warnings)?;
     let atmosphere = resolve_atmosphere(&request.atmosphere, &mut assumptions)?;
     // Air that cannot exist is refused here, before any flight, as `invalid_value` at the field
-    // to blame (R2): the refusal `atmosphere.density_altitude` gives for the same air, rather
+    // to blame: the refusal `atmosphere.density_altitude` gives for the same air, rather
     // than a `solve_failed` with no path from deep inside the zero search.
     resolved_station_air(&request.atmosphere, &atmosphere)?;
     // Here rather than in `resolve_atmosphere`, which `atmosphere.density_altitude` shares and
@@ -1383,7 +1383,7 @@ pub(crate) fn resolve_atmosphere(
     if let Some(value) = atmosphere.pressure_pa {
         require_positive("$.atmosphere.pressure_pa", value)?;
     }
-    // The sensor band (S5b, `HUMIDITY_SENSOR_TOLERANCE_PERCENT`): a fraction up to 0.05
+    // The sensor band (`HUMIDITY_SENSOR_TOLERANCE_PERCENT`): a fraction up to 0.05
     // outside [0, 1] is a reading of saturated or dry air (an app's Kestrel or phone sensor in
     // fog), and resolves to the end it reads as, so the resolved request echoes, and every
     // consumer of it flies, that end. An in-range fraction keeps its bits. Beyond the band it is
@@ -1495,7 +1495,7 @@ pub(crate) fn resolve_atmosphere(
         relative_humidity_sent,
         DEFAULT_RELATIVE_HUMIDITY,
         "$.atmosphere.relative_humidity",
-        // The fraction the wire carries, with the percent it means (plan C5): a bare 0.5 is
+        // The fraction the wire carries, with the percent it means: a bare 0.5 is
         // the very number a reader cannot tell from 0.5 %.
         format!(
             "Relative humidity defaulted to {DEFAULT_RELATIVE_HUMIDITY} ({}%).",
@@ -2520,12 +2520,11 @@ mod tests {
         assert_eq!(prepared.inputs.humidity_percent, 50.0);
     }
 
-    /// Humidity-consistency train (plan C4, H8): an omitted `$.atmosphere.relative_humidity` is
-    /// the one default, `RelativeHumidity::DEFAULT`, in the wire's unit; the resolved echo, the
-    /// percent that flies and the notice all state that value. Plan C5 (H7): the notice names
-    /// the unit too, the fraction with its percent, because a bare 0.5 is exactly the number a
-    /// reader cannot tell from 0.5 %. Its code and path keep their 0.49.0 bytes (the apps key on
-    /// the path).
+    /// An omitted `$.atmosphere.relative_humidity` is the one default,
+    /// `RelativeHumidity::DEFAULT`, in the wire's unit; the resolved echo, the percent that flies
+    /// and the notice all state that value. The notice names the unit too, the fraction with its
+    /// percent, because a bare 0.5 is exactly the number a reader cannot tell from 0.5 %. Its code
+    /// and path keep their 0.49.0 bytes (the apps key on the path).
     #[test]
     fn an_omitted_relative_humidity_is_the_one_default_and_its_notice_says_so() {
         let prepared = prepare_request(&minimal_request()).expect("valid request");
@@ -2645,7 +2644,7 @@ mod tests {
     /// relation goes NaN once the setting's pressure altitude plus the station height reaches
     /// 44,331 m) is refused as an invalid value, never flown as near-vacuum air. A 500 hPa QNH is
     /// itself a pressure inside the troposphere, so the one rule blames the altitude it was
-    /// reduced to (gate R2: `atmosphere.density_altitude` always did, and the solve blamed
+    /// reduced to (`atmosphere.density_altitude` always did, and the solve blamed
     /// `pressure_pa`); one that is not (hPa sent as pascals) is the pressure's fault. Both
     /// commands refuse it identically, code, path and message.
     #[test]
@@ -2807,8 +2806,8 @@ mod tests {
 
     #[test]
     fn semantic_conflicts_and_invalid_values_keep_exact_paths() {
-        // S5b (owner decision 2026-11-01): 1.01 is a sensor reading of saturated air, within
-        // 0.05 of the range, so it resolves to exactly 1 and flies as 100 %.
+        // The sensor band (owner decision 2026-11-01): 1.01 is a sensor reading of saturated air,
+        // within 0.05 of the range, so it resolves to exactly 1 and flies as 100 %.
         let mut request = minimal_request();
         request.atmosphere.relative_humidity = Some(1.01);
         let prepared = prepare_request(&request).expect("a reading within 0.05 of one");

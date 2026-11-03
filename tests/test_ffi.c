@@ -344,7 +344,7 @@ static int test_station_presence(const FFIBallisticInputs* base) {
     return 0;
 }
 
-// 0.50.0 (humidity-consistency train): a relative humidity is a PERCENT from 0 to 100, and a
+// 0.50.0: a relative humidity is a PERCENT from 0 to 100, and a
 // value beyond the 5-point sensor band around it is REFUSED, never clamped. 0.49.0 flew 150 as
 // 100 %. The single solve and the Monte Carlo return NULL, the zero angle NaN; 0 and 100 still
 // fly. A sensor reading within the band (101.7 in fog, -2 in desert air) is the saturated or

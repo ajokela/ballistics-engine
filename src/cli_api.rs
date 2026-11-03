@@ -213,9 +213,10 @@ pub struct BallisticInputs {
     /// The entry points that take inputs alone (the `run_monte_carlo*` family and
     /// [`crate::monte_carlo::solve_trajectory_for_monte_carlo`]) fly this value.
     ///
-    /// 0.50.0 renamed it from `humidity`, a 0-1 FRACTION, and removed the clamping
-    /// `humidity_percent()` method that converted that. To migrate, write the percent, or
-    /// convert a fraction with [`crate::RelativeHumidity::try_fraction`].
+    /// 0.50.0 renamed it from `humidity`, a 0-1 FRACTION. The `humidity_percent()` accessor
+    /// that converted that fraction is kept for one release, deprecated, and returns this field.
+    /// To migrate, write the percent, or convert a fraction with
+    /// [`crate::RelativeHumidity::try_fraction`].
     pub humidity_percent: f64,
     pub latitude: Option<f64>, // degrees
 
@@ -354,6 +355,22 @@ pub struct BallisticInputs {
 }
 
 impl BallisticInputs {
+    /// The humidity as a percent: 0.49.0's accessor, which converted the 0-1 fraction field
+    /// `humidity` to a percent. Since 0.50.0 the `humidity_percent` field is that percent, so
+    /// this returns the field unchanged, and a caller that only read the accessor still compiles,
+    /// for one release.
+    ///
+    /// 0.49.0's accessor also clamped into 0-100. 0.50.0 clamps a humidity nowhere: a value
+    /// beyond the sensor band ([`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`]) is returned as
+    /// stored, and the solve refuses it. From 0 to 100 the two accessors return the same percent.
+    #[deprecated(
+        since = "0.50.0",
+        note = "read the `humidity_percent` field, which is the percent itself since 0.50.0"
+    )]
+    pub fn humidity_percent(&self) -> f64 {
+        self.humidity_percent
+    }
+
     /// Azimuth bias (radians) a zero solved at `zero_distance_m` applies to the launch
     /// direction. Two independent terms share this one convergence point:
     /// * MBA-1359 — the deliberate horizontal POI offset at the zero range
@@ -1329,7 +1346,7 @@ impl TrajectorySolver {
         // call the fast path directly.
         inputs.normalize_for_solve();
         // The atmosphere is what a solve flies, so its humidity wins and the inputs then say
-        // the same thing (H5). Copied as given; an out-of-range value is the solve's to judge.
+        // the same thing. Copied as given; an out-of-range value is the solve's to judge.
         inputs.humidity_percent = atmosphere.humidity;
 
         // Initialize cluster BC if enabled
@@ -1918,7 +1935,7 @@ impl TrajectorySolver {
         require_finite("atmosphere.temperature", self.atmosphere.temperature)?;
         require_finite("atmosphere.pressure", self.atmosphere.pressure)?;
         require_finite("atmosphere.altitude", self.atmosphere.altitude)?;
-        // Humidity train (plan C4): one validator and one impossible-air rule. The station RH
+        // One validator and one impossible-air rule. The station RH
         // goes through `RelativeHumidity` (a percent in [0, 100], a sensor reading within 5
         // points of it flown as the end it reads as, anything farther out refused and never
         // clamped),
@@ -5435,8 +5452,8 @@ pub fn estimate_bc_fit_with_station_presence(
             "No data points provided for BC estimation.".to_string(),
         ));
     }
-    // The fit's air goes through the solver's own station check once, up front (humidity train,
-    // plan C4). The sweep below drops every trial that fails, so without this an out-of-range
+    // The fit's air goes through the solver's own station check once, up front. The sweep below
+    // drops every trial that fails, so without this an out-of-range
     // humidity or air that cannot exist would come back as "Unable to estimate BC from provided
     // data", which blames the data for the air.
     TrajectorySolver::new_with_station_presence(
@@ -6772,7 +6789,7 @@ mod station_presence_twin_tests {
     fn zero_twins_reproduce_ab4eb0c_with_neither_and_fly_a_supplied_reading() {
         // (temperature, pressure, altitude, zero angle, near crossing, far crossing for a
         // 0.002 rad bore angle), all captured at ab4eb0c.
-        // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the
+        // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the
         // station's water-vapour mole fraction, with a virtual-temperature lapse), old -> new: the
         // zero angles did not move (the bisection's 1e-7 rad step hides it); the crossings near
         // 20.667807586483896 -> 20.66780758664646 m (+7.9e-12) and far 224.33240698998765 ->
@@ -6963,7 +6980,8 @@ mod station_presence_twin_tests {
             results.hit_probability(DEFAULT_HIT_RADIUS_M).to_bits(),
             0.14_f64.to_bits()
         );
-        // The legacy seeded pins of `monte_carlo_seeded_tests`, re-captured with them in S8.
+        // The legacy seeded pins of `monte_carlo_seeded_tests`, re-captured with them for the
+        // aloft change.
         let expected_ranges: [f64; 3] = [1907.9716332174821, 1936.4071333440454, 1912.81384414182];
         let expected_velocities: [f64; 3] =
             [238.6179931921287, 239.9185187950357, 243.14025219104838];
@@ -7007,7 +7025,7 @@ mod station_presence_twin_tests {
             ..MonteCarloParams::default()
         };
         // captured at ab4eb0c: (range, impact velocity) of the first three trials
-        // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the
+        // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the
         // station's water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
         // ranges 1933.7023025926699 -> 1933.7006673718802, 1962.5974312446554 -> 1962.5957266568341
         // and 1938.055244658578 -> 1938.0537040308395 m (-8.0e-7 to -8.7e-7); velocities
@@ -7111,7 +7129,7 @@ mod station_presence_twin_tests {
             assert_eq!(report.samples, 80);
             assert_eq!(report.attempts, 80);
             // captured at ab4eb0c
-            // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the
+            // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the
             // station's water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
             // the hit probability did not move; the mean impact velocity 244.8044668331616 ->
             // 244.80335002519013 m/s (-4.6e-6) and the mean drop at the target 0.00242533056417438
@@ -7315,13 +7333,13 @@ mod station_presence_twin_tests {
         for output in [&legacy, &neither] {
             // Captured at ab4eb0c (drop 0x40039eddd41bdb44, velocity 0x4080fe7009642434) when
             // this kernel flew the default 50 % RH in its density but 0 % in its sound speed.
-            // Re-captured in 0.50.0 (humidity train, H2), where it flies 50 % in both, exactly
+            // Re-captured in 0.50.0, where it flies 50 % in both, exactly
             // as TrajectorySolver does: the drop is 0.61 mm longer and the speed
             // 0.19 m/s lower at 500 m.
-            // Re-captured again in S8 (the aloft air now holds the station's water-vapour mole
-            // fraction, with a virtual-temperature lapse): drop 2.453183461133607 ->
-            // 2.4531833213074137 m (-0.14 um), velocity 543.6188052770763 -> 543.6189355048916 m/s
-            // (+0.13 mm/s).
+            // Re-captured again with the aloft change (the aloft air now holds the station's
+            // water-vapour mole fraction, with a virtual-temperature lapse): drop 2.453183461133607
+            // -> 2.4531833213074137 m (-0.14 um), velocity 543.6188052770763 -> 543.6189355048916
+            // m/s (+0.13 mm/s).
             assert_eq!(output.drop.to_bits(), 0x4003a01e93c0dd30);
             assert_eq!(output.velocity.to_bits(), 0x4080fcf394753ebe);
         }
@@ -7449,7 +7467,7 @@ mod monte_carlo_seeded_tests {
             results.hit_probability(DEFAULT_HIT_RADIUS_M)
         );
 
-        // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the
+        // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the
         // station's water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
         // ranges 1907.972891143359 -> 1907.9716332174821, 1936.408435469319 -> 1936.4071333440454
         // and 1912.8150447617645 -> 1912.81384414182 m (-6.3e-7 to -6.7e-7); velocities
@@ -10095,9 +10113,9 @@ mod coriolis_direction_tests {
 
     #[test]
     fn humidity_percent_is_a_percent_field_that_relative_humidity_validates_never_clamps() {
-        // 0.50.0 (H5): the field is a PERCENT with the engine's one default, and the clamping
+        // 0.50.0: the field is a PERCENT with the engine's one default, and the clamping
         // 0-1 -> 0-100 helper is gone. RelativeHumidity::try_percent is its validator: it keeps
-        // 0..=100 bit for bit, reads a sensor reading within 5 points of it as its end (S5b), and
+        // 0..=100 bit for bit, reads a sensor reading within 5 points of it as its end, and
         // refuses anything farther out. 0.49.0's helper clamped 1.5 to 100 %.
         let inputs = BallisticInputs::default();
         assert_eq!(
@@ -10118,7 +10136,7 @@ mod coriolis_direction_tests {
                 "{percent} must be refused, not clamped"
             );
         }
-        // S5b: a sensor reading within 5 points of the range is the end it reads as.
+        // A sensor reading within 5 points of the range is the end it reads as.
         for (percent, end) in [(-5.0, 0.0), (100.0001, 100.0)] {
             assert_eq!(
                 crate::RelativeHumidity::try_percent(percent)
@@ -10199,7 +10217,7 @@ mod coriolis_direction_tests {
     #[test]
     fn labeled_mach_crossings_match_pinned_pre_change_flat_vec_across_solvers() {
         // (solver_name, use_rk4, use_adaptive_rk45, expected mach_1_2, expected mach_1_0)
-        // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the
+        // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the
         // station's water-vapour mole fraction, with a virtual-temperature lapse), old -> new: Mach
         // 1.2 at 670.9878683238721 -> 670.9870968186207, 671.7257336844475 -> 671.7249603175201 and
         // 672.4905711917901 -> 672.4897951903022 m; Mach 1.0 at 805.5274119916264 ->
@@ -10252,13 +10270,13 @@ mod coriolis_direction_tests {
                 result.mach_1_2_distance_m,
                 Some(expected_1_2),
                 "{solver_name}: mach_1_2_distance_m must match its pin (the pre-change flat-Vec \
-                 capture, re-captured in 0.50.0's S8)"
+                 capture, re-captured for 0.50.0's aloft vapour model)"
             );
             assert_eq!(
                 result.mach_1_0_distance_m,
                 Some(expected_1_0),
                 "{solver_name}: mach_1_0_distance_m must match its pin (the pre-change flat-Vec \
-                 capture, re-captured in 0.50.0's S8)"
+                 capture, re-captured for 0.50.0's aloft vapour model)"
             );
 
             let mach_1_2 = result.mach_1_2_distance_m.expect("crosses 1.2");
@@ -11389,7 +11407,7 @@ mod boundary_layer_shear_height_tests {
 #[cfg(test)]
 mod station_air_tests {
     //! TrajectorySolver's station air comes from `StationAir`, and its per-step air from
-    //! `atmosphere::air_at_with_gravity`. The end-to-end bits are pinned by the S1
+    //! `atmosphere::air_at_with_gravity`. The end-to-end bits are pinned by the byte-identity
     //! byte-identity files; these check the station itself, that a humidity beyond the sensor
     //! band is refused, never clamped, and that a reading within it flies as its end.
     use super::*;
@@ -11480,14 +11498,13 @@ mod station_air_tests {
         }
     }
 
-    /// An out-of-range station RH (beyond the S5b sensor band) is REJECTED, never clamped
-    /// (humidity train, plan C4). 0.49.0
+    /// An out-of-range station RH (beyond the sensor band) is REJECTED, never clamped. 0.49.0
     /// flew 150 % as 100 % and -5 % as 0 %; `validate_for_solve` now refuses both, and the
     /// station itself (`station_air`) refuses them through `StationAir::new` too, so no solve
     /// path can fly an unvalidated humidity.
     #[test]
     fn out_of_range_station_humidity_is_rejected_never_clamped() {
-        // S5b: beyond the 5-point sensor band (a reading within it is the next test's).
+        // Beyond the 5-point sensor band (a reading within it is the next test's).
         for humidity in [150.0, -5.000_000_1, 105.000_000_1, f64::NAN, f64::INFINITY] {
             let mut solver = solver(
                 AtmosphericConditions {
@@ -11526,10 +11543,10 @@ mod station_air_tests {
         }
     }
 
-    /// S5b (owner decision 2026-11-01): a station reading within 5 points of the range is
-    /// sensor error in saturated or dry air, so the station is the end it reads as, and the
-    /// solve flies that end to the bit, on every integrator: the 0.49.0 clamp's numbers, now
-    /// for the band only.
+    /// The sensor band (owner decision 2026-11-01): a station reading within 5 points of the range
+    /// is sensor error in saturated or dry air, so the station is the end it reads as, and the
+    /// solve flies that end to the bit, on every integrator: the 0.49.0 clamp's numbers, now for
+    /// the band only.
     #[test]
     fn a_station_reading_within_five_points_of_the_range_flies_the_end_bit_for_bit() {
         let flight = |humidity: f64, rk4: bool, rk45: bool| -> Vec<u64> {
@@ -11588,13 +11605,12 @@ mod station_air_tests {
 }
 
 // The humidity class guard: every solver family flies TrajectorySolver's humid air, at every
-// step (humidity-consistency train). A child module so it can drive the solver's own per-step
-// acceleration.
+// step. A child module so it can drive the solver's own per-step acceleration.
 #[cfg(test)]
 mod humidity_consistency_tests;
 
-// H5 builder pins: every builder of a BallisticInputs leaves the humidity in it as the percent
-// the engine flies (humidity-consistency train, plan C3). A child module so it can read the
-// solver's and the Monte Carlo sampler's own inputs.
+// Builder pins: every builder of a BallisticInputs leaves the humidity in it as the percent the
+// engine flies. A child module so it can read the solver's and the Monte Carlo sampler's own
+// inputs.
 #[cfg(test)]
 mod humidity_inputs_tests;

@@ -1037,7 +1037,7 @@ fn true_wind_flies_a_sent_pressure_and_omits_an_absent_one() {
         assert_eq!(v["ok"], json!(true), "{v}");
         v["result"]["mean_crosswind_mph"].as_f64().unwrap()
     };
-    // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
     // water-vapour mole fraction, with a virtual-temperature lapse), old -> new: sent
     // 5.053688506163011 -> 5.053689066860352 mph (+1.1e-7), omitted 6.197365422146237 ->
     // 6.197366125416333 mph (+1.1e-7).
@@ -1111,7 +1111,7 @@ fn true_dsf_flies_a_sent_pressure_at_its_zero_too() {
             r["dsf"].as_f64().unwrap(),
         )
     };
-    // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
     // water-vapour mole fraction, with a virtual-temperature lapse), old -> new: predicted drop
     // 0.9296793417404231 -> 0.9296971694667545 (+1.9e-5), DSF 1.0756396911304191 ->
     // 1.0756190648333037 (-1.9e-5), omitted-air predicted drop 0.9084117581689021 ->
@@ -1158,7 +1158,7 @@ fn true_star_reads_a_null_reading_as_omitted() {
         absent.to_bits()
     );
     // The 5000 ft, 68 °F case of `true_wind_flies_a_sent_pressure_and_omits_an_absent_one`,
-    // re-captured with it in S8 (6.197365422146237 -> 6.197366125416333).
+    // re-captured with it for the aloft change (6.197365422146237 -> 6.197366125416333).
     assert_eq!(
         mean(request(Value::Null, json!(68.0))).to_bits(),
         6.197366125416333_f64.to_bits()

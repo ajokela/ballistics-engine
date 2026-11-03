@@ -69,7 +69,7 @@ fn write_temp_csv(content: &str, tag: &str) -> PathBuf {
 
 /// Pinned literal captured from this branch's `ballistics` binary BEFORE MBA-1366's
 /// `--density-altitude` flag existed (i.e. before any main.rs change in this task).
-/// Re-captured once, in 0.50.0 (humidity train S8, the unified aloft vapour model: this run
+/// Re-captured once, in 0.50.0 (the unified aloft vapour model: this run
 /// flies 60 % RH, and the air off the station's height now holds the station's water-vapour
 /// mole fraction with a virtual-temperature lapse). Old -> new: `time_of_flight`
 /// 0.12333720481671129 -> 0.12333721176904215 s (+5.6e-8 relative), `impact_velocity`

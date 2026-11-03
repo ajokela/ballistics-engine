@@ -262,7 +262,7 @@ mod tests {
     /// The point of `station_air`: a harness that flies it delivers the drawn humidity to the
     /// solver. A NaN humidity in an otherwise plausible draw is refused, naming the humidity.
     /// (`AtmosphericConditions::default()`, which every robustness and invariant harness flew
-    /// until 0.50.0's R5, flies 50 % whatever was drawn, and the same draw solves.)
+    /// until 0.50.0, flies 50 % whatever was drawn, and the same draw solves.)
     #[test]
     fn the_drawn_humidity_reaches_the_solver() {
         use ballistics_engine::{TrajectorySolver, WindConditions};

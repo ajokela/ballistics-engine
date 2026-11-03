@@ -1,4 +1,4 @@
-//! Humidity consistency through the PUBLIC API (humidity-consistency train, plan C0b and C2):
+//! Humidity consistency through the PUBLIC API:
 //! every kernel family responds to relative humidity as `TrajectorySolver` does.
 //!
 //! The in-crate class guard (`src/cli_api/humidity_consistency_tests.rs`) proves every family
@@ -768,7 +768,7 @@ fn a_humid_zone_moves_every_zoned_family_as_it_moves_the_reference() {
 }
 
 // =================================================================================================
-// The sensor-tolerance band (S5b, owner decision 2026-11-01)
+// The sensor-tolerance band (owner decision 2026-11-01)
 // =================================================================================================
 
 /// Readings within 5 points of the range, each with the end it reads as.

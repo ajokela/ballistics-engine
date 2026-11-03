@@ -1,4 +1,4 @@
-//! Humidity-consistency train, review step R2: one way to refuse a humidity or air that cannot
+//! One way to refuse a humidity or air that cannot
 //! exist, and every refusal readable.
 //!
 //! - **Display, never Debug.** Every error that reaches a CLI user prints its message: no Rust
@@ -427,7 +427,7 @@ fn every_cli_command_refuses_impossible_air_up_front_with_the_cause_first() {
 
 /// A station above the troposphere because no pressure was given is the altitude's fault: every
 /// command that takes a station `--altitude` says to check the altitude's unit, never the unit of
-/// a `--pressure` nobody typed (gate R2), whether it resolves the station itself (`trajectory`)
+/// a `--pressure` nobody typed, whether it resolves the station itself (`trajectory`)
 /// or hands the presence to the engine (`zero`, the cards, the truing commands). 20 km of
 /// standard atmosphere is about 55 hPa, which saturated air at 40 C exceeds.
 #[test]
@@ -525,7 +525,7 @@ fn every_cli_command_blames_an_omitted_pressure_above_the_troposphere_on_the_alt
 }
 
 /// The zero day names each reading where it came from: a humidity the zero day inherits from
-/// `--humidity` is `--humidity`, even when another zero-day flag is set (gate R2).
+/// `--humidity` is `--humidity`, even when another zero-day flag is set.
 #[test]
 fn the_zero_day_names_an_inherited_humidity_by_the_flag_it_came_from() {
     let output = run(&with(
@@ -827,7 +827,7 @@ fn the_request_file_commands_print_the_wire_code_by_its_name() {
 /// A domain whose edge the solve refuses is refused naming the code by its wire name, never the
 /// Rust variant (`solve failed (InvalidValue)`).
 ///
-/// R3 (review C3): a humidity domain beyond 0 to 1 no longer reaches the solve at all. It is
+/// A humidity domain beyond 0 to 1 no longer reaches the solve at all. It is
 /// refused up front for leaving the axis's physical range, naming the fraction it must be, the
 /// way the humidity axis's unit is named everywhere now; before, `relative-humidity=0:1.2`
 /// reached the solve and came back as `solve failed (invalid_value): ... outside the
@@ -1134,7 +1134,7 @@ mod bridge {
         }
     }
 
-    /// One rule decides which reading impossible air is blamed on (gate R2): the temperature
+    /// One rule decides which reading impossible air is blamed on: the temperature
     /// when it is outside 173.15-373.15 K; then, at a station pressure outside the troposphere,
     /// the pressure when it was sent as a station pressure (or as a QNH that is itself outside
     /// it) and the altitude when it was omitted or was a plausible QNH; otherwise the humidity.
@@ -1223,7 +1223,7 @@ mod bridge {
 
     /// Every other wire command blames the same reading for the same air, at its own member: a
     /// temperature outside 173.15-373.15 K is the temperature's fault, and an omitted pressure
-    /// that leaves the station above the troposphere is the altitude's (gate R2).
+    /// that leaves the station above the troposphere is the altitude's.
     #[test]
     fn every_wire_command_blames_the_reading_solve_blames() {
         let hot = "humidity = 100 at 230 °F and 29.92 inHg: no such air exists";
@@ -1271,7 +1271,7 @@ mod bridge {
     }
 
     /// `profile.export_a7p`'s message is the refusal itself, cause first, with the field named
-    /// once (gate R2 note: it read `humidity: profile 'boil' field humidity = 100 ...`).
+    /// once (it read `humidity: profile 'boil' field humidity = 100 ...`).
     #[cfg(feature = "profile-export")]
     #[test]
     fn profile_export_a7p_names_the_refused_field_once() {

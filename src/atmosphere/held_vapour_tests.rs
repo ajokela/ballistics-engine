@@ -1,10 +1,10 @@
-//! The governing air is computed once per base air, never per step (R4, review HR-2).
+//! The governing air is computed once per base air, never per step.
 //!
 //! A flight's governing air is the station's, or inside a downrange [`AtmoSock`] zone the zone's
-//! own. Its water-vapour mole fraction `x_v` (held at every height since S8) and, for a zone,
-//! its CIPM-2007 density ratio are fixed for the whole flight. They are computed when the
-//! station or the zones are built and read at every step, so [`air_at`] evaluates no
-//! Wagner-Pruss saturation pressure.
+//! own. Its water-vapour mole fraction `x_v` (held at every height since the aloft change) and, for
+//! a zone, its CIPM-2007 density ratio are fixed for the whole flight. They are computed when the
+//! station or the zones are built and read at every step, so [`air_at`] evaluates no Wagner-Pruss
+//! saturation pressure.
 //!
 //! - **No per-step work.** [`air_at`] over a built station, through either constructor, with no
 //!   zones, an empty sock, valid zones or unvalidated ones, evaluates no saturation pressure at
@@ -14,7 +14,7 @@
 //!   them afresh from the raw base gives, and the legacy wrapper's too, which still computes
 //!   them on every call ([`the_held_air_is_the_air_a_fresh_composition_computes`]).
 //! - **The same Debug.** The held values are a cache, not state: [`StationAir`]'s and
-//!   [`AtmoSock`]'s `Debug` output names the fields it named before R4
+//!   [`AtmoSock`]'s `Debug` output names the fields it named before they held it
 //!   ([`the_held_values_leave_debug_output_unchanged`]).
 
 use super::*;
@@ -228,8 +228,8 @@ fn the_held_air_is_the_air_a_fresh_composition_computes() {
     );
 }
 
-/// The types' `Debug` before R4, derived from exactly the fields they had then.
-mod before_r4 {
+/// The types' `Debug` before they held the vapour, derived from exactly the fields they had then.
+mod before_the_held_vapour {
     #![allow(dead_code)] // read only through `Debug`
 
     use super::{AtmoSegment, RelativeHumidity};
@@ -259,7 +259,7 @@ mod before_r4 {
 #[test]
 fn the_held_values_leave_debug_output_unchanged() {
     for station in stations() {
-        let before = before_r4::StationAir {
+        let before = before_the_held_vapour::StationAir {
             altitude_m: station.altitude_m(),
             temperature_c: station.temperature_c(),
             pressure_hpa: station.pressure_hpa(),
@@ -271,7 +271,7 @@ fn the_held_values_leave_debug_output_unchanged() {
         assert_eq!(format!("{station:?}"), format!("{before:?}"));
         assert_eq!(format!("{station:#?}"), format!("{before:#?}"));
         let atmosphere = KernelAtmosphere::Station(station);
-        let atmosphere_before = before_r4::KernelAtmosphere::Station(before);
+        let atmosphere_before = before_the_held_vapour::KernelAtmosphere::Station(before);
         assert_eq!(format!("{atmosphere:?}"), format!("{atmosphere_before:?}"));
         assert_eq!(
             format!("{atmosphere:#?}"),
@@ -279,7 +279,7 @@ fn the_held_values_leave_debug_output_unchanged() {
         );
     }
     for zones in zone_sets().into_iter().flatten() {
-        let before = before_r4::AtmoSock {
+        let before = before_the_held_vapour::AtmoSock {
             segments: zones.segments.clone(),
         };
         assert_eq!(format!("{zones:?}"), format!("{before:?}"));

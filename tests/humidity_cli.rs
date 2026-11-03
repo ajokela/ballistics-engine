@@ -1,4 +1,4 @@
-//! Humidity-consistency train, plan C4, at the CLI: one validator, one default, every flag.
+//! Humidity at the CLI: one validator, one default, every flag.
 //!
 //! - Every `--humidity` is a PERCENT that is range-checked by the parser; 0.49.0 left
 //!   `wind-card` and `compare` unchecked, so 150 flew clamped to 100 %.
@@ -6,7 +6,7 @@
 //!   error names where it came from. A refused stored humidity says to edit the profile's file,
 //!   which it names, and never costs the profile its data: `profile save` reads the stored file
 //!   for its carry-forward without the load-time field checks, so a re-save keeps every field it
-//!   cannot express (gate G17). Nor does `profile save` overwrite a stored profile it cannot
+//!   cannot express. Nor does `profile save` overwrite a stored profile it cannot
 //!   read, or carry forward a tracking CF that every later load would refuse.
 //! - `monte-carlo` gains `--humidity` (0.49.0 always flew 50 %), and it reaches every mode:
 //!   the fixed-count run, `--adaptive` and `--wez`.
@@ -14,7 +14,7 @@
 //! - Air that cannot exist is refused by the solver's one rule on every command that takes a
 //!   station temperature.
 //!
-//! - The sensor band (S5b, owner decision 2026-11-01): a reading within 5 points of the range
+//! - The sensor band (owner decision 2026-11-01): a reading within 5 points of the range
 //!   (101.7 in fog, -2 in desert air), from a flag, a `--location` CSV or a saved profile, is
 //!   the saturated or dry air it reads, byte for byte the output of the end itself. Only a value
 //!   beyond the band is refused.
@@ -203,7 +203,7 @@ const MONTE_CARLO_WEZ: &[&str] = &[
 #[test]
 fn wind_card_and_compare_range_check_their_humidity_like_every_other_command() {
     for (label, base) in [("wind-card", WIND_CARD), ("compare", COMPARE)] {
-        // Beyond the 5-point sensor band (S5b: -5 and 100.0001 are readings, flown below).
+        // Beyond the 5-point sensor band (-5 and 100.0001 are readings, flown below).
         for bad in ["150", "-5.0000001", "105.0000001", "nan"] {
             // The `=` form, so a negative value reaches the humidity parser as a value.
             let flag = format!("--humidity={bad}");
@@ -382,7 +382,7 @@ fn every_command_with_a_temperature_refuses_impossible_air() {
             &run(&with(base, &["--temperature", "212", "--humidity", "100"])),
             &format!("{label} at 212 F / 100 %"),
         );
-        // R2: the flag, not the solver's internal `atmosphere.humidity`, with the air it was
+        // The flag, not the solver's internal `atmosphere.humidity`, with the air it was
         // refused in, as the first thing the user reads.
         assert!(
             text.contains(
@@ -438,7 +438,7 @@ fn location_csv(humidity: &str) -> (PrivateDir, std::path::PathBuf) {
 
 #[test]
 fn a_location_csv_humidity_outside_zero_to_one_hundred_is_refused_naming_its_source() {
-    // Beyond the 5-point sensor band (S5b: -5 and 100.5 are readings, flown in the band test).
+    // Beyond the 5-point sensor band (-5 and 100.5 are readings, flown in the band test).
     for bad in ["150", "-5.0000001", "105.0000001"] {
         let (_dir, csv) = location_csv(bad);
         let text = refusal_of(
@@ -535,7 +535,7 @@ fn a_saved_profile_humidity_outside_zero_to_one_hundred_is_refused_naming_its_so
     stdout_of(&output, "a saved profile at 100 %");
 }
 
-// --- a refused stored value never costs a profile its data (gate G17) ---------------------------
+// --- a refused stored value never costs a profile its data ---------------------------
 
 /// `profile save humid` with the five mandatory fields; the caller adds `--humidity`.
 const SAVE_HUMID: &[&str] = &[
@@ -678,7 +678,7 @@ fn a_refused_stored_humidity_says_to_edit_the_profile_file_it_names() {
         "a stored humidity of 150",
     );
     let path = humid_profile_path(home.path());
-    // R2: the rule states the band it enforces, once, and the fix names the file.
+    // The rule states the band it enforces, once, and the fix names the file.
     let advice = format!(
         "profile 'humid' field humidity = 150: relative humidity must be a percent from 0 to 100 \
          (a sensor reading from -5 to 105 is read as 0 or 100); edit the humidity stored in the \
@@ -737,7 +737,7 @@ fn profile_save_never_carries_forward_a_tracking_cf_every_load_would_refuse() {
     }
 }
 
-// --- the sensor band (S5b) ----------------------------------------------------------------------
+// --- the sensor band ----------------------------------------------------------------------
 
 /// Readings within 5 points of the range, each with the end it reads as.
 const SENSOR_READINGS: [(&str, &str); 6] = [

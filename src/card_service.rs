@@ -1290,8 +1290,8 @@ fn resolve_inner(
             "tracking correction factors must lie in (0.5, 1.5)".into(),
         ));
     }
-    // The station air (R2): the engine's one humidity validator (plan C4: a percent in
-    // [0, 100], a sensor reading within 5 points of it read as the end (S5b), anything farther
+    // The station air: the engine's one humidity validator (a percent in
+    // [0, 100], a sensor reading within 5 points of it read as the end, anything farther
     // out refused and never clamped; 0.49.0 flew 150 as 100 % here) and the solver's one
     // impossible-air rule, refused here in the card's words before any solve, so a card of air
     // that cannot exist names that air rather than a failed zero solve. The bridge reports the

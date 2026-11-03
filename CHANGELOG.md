@@ -20,7 +20,9 @@ and validation now apply wherever a relative humidity enters the engine.
   Only the SI JSON's `relative_humidity` carries a fraction, and so do the request-file axes
   that follow it: `error-budget --sigma relative-humidity=`, `tolerance --domain
   relative-humidity=` and the perturbation API's `InputAxis::RelativeHumidity`.
-- **Default.** An omitted humidity is 50 % everywhere.
+- **Default.** An omitted humidity is 50 %, unless another reading supplies it (a saved profile, the
+  shot day for `--zero-humidity`), with two exceptions: an `.a7p` file's absent humidity is 0 % (the
+  format's own meaning), and the bridge's `true.*` commands require `humidity_pct`.
 - **Validation.** One rule applies at every boundary: `RelativeHumidity::try_percent` and
   `RelativeHumidity::try_fraction`.
 
@@ -73,8 +75,9 @@ exactly as before. The kernels' own change is listed under Numeric shifts.
   `far_at_physical_boundary`**, so a struct literal must name them (they deserialize as
   `false` when absent). `perturbation::physical_domain` and `PhysicalDomain` are new, and the
   `RelativeHumidity` axis's `AxisKind::Continuous` unit is `"fraction"`, where it was `""`.
-- **`ProfileData` gains `flown_humidity` and `flown_humidity_note`.** They give the humidity a
-  flight of the profile flies, and what a stored band reading flies as.
+- **`ProfileData` gains `flown_humidity`, `flown_humidity_note` and
+  `ProfileData::validate_humidity`.** They give the humidity a flight of the profile flies, what a
+  stored band reading flies as, and the one validator's verdict on the stored humidity.
 - **`try_integrate_trajectory` returns `KernelInputError`**, not `WindSegmentError`. The new type
   is a malformed wind segment or a refused atmosphere zone. `try_solve_trajectory_rust` still
   returns `WindSegmentError`.
@@ -84,32 +87,42 @@ exactly as before. The kernels' own change is listed under Numeric shifts.
   `try_solve_trajectory_rust`, `fast_integrate*`) copy the station's altitude, temperature,
   pressure and humidity into the inputs they fly.
 - **`BallisticInputs.humidity`, a 0-1 FRACTION, is renamed `humidity_percent`, a PERCENT**
-  (default 50). The clamping `BallisticInputs::humidity_percent()` method is removed. Write the
-  percent, or delete the `/ 100`. A `..Default::default()` literal that never names the field
-  compiles unchanged and keeps 50 %. Every `TrajectorySolver` constructor sets the field from
-  its `AtmosphericConditions.humidity`.
-- **`wez::compute_wez` takes a final `humidity: RelativeHumidity`.** In 0.49.0 its sweep
-  always flew 50 %.
+  (default 50). Write the percent, or delete the `/ 100`. The
+  `BallisticInputs::humidity_percent()` accessor is `#[deprecated]`, kept for one release: it
+  returns the field, a percent. 0.49.0's clamped into 0-100; 0.50.0 clamps a humidity nowhere,
+  so from 0 to 100 the two return the same percent. A `..Default::default()` literal that never
+  names the field compiles unchanged and keeps 50 %. Every `TrajectorySolver` constructor sets the
+  field from its `AtmosphericConditions.humidity`.
+- **`wez::compute_wez_with_humidity` is the WEZ sweep with a final `humidity:
+  RelativeHumidity`.** In 0.49.0 the sweep always flew 50 %. `wez::compute_wez`, the 24-argument
+  form, is `#[deprecated]`, kept for one release: it is `compute_wez_with_humidity` at
+  `RelativeHumidity::DEFAULT`, the 50 % 0.49.0 flew.
 - **`atmosphere::get_local_atmosphere` is `#[deprecated]`.** It is dry by contract; use
-  `air_at`. Its sound speed is now the engine's one dry value, `sqrt(1.4 · 287.0531 · T)`,
-  where it was `sqrt(401.874 · T)`. That is +4.23e-7 relative, +0.00014 m/s at 15 °C. Under
-  `clippy -D warnings` the deprecation is an error.
+  `air_at(&KernelAtmosphere::Station(StationAir::new(..)?), None, 0.0, altitude_m)`, or
+  `StationAir::with_density_ratio` for a caller-held density ratio. Its sound speed is now the
+  engine's one dry value, `sqrt(1.4 · 287.0531 · T)`, where it was `sqrt(401.874 · T)`. That is
+  +4.23e-7 relative, +0.00014 m/s at 15 °C. Under `clippy -D warnings` the deprecation is an error.
 - **New crate-root names.** These are now exported from the crate root: `RelativeHumidity`,
   `StationAir`, `KernelAtmosphere`, `LocalAir`, `air_at`, `AtmosphereError`,
   `AtmosphereErrorReason`, `DEFAULT_HUMIDITY_PERCENT` and `HUMIDITY_SENSOR_TOLERANCE_PERCENT`.
   `trajectory_integration::KernelInputError` and `AtmoSock::validate` are new too.
   `perturbation::InputAxis` has a `RelativeHumidity` variant, so a glob import of both
   `ballistics_engine::*` and `InputAxis::*` makes `RelativeHumidity` ambiguous. Name one of them.
-- **`wind_scenarios::WindScenarioError` has a `ZeroFailed { message }` variant**, so an
-  exhaustive `match` needs an arm for it. A load whose zero cannot be solved was a `SolveFailed`
-  of a scenario named `<zero>`, a placeholder no scenario set contains.
+- **`wind_scenarios::WindScenarioError` has two new variants, `InvalidHumidity(AtmosphereError)`
+  and `ZeroFailed { message }`**, so an exhaustive `match` needs an arm for each.
+  - A load's `humidity_pct` beyond the sensor band, NaN or infinite, is `InvalidHumidity`, at the
+    field `humidity_pct`. 0.49.0 reported a NaN as `InvalidLoad { field: "humidity", .. }` and
+    flew 150 as 100 %.
+  - A load whose zero cannot be solved is `ZeroFailed`. It was a `SolveFailed` of a scenario
+    named `<zero>`, a placeholder no scenario set contains.
 - **`wasm::Calculator::set_humidity` returns `Result<Calculator, JsValue>`** (wasm32 only). It
   refuses a humidity beyond the sensor band itself; JavaScript chains as before and catches the
   throw.
 - **New refusal API.** `AirField`, `AirSpelling` and `AirRefusal` are exported from the crate
   root. `AtmosphereError::refusal_in` states a refused station air in a surface's own words and
   locates the field to blame; `AtmosphereError::explanation` is the reason alone, and
-  `atmosphere::parse_humidity_percent_text` parses a typed percent through the one validator.
+  `atmosphere::parse_humidity_percent_text` parses a typed percent through the one validator,
+  and `atmosphere::reading_text` writes a reading the way a refusal quotes it.
   `AtmosphericConditions` gains `resolved_station`, `station_air`, `pressure_origin`,
   `air_refusal`, `air_refusal_from`, `air_refusal_named` and `air_refusal_named_from`;
   `ProfileData` gains `stored_station`, `air_refusal` and `air_refusal_in`;
@@ -132,8 +145,10 @@ exactly as before. The kernels' own change is listed under Numeric shifts.
   `M_m / M_a = 1 - x_v (1 - M_v / M_a)`, the molar-mass factor the CIPM-2007 density already
   applies. Humid air is lighter, so its pressure falls a little more slowly with height. A
   downrange atmosphere zone (`AtmoSock`) is the governing air within its stretch of range, with
-  its own `x_v`. Held aloft, `x_v` can exceed saturation in the colder air (at +3 km over a
-  15 °C / 50 % station); condensation is not modelled.
+  its own `x_v`. Held aloft, `x_v` exceeds saturation in the colder air: at every height above a
+  saturated station, and from about 2.2 km above a 15 °C / 50 % station and 0.4 km above a 35 °C /
+  90 % one. At +3 km it is 1.35 times saturation over the first and 2.06 times over the second, and
+  at +10 km 34 and 29 times. Condensation is not modelled.
 - **What it moves.** Every solver path at a humidity above 0, off the station's height:
   - `TrajectorySolver`, and so the CLI, the browser terminal, the C ABI, the bridge, solve-json,
     explain, error-budget, the cards and PDFs, truing, Monte Carlo, WEZ and hold-corridor;
@@ -423,11 +438,12 @@ Only library callers of the kernels at a humidity above 0 see a change:
 - `AtmoSock` zones on those paths.
 
 That is rockets-engine's drag, the Python binding's `fast_integrate`, `derivatives()` and fast
-Monte Carlo, and any service that calls them. In 0.49.0 their sound speed was
-the 0 % value whatever the station's humidity, while their density was the humid one. Now the
-sound speed is the station's own moist value, so Mach falls and the drag coefficient moves along
-the drag curve. The density at the station is unchanged, bit for bit; away from it, the kernels
-move with every other path under the aloft change above.
+Monte Carlo, and any service that calls them. In 0.49.0 their sound speed was the 0 % value
+whatever the station's humidity, while their density was the humid one. Now the sound speed is
+the station's own moist value (inside an `AtmoSock` zone the zone's own, at the zone's height
+too), so Mach falls and the drag coefficient moves along the drag curve. The density at the station
+is unchanged, bit for bit; away from it, the kernels move with every other path under the aloft
+change above.
 
 | Station, 1013.25 hPa | Kernel sound speed, 0.49.0 | 0.50.0 | Change |
 |---|---|---|---|
@@ -461,10 +477,15 @@ The aloft change is part of these numbers too, though a small one: on its own it
 the same way, at -0.13 µm of drop and +0.0001 m/s of speed at 500 m, and -0.010 mm and
 -0.0007 m/s at 1000 m.
 
-At 0 % every kernel is bit-identical to 0.49.0.
-`KernelAtmosphere::from_legacy_params((alt, t, p, ratio), RelativeHumidity::DRY)` rebuilds
-0.49.0's kernel air, with the humid density and the 0 % sound speed. It was checked bit for bit
-against the 0.49.0 build. Use it to re-baseline a stored kernel result, not for new work.
+With the station and every `AtmoSock` zone at 0 %, every kernel is bit-identical to 0.49.0.
+`KernelAtmosphere::from_legacy_params((alt, t, p, ratio), RelativeHumidity::DRY)` rebuilds 0.49.0's
+kernel air, the humid density with the 0 % sound speed, for a flight with no `AtmoSock` zones or
+only dry ones; that was checked bit for bit against the 0.49.0 build. Use it to re-baseline such a
+stored kernel result, not for new work. A zone with a humidity above 0 flies its own moist sound
+speed and lapse, at its own height too, which 0.49.0's kernels never did, so no API rebuilds 0.49.0
+there: under this recipe a zone at the station's own 15 °C / 50 % still moves the 2 s flat shot by
+-0.169 m, the shift in the table above. A zoned caller migrates with `StationAir::new` at the
+station's humidity, so the station and its zones fly one model.
 
 ### Byte-identical
 - **Every `TrajectorySolver` surface at every humidity from 0 to 100 %, apart from the aloft
@@ -549,33 +570,53 @@ against the 0.49.0 build. Use it to re-baseline a stored kernel result, not for 
   water-vapour mole fraction and the virtual-temperature lapse.
 
 ### Downstream follow-ups
-These repositories pin the engine version and are not changed here:
-- **rockets-engine**: does not compile against 0.50.0 unchanged. `Atmosphere::parameters`
-  becomes a `KernelAtmosphere`, and `Air::at` becomes `air_at`. Set `inputs.humidity_percent`
-  from the rocket's atmosphere. The deprecation is a `-D warnings` error there.
-  `Atmosphere::default` becomes 50 %, while `icao_standard` stays dry. Recheck the OpenRocket
-  parity job: a humid rocket flight climbs kilometres, so the aloft change moves it. Its
-  `Atmosphere::Uniform { density_kg_m3: 0.0, .. }` ("zero disables drag") converts to
-  `KernelAtmosphere::uniform(0.0, c)`, the exact vacuum; a negative density is refused.
+These consumers pin or embed the engine and are not changed here:
+- **rockets-engine**: does not compile against 0.50.0 unchanged.
+  - `Atmosphere::parameters` becomes a `KernelAtmosphere`, and `Air::at` becomes `air_at`. The
+    deprecation of `get_local_atmosphere` is a `-D warnings` error there.
+  - `compute_derivatives` now measures a point's height from the `KernelAtmosphere` station, so
+    `pos.y` is the height above the station's altitude. rockets-engine passes the absolute
+    altitude in `pos.y` (with `inputs.altitude` at 0): subtract `StationAir::altitude_m()` from
+    it, and a dry flight's acceleration is 0.49.0's to the bit. Without the shift the air is read
+    one station altitude too high: at a 1500 m pad, 14 % too little drag. `air_at`, which
+    `Air::at` moves to, still takes the absolute altitude.
+  - `Atmosphere::default` should fly the engine's 50 % default, while `icao_standard` stays dry;
+    its test that `icao_standard(0.0)` equals the default changes with it.
+  - Recheck the OpenRocket parity job: a humid rocket flight climbs kilometres, so the aloft
+    change moves it.
+  - Its `Atmosphere::Uniform { density_kg_m3: 0.0, .. }` ("zero disables drag") converts to
+    `KernelAtmosphere::uniform(0.0, c)`, the exact vacuum; a negative density is refused.
+  - Move after winds-engine (below).
+- **winds-engine**: requires `ballistics-engine = "0.49"`, which does not accept 0.50.0, and
+  re-exports the engine's `wind` types. Release it on `"0.50"` before rockets-engine moves, or a
+  build with both carries two engine copies whose wind types do not match.
 - **ballistics-engine-py**: does not compile unchanged.
   - Build `KernelAtmosphere::from_legacy_params` in `fast_integrate` and `derivatives`. A
     `(0, c, 0, 0)` vacuum tuple still converts; the classes listed under Breaking are refused,
     and `derivatives()` should surface that refusal.
-  - Rename to `humidity_percent` and delete its `/ 100` lines. Its dict `humidity` default moves
-    from 0 to 50, which must be disclosed.
+  - `derivatives()` takes its inputs' altitude from the dict and the station from the tuple.
+    0.50.0 measures the height from the tuple's station, so a call whose two altitudes differ
+    moves.
+  - Rename to `humidity_percent` and delete its `/ 100` lines; its `humidity_percent()` calls
+    compile, deprecated. Its dict `humidity` default moves from 0 to 50, which must be
+    disclosed.
   - Give `get_local_atmosphere` a humidity.
   - Expose `station_speed_of_sound_mps`.
 - **ballistics-engine-rb**: compiles unchanged. Its `monte_carlo` should map the atmosphere hash
   into the inputs instead of ignoring it.
+- **handbook**: describe the engine's vapour model. Replace the Arden Buck saturation pressure
+  with the Wagner-Pruss equation, its 0.11 / 0.6078 coefficients with 0.062 / 0.378, and drop
+  `R_DRY` 287.05 and `R_VAPOR` 461.495, which the engine does not have. Replace the
+  humidity-as-ratio kernel snippets and the `atmos_params` / `atmo_params` tuples with `air_at`
+  and `KernelAtmosphere`, and note that `get_local_atmosphere` is deprecated (dry by contract),
+  not gone. Describe the aloft model: the station's water-vapour mole fraction held at every
+  height, with the virtual-temperature lapse. The chapters that carry the old model are the
+  primer, the atmosphere, the trajectory solver, weather integration, architecture, performance
+  and the physics-constants appendix. The stability chapter's dry Miller listing stays: it is the
+  deliberate exception.
 - **Apps and services that embed the engine**: their numbers move with the aloft change at a
   humidity above 0, in high-angle fire and in shots far above or below the station. Re-baseline
   their goldens against 0.50.0, and fill a missing humidity with the 50 % default.
-- **handbook**: replace the Arden Buck vapour pressure (the atmosphere chapter and the
-  physics-constants appendix) with the Wagner-Pruss equation. Its 0.11 / 0.6078 coefficients
-  become 0.062 / 0.378. Drop the appendix's `R_DRY` 287.05 and `R_VAPOR` 461.495, which the
-  engine does not have. Replace the humidity-as-ratio kernel snippets (the trajectory-solver and
-  performance chapters) with `air_at` and `KernelAtmosphere`. Describe the aloft model: the
-  station's water-vapour mole fraction held at every height, with the virtual-temperature lapse.
 
 ## [0.49.0] - 2026-10-27
 

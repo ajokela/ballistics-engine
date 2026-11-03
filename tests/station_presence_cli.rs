@@ -215,7 +215,7 @@ const E: &[&str] = &[
 /// flies as typed there). "Was" is what ab4eb0c printed (ICAO air at the altitude).
 #[test]
 fn the_canonical_repros_fly_the_typed_air() {
-    // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
     // water-vapour mole fraction, with a virtual-temperature lapse), old -> new: every velocity and
     // drop below moved by 2.5e-8 to 3.3e-7 relative, for example A's come-ups 491.61153010153987 ->
     // 491.61166290955026 m/s and 5.020390667980392 -> 5.020390372633107 mil, C's trajectory
@@ -933,7 +933,7 @@ fn every_subcommand_flies_the_typed_air_at_its_zero_too() {
     };
     // (case, command, value, now, was at ab4eb0c)
     //
-    // `now` re-captured in 0.50.0 (humidity train S8, the unified aloft vapour model: these
+    // `now` re-captured in 0.50.0 (the unified aloft vapour model: these
     // commands fly the default 50 % RH, and the air off the station's height now holds the
     // station's water-vapour mole fraction with a virtual-temperature lapse). 55 of the 63
     // `now` values moved, by -7.6e-7 to +7.9e-8 relative; the largest are plan-truing's
@@ -1115,7 +1115,7 @@ fn max_height(args: &[&str]) -> f64 {
 
 #[test]
 fn the_zero_day_flies_its_own_typed_air_and_inherits_presence() {
-    // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
     // water-vapour mole fraction, with a virtual-temperature lapse), old -> new: S1
     // 2.2201995067396814 -> 2.220199376108147 m and S1 inherited 2.2204084092114758 ->
     // 2.2204082785459076 m (-5.9e-8).
@@ -1170,7 +1170,7 @@ fn the_zero_day_flies_its_own_typed_air_and_inherits_presence() {
 
 #[test]
 fn a_density_altitude_with_a_typed_temperature_flies_that_temperature() {
-    // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
     // water-vapour mole fraction, with a virtual-temperature lapse), old -> new: S2
     // 1.5526787637373636 -> 1.5526787619247384 m and S2b 1.5523778009403533 -> 1.5523777991389598 m
     // (-1.2e-9).
@@ -1376,7 +1376,7 @@ fn location_and_profile_csv_cells_are_readings() {
         "--pressure",
         "25",
     ]);
-    // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
     // water-vapour mole fraction, with a virtual-temperature lapse), old -> new: 2020.232528009309
     // -> 2020.2321531314424 fps (-1.9e-7).
     assert_bits(
@@ -1548,7 +1548,7 @@ fn saved_profiles_fly_a_marked_reading_and_keep_the_legacy_rule_unmarked() {
     let text = std::fs::read_to_string(home.join(".ballistics/profiles/typed.json")).unwrap();
     assert!(text.contains("\"pressure_supplied\": true"), "{text}");
     // The C repro, through a saved profile.
-    // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
     // water-vapour mole fraction, with a virtual-temperature lapse), old -> new: marked
     // 1817.3657972174826 -> 1817.3652235119462 fps and unmarked 1934.971466102828 ->
     // 1934.9708328297384 fps (-3.2e-7 and -3.3e-7).
@@ -2032,7 +2032,7 @@ fn a_profiles_omitted_pressure_flown_as_a_qnh_stays_omitted() {
             .unwrap()
     };
     // (units, run, condition number captured from ab4eb0c)
-    // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
     // water-vapour mole fraction, with a virtual-temperature lapse), old -> new: metric
     // 147.22911163966467 -> 147.22929978491447, 146.77803224676077 -> 146.7782194651384 and
     // 146.78702305164347 -> 146.78721029084687 (+1.3e-6); imperial 158.11027132668036 ->

@@ -1,5 +1,5 @@
-//! The public docs say what the humidity code does (humidity-consistency train, step S7, plan
-//! C6: H19 stale comments, H20 docs that contradict the code).
+//! The public docs say what the humidity code does: no stale comment, and no doc that
+//! contradicts the code.
 //!
 //! Every number the docs give for the humidity change is recomputed here by running the engine,
 //! so a doc can neither quote an estimate nor drift from the code. Each is checked IN PLACE: a
@@ -14,12 +14,13 @@
 //!   30 s lob, on 0.49.0 and 0.50.0; the `fast_integrate` flat shot the prose quotes; and the lean
 //!   Monte Carlo at 500 m and 1000 m. [`legacy_kernel_air_reproduces_0_49_0`] holds
 //!   `KernelAtmosphere::from_legacy_params` with `RelativeHumidity::DRY` to 0.49.0's kernel bit
-//!   for bit.
-//! - **The aloft vapour model (S8).** The air at +1 km and +3 km, and three `TrajectorySolver`
+//!   for bit, and [`the_legacy_recipe_is_exact_only_without_humid_zones`] shows that holds only
+//!   without humid `AtmoSock` zones, as both documents now say.
+//! - **The aloft vapour model.** The air at +1 km and +3 km, and three `TrajectorySolver`
 //!   shots (flat to 1000 m, a 30-degree lob, and both from a 1500 m station), 0.49.0 against
-//!   0.50.0. [`the_air_before_s8_is_the_old_aloft_model`] also rebuilds the old air from the old
-//!   formulas. The aloft change's own share, which only the development build before it could
-//!   measure, is labelled as a one-time measurement, as is the CLI golden-corpus count.
+//!   0.50.0. [`the_air_before_0_50_0_is_the_old_aloft_model`] also rebuilds the old air from
+//!   the old formulas. The aloft change's own share, which only the development build before it
+//!   could measure, is labelled as a one-time measurement, as is the CLI golden-corpus count.
 //! - **The Miller exception.** The factor a humid density would put on the muzzle Miller Sg,
 //!   which 0.50.0 deliberately does not apply, in every document that quotes it, and the spin
 //!   drift and aerodynamic jump it would move. A pin shows the solve's Sg does not move with
@@ -28,12 +29,18 @@
 //!   steam a NaN humidity flew as.
 //! - **Constants.** The engine's own dry sound speed at 15 °C, which `SPEED_OF_SOUND_MPS`'s doc
 //!   states.
+//! - **The model's own limits.** The held vapour's supersaturation aloft, and the gaps between
+//!   the lapse's, the density's and the sound speed's gas constants, at every site that states
+//!   them.
+//! - **Disclosures.** A kernel caller's new height reference, the breaking list and the new
+//!   items in both documents, the default and its exceptions, the sensor band on every public
+//!   humidity field, and no private app's internals in the public release notes.
 //!
 //! It also checks the CHANGELOG's 0.50.0 section carries the breaking API list, the sensor band
-//! from its constant and the downstream follow-ups, and that the stale wording H19/H20 named is
-//! gone. The section is found under `## [Unreleased]` before the release cut and under
-//! `## [0.50.0] - <date>` after it, and a test applies `scripts/release/bump.sh`'s cut in memory,
-//! so cutting 0.50.0 cannot turn this suite red.
+//! from its constant and the downstream follow-ups, and that the stale wording is gone. The section
+//! is found under `## [Unreleased]` before the release cut and under `## [0.50.0] - <date>` after
+//! it, and a test applies `scripts/release/bump.sh`'s cut in memory, so cutting 0.50.0 cannot turn
+//! this suite red.
 
 use std::fs;
 use std::path::Path;
@@ -287,17 +294,68 @@ fn the_0_50_0_section_states_the_sensor_band_from_its_constant() {
     );
 }
 
+/// The follow-ups name every public repository that pins the engine, each as its own bullet, and
+/// one neutral line for the apps and services that embed it: their own task lists live with
+/// them, not in a public release note.
 #[test]
 fn the_0_50_0_section_lists_the_downstream_follow_ups() {
     let section = release_section();
     for repo in [
         "rockets-engine",
+        "winds-engine",
         "ballistics-engine-py",
         "ballistics-engine-rb",
-        "Apps and services that embed the engine",
         "handbook",
     ] {
-        assert_contains(&section, repo, "a downstream follow-up");
+        assert_contains(&section, &format!("- **{repo}**"), "a downstream follow-up");
+    }
+    assert_contains(
+        &section,
+        "- **Apps and services that embed the engine**",
+        "the embedders' follow-up",
+    );
+}
+
+/// The `# Humidity Consistency (0.50.0)` section of MCCOY_MIGRATION.md, to the next `# ` heading.
+fn migration_section() -> String {
+    let migration = read("MCCOY_MIGRATION.md");
+    let start = migration
+        .find("\n# Humidity Consistency (0.50.0)")
+        .expect("MCCOY_MIGRATION.md has the 0.50.0 humidity notes")
+        + 1;
+    let body = &migration[start..];
+    let end = body.find("\n# ").unwrap_or(body.len());
+    body[..end].to_string()
+}
+
+/// The CHANGELOG section ships as the GitHub release body and in the crates.io package, and the
+/// migration notes ship in the package too, so neither may carry a private app's or service's
+/// internals: its environment variables, deploy details, private models, defects or chores.
+/// Those follow-ups live with the apps; the notes keep one neutral line for embedders.
+#[test]
+fn the_release_notes_carry_no_private_app_internals() {
+    for (what, text) in [
+        ("the CHANGELOG's 0.50.0 section", release_section()),
+        ("MCCOY_MIGRATION.md's 0.50.0 section", migration_section()),
+    ] {
+        for private in [
+            "Flask",
+            "flask",
+            "BALLISTICS_",
+            "Dockerfile",
+            "/v1/calculate",
+            "ballistics_rust",
+            "hardcoded",
+            "the live apps",
+            "neither app",
+            "iOS",
+            "Android",
+        ] {
+            assert!(
+                !text.contains(private),
+                "{what}: `{private}` is a private app's material, not a public release note's"
+            );
+        }
     }
 }
 
@@ -546,8 +604,8 @@ fn bits((x, y, v): (f64, f64, f64)) -> [u64; 3] {
 
 /// The rebuilt "before" is 0.49.0's kernel, bit for bit: the released 0.49.0 crate flies the
 /// same shots beside it, on whatever platform runs this. The constants are what the 0.49.0 build
-/// itself (main 261c1eb) flew at 15 C / 50 % on macOS (the S7 measurement probe); 1e-12 relative
-/// leaves room for another libm.
+/// itself (main 261c1eb) flew at 15 C / 50 % on macOS, measured when these docs were written;
+/// 1e-12 relative leaves room for another libm.
 #[test]
 fn legacy_kernel_air_reproduces_0_49_0() {
     #[cfg(not(target_arch = "wasm32"))]
@@ -807,15 +865,15 @@ fn the_0_50_0_measured_figures_say_so() {
 }
 
 // =================================================================================================
-// S8: one vapour model aloft, on every surface
+// One vapour model aloft, on every surface
 // =================================================================================================
 
 const SEA_LEVEL_STATION_HPA: f64 = 1013.25;
 
-/// The air over a sea-level station at 1013.25 hPa before S8, as the 0.49.0 build (main 261c1eb)
-/// and the 4281ccf build flew it, bit for bit alike: `(T C, RH %, height m, density kg/m3,
-/// sound speed m/s)`. The rows of the aloft table, in its order.
-const AIR_BEFORE_S8: [(f64, f64, f64, f64, f64); 4] = [
+/// The air over a sea-level station at 1013.25 hPa before the aloft change, as the 0.49.0 build
+/// (main 261c1eb) and the 4281ccf build flew it, bit for bit alike: `(T C, RH %, height m, density
+/// kg/m3, sound speed m/s)`. The rows of the aloft table, in its order.
+const AIR_BEFORE_0_50_0: [(f64, f64, f64, f64, f64); 4] = [
     (15.0, 50.0, 1000.0, 1.1086026577295789, 336.76382227330026),
     (15.0, 50.0, 3000.0, 0.9067541155034896, 328.7463422984116),
     (35.0, 90.0, 1000.0, 1.0267223810704649, 350.29942794649406),
@@ -839,8 +897,8 @@ fn air_over_sea_level(temperature_c: f64, humidity_percent: f64, height_m: f64) 
 /// temperature and pressure. They are also what the released 0.49.0 crate gives, run beside
 /// this one.
 #[test]
-fn the_air_before_s8_is_the_old_aloft_model() {
-    for (temperature_c, humidity_percent, height_m, density, sound_speed) in AIR_BEFORE_S8 {
+fn the_air_before_0_50_0_is_the_old_aloft_model() {
+    for (temperature_c, humidity_percent, height_m, density, sound_speed) in AIR_BEFORE_0_50_0 {
         let dry = air_over_sea_level(temperature_c, 0.0, height_m);
         let station = StationAir::new(
             0.0,
@@ -900,7 +958,7 @@ fn released_air_aloft(temperature_c: f64, humidity_percent: f64, height_m: f64) 
 /// above) against 0.50.0's.
 #[test]
 fn the_aloft_air_table_is_engine_output() {
-    let expected: Vec<String> = AIR_BEFORE_S8
+    let expected: Vec<String> = AIR_BEFORE_0_50_0
         .iter()
         .map(
             |&(temperature_c, humidity_percent, height_m, density, sound_speed)| {
@@ -1250,7 +1308,7 @@ fn the_solves_muzzle_sg_does_not_move_with_humidity() {
 }
 
 // =================================================================================================
-// Model descriptions and stale wording (H19, H20)
+// Model descriptions and stale wording
 // =================================================================================================
 
 #[test]
@@ -1473,7 +1531,756 @@ fn stale_humidity_comments_are_gone() {
             "Every solver (cli_api / monte_carlo / ffi / fast_trajectory) reaches this one formula",
             "zones reach the CIPM density directly, stations through StationAir::new",
         ),
+        // The aloft model before 0.50.0, which re-derived the vapour from the RH aloft. The base
+        // air's water-vapour mole fraction is held at every height for the lapse, the density
+        // and the sound speed alike.
+        (
+            "src/derivatives.rs",
+            "the sound speed is the moist value at the base RH",
+            "the base air's vapour mole fraction is held aloft, not its RH",
+        ),
+        (
+            "src/derivatives.rs",
+            "RH, for density AND sound speed) before the altitude lapse",
+            "the zone's vapour mole fraction sets the lapse too",
+        ),
+        (
+            "src/trajectory_integration.rs",
+            "RH, for density and sound speed) before the altitude lapse",
+            "the zone's vapour mole fraction sets the lapse too",
+        ),
+        (
+            "src/fast_trajectory.rs",
+            "RH, for\n    /// density and sound speed) as the base before the altitude lapse",
+            "the zone's vapour mole fraction sets the lapse too",
+        ),
+        (
+            "src/fast_trajectory.rs",
+            "the base humidity for density and sound speed alike",
+            "the base air's vapour mole fraction sets the lapse too",
+        ),
+        (
+            "src/monte_carlo.rs",
+            "and its RH the flight's sound speed",
+            "the station's vapour mole fraction sets the lapse and the sound speed",
+        ),
+        (
+            "src/atmosphere.rs",
+            "the relative humidity it gave the sound speed",
+            "the trace records the base humidity whose vapour mole fraction is held aloft",
+        ),
+        (
+            "src/atmosphere.rs",
+            "so the\n/// pressure aloft falls as the density the projectile flies says it must",
+            "the lapse's gas constant and the density's agree only to about 1e-3",
+        ),
     ] {
         assert!(!read(path).contains(stale), "{path}: stale comment ({why})");
     }
+}
+
+// =================================================================================================
+// Disclosures checked against the engine: re-baseline recipes, a kernel caller's height
+// reference, the breaking list in both documents, the new items, and the model's own limits
+// =================================================================================================
+
+/// [`fly`] with downrange `AtmoSock` zones `(T C, P hPa, RH %, until m)`.
+#[cfg(not(target_arch = "wasm32"))]
+fn fly_zoned(
+    atmosphere: KernelAtmosphere,
+    zones: Option<Vec<(f64, f64, f64, f64)>>,
+    angle_rad: f64,
+    seconds: f64,
+) -> (f64, f64, f64) {
+    let mut params = params(atmosphere);
+    params.atmo_sock = zones.map(ballistics_engine::atmosphere::AtmoSock::new);
+    let steps = try_integrate_trajectory(
+        launch(angle_rad),
+        (0.0, seconds),
+        params,
+        "RK4",
+        1e-6,
+        0.001,
+    )
+    .expect("valid kernel input");
+    let (time, state) = steps.last().unwrap();
+    assert_eq!(*time, seconds);
+    endpoint(state)
+}
+
+/// [`fly_released`] with the same zones, on the released 0.49.0 kernel.
+#[cfg(not(target_arch = "wasm32"))]
+fn fly_released_zoned(
+    temperature_c: f64,
+    humidity_percent: f64,
+    zones: Option<Vec<(f64, f64, f64, f64)>>,
+    angle_rad: f64,
+    seconds: f64,
+) -> (f64, f64, f64) {
+    let mut params =
+        kernel_params!(old, atmos_params: released_tuple(temperature_c, humidity_percent));
+    params.atmo_sock = zones.map(old::atmosphere::AtmoSock::new);
+    let steps = old::trajectory_integration::try_integrate_trajectory(
+        launch(angle_rad),
+        (0.0, seconds),
+        params,
+        "RK4",
+        1e-6,
+        0.001,
+    )
+    .expect("valid kernel input");
+    let (time, state) = steps.last().unwrap();
+    assert_eq!(*time, seconds);
+    endpoint(state)
+}
+
+/// The 2 s flat shot's downrange on `fast_integrate`, this crate or 0.49.0, at a sea-level
+/// station with the given zones.
+#[cfg(not(target_arch = "wasm32"))]
+macro_rules! fast_flat_downrange {
+    (
+        $engine:ident,
+        $temperature_c:expr,
+        $humidity:ident: $humidity_value:expr,
+        $atmosphere:ident: $air:expr,
+        $zones:expr
+    ) => {{
+        let mut inputs = $engine::BallisticInputs {
+            temperature: $temperature_c,
+            bc_value: BC_G7,
+            bc_type: $engine::DragModel::G7,
+            bullet_mass: MASS_KG,
+            muzzle_velocity: MUZZLE_VELOCITY_MPS,
+            bullet_diameter: DIAMETER_M,
+            bullet_length: LENGTH_M,
+            twist_rate: 10.0,
+            caliber_inches: DIAMETER_M / 0.0254,
+            weight_grains: MASS_KG / 0.000_064_798_91,
+            pressure: SEA_LEVEL_HPA,
+            ground_threshold: -1.0e5,
+            ..$engine::BallisticInputs::default()
+        };
+        inputs.$humidity = $humidity_value;
+        let solution = $engine::fast_trajectory::fast_integrate(
+            &inputs,
+            &$engine::wind::WindSock::new(vec![]),
+            $engine::fast_trajectory::FastIntegrationParams {
+                horiz: 1.0e6,
+                vert: 0.0,
+                initial_state: launch(FLAT.0),
+                t_span: (0.0, FLAT.1),
+                $atmosphere: $air,
+                atmo_sock: $zones.map($engine::atmosphere::AtmoSock::new),
+            },
+        );
+        let last = solution.t.len() - 1;
+        assert_eq!(solution.t[last], FLAT.1);
+        solution.y[0][last]
+    }};
+}
+
+/// `KernelAtmosphere::from_legacy_params(.., RelativeHumidity::DRY)` rebuilds 0.49.0's kernel air
+/// bit for bit only for a flight with no `AtmoSock` zones or only dry ones. A zone with a
+/// humidity above 0 flies its own moist sound speed and lapse, which 0.49.0's kernels never did,
+/// so no recipe rebuilds 0.49.0 there; both documents say so, with the engine's own number.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn the_legacy_recipe_is_exact_only_without_humid_zones() {
+    let humid_zone_shift = |temperature_c: f64, humidity_percent: f64, angle: f64, secs: f64| {
+        let zone = Some(vec![(
+            temperature_c,
+            SEA_LEVEL_HPA,
+            humidity_percent,
+            1.0e6,
+        )]);
+        let recipe = fly_zoned(
+            legacy_kernel_air(temperature_c, humidity_percent),
+            zone.clone(),
+            angle,
+            secs,
+        );
+        let released = fly_released_zoned(temperature_c, humidity_percent, zone, angle, secs);
+        recipe.0 - released.0
+    };
+    for (temperature_c, humidity_percent) in QUOTED.into_iter().chain([(15.0, 0.0)]) {
+        let dry_zone = vec![(temperature_c, SEA_LEVEL_HPA, 0.0, 1.0e6)];
+        let humid_zone = vec![(temperature_c, SEA_LEVEL_HPA, 50.0, 1.0e6)];
+        for (shot, (angle, secs)) in [("flat", FLAT), ("lob", LOB)] {
+            for zones in [None, Some(dry_zone.clone())] {
+                assert_eq!(
+                    bits(fly_zoned(
+                        legacy_kernel_air(temperature_c, humidity_percent),
+                        zones.clone(),
+                        angle,
+                        secs
+                    )),
+                    bits(fly_released_zoned(
+                        temperature_c,
+                        humidity_percent,
+                        zones.clone(),
+                        angle,
+                        secs
+                    )),
+                    "{shot} at {temperature_c} C / {humidity_percent} %, zones {zones:?}: the \
+                     recipe is not 0.49.0"
+                );
+            }
+            // A humid zone, over a humid station or a dry one: not 0.49.0.
+            assert_ne!(
+                bits(fly_zoned(
+                    legacy_kernel_air(temperature_c, humidity_percent),
+                    Some(humid_zone.clone()),
+                    angle,
+                    secs
+                )),
+                bits(fly_released_zoned(
+                    temperature_c,
+                    humidity_percent,
+                    Some(humid_zone.clone()),
+                    angle,
+                    secs
+                )),
+                "{shot} at {temperature_c} C / {humidity_percent} % with a 50 % zone"
+            );
+        }
+        // fast_integrate, which the migration notes also name: the same rule.
+        if humidity_percent > 0.0 {
+            for zones in [None, Some(dry_zone.clone())] {
+                let ratio_tuple = released_tuple(temperature_c, humidity_percent);
+                let recipe = fast_flat_downrange!(
+                    ballistics_engine,
+                    temperature_c,
+                    humidity_percent: 0.0,
+                    atmosphere: KernelAtmosphere::from_legacy_params(
+                        ratio_tuple,
+                        RelativeHumidity::DRY
+                    )
+                    .unwrap(),
+                    zones.clone()
+                );
+                let released = fast_flat_downrange!(
+                    old,
+                    temperature_c,
+                    humidity: humidity_percent / 100.0,
+                    atmo_params: ratio_tuple,
+                    zones.clone()
+                );
+                assert_eq!(
+                    recipe.to_bits(),
+                    released.to_bits(),
+                    "fast_integrate at {temperature_c} C / {humidity_percent} %, zones {zones:?}"
+                );
+            }
+        }
+    }
+    // A zone at the station's own air carries the station's whole humidity shift: the table's.
+    let shift = humid_zone_shift(15.0, 50.0, FLAT.0, FLAT.1);
+    let station_shift = {
+        let (x0, ..) = fly_released(15.0, 50.0, FLAT.0, FLAT.1);
+        let (x1, ..) = fly(
+            KernelAtmosphere::Station(station(15.0, 50.0)),
+            FLAT.0,
+            FLAT.1,
+        );
+        x1 - x0
+    };
+    assert_eq!(format!("{shift:+.3}"), format!("{station_shift:+.3}"));
+
+    let section = release_section();
+    for prose in [
+        "With the station and every `AtmoSock` zone at 0 %, every kernel is bit-identical to \
+         0.49.0."
+            .to_string(),
+        "`KernelAtmosphere::from_legacy_params((alt, t, p, ratio), RelativeHumidity::DRY)` \
+         rebuilds 0.49.0's kernel air, the humid density with the 0 % sound speed, for a flight \
+         with no `AtmoSock` zones or only dry ones; that was checked bit for bit against the \
+         0.49.0 build."
+            .to_string(),
+        format!(
+            "A zone with a humidity above 0 flies its own moist sound speed and lapse, at its own \
+             height too, which 0.49.0's kernels never did, so no API rebuilds 0.49.0 there: under \
+             this recipe a zone at the station's own 15 °C / 50 % still moves the 2 s flat shot \
+             by {shift:+.3} m, the shift in the table above."
+        ),
+        "A zoned caller migrates with `StationAir::new` at the station's humidity, so the station \
+         and its zones fly one model."
+            .to_string(),
+        "(inside an `AtmoSock` zone the zone's own, at the zone's height too)".to_string(),
+    ] {
+        assert_prose(
+            &section,
+            &prose,
+            "the CHANGELOG's kernel re-baseline recipe",
+        );
+    }
+    let migration = migration_section();
+    for prose in [
+        "It was checked bit for bit against the 0.49.0 build on `try_integrate_trajectory` and \
+         `fast_integrate`, for a flight with no `AtmoSock` zones or only dry ones.",
+        "A zone with a humidity above 0 now flies its own moist sound speed and lapse, at its own \
+         height too, and no API reproduces 0.49.0 there; migrate a zoned caller with \
+         `StationAir::new` at the station's humidity, so the station and its zones fly one model.",
+        "with the station and every zone at 0 % nothing moves, bit for bit",
+    ] {
+        assert_prose(&migration, prose, "MCCOY_MIGRATION.md's re-baseline recipe");
+    }
+    assert!(
+        !normalized(&section).contains("At 0 % every kernel is bit-identical to 0.49.0."),
+        "the CHANGELOG still says a kernel at 0 % is 0.49.0 whatever its zones"
+    );
+}
+
+/// `compute_derivatives` measures a point's height from its `KernelAtmosphere` station, where
+/// 0.49.0 measured it from `inputs.altitude`. A caller that passes an absolute altitude in
+/// `pos.y` with `inputs.altitude` at 0 (rockets-engine's shape) subtracts the station's altitude
+/// and gets 0.49.0's acceleration to the bit; without the shift it reads the air one station
+/// altitude too high. The rockets follow-up, the migration notes and the rustdoc say so.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn an_absolute_height_kernel_caller_subtracts_the_station_altitude() {
+    use nalgebra::Vector3;
+    let pad_m = 1500.0;
+    let (temperature_c, pressure_hpa) = (5.25, 845.6);
+    let mut too_little_drag_at_the_pad = f64::NAN;
+    for humidity_percent in [0.0, 30.0] {
+        let (density, _) = old::atmosphere::calculate_atmosphere(
+            pad_m,
+            Some(temperature_c),
+            Some(pressure_hpa),
+            humidity_percent,
+        );
+        let tuple = (pad_m, temperature_c, pressure_hpa, density / 1.225);
+        let kernel = KernelAtmosphere::from_legacy_params(tuple, RelativeHumidity::DRY).unwrap();
+        let old_inputs = old::BallisticInputs {
+            altitude: 0.0,
+            ..Default::default()
+        };
+        let inputs = BallisticInputs {
+            altitude: 0.0,
+            ..Default::default()
+        };
+        let velocity = Vector3::new(150.0, 90.0, 3.0);
+        for absolute_m in [1500.0, 1600.1, 2500.0, 5000.0] {
+            let then = old::derivatives::compute_derivatives(
+                Vector3::new(100.0, absolute_m, 0.0),
+                velocity,
+                &old_inputs,
+                Vector3::zeros(),
+                tuple,
+                0.3,
+                None,
+                0.0,
+                None,
+            );
+            let at = |height_m: f64| {
+                ballistics_engine::derivatives::compute_derivatives(
+                    Vector3::new(100.0, height_m, 0.0),
+                    velocity,
+                    &inputs,
+                    Vector3::zeros(),
+                    &kernel,
+                    0.3,
+                    None,
+                    0.0,
+                    None,
+                )
+            };
+            let shifted = at(absolute_m - pad_m);
+            assert_eq!(
+                shifted.map(f64::to_bits),
+                then.map(f64::to_bits),
+                "{humidity_percent} % at {absolute_m} m: the shifted height is not 0.49.0"
+            );
+            let unshifted = at(absolute_m);
+            assert_ne!(
+                unshifted[3], then[3],
+                "the unshifted height reads the same air"
+            );
+            if humidity_percent == 0.0 && absolute_m == pad_m {
+                too_little_drag_at_the_pad = (1.0 - unshifted[3] / then[3]) * 100.0;
+            }
+        }
+    }
+    let section = release_section();
+    assert_prose(
+        &section,
+        &format!(
+            "`compute_derivatives` now measures a point's height from the `KernelAtmosphere` \
+             station, so `pos.y` is the height above the station's altitude. rockets-engine \
+             passes the absolute altitude in `pos.y` (with `inputs.altitude` at 0): subtract \
+             `StationAir::altitude_m()` from it, and a dry flight's acceleration is 0.49.0's to \
+             the bit. Without the shift the air is read one station altitude too high: at a \
+             1500 m pad, {too_little_drag_at_the_pad:.0} % too little drag."
+        ),
+        "the rockets-engine follow-up",
+    );
+    assert_prose(
+        &section,
+        "`air_at`, which `Air::at` moves to, still takes the absolute altitude.",
+        "the rockets-engine follow-up's second height convention",
+    );
+    assert!(
+        !section.contains("Set `inputs.humidity_percent`"),
+        "compute_derivatives does not read the inputs' humidity, so setting it is a no-op"
+    );
+    assert_prose(
+        &migration_section(),
+        "A caller that passes an absolute altitude in `pos.y` (with `inputs.altitude` at 0) \
+         subtracts the station's altitude, `StationAir::altitude_m()`, from it; then a dry \
+         flight's acceleration is 0.49.0's to the bit.",
+        "MCCOY_MIGRATION.md's height reference",
+    );
+    assert_prose(
+        &read("src/derivatives.rs"),
+        "A caller holding an absolute altitude passes its height above the station, `altitude - \
+         station.altitude_m()`, as `pos.y`.",
+        "compute_derivatives' rustdoc",
+    );
+}
+
+/// Every Rust-source break and deprecation is in both the CHANGELOG's breaking list and the
+/// migration notes, so a binding maintainer who reads either one meets each of them.
+#[test]
+fn every_breaking_change_is_in_the_changelog_and_the_migration_notes() {
+    let (section, migration) = (release_section(), migration_section());
+    for name in [
+        "atmos_params",
+        "atmo_params",
+        "KernelAtmosphere",
+        "compute_derivatives",
+        "try_solve_trajectory_rust",
+        "solve_trajectory_rust",
+        "aerodynamic_jump_launch_offset_rad",
+        "try_integrate_trajectory",
+        "KernelInputError",
+        "humidity_percent",
+        "humidity_percent()",
+        "get_local_atmosphere",
+        "from_legacy_params",
+        "ToleranceAxisV1",
+        "near_at_physical_boundary",
+        "far_at_physical_boundary",
+        "compute_wez",
+        "compute_wez_with_humidity",
+        "WindScenarioError",
+        "InvalidHumidity",
+        "ZeroFailed",
+        "set_humidity",
+        "InputAxis",
+        "inputs.altitude",
+    ] {
+        assert_contains(&section, name, "the CHANGELOG's breaking list");
+        assert_contains(&migration, name, "MCCOY_MIGRATION.md's 0.50.0 notes");
+    }
+    for deprecated in [
+        "`BallisticInputs::humidity_percent()` accessor is `#[deprecated]`",
+        "`wez::compute_wez`, the 24-argument form, is `#[deprecated]`",
+    ] {
+        assert_prose(&section, deprecated, "the CHANGELOG's deprecation shims");
+    }
+}
+
+/// Every new public item outside a new type is named in the CHANGELOG, and the one deprecation
+/// note on the humidity work says how to migrate, constructor included.
+#[test]
+fn the_0_50_0_section_names_every_new_public_item() {
+    let section = release_section();
+    for name in [
+        "ProfileData::validate_humidity",
+        "atmosphere::reading_text",
+        "flown_humidity_note",
+        "stored_station",
+        "air_refusal_in",
+        "a7p_air_refusal",
+        "physical_domain",
+        "StationPressureOrigin",
+        "AtmoSock::validate",
+        "compute_wez_with_humidity",
+    ] {
+        assert_contains(&section, name, "the CHANGELOG's new items");
+    }
+    assert_contains(
+        &read("src/atmosphere.rs"),
+        "note = \"dry air by contract; use air_at(&KernelAtmosphere::Station(StationAir::new(..)?), \
+         None, 0.0, altitude_m), or StationAir::with_density_ratio for a caller-held density \
+         ratio\"",
+        "get_local_atmosphere's deprecation note",
+    );
+}
+
+/// The water-vapour mole fraction a first-order moist sound speed implies at `temp_k`: the
+/// engine's `c = sqrt(1.4 (1 - 0.062 x_v) · 287.0531 (1 + 0.378 x_v) · T)` solved for `x_v`, in
+/// the cancellation-free form of the root near 0.
+fn x_v_from_sound_speed(sound_speed_mps: f64, temp_k: f64) -> f64 {
+    let q = sound_speed_mps * sound_speed_mps / (1.4 * 287.0531 * temp_k) - 1.0;
+    let (b, a) = (0.378 - 0.062, 0.062 * 0.378);
+    2.0 * q / (b + (b * b - 4.0 * a * q).sqrt())
+}
+
+/// Over a sea-level station at 1013.25 hPa, the air `height_m` up holds the station's
+/// water-vapour mole fraction: this many times the most the air there could hold, its saturation
+/// mole fraction at the local temperature and pressure (the engine's own Wagner-Pruss pressure
+/// and enhancement factor, read through its sound speed at 100 %).
+fn times_saturation(temperature_c: f64, humidity_percent: f64, height_m: f64) -> f64 {
+    let station = station(temperature_c, humidity_percent);
+    let held = x_v_from_sound_speed(station.speed_of_sound_mps(), temperature_c + 273.15);
+    let air = air_at(&KernelAtmosphere::Station(station), None, 0.0, height_m);
+    let held_aloft = x_v_from_sound_speed(air.speed_of_sound_mps, air.temperature_k);
+    assert!((held_aloft / held - 1.0).abs() < 1e-9, "x_v is held aloft");
+    let saturated = x_v_from_sound_speed(
+        moist_speed_of_sound(air.temperature_k, air.pressure_pa, 100.0),
+        air.temperature_k,
+    );
+    held / saturated
+}
+
+/// The height above a sea-level station where its held vapour reaches saturation.
+fn saturation_height_m(temperature_c: f64, humidity_percent: f64) -> f64 {
+    let (mut below, mut above) = (0.0_f64, 12_000.0_f64);
+    for _ in 0..80 {
+        let mid = 0.5 * (below + above);
+        if times_saturation(temperature_c, humidity_percent, mid) < 1.0 {
+            below = mid;
+        } else {
+            above = mid;
+        }
+    }
+    0.5 * (below + above)
+}
+
+/// The held vapour's supersaturation aloft, quantified from the engine at every disclosure site:
+/// every height above a saturated station is supersaturated, and the crossing heights and the
+/// multiples at +3 km and +10 km are the engine's.
+#[test]
+fn the_supersaturation_aloft_is_quantified_from_the_engine() {
+    for temperature_c in [0.0, 15.0, 35.0, 45.0] {
+        for height_m in [1.0, 10.0, 100.0, 1000.0, 3000.0, 10_000.0] {
+            let times = times_saturation(temperature_c, 100.0, height_m);
+            assert!(
+                times > 1.0,
+                "{temperature_c} C / 100 % at +{height_m} m: {times}"
+            );
+        }
+    }
+    let sentence = format!(
+        "Held aloft, `x_v` exceeds saturation in the colder air: at every height above a \
+         saturated station, and from about {:.1} km above a 15 °C / 50 % station and {:.1} km \
+         above a 35 °C / 90 % one. At +3 km it is {:.2} times saturation over the first and {:.2} \
+         times over the second, and at +10 km {:.0} and {:.0} times. Condensation is not \
+         modelled.",
+        saturation_height_m(15.0, 50.0) / 1000.0,
+        saturation_height_m(35.0, 90.0) / 1000.0,
+        times_saturation(15.0, 50.0, 3000.0),
+        times_saturation(35.0, 90.0, 3000.0),
+        times_saturation(15.0, 50.0, 10_000.0),
+        times_saturation(35.0, 90.0, 10_000.0),
+    );
+    assert_prose(&release_section(), &sentence, "the CHANGELOG's aloft model");
+    assert_prose(
+        &read("CLI_USAGE.md"),
+        &sentence,
+        "CLI_USAGE.md's aloft model",
+    );
+    // The atmosphere module's doc and air_at's own.
+    assert_eq!(
+        normalized(&read("src/atmosphere.rs"))
+            .matches(&sentence)
+            .count(),
+        2,
+        "src/atmosphere.rs states it in the module doc and on air_at: {sentence}"
+    );
+}
+
+/// The engine's gas constants for one held `x_v`, checked against their own docs:
+/// - the lapse's ideal-gas `R_AIR / (M_m / M_a)` against the `Z R / M_m` the CIPM-2007 density
+///   implies (its compressibility, and its `R / M_a` against `R_AIR`), over a grid of stations;
+/// - the sound speed's first-order `R_AIR (1 + 0.378 x_v)` against the lapse's exact one.
+#[test]
+fn the_gas_constant_gaps_are_quantified_from_the_engine() {
+    const R_AIR: f64 = 287.0531;
+    const M_V_OVER_M_A: f64 = 18.015_28e-3 / 28.965_46e-3;
+    let gaps = |temperature_c: f64, pressure_hpa: f64, humidity_percent: f64| {
+        let station = StationAir::new(
+            0.0,
+            temperature_c,
+            pressure_hpa,
+            RelativeHumidity::try_percent(humidity_percent).unwrap(),
+        )
+        .unwrap();
+        let temp_k = temperature_c + 273.15;
+        let x_v = x_v_from_sound_speed(station.speed_of_sound_mps(), temp_k);
+        let lapse_r = R_AIR / (1.0 - x_v * (1.0 - M_V_OVER_M_A));
+        let density_r = pressure_hpa * 100.0 / (station.density_kg_m3() * temp_k);
+        let sound_r = R_AIR * (1.0 + 0.378 * x_v);
+        let sound_speed = station.speed_of_sound_mps();
+        let with_lapse_r = (1.4 * (1.0 - 0.062 * x_v) * lapse_r * temp_k).sqrt();
+        (
+            lapse_r / density_r - 1.0,
+            sound_r / lapse_r - 1.0,
+            with_lapse_r - sound_speed,
+            (with_lapse_r / sound_speed - 1.0) * 100.0,
+        )
+    };
+    let (mut low, mut high) = (f64::INFINITY, f64::NEG_INFINITY);
+    for temperature_c in [-20.0, 0.0, 15.0, 30.0, 45.0] {
+        for pressure_hpa in [700.0, 850.0, 1013.25] {
+            for humidity_percent in [0.0, 50.0, 100.0] {
+                let (lapse_vs_density, ..) = gaps(temperature_c, pressure_hpa, humidity_percent);
+                low = low.min(lapse_vs_density);
+                high = high.max(lapse_vs_density);
+            }
+        }
+    }
+    let atmosphere = read("src/atmosphere.rs");
+    assert_prose(
+        &atmosphere,
+        &format!(
+            "The two gas constants still differ a little, dry air included: the lapse's \
+             ideal-gas `R_AIR / (M_m / M_a)` and the `Z R / M_m` the CIPM-2007 density implies \
+             (its compressibility `Z`, and its `R / M_a = 287.0478` against `R_AIR = 287.0531`) \
+             differ by {low:.1e} to {high:.1e} from -20 to 45 °C, 700 to 1013.25 hPa and 0 to \
+             100 %."
+        ),
+        "the lapse's gas constant against the density's",
+    );
+    let (_, mild, ..) = gaps(15.0, 1013.25, 50.0);
+    let (_, hot, low_speed, low_percent) = gaps(45.0, 1013.25, 100.0);
+    let (.., thin_speed, _) = gaps(45.0, 700.0, 100.0);
+    assert_prose(
+        &atmosphere,
+        &format!(
+            "Its gas constant, `287.0531 (1 + 0.378 x_v)`, is first order in `x_v`: it differs \
+             from the exact `R_AIR / (M_m / M_a)` the lapse uses by {mild:.1e} at 15 °C / 50 % \
+             and {hot:.1e} at 45 °C / 100 % (1013.25 hPa), where the sound speed is \
+             {low_speed:.2} m/s ({low_percent:.3} %) below what the lapse's gas constant gives. \
+             The gap grows as the pressure falls: {thin_speed:.2} m/s at 45 °C / 100 % and \
+             700 hPa."
+        ),
+        "the sound speed's gas constant against the lapse's",
+    );
+}
+
+/// The default sentence names its exceptions, in all three documents that state it.
+#[test]
+fn the_default_is_stated_with_its_exceptions() {
+    let exceptions = "unless another reading supplies it (a saved profile, the shot day for \
+                      `--zero-humidity`), with two exceptions: an `.a7p` file's absent humidity \
+                      is 0 % (the format's own meaning), and the bridge's `true.*` commands \
+                      require `humidity_pct`.";
+    for (what, text, blanket) in [
+        (
+            "the CHANGELOG",
+            release_section(),
+            "An omitted humidity is 50 % everywhere.",
+        ),
+        (
+            "src/atmosphere.rs",
+            read("src/atmosphere.rs"),
+            "An omitted humidity is [`DEFAULT_HUMIDITY_PERCENT`], 50 %, on every surface.",
+        ),
+        (
+            "CLI_USAGE.md",
+            read("CLI_USAGE.md"),
+            "(0.50.0 made this one rule everywhere)",
+        ),
+    ] {
+        assert_prose(&text, exceptions, what);
+        assert!(
+            !normalized(&text).contains(blanket),
+            "{what}: the blanket default `{blanket}` contradicts its documented exceptions"
+        );
+    }
+}
+
+/// Every public field that carries a humidity reading says in its rustdoc that a reading within
+/// the sensor band flies as the end it reads as, so a binding author neither refuses 101 nor
+/// clamps it by hand. A field that is not a reading (an echo, a test trace) is listed with why.
+#[test]
+fn every_public_humidity_field_doc_states_the_sensor_band() {
+    const NOT_A_READING: [(&str, &str, &str); 3] = [
+        (
+            "src/atmosphere.rs",
+            "humidity_sent",
+            "the value a refusal message quotes, as sent",
+        ),
+        (
+            "src/atmosphere.rs",
+            "humidity_percent",
+            "the test-only air trace's record of the base humidity",
+        ),
+        (
+            "src/truing.rs",
+            "humidity",
+            "the pub(crate) forward model's copy of the validated request humidity",
+        ),
+    ];
+    let mut files = Vec::new();
+    let mut pending = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs")
+                && !path.to_string_lossy().ends_with("_tests.rs")
+            {
+                files.push(path);
+            }
+        }
+    }
+    let mut checked = 0;
+    for path in files {
+        let relative = path
+            .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let text = fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
+            let Some(rest) = line.trim_start().strip_prefix("pub ") else {
+                continue;
+            };
+            let Some((name, ty)) = rest.split_once(':') else {
+                continue;
+            };
+            let ty = ty.trim().trim_end_matches(',');
+            if !name.contains("humid") || !matches!(ty, "f64" | "Option<f64>" | "c_double") {
+                continue;
+            }
+            if NOT_A_READING
+                .iter()
+                .any(|&(file, field, _)| file == relative && field == name)
+            {
+                continue;
+            }
+            // The field's doc comment: the `///` lines above it, past any attributes (a
+            // `#[serde(...)]` may span several lines).
+            let mut doc = Vec::new();
+            let mut in_attribute = false;
+            for above in lines[..index].iter().rev().map(|line| line.trim()) {
+                if in_attribute {
+                    in_attribute = !above.starts_with("#[");
+                } else if above.starts_with("///") {
+                    doc.push(above);
+                } else if above.starts_with("#[") {
+                    in_attribute = !above.ends_with(']');
+                } else if above.ends_with(")]") {
+                    in_attribute = true;
+                } else {
+                    break;
+                }
+            }
+            let doc = doc.join(" ");
+            assert!(
+                doc.contains("HUMIDITY_SENSOR_TOLERANCE_PERCENT")
+                    || doc.contains("5 points")
+                    || doc.contains("within the band"),
+                "{relative}:{}: `pub {name}` does not say how a sensor reading near 0-100 flies",
+                index + 1
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked >= 14, "only {checked} humidity fields were checked");
 }

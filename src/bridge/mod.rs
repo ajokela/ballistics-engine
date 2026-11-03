@@ -703,7 +703,7 @@ where
 }
 
 /// The one machine-readable shape of a refused station air (a humidity beyond the sensor band,
-/// or air that cannot exist) on every command (R2): the solve-json v1 error envelope, so
+/// or air that cannot exist) on every command: the solve-json v1 error envelope, so
 /// `error.details.error.code` is `invalid_value` and `error.details.error.path` is the member
 /// to blame in the command's own request (`$.humidity`, `$.model.humidity_pct`, ...), as
 /// `solve` and `atmosphere.density_altitude` already report it. A command whose details carry
@@ -864,7 +864,7 @@ fn run_card_pdf(inner: &Value) -> String {
             )
         }
         Err(err) => {
-            // The air refusal every card command gives (R2), when that is what refused it.
+            // The air refusal every card command gives, when that is what refused it.
             if let Some(refusal) = crate::card_service::air_refusal(&request)
                 .filter(|refusal| err.to_string().contains(refusal.message()))
             {
@@ -977,7 +977,7 @@ fn decode_profile_document(
     })
 }
 
-/// The one echo rule for a stored document (R3, review C8): `profile.validate` and
+/// The one echo rule for a stored document: `profile.validate` and
 /// `profile.normalize` echo the stored `humidity` unchanged, and when it is a sensor reading
 /// outside 0-100 that flies as an end they add `"flown_humidity"`, the percent a flight of the
 /// profile flies (100 for a stored 102, 0 for a stored -5). The member is absent for a stored
@@ -1251,7 +1251,7 @@ fn run_profile_import_a7p(inner: &Value) -> String {
     let outcome = match map_a7p_to_profile(&doc, None, zero_click) {
         Ok(outcome) => outcome,
         Err(err) => {
-            // The file's air refused by the rule every flight applies (R2): the one envelope,
+            // The file's air refused by the rule every flight applies: the one envelope,
             // located at the file's own field (`a7p:c_zero_air_humidity`).
             let details = crate::profile_import::a7p_air_refusal(&doc)
                 .filter(|refusal| err == refusal.message())
@@ -1324,7 +1324,7 @@ fn run_profile_export_a7p(inner: &Value) -> String {
                     json!({ "reason": "field", "field": field })
                 }
             };
-            // The stored air refused by the rule every flight applies (R2): the one envelope at
+            // The stored air refused by the rule every flight applies: the one envelope at
             // the stored document's member, beside this command's flat reason, and the refusal
             // itself as the message, which names the field once (`err`'s Display would prefix
             // it again: "humidity: profile 'p' field humidity = ...").

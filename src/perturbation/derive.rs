@@ -1009,11 +1009,11 @@ mod tests {
         assert!(d[0].d_drop_d_x.is_finite());
     }
 
-    /// S5b (owner decision 2026-11-01): the solve now reads a fraction up to 0.05 outside
-    /// `[0, 1]` as a sensor reading of saturated or dry air, so a perturbed humidity there would
-    /// fly the end itself and halve the derivative. A perturbation is a hypothetical humidity,
-    /// not a reading: `[0, 1]` stays `RelativeHumidity`'s domain here, at BOTH ends. A request
-    /// that sent a saturated-air reading (1.03) resolves to exactly 1, and differentiates
+    /// The sensor band (owner decision 2026-11-01): the solve now reads a fraction up to 0.05
+    /// outside `[0, 1]` as a sensor reading of saturated or dry air, so a perturbed humidity there
+    /// would fly the end itself and halve the derivative. A perturbation is a hypothetical
+    /// humidity, not a reading: `[0, 1]` stays `RelativeHumidity`'s domain here, at BOTH ends. A
+    /// request that sent a saturated-air reading (1.03) resolves to exactly 1, and differentiates
     /// backward from there.
     #[test]
     fn relative_humidity_falls_back_to_one_sided_at_the_saturated_boundary() {

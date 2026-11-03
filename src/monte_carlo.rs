@@ -81,10 +81,11 @@ pub fn solve_trajectory_for_monte_carlo_with_station_presence(
             crate::atmosphere::PressureReferenceMode::Absolute,
             station_presence,
         );
-    // ONE station air, built once: its density ratio seeds the flight's density and its RH the
-    // flight's sound speed (both at every step, through air_at), and its sound speed is the
-    // reference the reported Mach divides by. So the flight and the report cannot disagree
-    // about the humidity (H2, H13).
+    // ONE station air, built once: its density ratio seeds the flight's density, and its
+    // water-vapour mole fraction, held at every height, the lapse, the density and the sound
+    // speed aloft (all at every step, through air_at); its sound speed is the reference the
+    // reported Mach divides by. So the flight and the report cannot disagree about the
+    // humidity.
     let humidity = RelativeHumidity::try_percent(inputs.humidity_percent)
         .map_err(|error| error.at_field("humidity_percent").to_string())?;
     let station = StationAir::new(
@@ -172,7 +173,7 @@ pub fn solve_trajectory_for_monte_carlo_with_station_presence(
     let final_vz = solution.y[5][final_idx];
 
     let final_speed = (final_vx * final_vx + final_vy * final_vy + final_vz * final_vz).sqrt();
-    // Station Mach, against the sound speed of the station this flight flew (H13).
+    // Station Mach, against the sound speed of the station this flight flew.
     let final_mach = final_speed / speed_of_sound;
     let final_energy = 0.5 * mass_kg * final_speed * final_speed;
 

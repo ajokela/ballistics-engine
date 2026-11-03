@@ -1,18 +1,18 @@
-//! The aloft vapour model (humidity-consistency train, step S8, plan C7, owner-approved: H4).
+//! The aloft vapour model.
 //!
-//! Until S8 the air aloft modelled its water vapour two ways inside one function. The density
+//! Until 0.50.0 the air aloft modelled its water vapour two ways inside one function. The density
 //! scaled the base density by `(T_0 · P) / (P_0 · T)`, which keeps the base air's vapour mole
 //! fraction `x_v`; the sound speed kept the base RELATIVE humidity and re-derived `x_v` at the
-//! local temperature and pressure; and the hydrostatic lapse was dry. S8 holds the governing air's
-//! `x_v` for all three (the well-mixed assumption), with a virtual-temperature lapse: the dry
+//! local temperature and pressure; and the hydrostatic lapse was dry. 0.50.0 holds the governing
+//! air's `x_v` for all three (the well-mixed assumption), with a virtual-temperature lapse: the dry
 //! exponent scaled by the moist-air molar-mass ratio `M_m / M_a = 1 - x_v (1 - M_v / M_a)`, the
 //! same factor the CIPM-2007 density applies.
 //!
 //! The governing air is the station's, or inside a downrange [`AtmoSock`] zone the zone's own:
 //! that is the base `air_at` lapses from, the one whose density ratio it already scales.
 //!
-//! - At 0 % `x_v` is 0 and `M_m = M_a`, so dry air is bit-identical to the model before S8
-//!   ([`dry_air_aloft_is_bit_identical_to_the_model_before_s8`]).
+//! - At 0 % `x_v` is 0 and `M_m = M_a`, so dry air is bit-identical to the model before
+//!   ([`dry_air_aloft_is_bit_identical_to_the_model_before`]).
 //! - At a humidity above 0 the sound speed, the density and the lapse all carry the base `x_v`,
 //!   checked against the formulas and against an independent hand calculation.
 
@@ -69,11 +69,12 @@ fn gravities() -> [Gravity; 2] {
 }
 
 // =================================================================================================
-// At 0 %: bit-identical to the model before S8
+// At 0 %: bit-identical to the model before the aloft change
 // =================================================================================================
 
-/// The lapse before S8, verbatim: the ICAO layers in geopotential height with the dry `R_AIR`.
-fn layers_before_s8(
+/// The lapse before the aloft change, verbatim: the ICAO layers in geopotential height with the dry
+/// `R_AIR`.
+fn layers_before_0_50_0(
     base_geopotential_m: f64,
     target_geopotential_m: f64,
     mut temp_k: f64,
@@ -141,10 +142,11 @@ fn layers_before_s8(
     (temp_k, pressure_hpa)
 }
 
-/// The per-step air before S8, verbatim: the dry lapse, the density from the base ratio, and
-/// `moist_speed_of_sound` at the LOCAL temperature and pressure and the base relative humidity.
+/// The per-step air before the aloft change, verbatim: the dry lapse, the density from the base
+/// ratio, and `moist_speed_of_sound` at the LOCAL temperature and pressure and the base relative
+/// humidity.
 #[allow(clippy::too_many_arguments)]
-fn air_before_s8(
+fn air_before_0_50_0(
     altitude_m: f64,
     base_alt: f64,
     base_temp_c: f64,
@@ -154,7 +156,7 @@ fn air_before_s8(
     gravity: Gravity,
 ) -> LocalAir {
     let base_temp_k = base_temp_c + 273.15;
-    let (temp_k, pressure_hpa) = layers_before_s8(
+    let (temp_k, pressure_hpa) = layers_before_0_50_0(
         geometric_to_geopotential_height_m(base_alt),
         geometric_to_geopotential_height_m(altitude_m),
         base_temp_k,
@@ -181,9 +183,11 @@ fn local_bits(air: LocalAir) -> [u64; 4] {
 }
 
 #[test]
-fn dry_air_aloft_is_bit_identical_to_the_model_before_s8() {
-    // The plan's C7 grid: T, P, heights and gravity, at two station altitudes, through the
-    // station and through a dry zone; plus the legacy wrapper that shares the composition.
+fn dry_air_aloft_is_bit_identical_to_the_model_before() {
+    // Dry air over station temperatures from -30 to 40 C and pressures from 700 to 1050 hPa,
+    // heights from 10 m below the station to 12 km above it, and Earth's and the Moon's gravity,
+    // at two station altitudes, through the station and through a dry zone; plus the legacy
+    // wrapper that shares the composition.
     let mut checked = 0usize;
     for base_alt in [0.0, 1_500.0] {
         for temp_c in [-30.0, 0.0, 15.0, 40.0] {
@@ -198,7 +202,7 @@ fn dry_air_aloft_is_bit_identical_to_the_model_before_s8() {
                 for offset in [0.0, 10.0, -10.0, 500.0, 3_000.0, 12_000.0] {
                     let altitude_m = base_alt + offset;
                     for gravity in gravities() {
-                        let before = air_before_s8(
+                        let before = air_before_0_50_0(
                             altitude_m,
                             base_alt,
                             temp_c,
@@ -239,7 +243,7 @@ fn dry_air_aloft_is_bit_identical_to_the_model_before_s8() {
                             ],
                             "legacy wrapper {what}"
                         );
-                        let zone_before = air_before_s8(
+                        let zone_before = air_before_0_50_0(
                             altitude_m, base_alt, zone.0, zone.1, zone_ratio, 0.0, gravity,
                         );
                         assert_eq!(
@@ -288,9 +292,9 @@ fn the_sound_speed_aloft_holds_the_governing_airs_vapour_mole_fraction() {
                         gravity.magnitude(),
                         air.speed_of_sound_mps
                     );
-                    // The model before S8 re-derived x_v at the local state, so it fails this
-                    // check by far more than any tolerance.
-                    let old = air_before_s8(
+                    // The model before the aloft change re-derived x_v at the local state, so it
+                    // fails this check by far more than any tolerance.
+                    let old = air_before_0_50_0(
                         altitude_m,
                         base_alt,
                         temp_c,
@@ -527,12 +531,12 @@ fn at_the_station_height_the_air_is_the_station_air() {
 // =================================================================================================
 
 /// `air_at` against a hand calculation from the published formulas, written independently of
-/// the engine's code (the S8 measurement script `hand_calc.py`, Python doubles): the station
-/// x_v from CIPM-2007 (enhancement factor, Wagner-Pruss saturation pressure), T from the ICAO
-/// lapse rate in geopotential height, P from the virtual-temperature lapse
-/// `P0 (T/T0)^(-g M_m / (L R_d M_a))` (or `P0 exp(-g dh M_m / (R_d M_a T0))` on the isothermal
-/// layer), the density as the station's CIPM density times `(T0 P) / (P0 T)`, and
-/// `c = sqrt(1.4 (1 - 0.062 x_v) 287.0531 (1 + 0.378 x_v) T)` at the station x_v.
+/// the engine's code and evaluated in Python doubles: the station x_v from CIPM-2007
+/// (enhancement factor, Wagner-Pruss saturation pressure), T from the ICAO lapse rate in
+/// geopotential height, P from the virtual-temperature lapse `P0 (T/T0)^(-g M_m / (L R_d M_a))`
+/// (or `P0 exp(-g dh M_m / (R_d M_a T0))` on the isothermal layer), the density as the station's
+/// CIPM density times `(T0 P) / (P0 T)`, and `c = sqrt(1.4 (1 - 0.062 x_v) 287.0531 (1 + 0.378
+/// x_v) T)` at the station x_v.
 #[test]
 fn the_moist_lapse_matches_a_hand_calculation() {
     // (station alt m, T C, P hPa, RH %, query alt m) -> (x_v, T K, P Pa, rho kg/m3, c m/s)

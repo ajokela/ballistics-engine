@@ -1068,6 +1068,9 @@ pub struct TruingModelInputsV1 {
     )]
     pub pressure_inhg: StationReading,
     /// Relative humidity in percent (0 through 100).
+    /// A sensor reading within [`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`] of that range (101.7 in
+    /// fog) flies as the end it reads as; a value beyond it, or one that is not finite, is refused
+    /// through [`crate::RelativeHumidity`], never clamped.
     pub humidity_pct: f64,
     /// Altitude in feet.
     pub altitude_ft: f64,
@@ -1205,8 +1208,8 @@ impl TruingModelInputsV1 {
         if !self.altitude_ft.is_finite() {
             return Err("altitude must be finite".to_string());
         }
-        // The station air (R2): the engine's one humidity validator (plan C4: a percent in
-        // [0, 100], a sensor reading within 5 points of it flown as the end it reads as (S5b),
+        // The station air: the engine's one humidity validator (a percent in
+        // [0, 100], a sensor reading within 5 points of it flown as the end it reads as,
         // anything farther out refused with its field named, never clamped) and the solver's
         // one impossible-air rule, so air that cannot exist is refused as bad input, named,
         // before any forward model runs, never reported as a forward-model failure or a
@@ -2543,7 +2546,7 @@ mod station_presence_tests {
     /// sea-level output.
     #[test]
     fn a_metric_sourced_omitted_reading_flies_its_own_value_at_sea_level() {
-        // Re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the
+        // Re-captured in 0.50.0 (the default 50 % RH aloft now holds the
         // station's water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
         // 4.4299666258599775 -> 4.429966468756218 mil and 4.429966625855552 ->
         // 4.429966468751798 mil (both -3.5e-8).
@@ -2583,7 +2586,7 @@ mod station_presence_tests {
     /// the chrono solve.
     #[test]
     fn an_omitted_reading_at_altitude_flies_the_legacy_air_on_every_truing_path() {
-        // captured at ab4eb0c, 59 °F / 29.92 inHg; re-captured in 0.50.0 (humidity train S8: the
+        // captured at ab4eb0c, 59 °F / 29.92 inHg; re-captured in 0.50.0 (the
         // default 50 % RH aloft now holds the station's water-vapour mole fraction, with a
         // virtual-temperature lapse), old -> new: the drop 4.419225638770966 -> 4.419225485334243
         // mil (-3.5e-8), the chrono velocity 2657.5285822920873 -> 2657.528582291956 fps (-4.9e-14).

@@ -594,9 +594,9 @@ impl ProfileData {
     }
 
     /// The stored `humidity`, checked by the engine's one validator,
-    /// [`crate::atmosphere::RelativeHumidity::try_percent`] (humidity-consistency train, plan C4).
-    /// The CLI refuses to load a profile that fails it, and the bridge's `profile.validate`
-    /// reports it; the message names the profile and the field, and says how to fix it.
+    /// [`crate::atmosphere::RelativeHumidity::try_percent`]. The CLI refuses to load a profile that
+    /// fails it, and the bridge's `profile.validate` reports it; the message names the profile and
+    /// the field, and says how to fix it.
     ///
     /// The fix it gives is an edit of the stored value, never a re-save: `profile save` is a
     /// full overwrite of every field its flags can express (and it resets `bc_segments` and
@@ -610,7 +610,7 @@ impl ProfileData {
     /// is the end it reads as (102 flies as 100, -5 and -0 as 0) and anything farther out is
     /// the same refusal.
     ///
-    /// The one echo rule (R3, review C8): a surface that reports the air FLOWN states this
+    /// The one echo rule: a surface that reports the air FLOWN states this
     /// value (the CLI's flight loader writes it into the profile it flies), and a surface that
     /// displays the STORED document shows `humidity` as stored, saying what it flies as when
     /// that is outside 0-100 ([`Self::flown_humidity_note`]).
@@ -830,7 +830,7 @@ impl ProfileData {
         if let Err(err) = self.validate_humidity() {
             warnings.push(err);
         } else if let Some(refusal) = self.air_refusal() {
-            // The impossible-air rule every flight of this profile applies (R2), so a profile
+            // The impossible-air rule every flight of this profile applies, so a profile
             // reported valid is one every solve of it can fly.
             warnings.push(format!(
                 "{refusal}; edit the humidity, temperature or pressure stored in the profile"

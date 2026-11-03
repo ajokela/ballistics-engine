@@ -120,7 +120,7 @@ pub(crate) fn zero_station_air(
     )
 }
 
-/// Where the pressure [`zero_station_air`] resolves from the same inputs came from (R2): the
+/// Where the pressure [`zero_station_air`] resolves from the same inputs came from: the
 /// reading, a QNH reduced to the station, or the standard pressure at the altitude.
 #[cfg(feature = "wasm-zero")]
 fn zero_station_pressure_origin(
@@ -331,7 +331,7 @@ fn refuse_truing_terminal_air(
 }
 
 /// Refuse the station air a terminal command is about to fly, in the terminal's own words,
-/// before it does any work (R2), exactly as the native CLI does: `atmosphere` and `presence` are
+/// before it does any work, exactly as the native CLI does: `atmosphere` and `presence` are
 /// what the command hands its solver, so this refuses what every solve of them refuses and
 /// nothing a solve flies. The refusal is THROWN, never returned as text, so `-o json` never
 /// answers with a non-JSON string and the npm `Calculator` surfaces the cause itself.
@@ -363,7 +363,7 @@ fn refuse_terminal_air(
 /// [`refuse_terminal_air`] for a command that resolved its station itself (a QNH reduced, the
 /// presence rule applied, a density altitude's derived triple): `resolved` flies as given, and
 /// `origin` says where its pressure came from, so a station pressure outside the troposphere is
-/// blamed on the reading that put it there, never on a `--pressure` nobody typed (R2).
+/// blamed on the reading that put it there, never on a `--pressure` nobody typed.
 fn refuse_resolved_terminal_air(
     resolved: &AtmosphericConditions,
     origin: StationPressureOrigin,
@@ -568,7 +568,7 @@ fn require_value<'a>(args: &[&'a str], i: usize) -> Result<&'a str, JsValue> {
 /// validator, [`crate::atmosphere::parse_humidity_percent_arg`]: a PERCENT from 0 to 100; a
 /// sensor reading up to 5 outside it is the end it reads as, and anything farther out is refused
 /// (never clamped), with the flag named in the error. Every humidity flag of
-/// every command parses through here (humidity-consistency train, plan C4); 0.49.0
+/// every command parses through here; 0.49.0
 /// range-checked only `true-velocity` and `true-wind`.
 fn humidity_value(flag: &str, raw: &str) -> Result<f64, JsValue> {
     crate::atmosphere::parse_humidity_percent_arg(flag, raw).map_err(|e| JsValue::from_str(&e))
@@ -2536,7 +2536,7 @@ impl WasmBallistics {
             }
         }
 
-        // R2: the shot day's air refused up front, before the zero or the flight, in the
+        // The shot day's air refused up front, before the zero or the flight, in the
         // terminal's words: the station the solver below flies (a density altitude's derived
         // triple as it stands, otherwise by presence and pressure mode).
         {
@@ -2750,7 +2750,7 @@ impl WasmBallistics {
             let mut resolved_zero_atmosphere = zero_atmosphere.clone();
             resolved_zero_atmosphere.temperature = resolved_temp_c;
             resolved_zero_atmosphere.pressure = resolved_pressure_hpa;
-            // R2: the zero day's air refused up front, each reading named by the flag it came
+            // The zero day's air refused up front, each reading named by the flag it came
             // from: the zero day's own when it was given (a zero-day density altitude supplies
             // the pressure and altitude), the shot day's when it is inherited.
             let flag = |own: bool, i: usize| {
@@ -2832,7 +2832,7 @@ impl WasmBallistics {
                         mrad_adjustment
                     );
                 }
-                // Thrown, not returned as text (R2): a returned "Error ..." string is a
+                // Thrown, not returned as text: a returned "Error ..." string is a
                 // success to a caller, and under -o json it is not JSON. The air was refused
                 // above, so what fails here is the zero itself, which a shorter zero distance
                 // can fix.
@@ -3193,7 +3193,7 @@ impl WasmBallistics {
                 }
                 Ok(combined)
             }
-            // Thrown, not returned as text (R2): every other refusal of this command throws,
+            // Thrown, not returned as text: every other refusal of this command throws,
             // and a returned "Error: ..." string read as a success, and was not JSON under
             // -o json (the npm Calculator reported it as a JSON parse error).
             Err(e) => {
@@ -3619,7 +3619,7 @@ impl WasmBallistics {
         let mut resolved_atmosphere = atmosphere.clone();
         resolved_atmosphere.temperature = resolved_temp_c;
         resolved_atmosphere.pressure = resolved_pressure_hpa;
-        // R2: the air refused up front, in the terminal's words, and thrown.
+        // The air refused up front, in the terminal's words, and thrown.
         refuse_resolved_terminal_air(&resolved_atmosphere, origin, units, SHOT_AIR_FLAGS)?;
 
         let result = if let Some(angle_deg) = from_angle {
@@ -3705,7 +3705,7 @@ impl WasmBallistics {
                         }
                     )
                 }
-                // Thrown, not returned as text (R2), like every other refusal here.
+                // Thrown, not returned as text, like every other refusal here.
                 Err(e) => {
                     return Err(JsValue::from_str(&format!(
                         "Error calculating zero range: {}",
@@ -3763,7 +3763,7 @@ impl WasmBallistics {
                         }
                     )
                 }
-                // Thrown, not returned as text (R2), like every other refusal here.
+                // Thrown, not returned as text, like every other refusal here.
                 Err(e) => return Err(JsValue::from_str(&format!("Error calculating zero: {}", e))),
             }
         };
@@ -4216,7 +4216,7 @@ impl WasmBallistics {
             pressure_type,
             units == UnitSystem::Imperial,
         );
-        // R2: the air refused up front, in the terminal's words, as the native `lead` does.
+        // The air refused up front, in the terminal's words, as the native `lead` does.
         refuse_terminal_air(&atmosphere, station_presence, units, SHOT_AIR_FLAGS)?;
         inputs.temperature = atmosphere.temperature;
         inputs.pressure = atmosphere.pressure;
@@ -4578,7 +4578,7 @@ impl WasmBallistics {
 
         // MBA-1343 Phase C: WEZ sweep mode. Mirrors the native dispatch
         // (Commands::MonteCarlo with `wez: true` in main.rs): convert to metric, run
-        // the shared seeded compute (ballistics_engine::wez::compute_wez), and render
+        // the shared seeded compute (ballistics_engine::wez::compute_wez_with_humidity), and render
         // summary / statistics / full exactly as the native printers do.
         if wez {
             return self.run_monte_carlo_wez(
@@ -4850,7 +4850,7 @@ impl WasmBallistics {
                     velocity_unit,
                 )
             }
-            // Thrown, not returned as text (R2), like every other refusal here.
+            // Thrown, not returned as text, like every other refusal here.
             Err(e) => {
                 return Err(JsValue::from_str(&format!(
                     "Error running Monte Carlo simulation: {}",
@@ -4870,9 +4870,9 @@ impl WasmBallistics {
 
     /// Native `monte-carlo --wez` parity path (MBA-1343 Phase C): unit conversions
     /// mirror the native dispatch factor-for-factor, the compute is the shared
-    /// per-step-seeded [`crate::wez::compute_wez`] core (deterministic, so outputs are
-    /// directly comparable to the native binary), and the three renderers replicate
-    /// the native printers byte-for-byte.
+    /// per-step-seeded [`crate::wez::compute_wez_with_humidity`] core (deterministic, so outputs
+    /// are directly comparable to the native binary), and the three renderers replicate the native
+    /// printers byte-for-byte.
     #[allow(
         clippy::too_many_arguments,
         reason = "flat arguments mirror the stable Monte Carlo CLI command shape (MBA-1317)"
@@ -4971,8 +4971,9 @@ impl WasmBallistics {
         // before any solve); just resolve the value and the out-of-range nudge here.
         let cd_scale_warning = cd_scale.and_then(cd_scale_range_warning);
         let cd_scale = cd_scale.unwrap_or(1.0);
-        // MBA-1365: table-only, same rationale as handle_trajectory_command. `compute_wez`
-        // has no `BallisticInputs` to ask, so check the same two primitives directly.
+        // MBA-1365: table-only, same rationale as handle_trajectory_command.
+        // `compute_wez_with_humidity` has no `BallisticInputs` to ask, so check the same two
+        // primitives directly.
         let bc_reference_warning = if custom_drag_table.is_some()
             && matches!(
                 bc_reference_standard,
@@ -4983,9 +4984,9 @@ impl WasmBallistics {
             None
         };
 
-        // MBA-1365: `compute_wez` owns its own solve plumbing (no `BcReferenceStandard`
-        // field), so apply the one ASM->ICAO multiply here instead — to both the mean and
-        // its std dev, linear-equivalent to converting every sampled BC downstream.
+        // MBA-1365: `compute_wez_with_humidity` owns its own solve plumbing (no
+        // `BcReferenceStandard` field), so apply the one ASM->ICAO multiply here instead — to both
+        // the mean and its std dev, linear-equivalent to converting every sampled BC downstream.
         let bc_metric = match bc_reference_standard {
             BcReferenceStandard::Icao => bc,
             BcReferenceStandard::ArmyStandardMetro => bc * crate::constants::ASM_TO_ICAO_BC,
@@ -4998,7 +4999,7 @@ impl WasmBallistics {
         // Flags the WASM monte-carlo surface does not (yet) expose keep the native
         // defaults: base wind (--wind-speed / --wind-direction / --wind-vertical) and
         // --cant are all 0.
-        let result = crate::wez::compute_wez(
+        let result = crate::wez::compute_wez_with_humidity(
             velocity_metric,
             angle,
             bc_metric,
@@ -5388,7 +5389,7 @@ impl WasmBallistics {
             UnitSystem::Imperial => altitude,
             UnitSystem::Metric => altitude / 0.3048, // meters to feet
         };
-        // R2: the air refused up front, in the terminal's words, as native does.
+        // The air refused up front, in the terminal's words, as native does.
         refuse_truing_terminal_air(
             temp_f,
             press_inhg,
@@ -5896,7 +5897,7 @@ impl WasmBallistics {
             UnitSystem::Imperial => altitude,
             UnitSystem::Metric => altitude / 0.3048,
         };
-        // R2: the air refused up front, in the terminal's words, as native does.
+        // The air refused up front, in the terminal's words, as native does.
         refuse_truing_terminal_air(
             temp_f,
             press_inhg,
@@ -6204,7 +6205,7 @@ impl WasmBallistics {
             pressure_type,
             units == UnitSystem::Imperial,
         );
-        // R2: the air refused up front, before any trial of the fit, as native does.
+        // The air refused up front, before any trial of the fit, as native does.
         refuse_terminal_air(&atmosphere, station_presence, units, SHOT_AIR_FLAGS)?;
         let zero_m = zero_range.map(|z| match units {
             UnitSystem::Imperial => z * 0.9144,
@@ -9304,7 +9305,7 @@ pub struct Calculator {
 
 impl Calculator {
     /// Refuse station air no solve could fly before anything is solved, naming the setters it
-    /// came from (R2): `setHumidity = 100 at 212 °F and 29.92 inHg: no such air exists: ...` for
+    /// came from: `setHumidity = 100 at 212 °F and 29.92 inHg: no such air exists: ...` for
     /// air that cannot exist, `setTemperature = NaN °F: must be finite`,
     /// `setPressure = -1 inHg: pressure must be greater than 0` or `setAltitude = NaN: must be
     /// finite` for a reading the station refuses on its own. The air is the terminal
@@ -9482,8 +9483,8 @@ impl Calculator {
     /// Relative humidity, a PERCENT from 0 to 100; a sensor reading up to 5 outside the range
     /// is read as 0 or 100. Anything farther out, or not finite, is refused here, by the
     /// engine's one validator, and the refusal names this method:
-    /// `setHumidity = 150: relative humidity must be a percent from 0 to 100 (...)` (R2;
-    /// before 0.50.0 it surfaced later, from `calculateTrajectory`, naming a terminal flag).
+    /// `setHumidity = 150: relative humidity must be a percent from 0 to 100 (...)` (before
+    /// 0.50.0 it surfaced later, from `calculateTrajectory`, naming a terminal flag).
     #[wasm_bindgen(js_name = setHumidity)]
     pub fn set_humidity(mut self, humidity: f64) -> Result<Calculator, JsValue> {
         self.humidity_percent = crate::atmosphere::RelativeHumidity::try_percent(humidity)

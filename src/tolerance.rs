@@ -92,7 +92,7 @@
 //!
 //! Two refinements come from the axis's own physical range
 //! ([`crate::perturbation::physical_domain`]: a relative humidity is a fraction from 0 to 1, a
-//! wind speed 0 m/s or more), since 0.50.0 (R3):
+//! wind speed 0 m/s or more), since 0.50.0:
 //!
 //! - A domain reaching outside that range is refused for it, with the unit named, before the
 //!   nominal is looked at: a percent typed as a humidity domain (20:80) is told it is no
@@ -265,7 +265,7 @@ pub struct ToleranceAxisV1 {
     /// the axis's own physical boundary ([`crate::perturbation::physical_domain`]): a dry
     /// humidity (a 0 to -5 % reading resolves to exactly 0), or a calm wind. There is nothing
     /// below it, so the near direction is not searched: `near_bound` is `None` and
-    /// `near_has_no_effect` `false`, and this field says why (R3, review C11). Absent from a
+    /// `near_has_no_effect` `false`, and this field says why. Absent from a
     /// report written before 0.50.0, and read as `false`.
     #[serde(default)]
     pub near_at_physical_boundary: bool,
@@ -500,7 +500,7 @@ pub fn tolerance_envelope(
                 reason: "the domain's lower bound must be strictly less than its upper bound",
             });
         }
-        // R3 (review C3): a domain reaching past the axis's own physical range is refused for
+        // A domain reaching past the axis's own physical range is refused for
         // that, in the axis's unit, before the nominal is looked at, so a percent typed as a
         // humidity domain (20:80) is told it is not a fraction.
         let physical = physical_domain(axis);
@@ -512,7 +512,7 @@ pub fn tolerance_envelope(
                 });
             }
         }
-        // R3 (review C11): a nominal ON the axis's physical boundary (a saturated or dry
+        // A nominal ON the axis's physical boundary (a saturated or dry
         // humidity, a calm wind) may sit on the domain's matching bound. That direction has
         // nothing to search and is reported as the physical boundary; the other is searched
         // as usual. Any other nominal on a bound would make a zero-width probe.
@@ -1804,7 +1804,7 @@ mod tests {
         assert_eq!(rep.schema_version, TOLERANCE_SCHEMA_VERSION_V1);
     }
 
-    // ---- R3 (whole-branch review C3, C11): the axis's physical boundary ----
+    // ---- the axis's physical boundary ----
 
     /// The `resolved()` shot at a given request `relative_humidity` (a fraction) and crosswind.
     fn resolved_at(

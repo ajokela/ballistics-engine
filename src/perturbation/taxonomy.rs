@@ -156,9 +156,8 @@ pub fn axis_meta(axis: InputAxis) -> AxisMeta {
         Altitude => (Atmosphere, cont("m", 1e-3, 1.0), false),
         Temperature => (Atmosphere, cont("K", 1e-3, 0.05), false),
         Pressure => (Atmosphere, cont("Pa", 1e-3, 10.0), false),
-        // A FRACTION (0.5 = 50 %), the solve-json request's own unit, like every axis here
-        // (R3, review C3): the CLI prints it, so a percent typed as a sigma or a domain is
-        // seen for what it is.
+        // A FRACTION (0.5 = 50 %), the solve-json request's own unit, like every axis here: the
+        // CLI prints it, so a percent typed as a sigma or a domain is seen for what it is.
         RelativeHumidity => (Atmosphere, cont("fraction", 1e-3, 1e-3), false),
         Latitude => (Atmosphere, cont("rad", 1e-3, 1e-5), false),
         WindSpeed => (Wind, cont("m/s", 1e-3, 0.05), false),
@@ -182,7 +181,7 @@ pub fn axis_meta(axis: InputAxis) -> AxisMeta {
 }
 
 /// The closed range of values an axis can physically take, where the engine states one, with
-/// the refusal a search domain reaching outside it gets (R3, review C3 and C11).
+/// the refusal a search domain reaching outside it gets.
 ///
 /// Two axes have one: a relative humidity is a fraction from 0 to 1 (what
 /// `crate::atmosphere::RelativeHumidity::is_physical_fraction` accepts; the solve reads up to

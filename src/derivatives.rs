@@ -139,7 +139,10 @@ pub(crate) fn yaw_of_repose_magnus_direction(
 /// `atmo_sock` the optional downrange zones, each with its own humidity. The point's altitude is
 /// the station's altitude plus its world-vertical height, and the lapse starts at the station:
 /// `atmosphere`'s station is authoritative over `inputs`' own altitude, temperature, pressure
-/// and humidity, which this function does not read.
+/// and humidity, which this function does not read. So `pos.y` is a height above the station,
+/// where 0.49.0 measured it from `inputs.altitude`. A caller holding an absolute altitude passes
+/// its height above the station, `altitude - station.altitude_m()`, as `pos.y`.
+/// ([`crate::atmosphere::air_at`] itself takes the absolute altitude.)
 /// Build `atmosphere` with [`crate::StationAir::new`] (or [`KernelAtmosphere::uniform`]); a
 /// legacy `(alt, T, P, ratio)` or `(rho, c, 0, 0)` tuple converts with
 /// [`KernelAtmosphere::from_legacy_params`]. `atmo_sock` must already have passed
@@ -158,9 +161,9 @@ pub fn compute_derivatives(
     // is now a Litz post-process), so this is currently unused; kept in the signature for callers.
     _time: f64,
     // MBA-1137: optional downrange-segmented atmosphere. When `Some` and non-empty, the zone
-    // selected by downrange distance (pos.x) replaces the station as the base (its T/P and its
-    // RH, for density AND sound speed) before the altitude lapse. `None` or an empty sock is the
-    // station. Uniform air ignores it.
+    // selected by downrange distance (pos.x) replaces the station as the base: its T/P and its
+    // RH, whose water-vapour mole fraction is held at every height for the lapse, the density
+    // AND the sound speed. `None` or an empty sock is the station. Uniform air ignores it.
     atmo_sock: Option<&AtmoSock>,
 ) -> [f64; 6] {
     compute_derivatives_with_gravity(
@@ -223,8 +226,9 @@ pub(crate) fn compute_derivatives_with_gravity(
 
         // The air here: air_at, the engine's ONE per-step air lookup, which TrajectorySolver
         // flies too. The station (or the zone that covers pos.x) gives the base temperature,
-        // pressure, density ratio and relative humidity; the lapse carries them to this
-        // altitude; the sound speed is the moist value at the base RH. Uniform air is the
+        // pressure and density ratio, and its water-vapour mole fraction, which is held at every
+        // height: the moist lapse carries the base to this altitude, and the density and the
+        // sound speed here carry that same mole fraction. Uniform air is the
         // caller's density and sound speed unchanged. The local temperature (for the optional,
         // disabled Reynolds input) is the lapse's, not one inverted from the sound speed.
         let local_air =

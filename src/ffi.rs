@@ -1336,7 +1336,7 @@ pub unsafe extern "C" fn ballistics_monte_carlo_with_station_presence(
 /// The Monte Carlo's base inputs, and the station presence its solves use, from the C inputs
 /// and atmosphere. A `None` (null) atmosphere leaves the inputs' own defaults, which are not
 /// readings, so its presence is [`StationAtmospherePresence::NEITHER`]. A separate builder so the
-/// units it writes are testable (humidity-consistency train, H5).
+/// units it writes are testable.
 pub(crate) fn monte_carlo_base_inputs(
     inputs: &FFIBallisticInputs,
     atmosphere: Option<&FFIAtmosphericConditions>,
@@ -1350,7 +1350,7 @@ pub(crate) fn monte_carlo_base_inputs(
     };
     ballistic_inputs.temperature = atmo.temperature;
     ballistic_inputs.pressure = atmo.pressure;
-    // A percent, the unit of both (H5): the caller's exact value, which the solve flies.
+    // A percent, the unit of both: the caller's exact value, which the solve flies.
     ballistic_inputs.humidity_percent = atmo.humidity;
     ballistic_inputs.altitude = atmo.altitude;
     (ballistic_inputs, station_presence)

@@ -1,4 +1,4 @@
-//! R3 (whole-branch review C2, VAL-1): every numeric cell `trajectory` reads from a
+//! Every numeric cell `trajectory` reads from a
 //! `--location` or `--profile` CSV row is read one way.
 //!
 //! - A cell is trimmed, so `" 70"` is 70, as it is on `--humidity`.

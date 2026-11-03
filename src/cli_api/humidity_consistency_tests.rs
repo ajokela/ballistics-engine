@@ -1,4 +1,4 @@
-//! The humidity class guard (humidity-consistency train, plan C0b and C2): every solver family
+//! The humidity class guard: every solver family
 //! flies `TrajectorySolver`'s humid air.
 //!
 //! `TrajectorySolver` is the reference. Its per-step air is [`air_at_with_gravity`] over its
@@ -26,7 +26,7 @@
 //! - **Lean Monte Carlo.** Its reported Mach divides by the sound speed it flew.
 //! - **Per-flight air.** No family's per-step lookup evaluates a saturation pressure: the
 //!   governing air's vapour mole fraction and a zone's density ratio are computed once, when
-//!   the station or the zones are built (R4, review HR-2).
+//!   the station or the zones are built.
 //! - **Aerodynamic jump.** The fast path's launch offset is `TrajectorySolver`'s, from the same
 //!   station air, at every RH. It is humidity-free by design: the published Miller T/P density
 //!   correction is dry.
@@ -858,13 +858,13 @@ const EVERY_HUMIDITY: [f64; 3] = [0.0, 50.0, 100.0];
 
 #[test]
 fn every_family_looks_up_its_air_without_evaluating_a_saturation_pressure() {
-    // R4 (review HR-2): the governing air's water-vapour mole fraction, and a zone's CIPM density
+    // The governing air's water-vapour mole fraction, and a zone's CIPM density
     // ratio, are fixed for the whole flight. Each is computed once per base air, when the
     // station or the zones are built, and never inside the per-step lookup: every point of
     // every family's flight evaluates no Wagner-Pruss saturation pressure, at every humidity,
-    // dry included, with and without zones. (Before R4 a step evaluated one for the station's
-    // x_v, and two for a zone's, which made fast_integrate, the lean Monte Carlo and the RK4
-    // and RK45 solver 4-10 % slower than 0.49.0.)
+    // dry included, with and without zones. (Before they were held a step evaluated one for the
+    // station's x_v, and two for a zone's, which made fast_integrate, the lean Monte Carlo and the
+    // RK4 and RK45 solver 4-10 % slower than 0.49.0.)
     //
     // The whole run is held to a per-flight budget too, so humid-air work cannot move out of
     // the lookup into some other per-step site. A flight's evaluations are its station's and
@@ -1048,8 +1048,8 @@ fn a_dry_control_path_fails_the_one_air_check_by_more_than_any_tolerance() {
 
 #[test]
 fn every_family_is_dry_consistent_at_zero_humidity_too() {
-    // At RH 0 every family was already TrajectorySolver's air (the S1 pins hold that to the
-    // bit); the one-air check must agree, or it is checking the wrong thing.
+    // At RH 0 every family was already TrajectorySolver's air (the byte-identity pins hold that to
+    // the bit); the one-air check must agree, or it is checking the wrong thing.
     for &family in SolverFamily::ALL {
         let scenario = Scenario::new(SEA_LEVEL, None);
         let entries = run_family(family, &scenario).expect("no zones");
@@ -1350,7 +1350,7 @@ fn drag_and_magnus_respond_to_humidity_exactly_as_the_reference_does() {
 }
 
 // =================================================================================================
-// The lean Monte Carlo reports Mach against the sound speed it flew (H13)
+// The lean Monte Carlo reports Mach against the sound speed it flew
 // =================================================================================================
 
 #[test]

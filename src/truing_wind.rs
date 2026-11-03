@@ -197,6 +197,9 @@ pub struct WindTruingRequest {
     )]
     pub pressure_inhg: StationReading,
     /// Relative humidity in percent (0 through 100).
+    /// A sensor reading within [`crate::HUMIDITY_SENSOR_TOLERANCE_PERCENT`] of that range (101.7 in
+    /// fog) flies as the end it reads as; a value beyond it, or one that is not finite, is refused
+    /// through [`crate::RelativeHumidity`], never clamped.
     pub humidity_pct: f64,
     /// Altitude in feet.
     pub altitude_ft: f64,
@@ -266,8 +269,8 @@ impl WindTruingRequest {
         if !self.altitude_ft.is_finite() {
             return Err("altitude must be finite".to_string());
         }
-        // The station air (R2): the engine's one humidity validator (plan C4: a percent in
-        // [0, 100], a sensor reading within 5 points of it flown as the end it reads as (S5b),
+        // The station air: the engine's one humidity validator (a percent in
+        // [0, 100], a sensor reading within 5 points of it flown as the end it reads as,
         // anything farther out refused with its field named, never clamped) and the solver's
         // one impossible-air rule, before any crosswind is searched for.
         if let Some(refusal) = self.air_refusal() {
@@ -1233,8 +1236,8 @@ mod tests {
         modeled_miss_right_m(request, crosswind_mph, range_m).expect("forward model must solve")
     }
 
-    /// Humidity-consistency train (plan C4): the request's humidity goes through the engine's
-    /// one validator, `RelativeHumidity::try_percent`, and its field-named error.
+    /// The request's humidity goes through the engine's one validator,
+    /// `RelativeHumidity::try_percent`, and its field-named error.
     #[test]
     fn humidity_is_refused_by_the_one_shared_validator() {
         let observation = WindObservation {
@@ -1242,12 +1245,12 @@ mod tests {
             miss_right_m: 0.1,
             sigma_m: None,
         };
-        // Beyond the 5-point sensor band (S5b: -5 and 100.0001 are readings, flown below).
+        // Beyond the 5-point sensor band (-5 and 100.0001 are readings, flown below).
         for humidity in [150.0, -5.000_000_1, 105.000_000_1, f64::NAN, f64::INFINITY] {
             let mut request = base_request(vec![observation]);
             request.humidity_pct = humidity;
             let error = request.validate().expect_err("an out-of-range humidity");
-            // R2: the range rule and the finiteness rule alike state the band they enforce.
+            // The range rule and the finiteness rule alike state the band they enforce.
             assert!(
                 error.starts_with("humidity_pct = ")
                     && error.contains(
@@ -1262,7 +1265,7 @@ mod tests {
             request.humidity_pct = humidity;
             request.validate().expect("a valid humidity");
         }
-        // S5b: a sensor reading within 5 points of the range is the end it reads as, and the
+        // A sensor reading within 5 points of the range is the end it reads as, and the
         // forward model flies that end to the bit.
         for (reading, end) in [(100.0001, 100.0), (101.7, 100.0), (-2.0, 0.0), (-5.0, 0.0)] {
             let at = |humidity: f64| {

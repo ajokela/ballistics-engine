@@ -139,7 +139,7 @@ fn mirrored_angles_have_opposite_signed_drift() {
     );
 }
 
-/// R3 (the class of review C2 and VAL-1, on a list flag): an entry of `--wind-speeds` that is
+/// An entry of `--wind-speeds` that is
 /// no finite number stops the run naming it, as `--wind-angles` already does. It used to be
 /// dropped, so `5,1O,15` silently printed a two-column card.
 #[test]

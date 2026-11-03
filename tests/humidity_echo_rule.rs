@@ -1,4 +1,4 @@
-//! R3 (whole-branch review C8): one echo rule for a humidity in the sensor band.
+//! One echo rule for a humidity in the sensor band.
 //!
 //! A stored humidity of 100-105 % (or -5-0 %) is a sensor reading of saturated (or dry) air,
 //! and every flight flies it as exactly 100 % (or 0 %). Two kinds of surface show it:

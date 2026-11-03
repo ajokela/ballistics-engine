@@ -230,7 +230,7 @@ fn wez_kernel_drag_model(model: DragModel) -> DragModelV1 {
 /// variance for one WEZ range step (0.33.0 decision-support D2), mirroring `base_inputs`/
 /// `base_wind`'s already-fully-resolved values field for field -- same units, same defaults --
 /// rather than re-deriving them through solve-json's own defaulting a second time. Every field
-/// `compute_wez` does not expose as a sweep parameter is left at exactly the value
+/// `compute_wez_with_humidity` does not expose as a sweep parameter is left at exactly the value
 /// `BallisticInputs::default()`/`WindConditions::default()` already carry, which is also the
 /// value `solve_v1::prepare_request`'s own hardcoded mappings for engine-only fields (powder
 /// sensitivity, tipoff, wind shear, pitch damping, ...) always resolve to regardless of the
@@ -238,11 +238,10 @@ fn wez_kernel_drag_model(model: DragModel) -> DragModelV1 {
 /// function only needs to carry the fields WEZ actually threads through.
 ///
 /// `solver_max_range` is threaded through separately rather than read off `base_inputs` because
-/// it is not a `BallisticInputs` field at all: `compute_wez` derives it per range step
-/// (`range_m.max(1000.0) * 2.0`) and applies it via `TrajectorySolver::set_max_range`, so the
+/// it is not a `BallisticInputs` field at all: `compute_wez_with_humidity` derives it per range
+/// step (`range_m.max(1000.0) * 2.0`) and applies it via `TrajectorySolver::set_max_range`, so the
 /// resolved request's `shot.max_range_m` must match that same per-step value for the kernel's
-/// perturbed solves to see the identical trajectory truncation the row's own baseline solve
-/// used.
+/// perturbed solves to see the identical trajectory truncation the row's own baseline solve used.
 ///
 /// Returns `None` for a loaded custom drag table (`base_inputs.custom_drag_table`), which
 /// replaces G-model+BC drag entirely. solve-json v1 can carry one since MBA-1597
@@ -250,8 +249,8 @@ fn wez_kernel_drag_model(model: DragModel) -> DragModelV1 {
 /// into that field. Differentiating under a built-in fallback model would silently misattribute
 /// variance, so custom-deck attribution remains explicitly unavailable. Every built-in [`DragModel`] is represented exactly by
 /// [`wez_kernel_drag_model`]. It is `None` too for a `base_inputs.humidity_percent` outside
-/// `0..=100`, which the SI wire cannot carry. That is unreachable from `compute_wez`, whose
-/// humidity is a validated [`RelativeHumidity`]: the attribution's `relative_humidity` is the
+/// `0..=100`, which the SI wire cannot carry. That is unreachable from `compute_wez_with_humidity`,
+/// whose humidity is a validated [`RelativeHumidity`]: the attribution's `relative_humidity` is the
 /// very value the sweep flies, as the wire's fraction.
 pub(crate) fn wez_resolved_request(
     base_inputs: &BallisticInputs,
@@ -291,8 +290,8 @@ pub(crate) fn wez_resolved_request(
         },
         shot: ResolvedShotV1 {
             max_range_m: solver_max_range,
-            // compute_wez always supplies an explicit muzzle angle directly and never zeroes
-            // (see its own doc comment) -- no re-zero search may run on any perturbed solve.
+            // compute_wez_with_humidity always supplies an explicit muzzle angle directly and never
+            // zeroes (see its own doc comment) -- no re-zero search may run on any perturbed solve.
             zero_distance_m: None,
             muzzle_angle_rad: base_inputs.muzzle_angle,
             aim_azimuth_rad: base_inputs.azimuth_angle,
@@ -310,7 +309,7 @@ pub(crate) fn wez_resolved_request(
             temperature_k: base_inputs.temperature + 273.15,
             pressure_pa: base_inputs.pressure * 100.0,
             // The SI wire's fraction, from the inputs' percent: a sensor reading within the
-            // band (S5b) has the fraction of the end it reads as (1 or 0), the same air the
+            // band has the fraction of the end it reads as (1 or 0), the same air the
             // solve flies; a humidity beyond the band has no wire fraction, so it gets no
             // attribution.
             relative_humidity: RelativeHumidity::try_percent(base_inputs.humidity_percent)
@@ -327,8 +326,8 @@ pub(crate) fn wez_resolved_request(
         }),
         solver: ResolvedSolverV1 {
             // BallisticInputs::default() runs adaptive RK45 (use_rk4 && use_adaptive_rk45,
-            // both true, and compute_wez never overrides either), so the kernel's perturbed
-            // solves must use the same method to match the row's own baseline solve.
+            // both true, and compute_wez_with_humidity never overrides either), so the kernel's
+            // perturbed solves must use the same method to match the row's own baseline solve.
             method: SolverMethodV1::Rk45,
             time_step_s: 0.001, // ignored by RK45; any positive finite value is inert here.
         },
@@ -406,16 +405,16 @@ pub(crate) fn wez_resolved_request(
 /// `crate::error_budget::unavailable_reason` (the same four-way split `error_budget` and
 /// `crate::tolerance::tolerance_envelope` already share) -- rather than silently normalizing
 /// over whichever sources DID evaluate, which would misattribute the missing source's variance
-/// to the other two buckets with no visible sign anything was skipped. `compute_wez` maps this
-/// `None` onto [`WezRow::attribution_unavailable`], its existing "nothing to attribute here"
-/// contract -- the same flag already used when the baseline does not reach this range. In
-/// practice none of the seven axes above carries an `AxisUnsupportedForRequest` guard (those
-/// are `Altitude` under QNH pressure and `ShotAzimuth` under compass wind; [`wez_resolved_request`]
+/// to the other two buckets with no visible sign anything was skipped. `compute_wez_with_humidity`
+/// maps this `None` onto [`WezRow::attribution_unavailable`], its existing "nothing to attribute
+/// here" contract -- the same flag already used when the baseline does not reach this range. In
+/// practice none of the seven axes above carries an `AxisUnsupportedForRequest` guard (those are
+/// `Altitude` under QNH pressure and `ShotAzimuth` under compass wind; [`wez_resolved_request`]
 /// never sets either reference mode) and the resolved wind is always `Constant` (never
 /// `AxisAbsent`'s segmented-wind trigger), so this path is defensive rather than routinely hit --
-/// see the task report for the specific fixtures that DO reach it. Short-circuits on the FIRST
-/// such refusal rather than evaluating the remaining sources, since the row's attribution is
-/// already going to be reported unavailable either way.
+/// see the task report for the specific fixtures that DO reach it. Short-circuits on the FIRST such
+/// refusal rather than evaluating the remaining sources, since the row's attribution is already
+/// going to be reported unavailable either way.
 ///
 /// # Errors
 /// Propagates any other [`KernelError`] (`Solve`, `Observation`, `TypeMismatch`, `NonFinite`) --
@@ -533,7 +532,7 @@ fn wez_variance_shares(
 /// (i.e. assume the shooter re-dials elevation perfectly for every range). A WEZ sweep instead
 /// answers "how far can I hit this target size with ONE hold", so it must also count the
 /// systematic ballistic drop below the fixed line of sight as a source of misses, not just random
-/// dispersion -- see the module doc comment above `compute_wez`.
+/// dispersion -- see the module doc comment above `compute_wez_with_humidity`.
 ///
 /// A sample that never reached the target plane keeps `MonteCarloResults`'s sentinel deviation
 /// (`TARGET_NOT_REACHED_SENTINEL_M`, roughly -1e9 m). Added to any finite baseline that stays a
@@ -613,6 +612,73 @@ pub struct WezResult {
     pub rows: Vec<WezRow>,
 }
 
+/// 0.49.0's 24-argument WEZ sweep: [`compute_wez_with_humidity`] at
+/// [`RelativeHumidity::DEFAULT`], the 50 % every 0.49.0 sweep flew whatever the shot day's
+/// humidity. Kept for one release so a 0.49.0 caller still compiles; pass the humidity to
+/// [`compute_wez_with_humidity`] instead.
+#[deprecated(
+    since = "0.50.0",
+    note = "flies 50 % whatever the shot day's humidity; use compute_wez_with_humidity"
+)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "0.49.0's signature, kept as it was for one release"
+)]
+pub fn compute_wez(
+    velocity: f64,
+    angle: f64,
+    bc: f64,
+    mass: f64,
+    diameter: f64,
+    num_sims: usize,
+    velocity_std: f64,
+    angle_std: f64,
+    bc_std: f64,
+    wind_std: f64,
+    wind_direction_std: f64,
+    wind_speed: f64,
+    wind_direction: f64,
+    wind_vertical: f64,
+    wind_call_error: f64,
+    target_size: TargetSizeMetric,
+    wez_start: f64,
+    wez_end: f64,
+    wez_step: f64,
+    drag_model: DragModel,
+    custom_drag_table: Option<DragTable>,
+    cd_scale: f64,
+    cant: f64,
+    sight_offset_lateral_m: f64,
+) -> Result<WezResult, Box<dyn Error>> {
+    compute_wez_with_humidity(
+        velocity,
+        angle,
+        bc,
+        mass,
+        diameter,
+        num_sims,
+        velocity_std,
+        angle_std,
+        bc_std,
+        wind_std,
+        wind_direction_std,
+        wind_speed,
+        wind_direction,
+        wind_vertical,
+        wind_call_error,
+        target_size,
+        wez_start,
+        wez_end,
+        wez_step,
+        drag_model,
+        custom_drag_table,
+        cd_scale,
+        cant,
+        sight_offset_lateral_m,
+        RelativeHumidity::DEFAULT,
+    )
+}
+
 /// Run a WEZ sweep and return its per-range rows plus the sweep-level parameters as a
 /// [`WezResult`], leaving all rendering (summary table / statistics CSV / full JSON) to the
 /// caller. All inputs are metric (the CLI converts from user units before calling).
@@ -663,11 +729,15 @@ pub struct WezResult {
 ///
 /// A fixed, distinct seed per range step (`0x57_45_5A_00 ^ step_index`) keeps a sweep
 /// reproducible run-to-run while still drawing independent samples at each range.
+///
+/// New in 0.50.0: 0.49.0's [`compute_wez`] took no humidity and always flew 50 %. That
+/// 24-argument form is kept for one release, deprecated, and is this function at
+/// [`RelativeHumidity::DEFAULT`].
 #[allow(
     clippy::too_many_arguments,
     reason = "flat arguments mirror the stable Monte Carlo CLI command shape (MBA-1317)"
 )]
-pub fn compute_wez(
+pub fn compute_wez_with_humidity(
     velocity: f64,
     angle: f64,
     bc: f64,
@@ -1305,13 +1375,13 @@ mod wez_tests {
         }
     }
 
-    /// Humidity train (plan C4): the sweep's humidity is a validated [`RelativeHumidity`] that
+    /// The sweep's humidity is a validated [`RelativeHumidity`] that
     /// reaches the flight AND the attribution, and the attribution echoes exactly the value the
     /// sweep flew (0.49.0's sweep could fly only the default).
     #[test]
     fn the_sweep_flies_and_attributes_the_humidity_it_is_given() {
         let sweep = |humidity: RelativeHumidity| {
-            compute_wez(
+            compute_wez_with_humidity(
                 823.0,
                 0.0,
                 0.243,
@@ -1341,7 +1411,7 @@ mod wez_tests {
                 0.0,
                 humidity,
             )
-            .expect("compute_wez")
+            .expect("compute_wez_with_humidity")
         };
         let shares = |result: &WezResult| {
             result
@@ -1385,7 +1455,7 @@ mod wez_tests {
     }
 
     fn assert_builtin_drag_model_attribution_available(model: DragModel) {
-        let result = compute_wez(
+        let result = compute_wez_with_humidity(
             823.0,
             0.0,
             0.243,
@@ -1415,7 +1485,7 @@ mod wez_tests {
             0.0,
             RelativeHumidity::DEFAULT,
         )
-        .expect("compute_wez");
+        .expect("compute_wez_with_humidity");
         let row = result.rows.first().expect("one row");
         assert!(
             !row.attribution_unavailable,
@@ -1479,7 +1549,7 @@ mod wez_tests {
             vec![0.0, 0.5, 1.0, 1.5, 2.0, 3.0],
             vec![0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
         );
-        let result = compute_wez(
+        let result = compute_wez_with_humidity(
             823.0,
             0.0,
             0.243,
@@ -1509,7 +1579,7 @@ mod wez_tests {
             0.0,
             RelativeHumidity::DEFAULT,
         )
-        .expect("compute_wez");
+        .expect("compute_wez_with_humidity");
         let row = result.rows.first().expect("one row");
         assert!(
             row.attribution_unavailable,
@@ -1526,7 +1596,7 @@ mod wez_tests {
     /// fails during the upgrade, record the before/after in the commit message and
     /// update the expected constants -- do not silently re-baseline.
     ///
-    /// Deliberately written against the public compute_wez so the refactor of the
+    /// Deliberately written against the public compute_wez_with_humidity so the refactor of the
     /// private attributor cannot change what this test measures.
     ///
     /// Range deviation from the task-13 brief's literal worked example: the brief's own
@@ -1539,7 +1609,7 @@ mod wez_tests {
     /// sits comfortably inside that ~365 m ceiling.
     #[test]
     fn attribution_shares_for_a_fixed_configuration() {
-        let result = compute_wez(
+        let result = compute_wez_with_humidity(
             823.0,   // velocity
             0.0,     // angle
             0.243,   // bc
@@ -1569,7 +1639,7 @@ mod wez_tests {
             0.0,  // sight_offset_lateral_m
             RelativeHumidity::DEFAULT,
         )
-        .expect("compute_wez");
+        .expect("compute_wez_with_humidity");
 
         let row = result.rows.first().expect("one row");
         assert!(

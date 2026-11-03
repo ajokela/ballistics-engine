@@ -740,7 +740,7 @@ mod tests {
     }
 
     /// The air outside this command's own model range that a solve refuses: the same field is
-    /// to blame in both (gate R2). Saturated air at 380 K, 400 K at 90 %, -103 °C at a pressure
+    /// to blame in both. Saturated air at 380 K, 400 K at 90 %, -103 °C at a pressure
     /// of 0.0001 Pa, and a station above the troposphere because its pressure was omitted or
     /// was a plausible QNH reduced 20 km up.
     #[test]
@@ -801,7 +801,7 @@ mod tests {
     }
 
     /// Whenever a solve refuses an `atmosphere` object, this command refuses the same object
-    /// with the same code and path (gate R2), across every way the object can be built: each
+    /// with the same code and path, across every way the object can be built: each
     /// field sent or omitted, an absolute pressure or a QNH, temperatures and pressures from
     /// absurd through ordinary to absurd again, and both edges of this command's own model
     /// range to the bit. The message is the same word for word too, except where this

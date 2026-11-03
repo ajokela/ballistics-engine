@@ -100,7 +100,7 @@ fn sampled_flight_twin_reproduces_ab4eb0c_with_neither() {
     let neither = flight(20.0, 1013.0, 150.0, NEITHER);
     for f in [&legacy, &neither] {
         // captured at ab4eb0c
-        // re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+        // re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
         // water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
         // velocity 543.6208143630137 -> 543.6208557335875 m/s (+7.6e-8), drop
         // 1.4413806540576637 -> 1.4413806722282556 m (+1.3e-8)
@@ -171,7 +171,7 @@ fn hold_drop_mil(t: f64, p: f64, alt: f64, presence: StationAtmospherePresence) 
 #[test]
 fn hold_curve_presence_field() {
     // captured at ab4eb0c (the load had no presence then: the legacy rule)
-    // re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
     // water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
     // 3.7383589247775926 -> 3.7383588266070236 mil (-2.6e-8)
     assert_eq!(
@@ -245,7 +245,7 @@ fn lead_twin() {
     )
     .unwrap();
     // captured at ab4eb0c
-    // re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
     // water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
     // lead 2.993530315377015 -> 2.993530121212426 m and time of flight 0.7483825788442537 ->
     // 0.7483825303031065 s (both -6.5e-8)
@@ -311,7 +311,7 @@ fn corridor_elevation_mil(t: f64, p: f64, alt: f64, presence: StationAtmosphereP
 #[test]
 fn corridor_presence_field() {
     // captured at ab4eb0c
-    // re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
     // water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
     // 4.283328501987208 -> 4.283328343262207 mil (-3.7e-8)
     assert_eq!(
@@ -400,7 +400,7 @@ fn chrono_correction_twin() {
     )
     .unwrap();
     // captured at ab4eb0c
-    // re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
     // water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
     // 2656.091456052507 -> 2656.091456052354 fps (-5.8e-14)
     assert_eq!(legacy.muzzle_velocity_fps.to_bits(), 0x40a4c02ed353e3c3);
@@ -468,7 +468,7 @@ fn true_velocity_twin() {
     let neither = true_velocity(68.0, inhg(1013.0), ALT150_FT, NEITHER);
     for r in [&legacy, &neither] {
         // captured at ab4eb0c
-        // re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+        // re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
         // water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
         // the drop 3.5794611667070355 -> 3.579461212563624 mil (+1.3e-8); the quantized velocity
         // did not move
@@ -547,7 +547,7 @@ fn multi_observation_truing_twin() {
     )
     .unwrap();
     // captured at ab4eb0c
-    // re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
     // water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
     // fitted MV 2707.275133552508 -> 2707.2750095544293 fps (-4.6e-8 relative), RMS
     // 0.00011234263666888538 -> 0.00011259351836390552 (+2.23e-3 relative: a near-zero
@@ -602,7 +602,7 @@ fn dsf_impact(t: StationReading, p: StationReading, alt_ft: f64) -> f64 {
 fn dsf_solve_reads_presence_from_the_readings() {
     use StationReading as R;
     // captured at ab4eb0c, when these were bare f64s (the legacy rule)
-    // re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
     // water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
     // impact velocity 563.8410855127402 -> 563.840920245476 (-2.9e-7)
     assert_eq!(
@@ -660,7 +660,7 @@ fn wind_truing_reads_presence_from_the_readings() {
     };
     let miss = |t, p, alt| modeled_miss_right_m(&wind_request(t, p, alt), 10.0, 457.2).unwrap();
     // captured at ab4eb0c, when these were bare f64s (the legacy rule)
-    // re-captured in 0.50.0 (humidity train S8: the default 50 % RH aloft now holds the station's
+    // re-captured in 0.50.0 (the default 50 % RH aloft now holds the station's
     // water-vapour mole fraction, with a virtual-temperature lapse), old -> new:
     // mean crosswind 4.421398917642297 -> 4.421399255682334 mph (+7.6e-8), miss
     // 0.28206345995734605 -> 0.2820634425080147 m (-6.2e-8)

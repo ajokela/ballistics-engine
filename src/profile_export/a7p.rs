@@ -737,7 +737,7 @@ pub fn export_a7p(profile: &ProfileData) -> Result<A7pExport, A7pExportError> {
         )?,
         &mut body,
     );
-    // The stored air by the humidity rules every flight of this profile applies (R2): a
+    // The stored air by the humidity rules every flight of this profile applies: a
     // humidity beyond the sensor band, or air that cannot exist, is refused in the engine's own
     // words before the format's humidity bound is consulted (the temperature and pressure
     // have passed the format's own bounds above). A file of air no solve could fly is no

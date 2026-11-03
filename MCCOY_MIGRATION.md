@@ -136,7 +136,7 @@ remain and must be kept in sync.
 
 ---
 
-# Humidity Consistency (0.50.0) — Downstream Notes (bindings, ballistics_rust, rockets-engine)
+# Humidity Consistency (0.50.0) — Downstream Notes (bindings, rockets-engine, embedders)
 
 0.50.0 flies every solver family on the same humid air, through one per-step lookup,
 `atmosphere::air_at`. The kernels used to take a bare `(f64, f64, f64, f64)` atmosphere tuple
@@ -154,13 +154,27 @@ sound speed cannot disagree about it.
 | `try_solve_trajectory_rust` / `solve_trajectory_rust` atmosphere tuple | `atmosphere: KernelAtmosphere` |
 | `aerodynamic_jump_launch_offset_rad(inputs, (f64, f64, f64, f64))` | `aerodynamic_jump_launch_offset_rad(inputs, &KernelAtmosphere)` |
 | `try_integrate_trajectory` -> `Result<_, WindSegmentError>` | `Result<_, KernelInputError>` (a wind segment or an atmosphere zone) |
-| `BallisticInputs.humidity`, a 0-1 FRACTION, and `humidity_percent()` | `BallisticInputs.humidity_percent`, a PERCENT (default 50); the method is gone |
-| `atmosphere::get_local_atmosphere` | deprecated (dry by contract); use `air_at` |
+| `BallisticInputs.humidity`, a 0-1 FRACTION, and `humidity_percent()` | `BallisticInputs.humidity_percent`, a PERCENT (default 50); `humidity_percent()` is deprecated for one release and returns the field (0.49.0's clamped into 0-100; 0.50.0 clamps nowhere) |
+| `atmosphere::get_local_atmosphere` | deprecated (dry by contract); use `air_at(&KernelAtmosphere::Station(StationAir::new(..)?), None, 0.0, altitude_m)`, or `StationAir::with_density_ratio` for a caller-held density ratio |
+| `wez::compute_wez(..24 arguments..)`, which always flew 50 % | `wez::compute_wez_with_humidity(.., humidity: RelativeHumidity)`; the 24-argument `compute_wez` is deprecated for one release and flies `RelativeHumidity::DEFAULT` |
+| an exhaustive `match` on `wind_scenarios::WindScenarioError` | two new variants: `InvalidHumidity(AtmosphereError)` (a load's `humidity_pct` beyond the sensor band, NaN or infinite, at the field `humidity_pct`; 0.49.0 reported a NaN as `InvalidLoad { field: "humidity", .. }` and flew 150 as 100 %) and `ZeroFailed { message }` (a zero that cannot be solved, not a `SolveFailed` of a scenario named `<zero>`) |
+| `wasm::Calculator::set_humidity(..) -> Calculator` (wasm32) | `-> Result<Calculator, JsValue>`: it refuses a humidity beyond the sensor band itself |
 | a legacy tuple `compute_derivatives` flew: a negative or infinite direct-mode value, a NaN, -inf or >= 2 ratio, a negative pressure, a temperature at or below absolute zero or above water's critical point, air that cannot exist at the stated humidity | refused by `from_legacy_params` with a named `AtmosphereError` (see below); `(0, c, 0, 0)` is still an exact vacuum |
 | `tolerance::ToleranceAxisV1 { .. }` literal | names `near_at_physical_boundary` and `far_at_physical_boundary` too |
 
 `compute_derivatives` and `fast_integrate*` now measure a point's height from the
-`KernelAtmosphere` station's altitude, not from `inputs.altitude`.
+`KernelAtmosphere` station's altitude, not from `inputs.altitude`, so `pos.y` is a height above
+the station. A caller that passes an absolute altitude in `pos.y` (with `inputs.altitude` at 0)
+subtracts the station's altitude, `StationAir::altitude_m()`, from it; then a dry flight's
+acceleration is 0.49.0's to the bit. `air_at` itself takes the absolute altitude:
+
+```rust
+// rockets-engine's shape: an absolute altitude in the state, the pad as the station.
+let pos = Vector3::new(x, altitude_m - station.altitude_m(), z);
+let kernel = KernelAtmosphere::Station(station);
+let accel = compute_derivatives(pos, vel, &inputs, wind, &kernel, bc, None, t, None);
+let air_here = air_at(&kernel, None, x, altitude_m);
+```
 
 ## What to change
 
@@ -221,11 +235,13 @@ NaN acceleration are each a named refusal now.
 
 ## Numeric effect
 
-Two changes move numbers at a humidity above 0; at 0 % nothing moves, bit for bit.
+Two changes move numbers at a humidity above 0; with the station and every zone at 0 % nothing
+moves, bit for bit.
 
 - **Kernel runs.** Their sound speed rises to the station's own moist value (+0.133 % at
-  15 °C / 50 %, +0.787 % at 35 °C / 90 %), so Mach falls and the drag coefficient moves along
-  the drag curve. The station density is unchanged.
+  15 °C / 50 %, +0.787 % at 35 °C / 90 %), and inside an `AtmoSock` zone to the zone's own, so
+  Mach falls and the drag coefficient moves along the drag curve. The station density is
+  unchanged.
 - **Every path, `TrajectorySolver` included: the air aloft.** Away from the station's height
   the air now holds the station's water-vapour mole fraction for its sound speed, its density
   and its (virtual-temperature) pressure lapse. Flat fire moves by under 0.1 mm at 1000 m; a
@@ -236,5 +252,9 @@ CHANGELOG.md's 0.50.0 section has the measured shifts of both.
 To reproduce a 0.49.0 kernel result exactly (for re-baselining, not for new work), pass the
 same humid ratio at `RelativeHumidity::DRY`:
 `KernelAtmosphere::from_legacy_params((alt, t, p, ratio), RelativeHumidity::DRY)` flies
-0.49.0's half-humid air (the humid density with a dry sound speed); it was checked bit for bit
-against the 0.49.0 build on `try_integrate_trajectory` and `fast_integrate`.
+0.49.0's half-humid air (the humid density with a dry sound speed). It was checked bit for bit
+against the 0.49.0 build on `try_integrate_trajectory` and `fast_integrate`, for a flight with
+no `AtmoSock` zones or only dry ones. A zone with a humidity above 0 now flies its own moist
+sound speed and lapse, at its own height too, and no API reproduces 0.49.0 there; migrate a
+zoned caller with `StationAir::new` at the station's humidity, so the station and its zones fly
+one model.
