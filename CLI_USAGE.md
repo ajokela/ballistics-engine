@@ -368,21 +368,23 @@ warning: station pressure 29.92 inHg is 1.202 times the ICAO standard pressure a
   (`temperature_supplied` / `pressure_supplied` in the file, written only when true), and
   `.a7p` import marks both. A profile saved before 0.49.0 carries neither, so its stored
   59 °F / 29.92 inHg keeps the old meaning, standard air at a real altitude; re-save it with
-  `--temperature` / `--pressure` to mark a real reading. On `plan-truing --profile` and
-  `dsf --saved-profile`, a profile's pressure flown as a QNH is a reading even without the
-  marker, unless it is the 29.92 inHg / 1013.25 hPa that `profile save` stores when
-  `--pressure` is omitted, which stays omitted.
+  `--temperature` / `--pressure` to mark a real reading. On every command that takes a saved
+  profile, a stored pressure flown as a QNH (its stored type, or a typed `--pressure-type qnh`)
+  is a reading even without the marker, unless it is the 29.92 inHg / 1013.25 hPa that
+  `profile save` stores when `--pressure` is omitted, which stays omitted. That stored default
+  is no reading in either unit system, so the run flies its own default in its place (see
+  [A saved profile's weather](#a-saved-profiles-weather-0500)).
 - **Density altitude.** The pressure is derived from the density altitude, never a reading,
   and an explicit temperature wins over the ISA one. Explicit means any supplied source: the
   flag, a `--location` CSV cell, a `--profile` CSV `ZERO_TEMP` cell or a marked saved profile.
   An unmarked (pre-0.49.0) profile's temperature is not explicit.
-- **A stored density altitude** is honoured by `plan-truing --profile` and
-  `dsf --saved-profile`, as `trajectory --saved-profile` already did, when the run supplies no
-  pressure or altitude of its own.
+- **A stored density altitude** is honoured by every command that takes a saved profile (since
+  0.50.0; `plan-truing --profile` and `dsf --saved-profile` since 0.49.0, `trajectory
+  --saved-profile` before), when the run supplies no pressure or altitude of its own.
 - **The zero day.** A `--zero-*` value you give is a reading; a value the zero day inherits
   from the shot day keeps the shot day's status.
-- **Typed defaults.** On `trajectory`, a typed `--altitude 0` or `--humidity 50` beats a
-  `--location` CSV or saved-profile value.
+- **Typed defaults.** A typed `--altitude 0` or `--humidity 50` beats a saved-profile value on
+  every command that takes one, and on `trajectory` a `--location` CSV value too.
 - **`--online`.** A typed value is sent with `temperature_supplied` / `pressure_supplied` set
   to `true`, and a declared QNH is sent as its station pressure. The online service flies a
   marked value as typed once it supports those fields; until then it still replaces an
@@ -390,6 +392,56 @@ warning: station pressure 29.92 inHg is 1.202 times the ICAO standard pressure a
   unchanged.
 - **`stability`** keeps its own rule: an omitted pressure there is the sea-level value itself,
   as before.
+
+#### A saved profile's weather (0.50.0)
+
+`profile save` stores a temperature, a pressure and its type (`--pressure-type`), a humidity, an
+altitude and, if you give one, a density altitude. **Every command that takes a saved profile flies
+that weather**: `trajectory --saved-profile`, `dsf --saved-profile`, and the `--profile` of
+`plan-truing`, `come-ups`, `range-table`, `wind-card`, `mpbr`, `lead`, `compare`, `hold-corridor`,
+`mark-to-range`, `bdc-match`, `optimal-zero`, `adaptive-card`, `reticle hold` and `stability`. Each
+station field follows one rule:
+
+1. A typed flag wins, and replaces only its own field. A typed value equal to the default
+   (`--temperature 59`, `--humidity 50`, `--altitude 0`) wins too.
+2. Otherwise the profile's stored value flies. On `trajectory` a `--location` CSV cell, or a
+   `--profile` CSV `ZERO_TEMP` / `ZERO_ALT` cell, comes before it.
+3. Otherwise the command's documented default flies, the one it flies with no profile.
+
+The qualifiers travel with the value they describe:
+
+- **The stored pressure type** applies to the stored pressure only. With a typed `--pressure` it
+  is ignored; a typed `--pressure-type` replaces it.
+- **A stored density altitude** flies its derived station unless the run gives a pressure or an
+  altitude of its own (a flag, or on `trajectory` a CSV cell or `--density-altitude`).
+- **A stored temperature or pressure** keeps its presence marker, so one typed when the profile
+  was saved flies as typed. The 59 °F / 29.92 inHg `profile save` stores for an omitted flag is
+  no reading, so the run flies its own default instead: a profile saved in imperial with no
+  weather flies 1013.25 hPa in a metric run, as no profile does.
+- **The zero** is solved in the same air. `trajectory --auto-zero` inherits the resolved shot
+  day for every `--zero-*` flag left out; the other commands zero in the air they fly.
+- **`stability`** reads the stored temperature, pressure, altitude and density altitude. Its
+  Miller correction is dry, so it never reads the humidity.
+- **`compare`** flies each `--profile` load in its own stored weather and each `--load` spec in
+  the typed flags or the defaults. When the loads fly different air it says so on stderr, and
+  in `-o json` each load that flies other air than the first carries an `air` object
+  (`temperature`, `pressure`, `humidity`, `altitude`). Type the flags to fly one air for every
+  load.
+
+A stored value is checked where it flies. A stored humidity outside the sensor band is refused,
+naming the field and the file: `profile 'p' field humidity = 106: relative humidity must be a
+percent from 0 to 100 (a sensor reading from -5 to 105 is read as 0 or 100); edit the humidity
+stored in the profile (the profile is stored at ...)`. Stored air that cannot exist is refused
+naming the profile field that put it there. A run that never reads the field does not refuse it:
+one that types `--humidity`, `stability`, `dial-plan`, or `reticle hold --drop-mil`.
+
+Before 0.50.0, only `trajectory --saved-profile`, `plan-truing --profile` and `dsf --saved-profile`
+flew the stored weather. The other commands loaded the profile's bullet and zero and flew the
+flags' defaults, with nothing said, and still refused a stored humidity they never flew. Engine
+output for a profile saved with `-v 2700 -b 0.475 -m 168 -d 0.308 --zero-distance 100
+--temperature 95 --humidity 100`, from `come-ups --profile hot --zero-distance 100` at 1000 yd:
+0.49.0 flew 59 °F and 50 % (1199.56 fps, a 10.83 mil come-up); 0.50.0 flies the stored 95 °F and
+100 % (1273.61 fps, 10.27 mil), as `trajectory --saved-profile hot` already did.
 
 #### Humidity: units, defaults and validation
 
@@ -409,7 +461,7 @@ is no percent alias.
 | `trajectory`, `zero`, `come-ups`, `range-table`, `wind-card`, `compare`, `mpbr`, `lead`, `hold-corridor`, `mark-to-range`, `bdc-match`, `optimal-zero`, `adaptive-card`, `estimate-bc`, `true-velocity`, `true-wind`, `plan-truing`, `reticle hold`, `profile save`, and `monte-carlo` (since 0.50.0) | `--humidity` | percent | 50 |
 | `trajectory --auto-zero` | `--zero-humidity` | percent | the shot day's |
 | `--location` CSV | `HUMIDITY` column | percent | a saved profile's, then 50 (a typed `--humidity` beats the CSV) |
-| Saved profile (`--saved-profile`, `--profile`) | `humidity` | percent | 50 |
+| Saved profile: `trajectory --saved-profile`, `dsf --saved-profile`, and the --profile flag of `plan-truing`, `come-ups`, `range-table`, `wind-card`, `compare`, `mpbr`, `lead`, `hold-corridor`, `mark-to-range`, `bdc-match`, `optimal-zero`, `adaptive-card` and `reticle hold` (every saved-profile command that flies a humidity) | `humidity` | percent | 50 (a typed `--humidity` beats it, and on `trajectory` a `--location` CSV cell) |
 | `.a7p` import | the file's air-humidity field, `c_zero_air_humidity` | whole percent | 0 (the format cannot tell an absent field from 0) |
 | `solve-json`, the `explain` / `error-budget` / `tolerance` request files, the MCP `solve` tool | `atmosphere.relative_humidity` | **fraction**, 0 to 1 (0.5 = 50 %) | 0.5 |
 | `error-budget --sigma relative-humidity=S`, `tolerance --domain relative-humidity=LO:HI` | the request file's humidity axis | **fraction**, like the request: a sigma below 1 (0.05 = 5 percentage points), a domain within 0 to 1 | required |
@@ -560,7 +612,7 @@ warning: station pressure 30.50 inHg is 1.532 times the ICAO standard pressure a
 
 solve-json carries the same check as the `station_pressure_implausible_for_altitude` warning; see [docs/SOLVE_JSON_V1.md](docs/SOLVE_JSON_V1.md#atmosphere).
 
-Available on **every subcommand that accepts `--pressure`** (MBA-1416): `trajectory` (`--pressure-type`, plus an independent `--zero-pressure-type` for the `--auto-zero` zero-day override — it defaults to the shot-day `--pressure-type` when not given, matching the existing "omitting all `--zero-*` flags reuses the shot-day values" contract), `zero`, `estimate-bc`, `true-velocity`, `true-wind`, `plan-truing`, `mpbr`, `come-ups`, `lead`, `wind-card`, `stability`, `range-table`, `compare`, `mark-to-range`, `bdc-match`, `optimal-zero`, `adaptive-card`, `hold-corridor`, `reticle hold`, and `profile save`. On the calculator subcommands the mode reduces `--pressure` against that command's own `--altitude`, so `qnh` means the same thing everywhere; omitting it is exactly `absolute`, leaving every existing invocation byte-identical. **`profile save` records the mode, and since MBA-1417 `--saved-profile` applies it — but only to the pressure it describes.** The profile's atmosphere (temperature, pressure, humidity, altitude, pressure mode, density altitude) now loads as a SET. Precedence per value is: an explicit CLI flag beats the profile, which beats the built-in standard. The stored MODE, however, is honored only when the profile's stored pressure VALUE is the one in use — supply `--pressure` yourself, or a `--location` CSV pressure, and the stored mode is ignored because it describes a different reading. That pairing is the point: applying a mode saved on another day to a pressure you just typed was a measured 77 fps error at 300 yd. A stored `density_altitude` is stricter still, since it supersedes altitude and pressure outright: it applies only when the run supplies no pressure or altitude of its own. Profiles saved before these flags existed omit the keys and load as `absolute` with no density altitude, unchanged.
+Available on **every subcommand that accepts `--pressure`** (MBA-1416): `trajectory` (`--pressure-type`, plus an independent `--zero-pressure-type` for the `--auto-zero` zero-day override — it defaults to the shot-day `--pressure-type` when not given, matching the existing "omitting all `--zero-*` flags reuses the shot-day values" contract), `zero`, `estimate-bc`, `true-velocity`, `true-wind`, `plan-truing`, `mpbr`, `come-ups`, `lead`, `wind-card`, `stability`, `range-table`, `compare`, `mark-to-range`, `bdc-match`, `optimal-zero`, `adaptive-card`, `hold-corridor`, `reticle hold`, and `profile save`. On the calculator subcommands the mode reduces `--pressure` against that command's own `--altitude`, so `qnh` means the same thing everywhere; omitting it is exactly `absolute`, leaving every existing invocation byte-identical. **`profile save` records the mode, and every command that takes a saved profile applies it — but only to the pressure it describes** (`trajectory --saved-profile` since MBA-1417, `plan-truing` and `dsf` since 0.49.0, every other `--profile` command since 0.50.0). The profile's atmosphere (temperature, pressure, humidity, altitude, pressure mode, density altitude) loads as a SET. Precedence per value is: an explicit CLI flag beats the profile, which beats the built-in standard (see [A saved profile's weather](#a-saved-profiles-weather-0500)). The stored MODE, however, is honored only when the profile's stored pressure VALUE is the one in use — supply `--pressure` yourself, or a `--location` CSV pressure, and the stored mode is ignored because it describes a different reading. That pairing is the point: applying a mode saved on another day to a pressure you just typed was a measured 77 fps error at 300 yd. A stored `density_altitude` is stricter still, since it supersedes altitude and pressure outright: it applies only when the run supplies no pressure or altitude of its own. Profiles saved before these flags existed omit the keys and load as `absolute` with no density altitude, unchanged.
 
 **Which pressure the mode describes (MBA-1421).** A `--pressure-type` you type on the command
 line describes **whatever pressure that run actually uses**, including one supplied by a
@@ -622,7 +674,7 @@ solved for `station_hpa` given a target density altitude and a station temperatu
 
 **BC reference standard (MBA-1365) interaction:** independent. `--bc-reference` converts the BC value itself (`inputs.bc_value`); `--density-altitude` resolves the atmosphere (`AtmosphericConditions`/`BallisticInputs.altitude`/`.temperature`/`.pressure`). Neither reads the other's fields, so any combination of the two flags composes exactly as if applied separately.
 
-Available on `trajectory` (CLI flag + `--location`/CSV `DA`/`DENSITY_ALTITUDE` columns) and `profile save --density-altitude`, stored alongside the profile's `temperature`/`pressure`/`altitude`/`humidity`. `trajectory --saved-profile` reads the stored atmosphere as a set (MBA-1417), and since 0.49.0 `plan-truing --profile` and `dsf --saved-profile` honour a stored density altitude too, whenever the run supplies no pressure or altitude of its own. `zero` takes `--density-altitude` too. **Not yet available** on the other subcommands (`estimate-bc`, `true-velocity`, `true-wind`, `plan-truing` apart from a stored profile value, `mpbr`, `come-ups`, `lead`, `wind-card`, `stability`, `range-table`, `compare` and the reticle and card commands); a tracked follow-up.
+Available on `trajectory` (CLI flag + `--location`/CSV `DA`/`DENSITY_ALTITUDE` columns) and `profile save --density-altitude`, stored alongside the profile's `temperature`/`pressure`/`altitude`/`humidity`. `trajectory --saved-profile` reads the stored atmosphere as a set (MBA-1417), and every other command that takes a saved profile honours a stored density altitude too (`plan-truing --profile` and `dsf --saved-profile` since 0.49.0, the rest since 0.50.0), whenever the run supplies no pressure or altitude of its own. `zero` takes `--density-altitude` too. **The flag is not yet available** on the other subcommands (`estimate-bc`, `true-velocity`, `true-wind`, `plan-truing`, `mpbr`, `come-ups`, `lead`, `wind-card`, `stability`, `range-table`, `compare` and the reticle and card commands), which fly a density altitude only from a saved profile; a tracked follow-up.
 
 **WASM:** pass `--density-altitude <value>` as a terminal argument to `trajectory`; behavior matches native exactly (same back-solve, flown authoritatively — including when `--density-altitude` is combined with `--pressure-type`). A typed `--temperature` is the explicit temperature, whatever its value; the zero day that inherits the density-altitude air keeps that temperature as a reading and the derived pressure as derived.
 
@@ -2044,9 +2096,13 @@ for a high-BC load) at the loose end of that range.
 
 ### Load Comparison (`compare`)
 
-Run several loads through identical conditions and see them side by side. Each load is
-zeroed independently at the shared `--zero-distance`, then solved twice (a no-wind pass
-for pure drop, a wind pass for drift), exactly like `range-table`:
+Run several loads side by side. Each load is zeroed independently at the shared
+`--zero-distance`, then solved twice (a no-wind pass for pure drop, a wind pass for drift),
+exactly like `range-table`. A `--load` spec flies the typed `--temperature`, `--pressure`,
+`--humidity` and `--altitude`, or their defaults; a `--profile` load flies the profile's stored
+weather for each one not typed (0.50.0; see
+[A saved profile's weather](#a-saved-profiles-weather-0500)), so type them to fly every load in
+one air:
 
 ```bash
 # Two loads by inline spec: NAME:DRAG:BC:MASS:VELOCITY[:DIAMETER]

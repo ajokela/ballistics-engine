@@ -2284,3 +2284,314 @@ fn every_public_humidity_field_doc_states_the_sensor_band() {
     }
     assert!(checked >= 14, "only {checked} humidity fields were checked");
 }
+
+/// The commands that take a saved profile (`--saved-profile <NAME>` or `--profile <NAME>`; not
+/// `trajectory`'s `--profile <FILE>`, a CSV) and fly a humidity: those that take `--humidity`,
+/// and `dsf`, which takes no station flag and flies the stored air whole.
+#[cfg(feature = "cli")]
+fn saved_profile_humidity_commands() -> std::collections::BTreeSet<String> {
+    let mut found = std::collections::BTreeSet::new();
+    let mut pending: Vec<Vec<String>> = vec![Vec::new()];
+    while let Some(path) = pending.pop() {
+        let help = help_of(&path);
+        let takes_profile = help.lines().map(str::trim_start).any(|line| {
+            line.starts_with("--saved-profile <NAME>") || line.starts_with("--profile <NAME>")
+        });
+        if !path.is_empty()
+            && takes_profile
+            && (declares_option(&help, "humidity") || path == ["dsf"])
+        {
+            found.insert(path.join(" "));
+        }
+        for name in subcommands_in(&help) {
+            let mut child = path.clone();
+            child.push(name);
+            pending.push(child);
+        }
+    }
+    found
+}
+
+/// The humidity table's saved-profile row names exactly the commands that fly a saved profile's
+/// stored humidity (0.50.0: every command that takes a saved profile and flies a humidity; before
+/// it, the row named `--saved-profile` and `--profile` while twelve `--profile` commands flew 50 %).
+#[cfg(feature = "cli")]
+#[test]
+fn the_cli_usage_humidity_table_names_every_command_that_flies_a_stored_humidity() {
+    let flown = saved_profile_humidity_commands();
+    for known in [
+        "trajectory",
+        "dsf",
+        "come-ups",
+        "compare",
+        "reticle hold",
+        "adaptive-card",
+    ] {
+        assert!(
+            flown.contains(known),
+            "the help walk missed `{known}`: {flown:?}"
+        );
+    }
+    assert!(
+        !flown.contains("stability") && !flown.contains("dial-plan"),
+        "stability's Miller correction is dry and dial-plan flies no air: {flown:?}"
+    );
+    assert_eq!(
+        humidity_table_commands("`humidity`"),
+        flown,
+        "CLI_USAGE.md's humidity table must name exactly the commands that fly a saved \
+         profile's stored humidity"
+    );
+}
+
+/// `come-ups` on one saved profile at 1000 yd, by `ballistics` itself: `(velocity fps, come-up
+/// mil)`, with `extra` typed after the profile.
+#[cfg(feature = "cli")]
+fn come_ups_on_a_saved_profile(home: &Path, extra: &[&str]) -> (f64, f64) {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ballistics"))
+        .env("HOME", home)
+        .args([
+            "come-ups",
+            "--profile",
+            "hot",
+            "--zero-distance",
+            "100",
+            "--start",
+            "1000",
+            "--end",
+            "1000",
+            "-o",
+            "json",
+        ])
+        .args(extra)
+        .output()
+        .expect("spawn ballistics");
+    assert!(
+        output.status.success(),
+        "come-ups failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let doc: serde_json::Value = serde_json::from_slice(&output.stdout).expect("come-ups JSON");
+    let row = &doc["data"][0];
+    (
+        row["velocity"].as_f64().expect("velocity"),
+        row["come_up"].as_f64().expect("come_up"),
+    )
+}
+
+/// The CHANGELOG's measured example of the saved-profile weather change is engine output. The
+/// 0.49.0 row is the profile flown with the flags' defaults typed (59 °F, 50 %), the air 0.49.0's
+/// `come-ups --profile` flew for every profile; the released 0.49.0 CLI gives 1199.5585 fps and
+/// 10.8345 mil there, the same at the table's precision (the aloft change moves the fourth
+/// decimal).
+#[cfg(feature = "cli")]
+#[test]
+fn the_saved_profile_weather_example_is_engine_output() {
+    let home =
+        std::env::temp_dir().join(format!("bx-humidity-docs-profile-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&home);
+    fs::create_dir_all(&home).unwrap();
+    let saved = std::process::Command::new(env!("CARGO_BIN_EXE_ballistics"))
+        .env("HOME", &home)
+        .args([
+            "profile",
+            "save",
+            "hot",
+            "-v",
+            "2700",
+            "-b",
+            "0.475",
+            "-m",
+            "168",
+            "-d",
+            "0.308",
+            "--zero-distance",
+            "100",
+            "--temperature",
+            "95",
+            "--humidity",
+            "100",
+        ])
+        .output()
+        .expect("spawn ballistics");
+    assert!(saved.status.success(), "profile save failed");
+    let (old_v, old_c) =
+        come_ups_on_a_saved_profile(&home, &["--temperature", "59", "--humidity", "50"]);
+    let (new_v, new_c) = come_ups_on_a_saved_profile(&home, &[]);
+    let _ = fs::remove_dir_all(&home);
+    // The table sits inside its list item, so its lines are indented.
+    let section = release_section();
+    let header = "| `come-ups --profile hot`, 1000 yd | velocity | come-up |";
+    let rows: Vec<&str> = section
+        .lines()
+        .map(str::trim_start)
+        .skip_while(|line| *line != header)
+        .skip(2)
+        .take_while(|line| line.starts_with('|'))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            format!(
+                "| 0.49.0: the flags' defaults, 59 °F and 50 % | {old_v:.2} fps | {old_c:.2} mil |"
+            ),
+            format!(
+                "| 0.50.0: the stored weather, 95 °F and 100 % | {new_v:.2} fps | {new_c:.2} mil |"
+            ),
+        ],
+        "the table headed `{header}` is not the engine's"
+    );
+}
+
+/// `ballistics` run with `HOME` at `home`, which must succeed; its stdout as JSON.
+#[cfg(feature = "cli")]
+fn cli_json(home: &Path, args: &[&str]) -> serde_json::Value {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_ballistics"))
+        .env("HOME", home)
+        .args(args)
+        .output()
+        .expect("spawn ballistics");
+    assert!(
+        output.status.success(),
+        "{args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("JSON output")
+}
+
+/// The CHANGELOG's two other measured figures for the saved-profile change are engine output.
+/// What 0.49.0 flew is reproduced by typing it: the converted 29.92 inHg a weatherless imperial
+/// profile carried into a metric `trajectory` run (at sea level its presence changes nothing),
+/// and a metric profile's numbers read as imperial ones by `reticle hold` (the profile is not
+/// converted). Both were checked against the build before the change, bit for bit.
+#[cfg(feature = "cli")]
+#[test]
+fn the_saved_profile_weather_figures_are_engine_output() {
+    let home = std::env::temp_dir().join(format!("bx-humidity-docs-units-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&home);
+    fs::create_dir_all(&home).unwrap();
+    let ok = |args: &[&str]| {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_ballistics"))
+            .env("HOME", &home)
+            .args(args)
+            .output()
+            .expect("spawn ballistics");
+        assert!(output.status.success(), "{args:?} failed");
+        output.stdout
+    };
+    ok(&[
+        "profile",
+        "save",
+        "plain",
+        "-v",
+        "2700",
+        "-b",
+        "0.475",
+        "-m",
+        "168",
+        "-d",
+        "0.308",
+        "--zero-distance",
+        "100",
+    ]);
+    ok(&[
+        "-u",
+        "metric",
+        "profile",
+        "save",
+        "m823",
+        "-v",
+        "823",
+        "-b",
+        "0.475",
+        "-m",
+        "10.9",
+        "-d",
+        "7.82",
+        "--zero-distance",
+        "91.44",
+    ]);
+    let reticle = home.join("reticle.json");
+    fs::write(
+        &reticle,
+        ok(&[
+            "reticle",
+            "generate",
+            "tree",
+            "--rows",
+            "8",
+            "--row-spacing",
+            "1.0",
+            "--spread-step",
+            "0.5",
+            "-o",
+            "json",
+        ]),
+    )
+    .unwrap();
+    let reticle = reticle.to_str().unwrap();
+
+    let converted_default = format!("{:?}", 29.92_f64 * 33.8639);
+    let trajectory = |extra: &[&str]| {
+        let mut args = vec![
+            "-u",
+            "metric",
+            "trajectory",
+            "--max-range",
+            "600",
+            "--auto-zero",
+            "100",
+            "-o",
+            "json",
+            "--saved-profile",
+            "plain",
+        ];
+        args.extend_from_slice(extra);
+        cli_json(&home, &args)["impact_velocity"]
+            .as_f64()
+            .expect("impact_velocity")
+    };
+    let before = trajectory(&["--pressure", &converted_default]);
+    let after = trajectory(&[]);
+    let hold = |extra: &[&str]| {
+        let mut args = vec![
+            "reticle",
+            "hold",
+            "--reticle-json",
+            reticle,
+            "--range",
+            "300",
+            "-o",
+            "json",
+        ];
+        args.extend_from_slice(extra);
+        cli_json(&home, &args)["hold"]["down_mil"]
+            .as_f64()
+            .expect("hold.down_mil")
+    };
+    let read_as_imperial = hold(&[
+        "-v",
+        "823",
+        "-b",
+        "0.475",
+        "-m",
+        "10.9",
+        "-d",
+        "7.82",
+        "--zero-distance",
+        "91.44",
+    ]);
+    let converted = hold(&["--profile", "m823"]);
+    let _ = fs::remove_dir_all(&home);
+    let section = release_section();
+    assert_prose(
+        &section,
+        &format!("moves from {before:.4} to {after:.4} m/s at 600 m"),
+        "the weatherless cross-unit trajectory figure",
+    );
+    assert_prose(
+        &section,
+        &format!("`reticle hold --range 300` held {read_as_imperial:.2} mil; it now holds {converted:.2} mil"),
+        "the unconverted-profile reticle hold figure",
+    );
+}

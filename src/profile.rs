@@ -636,13 +636,15 @@ impl ProfileData {
         (flown != self.humidity).then_some(flown)
     }
 
-    /// The station air a flight of this profile's OWN stored atmosphere flies, the way
-    /// `trajectory --saved-profile` and `dsf --saved-profile` read it: the stored readings in
-    /// the profile's `units`, converted to metric; a stored density altitude flies its derived
-    /// station triple with both readings supplied; a stored `pressure_reference` of `qnh` is
-    /// reduced to station pressure at the profile's altitude; otherwise each reading's presence
-    /// is the profile's marker (a profile written before 0.49.0 has none and keeps the legacy
-    /// rule).
+    /// The station air a flight of this profile's OWN stored atmosphere flies, the way every
+    /// CLI command that takes a saved profile reads it when no station flag is typed (`dsf
+    /// --saved-profile` always): the stored readings in the profile's `units`, converted to
+    /// metric; a stored density altitude flies its derived station triple with both readings
+    /// supplied; a stored `pressure_reference` of `qnh` is reduced to station pressure at the
+    /// profile's altitude; otherwise each reading's presence is the profile's marker (a profile
+    /// written before 0.49.0 has none and keeps the legacy rule). An unmarked stored default
+    /// (29.92 inHg, 1013.25 hPa) is taken as stored here; the CLI flies the run's own default in
+    /// its place, which differs from it by at most the 0.04 hPa between the two.
     ///
     /// Returns the conditions (°C, hPa, the stored humidity percent, m), the presence a solver
     /// resolves them with, and where the station pressure came from (the stored reading, a

@@ -518,7 +518,7 @@ fn refuse_truing_cli_air(
     alt_ft: f64,
     presence: StationAtmospherePresence,
     units: UnitSystem,
-    humidity_label: &str,
+    labels: [&str; 4],
 ) -> Result<(), String> {
     refuse_cli_air(
         &AtmosphericConditions {
@@ -530,12 +530,7 @@ fn refuse_truing_cli_air(
         },
         presence,
         units,
-        [
-            humidity_label,
-            SHOT_AIR_FLAGS[1],
-            SHOT_AIR_FLAGS[2],
-            SHOT_AIR_FLAGS[3],
-        ],
+        labels,
     )
 }
 
@@ -710,7 +705,11 @@ enum Commands {
         #[arg(long, value_name = "NAME")]
         profile_row: Option<String>,
 
-        /// Load a saved profile by name (from ~/.ballistics/profiles/)
+        /// Load a saved profile by name (from ~/.ballistics/profiles/): its bullet and rifle,
+        /// and its stored weather (temperature, pressure and its type, humidity, altitude,
+        /// density altitude), each station field unless a flag or a --location CSV cell
+        /// supplies it. A stored density altitude supersedes the stored altitude and pressure
+        /// unless the run supplies a pressure or an altitude of its own
         #[arg(long, value_name = "NAME")]
         saved_profile: Option<String>,
 
@@ -827,11 +826,17 @@ enum Commands {
         #[arg(long = "bc-segment", value_name = "VMIN:VMAX:BC", action = clap::ArgAction::Append)]
         bc_segment: Vec<String>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units). Omitted: ICAO standard at --altitude (59 F / 15 C at sea level); a typed value always flies as typed
+        /// Temperature (Fahrenheit or Celsius based on --units). Omitted: a --location CSV cell
+        /// (or a --profile CSV ZERO_TEMP cell), else the --saved-profile's stored temperature,
+        /// else ICAO standard at --altitude (59 F / 15 C at sea level); a typed value always
+        /// flies as typed
         #[arg(long)]
         temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units). Omitted: ICAO standard at --altitude (29.92 inHg / 1013.25 hPa at sea level); a typed value always flies as typed
+        /// Pressure (inHg or hPa based on --units). Omitted: a --location CSV cell, else the
+        /// --saved-profile's stored pressure (with its stored --pressure-type), else ICAO
+        /// standard at --altitude (29.92 inHg / 1013.25 hPa at sea level); a typed value always
+        /// flies as typed
         #[arg(long)]
         pressure: Option<f64>,
 
@@ -848,8 +853,9 @@ enum Commands {
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
-        /// fog) is read as 100 or 0.
+        /// Relative humidity, percent 0-100. Omitted: a --location CSV HUMIDITY cell, else the
+        /// --saved-profile's stored humidity, else 50. A sensor reading up to 5 outside that
+        /// range (101.7 in fog) is read as 100 or 0.
         #[arg(
             long,
             default_value = "50.0",
@@ -858,7 +864,8 @@ enum Commands {
         )]
         humidity: f64,
 
-        /// Altitude (feet or meters based on --units)
+        /// Altitude (feet or meters based on --units). Omitted: a --location CSV cell (or a
+        /// --profile CSV ZERO_ALT cell), else the --saved-profile's stored altitude, else 0
         #[arg(long, default_value = "0.0")]
         altitude: f64,
 
@@ -2320,23 +2327,28 @@ enum Commands {
         #[arg(long)]
         sight_height: Option<f64>,
 
-        /// Temperature (Fahrenheit or Celsius based on global --units)
+        /// Temperature (Fahrenheit or Celsius based on --units). Omitted: the --profile's
+        /// stored temperature, else ICAO standard at --altitude (59 F / 15 C at sea level); a
+        /// typed value always flies as typed
         #[arg(long)]
         temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on global --units)
+        /// Pressure (inHg or hPa based on --units). Omitted: the --profile's stored pressure
+        /// (with its stored --pressure-type), else ICAO standard at --altitude (29.92 inHg /
+        /// 1013.25 hPa at sea level); a typed value always flies as typed
         #[arg(long)]
         pressure: Option<f64>,
-        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) is station pressure
-        /// at your altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of
-        /// value a weather report or METAR gives — and is reduced to station pressure using
-        /// `--altitude`. Omitting this is exactly `absolute`, so existing invocations are
-        /// unchanged. Same meaning as `trajectory --pressure-type`.
+        /// How to interpret `--pressure` (MBA-1416): `absolute` is station pressure at your
+        /// altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of value a
+        /// weather report or METAR gives — and is reduced to station pressure using
+        /// `--altitude`. Omitted: the --profile's stored type when its stored pressure flies
+        /// (never for a typed --pressure), else `absolute`. Same meaning as `trajectory
+        /// --pressure-type`.
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
-        /// fog) is read as 100 or 0.
+        /// Relative humidity, percent 0-100. Omitted: the --profile's stored humidity, else 50.
+        /// A sensor reading up to 5 outside that range (101.7 in fog) is read as 100 or 0.
         #[arg(
             long,
             value_parser = parse_humidity_percent,
@@ -2344,7 +2356,8 @@ enum Commands {
         )]
         humidity: Option<f64>,
 
-        /// Altitude (feet or meters based on global --units)
+        /// Altitude (feet or meters based on --units). Omitted: the --profile's stored
+        /// altitude, else 0
         #[arg(long)]
         altitude: Option<f64>,
 
@@ -2378,7 +2391,10 @@ enum Commands {
 
     /// Calculate Maximum Point-Blank Range (MPBR)
     Mpbr {
-        /// Load parameters from saved profile
+        /// Load parameters from a saved profile: its bullet and rifle, and its stored weather
+        /// (temperature, pressure and its type, humidity, altitude, density altitude), each
+        /// station field unless its flag is typed here. A stored density altitude supersedes
+        /// the stored altitude and pressure unless --pressure or --altitude is typed
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
 
@@ -2428,23 +2444,28 @@ enum Commands {
         #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
         sight_offset: Option<f64>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units). Omitted: ICAO standard at --altitude (59 F / 15 C at sea level); a typed value always flies as typed
+        /// Temperature (Fahrenheit or Celsius based on --units). Omitted: the --profile's
+        /// stored temperature, else ICAO standard at --altitude (59 F / 15 C at sea level); a
+        /// typed value always flies as typed
         #[arg(long)]
         temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units). Omitted: ICAO standard at --altitude (29.92 inHg / 1013.25 hPa at sea level); a typed value always flies as typed
+        /// Pressure (inHg or hPa based on --units). Omitted: the --profile's stored pressure
+        /// (with its stored --pressure-type), else ICAO standard at --altitude (29.92 inHg /
+        /// 1013.25 hPa at sea level); a typed value always flies as typed
         #[arg(long)]
         pressure: Option<f64>,
-        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) is station pressure
-        /// at your altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of
-        /// value a weather report or METAR gives — and is reduced to station pressure using
-        /// `--altitude`. Omitting this is exactly `absolute`, so existing invocations are
-        /// unchanged. Same meaning as `trajectory --pressure-type`.
+        /// How to interpret `--pressure` (MBA-1416): `absolute` is station pressure at your
+        /// altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of value a
+        /// weather report or METAR gives — and is reduced to station pressure using
+        /// `--altitude`. Omitted: the --profile's stored type when its stored pressure flies
+        /// (never for a typed --pressure), else `absolute`. Same meaning as `trajectory
+        /// --pressure-type`.
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
-        /// fog) is read as 100 or 0.
+        /// Relative humidity, percent 0-100. Omitted: the --profile's stored humidity, else 50.
+        /// A sensor reading up to 5 outside that range (101.7 in fog) is read as 100 or 0.
         #[arg(
             long,
             default_value = "50.0",
@@ -2453,7 +2474,8 @@ enum Commands {
         )]
         humidity: f64,
 
-        /// Altitude (feet or meters based on --units)
+        /// Altitude (feet or meters based on --units). Omitted: the --profile's stored
+        /// altitude, else 0
         #[arg(long, default_value = "0.0")]
         altitude: f64,
 
@@ -2464,7 +2486,10 @@ enum Commands {
 
     /// Generate come-up (elevation adjustment) table
     ComeUps {
-        /// Load parameters from saved profile
+        /// Load parameters from a saved profile: its bullet and rifle, and its stored weather
+        /// (temperature, pressure and its type, humidity, altitude, density altitude), each
+        /// station field unless its flag is typed here. A stored density altitude supersedes
+        /// the stored altitude and pressure unless --pressure or --altitude is typed
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
 
@@ -2560,23 +2585,28 @@ enum Commands {
         #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
         sight_offset: Option<f64>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units). Omitted: ICAO standard at --altitude (59 F / 15 C at sea level); a typed value always flies as typed
+        /// Temperature (Fahrenheit or Celsius based on --units). Omitted: the --profile's
+        /// stored temperature, else ICAO standard at --altitude (59 F / 15 C at sea level); a
+        /// typed value always flies as typed
         #[arg(long)]
         temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units). Omitted: ICAO standard at --altitude (29.92 inHg / 1013.25 hPa at sea level); a typed value always flies as typed
+        /// Pressure (inHg or hPa based on --units). Omitted: the --profile's stored pressure
+        /// (with its stored --pressure-type), else ICAO standard at --altitude (29.92 inHg /
+        /// 1013.25 hPa at sea level); a typed value always flies as typed
         #[arg(long)]
         pressure: Option<f64>,
-        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) is station pressure
-        /// at your altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of
-        /// value a weather report or METAR gives — and is reduced to station pressure using
-        /// `--altitude`. Omitting this is exactly `absolute`, so existing invocations are
-        /// unchanged. Same meaning as `trajectory --pressure-type`.
+        /// How to interpret `--pressure` (MBA-1416): `absolute` is station pressure at your
+        /// altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of value a
+        /// weather report or METAR gives — and is reduced to station pressure using
+        /// `--altitude`. Omitted: the --profile's stored type when its stored pressure flies
+        /// (never for a typed --pressure), else `absolute`. Same meaning as `trajectory
+        /// --pressure-type`.
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
-        /// fog) is read as 100 or 0.
+        /// Relative humidity, percent 0-100. Omitted: the --profile's stored humidity, else 50.
+        /// A sensor reading up to 5 outside that range (101.7 in fog) is read as 100 or 0.
         #[arg(
             long,
             default_value = "50.0",
@@ -2585,7 +2615,8 @@ enum Commands {
         )]
         humidity: f64,
 
-        /// Altitude (feet or meters based on --units)
+        /// Altitude (feet or meters based on --units). Omitted: the --profile's stored
+        /// altitude, else 0
         #[arg(long, default_value = "0.0")]
         altitude: f64,
 
@@ -2614,7 +2645,8 @@ enum Commands {
     /// point within 0.05 Mach of an existing one supersedes it. Rejects a supersonic
     /// observation (Mach above 1.2) outright — that belongs to `true-velocity`, not here.
     Dsf {
-        /// Saved profile to solve, calibrate, and write the DSF point back to.
+        /// Saved profile to solve, calibrate, and write the DSF point back to. It flies the
+        /// profile's bullet, rifle and stored weather whole (`dsf` takes no station flags).
         #[arg(long, value_name = "NAME")]
         saved_profile: String,
 
@@ -2638,7 +2670,10 @@ enum Commands {
 
     /// Moving-target lead table (hold in the direction of target travel)
     Lead {
-        /// Load parameters from saved profile
+        /// Load parameters from a saved profile: its bullet and rifle, and its stored weather
+        /// (temperature, pressure and its type, humidity, altitude, density altitude), each
+        /// station field unless its flag is typed here. A stored density altitude supersedes
+        /// the stored altitude and pressure unless --pressure or --altitude is typed
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
 
@@ -2666,23 +2701,28 @@ enum Commands {
         #[arg(long)]
         sight_height: Option<f64>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units). Omitted: ICAO standard at --altitude (59 F / 15 C at sea level); a typed value always flies as typed
+        /// Temperature (Fahrenheit or Celsius based on --units). Omitted: the --profile's
+        /// stored temperature, else ICAO standard at --altitude (59 F / 15 C at sea level); a
+        /// typed value always flies as typed
         #[arg(long)]
         temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units). Omitted: ICAO standard at --altitude (29.92 inHg / 1013.25 hPa at sea level); a typed value always flies as typed
+        /// Pressure (inHg or hPa based on --units). Omitted: the --profile's stored pressure
+        /// (with its stored --pressure-type), else ICAO standard at --altitude (29.92 inHg /
+        /// 1013.25 hPa at sea level); a typed value always flies as typed
         #[arg(long)]
         pressure: Option<f64>,
-        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) is station pressure
-        /// at your altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of
-        /// value a weather report or METAR gives — and is reduced to station pressure using
-        /// `--altitude`. Omitting this is exactly `absolute`, so existing invocations are
-        /// unchanged. Same meaning as `trajectory --pressure-type`.
+        /// How to interpret `--pressure` (MBA-1416): `absolute` is station pressure at your
+        /// altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of value a
+        /// weather report or METAR gives — and is reduced to station pressure using
+        /// `--altitude`. Omitted: the --profile's stored type when its stored pressure flies
+        /// (never for a typed --pressure), else `absolute`. Same meaning as `trajectory
+        /// --pressure-type`.
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
-        /// fog) is read as 100 or 0.
+        /// Relative humidity, percent 0-100. Omitted: the --profile's stored humidity, else 50.
+        /// A sensor reading up to 5 outside that range (101.7 in fog) is read as 100 or 0.
         #[arg(
             long,
             default_value = "50.0",
@@ -2691,7 +2731,8 @@ enum Commands {
         )]
         humidity: f64,
 
-        /// Altitude (feet or meters based on --units)
+        /// Altitude (feet or meters based on --units). Omitted: the --profile's stored
+        /// altitude, else 0
         #[arg(long, default_value = "0.0")]
         altitude: f64,
 
@@ -2905,7 +2946,10 @@ enum Commands {
 
     /// Generate wind drift card (wind deflection at multiple speeds)
     WindCard {
-        /// Load parameters from saved profile
+        /// Load parameters from a saved profile: its bullet and rifle, and its stored weather
+        /// (temperature, pressure and its type, humidity, altitude, density altitude), each
+        /// station field unless its flag is typed here. A stored density altitude supersedes
+        /// the stored altitude and pressure unless --pressure or --altitude is typed
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
 
@@ -3012,23 +3056,28 @@ enum Commands {
         #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
         sight_offset: Option<f64>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units). Omitted: ICAO standard at --altitude (59 F / 15 C at sea level); a typed value always flies as typed
+        /// Temperature (Fahrenheit or Celsius based on --units). Omitted: the --profile's
+        /// stored temperature, else ICAO standard at --altitude (59 F / 15 C at sea level); a
+        /// typed value always flies as typed
         #[arg(long)]
         temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units). Omitted: ICAO standard at --altitude (29.92 inHg / 1013.25 hPa at sea level); a typed value always flies as typed
+        /// Pressure (inHg or hPa based on --units). Omitted: the --profile's stored pressure
+        /// (with its stored --pressure-type), else ICAO standard at --altitude (29.92 inHg /
+        /// 1013.25 hPa at sea level); a typed value always flies as typed
         #[arg(long)]
         pressure: Option<f64>,
-        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) is station pressure
-        /// at your altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of
-        /// value a weather report or METAR gives — and is reduced to station pressure using
-        /// `--altitude`. Omitting this is exactly `absolute`, so existing invocations are
-        /// unchanged. Same meaning as `trajectory --pressure-type`.
+        /// How to interpret `--pressure` (MBA-1416): `absolute` is station pressure at your
+        /// altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of value a
+        /// weather report or METAR gives — and is reduced to station pressure using
+        /// `--altitude`. Omitted: the --profile's stored type when its stored pressure flies
+        /// (never for a typed --pressure), else `absolute`. Same meaning as `trajectory
+        /// --pressure-type`.
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
-        /// fog) is read as 100 or 0.
+        /// Relative humidity, percent 0-100. Omitted: the --profile's stored humidity, else 50.
+        /// A sensor reading up to 5 outside that range (101.7 in fog) is read as 100 or 0.
         #[arg(
             long,
             default_value = "50.0",
@@ -3037,7 +3086,8 @@ enum Commands {
         )]
         humidity: f64,
 
-        /// Altitude (feet or meters based on --units)
+        /// Altitude (feet or meters based on --units). Omitted: the --profile's stored
+        /// altitude, else 0
         #[arg(long, default_value = "0.0")]
         altitude: f64,
 
@@ -3048,7 +3098,11 @@ enum Commands {
 
     /// Analyze gyroscopic stability (Miller stability factor)
     Stability {
-        /// Load parameters from saved profile
+        /// Load parameters from a saved profile: its mass and diameter, and its stored
+        /// temperature, pressure (with its type), altitude and density altitude, each station
+        /// field unless its flag is typed here (the Miller correction is dry, so no humidity is
+        /// read). A stored density altitude supersedes the stored altitude and pressure unless
+        /// --pressure or --altitude is typed
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
 
@@ -3072,22 +3126,26 @@ enum Commands {
         #[arg(short = 'v', long)]
         velocity: Option<f64>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units; default 59 F / 15 C)
+        /// Temperature (Fahrenheit or Celsius based on --units). Omitted: the --profile's
+        /// stored temperature, else 59 F / 15 C
         #[arg(long)]
         temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units; default 29.92 inHg / 1013.25 hPa)
+        /// Pressure (inHg or hPa based on --units). Omitted: the --profile's stored pressure
+        /// (with its stored --pressure-type), else 29.92 inHg / 1013.25 hPa
         #[arg(long)]
         pressure: Option<f64>,
-        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) is station pressure
-        /// at your altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of
-        /// value a weather report or METAR gives — and is reduced to station pressure using
-        /// `--altitude`. Omitting this is exactly `absolute`, so existing invocations are
-        /// unchanged. Same meaning as `trajectory --pressure-type`.
+        /// How to interpret `--pressure` (MBA-1416): `absolute` is station pressure at your
+        /// altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of value a
+        /// weather report or METAR gives — and is reduced to station pressure using
+        /// `--altitude`. Omitted: the --profile's stored type when its stored pressure flies
+        /// (never for a typed --pressure), else `absolute`. Same meaning as `trajectory
+        /// --pressure-type`.
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Altitude (feet or meters based on --units)
+        /// Altitude (feet or meters based on --units). Omitted: the --profile's stored
+        /// altitude, else 0
         #[arg(long, default_value = "0.0")]
         altitude: f64,
 
@@ -3098,7 +3156,10 @@ enum Commands {
 
     /// Generate comprehensive range table (drop, wind, velocity, energy, ToF)
     RangeTable {
-        /// Load parameters from saved profile
+        /// Load parameters from a saved profile: its bullet and rifle, and its stored weather
+        /// (temperature, pressure and its type, humidity, altitude, density altitude), each
+        /// station field unless its flag is typed here. A stored density altitude supersedes
+        /// the stored altitude and pressure unless --pressure or --altitude is typed
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
 
@@ -3214,23 +3275,28 @@ enum Commands {
         #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
         sight_offset: Option<f64>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units). Omitted: ICAO standard at --altitude (59 F / 15 C at sea level); a typed value always flies as typed
+        /// Temperature (Fahrenheit or Celsius based on --units). Omitted: the --profile's
+        /// stored temperature, else ICAO standard at --altitude (59 F / 15 C at sea level); a
+        /// typed value always flies as typed
         #[arg(long)]
         temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units). Omitted: ICAO standard at --altitude (29.92 inHg / 1013.25 hPa at sea level); a typed value always flies as typed
+        /// Pressure (inHg or hPa based on --units). Omitted: the --profile's stored pressure
+        /// (with its stored --pressure-type), else ICAO standard at --altitude (29.92 inHg /
+        /// 1013.25 hPa at sea level); a typed value always flies as typed
         #[arg(long)]
         pressure: Option<f64>,
-        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) is station pressure
-        /// at your altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of
-        /// value a weather report or METAR gives — and is reduced to station pressure using
-        /// `--altitude`. Omitting this is exactly `absolute`, so existing invocations are
-        /// unchanged. Same meaning as `trajectory --pressure-type`.
+        /// How to interpret `--pressure` (MBA-1416): `absolute` is station pressure at your
+        /// altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of value a
+        /// weather report or METAR gives — and is reduced to station pressure using
+        /// `--altitude`. Omitted: the --profile's stored type when its stored pressure flies
+        /// (never for a typed --pressure), else `absolute`. Same meaning as `trajectory
+        /// --pressure-type`.
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
-        /// fog) is read as 100 or 0.
+        /// Relative humidity, percent 0-100. Omitted: the --profile's stored humidity, else 50.
+        /// A sensor reading up to 5 outside that range (101.7 in fog) is read as 100 or 0.
         #[arg(
             long,
             default_value = "50.0",
@@ -3239,7 +3305,8 @@ enum Commands {
         )]
         humidity: f64,
 
-        /// Altitude (feet or meters based on --units)
+        /// Altitude (feet or meters based on --units). Omitted: the --profile's stored
+        /// altitude, else 0
         #[arg(long, default_value = "0.0")]
         altitude: f64,
 
@@ -3258,9 +3325,12 @@ enum Commands {
         #[arg(long = "load", value_name = "SPEC")]
         loads: Vec<String>,
 
-        /// A saved profile as a load (repeatable; mixable with --load). Like
-        /// range-table, a profile's bc_segments/drag_curve are not yet consumed
-        /// here — the scalar BC is used.
+        /// A saved profile as a load (repeatable; mixable with --load). Like range-table, a
+        /// profile's bc_segments/drag_curve are not yet consumed here — the scalar BC is used.
+        /// A profile load flies its stored weather (temperature, pressure and its type,
+        /// humidity, altitude, density altitude) for each station flag not typed, so two
+        /// profiles can fly different air (compare says so, and reports each load's in JSON);
+        /// type the flags to fly one air for every load
         #[arg(long = "profile", value_name = "NAME")]
         profiles: Vec<String>,
 
@@ -3346,23 +3416,30 @@ enum Commands {
         #[arg(long, value_name = "OFFSET", allow_hyphen_values = true)]
         sight_offset: Option<f64>,
 
-        /// Temperature (F or C based on --units)
+        /// Temperature (F or C based on --units), for every load. Omitted: a --profile load
+        /// flies the profile's stored temperature, a --load spec ICAO standard at --altitude
+        /// (59 F / 15 C at sea level); a typed value always flies as typed
         #[arg(long)]
         temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units)
+        /// Pressure (inHg or hPa based on --units), for every load. Omitted: a --profile load
+        /// flies the profile's stored pressure (with its stored --pressure-type), a --load spec
+        /// ICAO standard at --altitude (29.92 inHg / 1013.25 hPa at sea level); a typed value
+        /// always flies as typed
         #[arg(long)]
         pressure: Option<f64>,
-        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) is station pressure
-        /// at your altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of
-        /// value a weather report or METAR gives — and is reduced to station pressure using
-        /// `--altitude`. Omitting this is exactly `absolute`, so existing invocations are
-        /// unchanged. Same meaning as `trajectory --pressure-type`.
+        /// How to interpret `--pressure` (MBA-1416): `absolute` is station pressure at your
+        /// altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of value a
+        /// weather report or METAR gives — and is reduced to station pressure using
+        /// `--altitude`. Omitted: a --profile load's stored type when its stored pressure flies
+        /// (never for a typed --pressure), else `absolute`. Same meaning as `trajectory
+        /// --pressure-type`.
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
-        /// fog) is read as 100 or 0.
+        /// Relative humidity, percent 0-100, for every load. Omitted: a --profile load flies
+        /// the profile's stored humidity, a --load spec 50. A sensor reading up to 5 outside
+        /// that range (101.7 in fog) is read as 100 or 0.
         #[arg(
             long,
             default_value = "50.0",
@@ -3371,7 +3448,8 @@ enum Commands {
         )]
         humidity: f64,
 
-        /// Altitude (feet or meters based on --units)
+        /// Altitude (feet or meters based on --units), for every load. Omitted: a --profile
+        /// load flies the profile's stored altitude, a --load spec 0
         #[arg(long, default_value = "0.0")]
         altitude: f64,
 
@@ -3435,7 +3513,10 @@ enum Commands {
         #[arg(long, value_name = "SPEC")]
         target: Option<String>,
 
-        /// Load parameters from a saved profile
+        /// Load parameters from a saved profile: its bullet and rifle, and its stored weather
+        /// (temperature, pressure and its type, humidity, altitude, density altitude), each
+        /// station field unless its flag is typed here. A stored density altitude supersedes
+        /// the stored altitude and pressure unless --pressure or --altitude is typed
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
 
@@ -3469,20 +3550,29 @@ enum Commands {
         #[arg(long)]
         sight_height: Option<f64>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units). Omitted: ICAO standard at --altitude (59 F / 15 C at sea level); a typed value always flies as typed
+        /// Temperature (Fahrenheit or Celsius based on --units). Omitted: the --profile's
+        /// stored temperature, else ICAO standard at --altitude (59 F / 15 C at sea level); a
+        /// typed value always flies as typed
         #[arg(long)]
         temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units). Omitted: ICAO standard at --altitude (29.92 inHg / 1013.25 hPa at sea level); a typed value always flies as typed
+        /// Pressure (inHg or hPa based on --units). Omitted: the --profile's stored pressure
+        /// (with its stored --pressure-type), else ICAO standard at --altitude (29.92 inHg /
+        /// 1013.25 hPa at sea level); a typed value always flies as typed
         #[arg(long)]
         pressure: Option<f64>,
 
-        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) or `qnh`
+        /// How to interpret `--pressure` (MBA-1416): `absolute` is station pressure at your
+        /// altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of value a
+        /// weather report or METAR gives — and is reduced to station pressure using
+        /// `--altitude`. Omitted: the --profile's stored type when its stored pressure flies
+        /// (never for a typed --pressure), else `absolute`. Same meaning as `trajectory
+        /// --pressure-type`.
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
-        /// fog) is read as 100 or 0.
+        /// Relative humidity, percent 0-100. Omitted: the --profile's stored humidity, else 50.
+        /// A sensor reading up to 5 outside that range (101.7 in fog) is read as 100 or 0.
         #[arg(
             long,
             default_value = "50.0",
@@ -3491,7 +3581,8 @@ enum Commands {
         )]
         humidity: f64,
 
-        /// Altitude (feet or meters based on --units)
+        /// Altitude (feet or meters based on --units). Omitted: the --profile's stored
+        /// altitude, else 0
         #[arg(long, default_value = "0.0")]
         altitude: f64,
 
@@ -3974,7 +4065,9 @@ enum ReticleAction {
         reticle_json: Option<PathBuf>,
 
         /// Saved profile supplying the reticle (`profile save --reticle-json`) and, for
-        /// --range, the load and conditions
+        /// --range, the bullet, the rifle and the stored weather (temperature, pressure and its
+        /// type, humidity, altitude, density altitude), each station field unless its flag is
+        /// typed here
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
 
@@ -4026,20 +4119,29 @@ enum ReticleAction {
         #[arg(long)]
         sight_height: Option<f64>,
 
-        /// Temperature (Fahrenheit or Celsius based on --units). Omitted: ICAO standard at --altitude (59 F / 15 C at sea level); a typed value always flies as typed
+        /// Temperature (Fahrenheit or Celsius based on --units). Omitted: the --profile's
+        /// stored temperature, else ICAO standard at --altitude (59 F / 15 C at sea level); a
+        /// typed value always flies as typed
         #[arg(long)]
         temperature: Option<f64>,
 
-        /// Pressure (inHg or hPa based on --units). Omitted: ICAO standard at --altitude (29.92 inHg / 1013.25 hPa at sea level); a typed value always flies as typed
+        /// Pressure (inHg or hPa based on --units). Omitted: the --profile's stored pressure
+        /// (with its stored --pressure-type), else ICAO standard at --altitude (29.92 inHg /
+        /// 1013.25 hPa at sea level); a typed value always flies as typed
         #[arg(long)]
         pressure: Option<f64>,
 
-        /// How to interpret `--pressure` (MBA-1416): `absolute` (default) or `qnh`
+        /// How to interpret `--pressure` (MBA-1416): `absolute` is station pressure at your
+        /// altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of value a
+        /// weather report or METAR gives — and is reduced to station pressure using
+        /// `--altitude`. Omitted: the --profile's stored type when its stored pressure flies
+        /// (never for a typed --pressure), else `absolute`. Same meaning as `trajectory
+        /// --pressure-type`.
         #[arg(long, value_enum)]
         pressure_type: Option<PressureReferenceMode>,
 
-        /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in
-        /// fog) is read as 100 or 0.
+        /// Relative humidity, percent 0-100. Omitted: the --profile's stored humidity, else 50.
+        /// A sensor reading up to 5 outside that range (101.7 in fog) is read as 100 or 0.
         #[arg(
             long,
             default_value = "50.0",
@@ -4048,7 +4150,8 @@ enum ReticleAction {
         )]
         humidity: f64,
 
-        /// Altitude (feet or meters based on --units)
+        /// Altitude (feet or meters based on --units). Omitted: the --profile's stored
+        /// altitude, else 0
         #[arg(long, default_value = "0.0")]
         altitude: f64,
 
@@ -4169,7 +4272,10 @@ struct ReticleGenerateCommon {
 /// two of the three take it as an input and the third solves for it.
 #[derive(clap::Args, Debug, Clone)]
 struct InverseSolverLoadArgs {
-    /// Load parameters from a saved profile
+    /// Load parameters from a saved profile: its bullet and rifle, and its stored weather
+    /// (temperature, pressure and its type, humidity, altitude, density altitude), each station
+    /// field unless its flag is typed here. A stored density altitude supersedes the stored
+    /// altitude and pressure unless --pressure or --altitude is typed
     #[arg(long, value_name = "NAME")]
     profile: Option<String>,
 
@@ -4197,20 +4303,28 @@ struct InverseSolverLoadArgs {
     #[arg(long)]
     sight_height: Option<f64>,
 
-    /// Temperature (Fahrenheit or Celsius based on --units). Omitted: ICAO standard at --altitude (59 F / 15 C at sea level); a typed value always flies as typed
+    /// Temperature (Fahrenheit or Celsius based on --units). Omitted: the --profile's stored
+    /// temperature, else ICAO standard at --altitude (59 F / 15 C at sea level); a typed value
+    /// always flies as typed
     #[arg(long)]
     temperature: Option<f64>,
 
-    /// Pressure (inHg or hPa based on --units). Omitted: ICAO standard at --altitude (29.92 inHg / 1013.25 hPa at sea level); a typed value always flies as typed
+    /// Pressure (inHg or hPa based on --units). Omitted: the --profile's stored pressure (with
+    /// its stored --pressure-type), else ICAO standard at --altitude (29.92 inHg / 1013.25 hPa
+    /// at sea level); a typed value always flies as typed
     #[arg(long)]
     pressure: Option<f64>,
 
-    /// How to interpret `--pressure` (MBA-1416): `absolute` (default) or `qnh`
+    /// How to interpret `--pressure` (MBA-1416): `absolute` is station pressure at your
+    /// altitude; `qnh` is a sea-level-corrected altimeter setting — the kind of value a weather
+    /// report or METAR gives — and is reduced to station pressure using `--altitude`. Omitted:
+    /// the --profile's stored type when its stored pressure flies (never for a typed
+    /// --pressure), else `absolute`. Same meaning as `trajectory --pressure-type`.
     #[arg(long, value_enum)]
     pressure_type: Option<PressureReferenceMode>,
 
-    /// Relative humidity, percent 0-100. A sensor reading up to 5 outside that range (101.7 in fog)
-    /// is read as 100 or 0.
+    /// Relative humidity, percent 0-100. Omitted: the --profile's stored humidity, else 50. A
+    /// sensor reading up to 5 outside that range (101.7 in fog) is read as 100 or 0.
     #[arg(
         long,
         default_value = "50.0",
@@ -4219,7 +4333,8 @@ struct InverseSolverLoadArgs {
     )]
     humidity: f64,
 
-    /// Altitude (feet or meters based on --units)
+    /// Altitude (feet or meters based on --units). Omitted: the --profile's stored altitude,
+    /// else 0
     #[arg(long, default_value = "0.0")]
     altitude: f64,
 
@@ -4238,13 +4353,19 @@ impl InverseSolverLoadArgs {
     ///
     /// Returns the loaded profile too, so a caller that needs another field from it (a zero
     /// distance, typically) does not load it a second time.
+    ///
+    /// `typed` is the station as typed on the command line ([`TypedStation::typed_in`]): the
+    /// air flown is each reading typed, else the profile's stored value, else the default
+    /// ([`flown_profile_station`]). The profile is converted to `units` like every other
+    /// consumer's, so a profile saved in the other unit system flies its own bullet and air.
     fn resolve(
         &self,
+        typed: &TypedStation,
         zero_distance: Option<f64>,
         units: UnitSystem,
     ) -> Result<(HoldCurveLoad, Option<ProfileData>), Box<dyn Error>> {
         let profile = match self.profile.as_deref() {
-            Some(name) => Some(load_profile(name)?),
+            Some(name) => Some(load_profile_for_units(name, units)?),
             None => None,
         };
         let require = |value: Option<f64>, flag: &str| -> Result<f64, Box<dyn Error>> {
@@ -4275,17 +4396,10 @@ impl InverseSolverLoadArgs {
                 UnitSystem::Imperial => 2.0,
                 UnitSystem::Metric => 50.0,
             });
-        // 0.49.0: presence from the flags, before the defaults collapse it.
-        let station_presence =
-            StationAtmospherePresence::new(self.temperature.is_some(), self.pressure.is_some());
-        let temperature = UnitConverter::resolve_temperature(self.temperature, units)?;
-        // MBA-1416: a declared QNH reduces against this command's own --altitude.
-        let pressure = apply_pressure_mode(
-            UnitConverter::resolve_pressure(self.pressure, units)?,
-            self.altitude,
-            self.pressure_type,
-            units,
-        );
+        // The air flown: each reading typed, else stored in the profile, else the default; a
+        // declared QNH reduces at the altitude flown (MBA-1416).
+        let station =
+            flown_profile_station(typed, self.profile.as_deref(), profile.as_ref(), units)?;
 
         let load = HoldCurveLoad {
             velocity_mps: UnitConverter::velocity_to_metric(velocity, units),
@@ -4295,13 +4409,13 @@ impl InverseSolverLoadArgs {
             drag_model: self.drag_model,
             sight_height_m: UnitConverter::sight_height_to_metric(sight_height, units),
             zero_distance_m: UnitConverter::distance_to_metric(zero_distance, units),
-            temperature_c: UnitConverter::temperature_to_metric(temperature, units),
-            pressure_hpa: UnitConverter::pressure_to_metric(pressure, units),
-            humidity: self.humidity,
-            altitude_m: UnitConverter::altitude_to_metric(self.altitude, units),
+            temperature_c: UnitConverter::temperature_to_metric(station.temperature, units),
+            pressure_hpa: UnitConverter::pressure_to_metric(station.pressure, units),
+            humidity: station.humidity,
+            altitude_m: UnitConverter::altitude_to_metric(station.altitude, units),
             wind_speed_mps: UnitConverter::wind_to_metric(self.wind_speed, units),
             wind_direction_deg: self.wind_direction.degrees,
-            station_presence,
+            station_presence: station.presence,
         };
         // The air refused up front, in the CLI's words, before any of the four inverse
         // solvers searches: one whose every trial fails on the air would otherwise blame a
@@ -4315,7 +4429,7 @@ impl InverseSolverLoadArgs {
             },
             load.station_presence,
             units,
-            SHOT_AIR_FLAGS,
+            station.labels(),
         )?;
         Ok((load, profile))
     }
@@ -4394,11 +4508,17 @@ enum ProfileAction {
         #[arg(long)]
         zero_distance: Option<f64>,
 
-        /// Temperature to store (Fahrenheit for imperial, Celsius for metric). A typed value is stored as a reading and always flies as typed; omitted, 59 F / 15 C is stored unmarked and flies ICAO standard at a run's real altitude
+        /// Temperature to store (Fahrenheit for imperial, Celsius for metric). A typed value is
+        /// stored as a reading and always flies as typed; omitted, 59 F / 15 C is stored
+        /// unmarked and is no reading, so a run flies its own default in its place (ICAO
+        /// standard at the run's altitude)
         #[arg(long)]
         temperature: Option<f64>,
 
-        /// Pressure to store (inHg for imperial, hPa for metric). A typed value is stored as a reading and always flies as typed; omitted, 29.92 inHg / 1013.25 hPa is stored unmarked and flies ICAO standard at a run's real altitude
+        /// Pressure to store (inHg for imperial, hPa for metric). A typed value is stored as a
+        /// reading and always flies as typed; omitted, 29.92 inHg / 1013.25 hPa is stored
+        /// unmarked and is no reading, so a run flies its own default in its place (ICAO
+        /// standard at the run's altitude, in the run's unit system)
         #[arg(long)]
         pressure: Option<f64>,
 
@@ -4425,10 +4545,10 @@ enum ProfileAction {
         /// Default density altitude (feet imperial / meters metric; MBA-1366). See
         /// `trajectory --density-altitude` for the full precedence rule. Stored in the saved
         /// profile alongside `temperature`/`pressure`/`altitude`/`humidity`, and read back as a
-        /// set: `trajectory --saved-profile` honours the stored atmosphere (MBA-1417), and since
-        /// 0.49.0 `plan-truing --profile` and `dsf --saved-profile` honour a stored density
-        /// altitude too, whenever the run supplies no pressure or altitude of its own. A typed
-        /// `--temperature` saved with it is the explicit temperature at that density altitude.
+        /// set by every command that takes the saved profile (MBA-1417; every one since
+        /// 0.50.0): a stored density altitude flies whenever the run supplies no pressure or
+        /// altitude of its own. A typed `--temperature` saved with it is the explicit
+        /// temperature at that density altitude.
         // MBA-1420: bound the flag so an out-of-range value fails naming --density-altitude.
         // Without this an extreme value drives the pressure inverse negative and surfaces as
         // "atmosphere.pressure must be finite", pointing at a field the user never typed. The
@@ -6033,7 +6153,13 @@ fn read_stored_profile(path: &std::path::Path) -> Result<Option<ProfileData>, Bo
     Ok(Some(serde_json::from_str(&content)?))
 }
 
-/// Loads a saved profile by name and checks the stored values a flight trusts.
+/// Loads a saved profile by name and checks the stored values every use of it trusts.
+///
+/// The stored weather is NOT checked here: [`resolve_profile_station`] checks each stored
+/// reading where a run flies it (a stored humidity outside the sensor band, air that cannot
+/// exist), naming the profile field and the file, so a command that never reads the stored air
+/// (`stability`'s dry Miller correction reads no humidity, `dial-plan` none of it) or a run that
+/// types the field instead never refuses it.
 fn load_profile(name: &str) -> Result<ProfileData, Box<dyn Error>> {
     let path = profile_file_path(name)?;
     let Some(profile) = read_stored_profile(&path)? else {
@@ -6051,16 +6177,6 @@ fn load_profile(name: &str) -> Result<ProfileData, Box<dyn Error>> {
     if let Some(cf) = profile.windage_cf {
         validate_tracking_cf(cf, "profile field windage_cf")?;
     }
-    // The stored humidity goes through the one validator ON LOAD too,
-    // so a hand-edited 150 % is a named error, never a clamped flight. The error names the file
-    // the fix is made in. This loader is for flights only (`profile show` and the zero-set
-    // commands read the stored file through `inspect_profile`), so it keeps the humidity the
-    // flight flies: a stored band reading of 102 is 100 here, and every echo
-    // of the air a run flies says 100.
-    let mut profile = profile;
-    profile.humidity = profile
-        .flown_humidity()
-        .map_err(|error| format!("{error} (the profile is stored at {})", path.display()))?;
     Ok(profile)
 }
 
@@ -6144,6 +6260,387 @@ fn resolve_tracking_cf(
 /// Load a profile for calculation, converting its stored display units to the active CLI units.
 fn load_profile_for_units(name: &str, units: UnitSystem) -> Result<ProfileData, Box<dyn Error>> {
     load_profile(name)?.converted_to(units)
+}
+
+// ============================================================================
+// A saved profile's stored weather, flown by every command that takes one (0.50.0)
+// ============================================================================
+
+/// Where one station reading a run flies came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StationSource {
+    /// The run supplied it: a typed flag (and for `trajectory`, a `--location` or `--profile`
+    /// CSV cell, which beat a saved profile the same way).
+    Typed,
+    /// The saved profile stored it.
+    Profile,
+    /// Neither did: the command's documented default.
+    Default,
+}
+
+/// The station readings a run supplied itself, in the run's display units, each `None` when the
+/// run left it out. A typed value equal to the default (`--humidity 50`, `--altitude 0`) is a
+/// value like any other and beats a stored one, so these come from what was typed, never from a
+/// comparison with the default ([`TypedStation::typed_in`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct TypedStation {
+    /// Temperature, °F imperial / °C metric.
+    temperature: Option<f64>,
+    /// Pressure, inHg imperial / hPa metric, as entered (a QNH before its reduction).
+    pressure: Option<f64>,
+    /// `--pressure-type`.
+    pressure_type: Option<PressureReferenceMode>,
+    /// Relative humidity, percent, through the sensor band.
+    humidity: Option<f64>,
+    /// Altitude, feet imperial / meters metric.
+    altitude: Option<f64>,
+    /// Density altitude, feet imperial / meters metric: `trajectory`'s `--density-altitude` or
+    /// `--location` CSV cell. No other command takes one, so for them only a stored one flies.
+    density_altitude: Option<f64>,
+    /// The command flies no humidity (`stability`'s Miller correction is dry), so a stored
+    /// humidity is never read, and so never refused.
+    dry: bool,
+}
+
+impl TypedStation {
+    /// The station flags typed on the command line `matches` holds, read from the deepest
+    /// subcommand's arguments by their ids (`temperature`, `pressure`, `pressure_type`,
+    /// `humidity`, `altitude`); a command without one of them reads it as not typed. A flag with
+    /// a clap default (`--humidity 50`, `--altitude 0`) counts only when it was typed, and a
+    /// typed temperature or pressure is range-checked as each command checks it.
+    fn typed_in(matches: &clap::ArgMatches, units: UnitSystem) -> Result<Self, String> {
+        let mut leaf = matches;
+        while let Some((_, sub)) = leaf.subcommand() {
+            leaf = sub;
+        }
+        let typed = |id: &str| -> Option<f64> {
+            let value = leaf.try_get_one::<f64>(id).ok().flatten().copied()?;
+            (leaf.value_source(id) == Some(ValueSource::CommandLine)).then_some(value)
+        };
+        Ok(Self {
+            temperature: typed("temperature")
+                .map(|t| UnitConverter::resolve_temperature(Some(t), units))
+                .transpose()?,
+            pressure: typed("pressure")
+                .map(|p| UnitConverter::resolve_pressure(Some(p), units))
+                .transpose()?,
+            pressure_type: leaf
+                .try_get_one::<PressureReferenceMode>("pressure_type")
+                .ok()
+                .flatten()
+                .copied(),
+            humidity: typed("humidity"),
+            altitude: typed("altitude"),
+            density_altitude: None,
+            dry: false,
+        })
+    }
+
+    /// The same readings for a command that flies no humidity.
+    fn dry(self) -> Self {
+        Self {
+            humidity: None,
+            dry: true,
+            ..self
+        }
+    }
+}
+
+/// Whether a saved profile's stored temperature is a reading, for a run in `units` (the profile
+/// already converted to them): marked as one (0.49.0+), or, in an unmarked profile, anything but
+/// the 59 °F / 15 °C `profile save` stores for an omitted `--temperature`. An unmarked default
+/// is no stored reading, so the command's own default flies in its place (the same bits in
+/// either unit system: 59 °F is exactly 15 °C).
+fn saved_temperature_is_reading(profile: &ProfileData, units: UnitSystem) -> bool {
+    const SAME_VALUE_C: f64 = 1e-9;
+    profile.temperature_supplied
+        || (UnitConverter::temperature_to_metric(profile.temperature, units) - 15.0).abs()
+            >= SAME_VALUE_C
+}
+
+/// The station a run flies, field by field, by the one rule every command that takes a saved
+/// profile follows: a typed flag wins, then the profile's stored value, then the command's
+/// documented default. Display units of the run. Built by [`resolve_profile_station`].
+#[derive(Debug, Clone, PartialEq)]
+struct ProfileStation {
+    /// Temperature, °F / °C.
+    temperature: f64,
+    /// Whether the temperature is a reading (typed, or a marked stored one): `false` lets the
+    /// legacy rule fly the ICAO standard at a real altitude for the sea-level default.
+    temperature_supplied: bool,
+    temperature_source: StationSource,
+    /// Pressure, inHg / hPa, as entered (a QNH before its reduction).
+    pressure: f64,
+    /// Whether the pressure is a reading (as `temperature_supplied`).
+    pressure_supplied: bool,
+    pressure_source: StationSource,
+    /// The pressure type in use: the typed one, else the stored one whenever no pressure was
+    /// typed (a stored type describes the stored pressure and nothing else, MBA-1397), else
+    /// `None` (absolute).
+    pressure_type: Option<PressureReferenceMode>,
+    /// Whether `--pressure-type` was typed.
+    pressure_type_typed: bool,
+    /// Relative humidity, percent, the one the flight flies (a stored band reading is the end
+    /// it reads as). The default for a command that flies no humidity.
+    humidity: f64,
+    humidity_source: StationSource,
+    /// Altitude, feet / meters.
+    altitude: f64,
+    altitude_source: StationSource,
+    /// The density altitude that flies, feet / meters, and where it came from: the run's own,
+    /// else the profile's stored one when the run supplies no pressure or altitude of its own
+    /// for it to supersede (MBA-1417).
+    density_altitude: Option<(f64, StationSource)>,
+    /// The saved profile's name, for the labels of its fields.
+    profile_name: Option<String>,
+}
+
+/// Resolve the station a run flies from what it typed and the saved profile it loaded (already
+/// converted to `units`), by the one rule: a typed flag, else the stored value, else the
+/// command's documented default. Every command that takes a saved profile goes through here.
+///
+/// - A stored temperature or pressure keeps its presence marker, so a typed-at-save reading
+///   flies as typed and a legacy unmarked one keeps the legacy rule. The value `profile save`
+///   stores for an omitted flag (59 °F / 15 °C, 29.92 inHg / 1013.25 hPa) is no stored reading,
+///   so the command's own default flies, the same one it flies with no profile.
+/// - The stored pressure type applies whenever no pressure was typed, and never to a typed one.
+/// - A stored density altitude flies only when the run types no pressure, altitude or density
+///   altitude of its own; it then supersedes the stored altitude and pressure.
+/// - A stored humidity is checked where it flies: outside the sensor band it is refused,
+///   naming the profile field and the file to edit (`profile` carries the name the profile was
+///   loaded by). A command that flies no humidity, or a typed `--humidity`, never reads it.
+fn resolve_profile_station(
+    typed: &TypedStation,
+    profile: Option<(&str, &ProfileData)>,
+    units: UnitSystem,
+) -> Result<ProfileStation, String> {
+    use StationSource::{Default as Fallback, Profile, Typed};
+    let stored = profile.map(|(_, data)| data);
+    let (temperature, temperature_supplied, temperature_source) = match (typed.temperature, stored)
+    {
+        (Some(value), _) => (value, true, Typed),
+        (None, Some(p)) if saved_temperature_is_reading(p, units) => {
+            (p.temperature, p.temperature_supplied, Profile)
+        }
+        _ => (
+            UnitConverter::resolve_temperature(None, units)?,
+            false,
+            Fallback,
+        ),
+    };
+    let (pressure, pressure_supplied, pressure_source) = match (typed.pressure, stored) {
+        (Some(value), _) => (value, true, Typed),
+        (None, Some(p)) if saved_pressure_is_reading(p, units) => {
+            (p.pressure, p.pressure_supplied, Profile)
+        }
+        _ => (
+            UnitConverter::resolve_pressure(None, units)?,
+            false,
+            Fallback,
+        ),
+    };
+    let pressure_type = match (typed.pressure_type, stored) {
+        (Some(mode), _) => Some(mode),
+        (None, Some(p)) if typed.pressure.is_none() => Some(
+            parse_pressure_reference_profile_field(p.pressure_reference.as_deref())?,
+        ),
+        _ => None,
+    };
+    let (humidity, humidity_source) = match (typed.dry, typed.humidity, profile) {
+        (true, _, _) => (DEFAULT_HUMIDITY_PERCENT, Fallback),
+        (false, Some(value), _) => (value, Typed),
+        (false, None, Some((name, p))) => {
+            let flown = p
+                .flown_humidity()
+                .map_err(|error| match profile_file_path(name) {
+                    Ok(path) => format!("{error} (the profile is stored at {})", path.display()),
+                    Err(_) => error,
+                })?;
+            (flown, Profile)
+        }
+        (false, None, None) => (DEFAULT_HUMIDITY_PERCENT, Fallback),
+    };
+    let (altitude, altitude_source) = match (typed.altitude, stored) {
+        (Some(value), _) => (value, Typed),
+        (None, Some(p)) => (p.altitude, Profile),
+        _ => (0.0, Fallback),
+    };
+    let density_altitude = match typed.density_altitude {
+        Some(value) => Some((value, Typed)),
+        None if typed.pressure.is_none() && typed.altitude.is_none() => stored
+            .and_then(|p| p.density_altitude)
+            .map(|value| (value, Profile)),
+        None => None,
+    };
+    Ok(ProfileStation {
+        temperature,
+        temperature_supplied,
+        temperature_source,
+        pressure,
+        pressure_supplied,
+        pressure_source,
+        pressure_type,
+        pressure_type_typed: typed.pressure_type.is_some(),
+        humidity,
+        humidity_source,
+        altitude,
+        altitude_source,
+        density_altitude,
+        profile_name: stored.map(|p| p.name.clone()),
+    })
+}
+
+/// The station a calculator command flies (display units), with the presence of each reading
+/// and the name of each one the way the user can see it, from [`ProfileStation::flown`].
+#[derive(Debug, Clone, PartialEq)]
+struct FlownStation {
+    /// Temperature, °F / °C.
+    temperature: f64,
+    /// Station pressure, inHg / hPa: a QNH already reduced at `altitude`.
+    pressure: f64,
+    /// Relative humidity, percent.
+    humidity: f64,
+    /// Altitude, feet / meters.
+    altitude: f64,
+    /// Which readings fly as given.
+    presence: StationAtmospherePresence,
+    /// Where each reading came from, in [`SHOT_AIR_FLAGS`] order: the flag, or the profile field.
+    labels: [String; 4],
+}
+
+impl FlownStation {
+    /// The labels as `&str`, for [`refuse_cli_air`].
+    fn labels(&self) -> [&str; 4] {
+        self.labels.each_ref().map(String::as_str)
+    }
+
+    /// The same air in metric (°C, hPa, percent, m), as the solvers take it.
+    fn metric(&self, units: UnitSystem) -> AtmosphericConditions {
+        AtmosphericConditions {
+            temperature: UnitConverter::temperature_to_metric(self.temperature, units),
+            pressure: UnitConverter::pressure_to_metric(self.pressure, units),
+            humidity: self.humidity,
+            altitude: UnitConverter::altitude_to_metric(self.altitude, units),
+        }
+    }
+
+    /// Whether a solve of this air and one of `other` fly the same air.
+    fn same_air(&self, other: &Self) -> bool {
+        [
+            (self.temperature, other.temperature),
+            (self.pressure, other.pressure),
+            (self.humidity, other.humidity),
+            (self.altitude, other.altitude),
+        ]
+        .iter()
+        .all(|(a, b)| a.to_bits() == b.to_bits())
+            && self.presence == other.presence
+    }
+}
+
+impl ProfileStation {
+    /// Each reading's name where the user can see it, in [`SHOT_AIR_FLAGS`] order (humidity,
+    /// temperature, pressure, altitude): the flag for a typed or default value, `profile 'NAME'
+    /// field humidity` for a stored one. A stored density altitude supplies the pressure and the
+    /// altitude.
+    fn air_labels(&self) -> [String; 4] {
+        let name = self.profile_name.as_deref().unwrap_or_default();
+        let label = |source: StationSource, field: &str, flag: &str| match source {
+            StationSource::Profile => format!("profile '{name}' field {field}"),
+            StationSource::Typed | StationSource::Default => flag.to_string(),
+        };
+        let stored_density_altitude =
+            matches!(self.density_altitude, Some((_, StationSource::Profile)));
+        let derived = |source: StationSource, field: &str, flag: &str| {
+            if stored_density_altitude {
+                format!("profile '{name}' field density_altitude")
+            } else {
+                label(source, field, flag)
+            }
+        };
+        [
+            label(self.humidity_source, "humidity", SHOT_AIR_FLAGS[0]),
+            label(self.temperature_source, "temperature", SHOT_AIR_FLAGS[1]),
+            derived(self.pressure_source, "pressure", SHOT_AIR_FLAGS[2]),
+            derived(self.altitude_source, "altitude", SHOT_AIR_FLAGS[3]),
+        ]
+    }
+
+    /// Whether the stored pressure is a reading flown as a QNH (stored or typed type): it then
+    /// flies its reduced value as a reading. A profile written before 0.49.0 has no marker, and
+    /// its QNH 1031 hPa at 150 m reduces to 1012.86 hPa, inside the legacy band; the absolute
+    /// rule the reduced value goes through would swap it for ICAO air.
+    fn stored_qnh_reading(&self) -> bool {
+        self.pressure_source == StationSource::Profile
+            && self.pressure_type == Some(PressureReferenceMode::Qnh)
+    }
+
+    /// The station a calculator command (`come-ups`, `range-table`, `wind-card`, `mpbr`,
+    /// `lead`, `compare`, `hold-corridor`, the inverse solvers, `reticle hold`, `stability`,
+    /// `plan-truing`) flies: a density altitude's derived triple with both readings supplied;
+    /// otherwise the pressure reduced by its type at the altitude flown
+    /// ([`apply_pressure_mode`]), each reading's presence as resolved, and a stored QNH reading
+    /// flown as a reading. Says so on stderr when a density altitude supersedes a typed
+    /// `--pressure-type`.
+    fn flown(&self, units: UnitSystem) -> FlownStation {
+        let labels = self.air_labels();
+        match self.density_altitude {
+            Some((density_altitude, _)) => {
+                if self.pressure_type_typed {
+                    eprintln!(
+                        "note: the saved profile's density altitude supersedes --pressure-type \
+                         (station pressure is derived from density altitude instead)"
+                    );
+                }
+                let da_m = UnitConverter::altitude_to_metric(density_altitude, units);
+                let explicit_temp_c = self
+                    .temperature_supplied
+                    .then(|| UnitConverter::temperature_to_metric(self.temperature, units));
+                let (da_altitude_m, da_temp_c, da_pressure_hpa) =
+                    ballistics_engine::atmosphere::resolve_atmosphere_for_density_altitude(
+                        da_m,
+                        explicit_temp_c,
+                    );
+                // The derived triple flies authoritatively, as on trajectory's
+                // density-altitude path.
+                FlownStation {
+                    temperature: UnitConverter::temperature_from_metric(da_temp_c, units),
+                    pressure: UnitConverter::pressure_from_metric(da_pressure_hpa, units),
+                    humidity: self.humidity,
+                    altitude: UnitConverter::altitude_from_metric(da_altitude_m, units),
+                    presence: StationAtmospherePresence::BOTH,
+                    labels,
+                }
+            }
+            None => FlownStation {
+                temperature: self.temperature,
+                pressure: apply_pressure_mode(
+                    self.pressure,
+                    self.altitude,
+                    self.pressure_type,
+                    units,
+                ),
+                humidity: self.humidity,
+                altitude: self.altitude,
+                presence: StationAtmospherePresence::new(
+                    self.temperature_supplied,
+                    self.pressure_supplied || self.stored_qnh_reading(),
+                ),
+                labels,
+            },
+        }
+    }
+}
+
+/// [`resolve_profile_station`] then [`ProfileStation::flown`]: the station a calculator command
+/// flies from what it typed and the profile it loaded by `name`.
+fn flown_profile_station(
+    typed: &TypedStation,
+    name: Option<&str>,
+    profile: Option<&ProfileData>,
+    units: UnitSystem,
+) -> Result<FlownStation, String> {
+    Ok(resolve_profile_station(typed, name.zip(profile), units)?.flown(units))
 }
 
 /// The result of [`resolve_zero_selection`] (MBA-1360): which zero distance this run
@@ -7214,19 +7711,24 @@ fn solve_profile_for_dsf(
         UnitSystem::Metric => bore_height_default_display * 0.001,
     };
 
-    // 0.49.0: the profile's air as a SET, the way `trajectory --saved-profile` reads it.
-    // A stored density altitude flies its derived station triple authoritatively (both
-    // readings supplied); a marked stored temperature is its explicit temperature. A stored
-    // `pressure_reference` of qnh is reduced to station pressure at the profile's altitude
-    // before use. Otherwise each reading's presence is the profile's marker (a profile written
-    // before 0.49.0 has none and keeps the legacy rule).
+    // The profile's air as a SET, through the one resolver every command that takes a saved
+    // profile uses, with nothing typed (`dsf` takes no station flags). A stored density altitude flies its derived station triple
+    // authoritatively (both readings supplied); a marked stored temperature is its explicit
+    // temperature. A stored `pressure_reference` of qnh is reduced to station pressure at the
+    // profile's altitude before use. Otherwise each reading's presence is the profile's marker
+    // (a profile written before 0.49.0 has none and keeps the legacy rule).
+    let station = resolve_profile_station(
+        &TypedStation::default(),
+        Some((&profile.name, profile)),
+        units,
+    )?;
     let (temperature_c, pressure_hpa, altitude_m, temperature_supplied, pressure_supplied) =
-        match profile.density_altitude {
-            Some(da_display) => {
+        match station.density_altitude {
+            Some((da_display, _)) => {
                 let da_m = UnitConverter::altitude_to_metric(da_display, units);
-                let explicit_temp_c = profile
+                let explicit_temp_c = station
                     .temperature_supplied
-                    .then(|| UnitConverter::temperature_to_metric(profile.temperature, units));
+                    .then(|| UnitConverter::temperature_to_metric(station.temperature, units));
                 let (da_altitude_m, da_temp_c, da_pressure_hpa) =
                     ballistics_engine::atmosphere::resolve_atmosphere_for_density_altitude(
                         da_m,
@@ -7235,8 +7737,8 @@ fn solve_profile_for_dsf(
                 (da_temp_c, da_pressure_hpa, da_altitude_m, true, true)
             }
             None => {
-                let altitude_m = UnitConverter::altitude_to_metric(profile.altitude, units);
-                let entered_hpa = UnitConverter::pressure_to_metric(profile.pressure, units);
+                let altitude_m = UnitConverter::altitude_to_metric(station.altitude, units);
+                let entered_hpa = UnitConverter::pressure_to_metric(station.pressure, units);
                 // A stored QNH reading flies its reduced value, as `trajectory --saved-profile`
                 // flies it, even in a profile written before 0.49.0 (no marker): QNH 1031 hPa
                 // at 150 m reduces to 1012.86 hPa, inside the legacy band. A QNH over an
@@ -7245,24 +7747,24 @@ fn solve_profile_for_dsf(
                 // 1 m, that is the ICAO air the profile flew before its stored mode was
                 // honoured. At or below 1 m, or where the reduced default leaves the band, the
                 // stored QNH now flies the reduced default.
-                let (pressure_hpa, pressure_supplied) =
-                    match parse_pressure_reference_profile_field(
-                        profile.pressure_reference.as_deref(),
-                    )? {
-                        PressureReferenceMode::Absolute => (entered_hpa, profile.pressure_supplied),
-                        PressureReferenceMode::Qnh => (
-                            ballistics_engine::atmosphere::reduce_qnh_to_station_pressure(
-                                entered_hpa,
-                                altitude_m,
-                            ),
-                            saved_pressure_is_reading(profile, units),
+                let (pressure_hpa, pressure_supplied) = match station
+                    .pressure_type
+                    .unwrap_or(PressureReferenceMode::Absolute)
+                {
+                    PressureReferenceMode::Absolute => (entered_hpa, station.pressure_supplied),
+                    PressureReferenceMode::Qnh => (
+                        ballistics_engine::atmosphere::reduce_qnh_to_station_pressure(
+                            entered_hpa,
+                            altitude_m,
                         ),
-                    };
+                        station.pressure_supplied || station.stored_qnh_reading(),
+                    ),
+                };
                 (
-                    UnitConverter::temperature_to_metric(profile.temperature, units),
+                    UnitConverter::temperature_to_metric(station.temperature, units),
                     pressure_hpa,
                     altitude_m,
-                    profile.temperature_supplied,
+                    station.temperature_supplied,
                     pressure_supplied,
                 )
             }
@@ -7303,9 +7805,9 @@ fn solve_profile_for_dsf(
             value: pressure_hpa / 33.8639,
             supplied: pressure_supplied,
         },
-        // profile.humidity is already 0-100 regardless of `units` (humidity has no
+        // The humidity the station flies, a percent whatever `units` says (humidity has no
         // imperial/metric distinction), matching DsfSolveInputs::humidity_pct.
-        humidity_pct: profile.humidity,
+        humidity_pct: station.humidity,
         altitude_ft: altitude_m / 0.3048,
         wind_speed_mps,
         wind_direction_rad,
@@ -7861,129 +8363,88 @@ fn run() -> Result<(), Box<dyn Error>> {
                 shot_direction,
             )?;
 
-            // Location overrides (environmental conditions).
-            // Resolve the per-unit standard once so CSV-less runs use the right
-            // standard atmosphere for --units (MBA-960/961).
-            let std_temperature = UnitConverter::resolve_temperature(None, cli.units)?;
-            let std_pressure = UnitConverter::resolve_pressure(None, cli.units)?;
-
-            // MBA-1417: a saved profile's atmosphere, wired as a SET rather than field by field.
-            //
-            // Precedence per VALUE is unchanged in spirit: explicit CLI flag > --location CSV >
-            // saved profile > built-in standard. The profile simply becomes the innermost
-            // fallback instead of the ISA default, so `--saved-profile` finally carries the
-            // conditions it has been storing all along. Values arrive already converted to
-            // --units by `load_profile_for_units`.
+            // MBA-1417 and 0.50.0: the station the run flies, field by field, through the one
+            // resolver every command that takes a saved profile uses. Precedence per value: an
+            // explicit CLI flag > a --location CSV cell (> a --profile CSV ZERO_TEMP/ZERO_ALT
+            // cell) > the saved profile's stored value > the built-in standard. The CSV cells are
+            // readings the run supplied, so they go in as typed ones. Values arrive already
+            // converted to --units by `load_profile_for_units`.
             //
             // The QUALIFIERS are the part that needs care, and the reason this is a set. A
             // pressure MODE describes one specific pressure VALUE, so it may only be inherited
-            // when that value is the one actually in use. Inheriting a mode apart from its value
-            // is exactly the 77 fps silent error MBA-1397 hit: a profile saved with
+            // when that value is the one actually in use: inheriting a mode apart from its value
+            // is exactly the 77 fps silent error MBA-1397 hit (a profile saved with
             // --pressure-type qnh applied its mode to a CLI absolute reading, giving 2299.49 fps
-            // instead of 2222.86 at 300 yd.
-            let saved_atmo = saved_profile_data.as_ref();
-            let profile_supplied_pressure =
-                pressure.is_none() && location_csv.pressure.is_none() && saved_atmo.is_some();
-            let final_temperature = match temperature {
-                Some(t) => UnitConverter::resolve_temperature(Some(t), cli.units)?,
-                None => location_csv
-                    .temperature
-                    .or(profile_csv.zero_temperature)
-                    .unwrap_or_else(|| saved_atmo.map_or(std_temperature, |p| p.temperature)),
-            };
-            let final_pressure = match pressure {
-                Some(p) => UnitConverter::resolve_pressure(Some(p), cli.units)?,
-                None => location_csv
-                    .pressure
-                    .unwrap_or_else(|| saved_atmo.map_or(std_pressure, |p| p.pressure)),
-            };
-            // MBA-1397 + MBA-1366 review: a pressure MODE describes one specific pressure
-            // VALUE, so it must never be inherited apart from it. `trajectory --saved-profile`
-            // does not load a profile's stored temperature/pressure/altitude/humidity (a
-            // pre-existing gap these fields all share), so inheriting only the stored
-            // `pressure_reference` applied a `qnh` mode to whatever pressure the run actually
-            // used — a CLI-supplied absolute station reading got silently reduced a second
-            // time. Measured at 300 yd: 2299.49 fps inherited vs 2222.86 fps correct, a 77 fps
-            // error from a flag the user set once, on a different day, for a different value.
-            // MBA-1417 wires the atmosphere as a set, so the stored mode is live again — but
-            // ONLY when the profile's pressure value is the one in use. An explicit
-            // --pressure-type still wins; a CLI or CSV pressure means the stored mode describes
-            // some other reading and is ignored, which is what keeps the bug above fixed.
-            let final_pressure_type = match pressure_type {
-                Some(mode) => mode,
-                None if profile_supplied_pressure => parse_pressure_reference_profile_field(
-                    saved_atmo.and_then(|p| p.pressure_reference.as_deref()),
-                )?,
-                None => PressureReferenceMode::Absolute,
-            };
-            // 0.49.0: presence follows the value actually used, through the same precedence as
-            // the values above (flag, --location CSV, --profile CSV ZERO_TEMP, saved profile,
-            // default). A later source's marker counts only when that source supplied the value,
-            // which the short-circuit order guarantees. A saved profile written before 0.49.0
-            // carries no marker and keeps the legacy rule.
-            let temperature_supplied = temperature.is_some()
-                || location_csv.temperature.is_some()
-                || profile_csv.zero_temperature.is_some()
-                || saved_atmo.is_some_and(|p| p.temperature_supplied);
-            let pressure_supplied = pressure.is_some()
-                || location_csv.pressure.is_some()
-                || saved_atmo.is_some_and(|p| p.pressure_supplied);
+            // instead of 2222.86 at 300 yd). An explicit --pressure-type still wins; a CLI or CSV
+            // pressure means the stored mode describes some other reading and is ignored.
+            //
+            // Presence follows the value actually used (0.49.0): a flag or CSV cell is a
+            // reading, a saved profile's marker says whether its value was one (a profile
+            // written before 0.49.0 carries none and keeps the legacy rule).
+            //
             // A typed `--altitude 0` / `--humidity 50` is a value, not the clap default.
             let altitude_typed = trajectory_flag_typed(&matches, "altitude");
             let humidity_typed = trajectory_flag_typed(&matches, "humidity");
             // A --location CSV humidity goes through the one validator
             // (`LocationCsvNumbers::read`): a sensor reading within 5 points of 0-100 flies as
-            // the end it reads as, and a value farther out, or a cell that is no number,
-            // is refused with its source named, never clamped or skipped. A saved profile's was
-            // validated, and snapped to the end it flies as, when it loaded. The fallback is the
-            // one default. So this is the humidity the run flies, and every echo of it says so.
-            let final_humidity = if humidity_typed {
-                humidity
-            } else if let Some(percent) = location_csv.humidity_percent {
-                percent
-            } else {
-                saved_atmo.map_or(DEFAULT_HUMIDITY_PERCENT, |p| p.humidity)
-            };
-            let final_altitude = if altitude_typed {
-                altitude
-            } else {
-                location_csv
-                    .altitude
-                    .or(profile_csv.zero_altitude)
-                    .unwrap_or_else(|| saved_atmo.map_or(0.0, |p| p.altitude))
-            };
-
-            // MBA-1366: --density-altitude supersedes --altitude and --pressure/--pressure-type
-            // entirely (a CLI flag always wins over a --location/CSV DA/DENSITY_ALTITUDE column,
-            // matching every other CSV-backed field above). An explicit --temperature still wins
-            // over the ISA-at-density-altitude default; the FAA-rule DA is honored either way (see
-            // `atmosphere::resolve_atmosphere_for_density_altitude`'s doc comment for the
-            // back-solve). Values here are in DISPLAY units (feet/meters per --units), like
-            // final_altitude above; the actual back-solve runs in metric further down.
-            //
-            // MBA-1417: a profile-stored density_altitude is the third source, and it is the
-            // most invasive qualifier of the three, because DA does not merely describe a
-            // pressure — it SUPERSEDES the altitude and pressure entirely. So it is honored only
-            // when the run has no present-tense pressure or altitude of its own to supersede: no
-            // explicit --pressure/--altitude, and nothing from a --location CSV. Letting a DA
-            // stored on a different day quietly override a pressure the user just typed would be
-            // the same class of error as inheriting a pressure mode apart from its value, with a
-            // larger blast radius.
-            let final_density_altitude: Option<f64> = match density_altitude {
-                Some(da) => Some(da),
-                None => match location_csv.density_altitude {
-                    Some(da_csv) => Some(da_csv),
-                    None => {
-                        let run_supplied_its_own_atmosphere = pressure.is_some()
-                            || altitude_typed
-                            || location_csv.pressure.is_some()
-                            || location_csv.altitude.is_some();
-                        saved_atmo
-                            .filter(|_| !run_supplied_its_own_atmosphere)
-                            .and_then(|p| p.density_altitude)
-                    }
+            // the end it reads as, and a value farther out, or a cell that is no number, is
+            // refused with its source named, never clamped or skipped. A saved profile's is
+            // validated, and snapped to the end it flies as, by the resolver. The fallback is
+            // the one default. So this is the humidity the run flies, and every echo of it says
+            // so.
+            let run_station = TypedStation {
+                temperature: match temperature {
+                    Some(t) => Some(UnitConverter::resolve_temperature(Some(t), cli.units)?),
+                    None => location_csv.temperature.or(profile_csv.zero_temperature),
                 },
+                pressure: match pressure {
+                    Some(p) => Some(UnitConverter::resolve_pressure(Some(p), cli.units)?),
+                    None => location_csv.pressure,
+                },
+                pressure_type,
+                humidity: if humidity_typed {
+                    Some(humidity)
+                } else {
+                    location_csv.humidity_percent
+                },
+                altitude: if altitude_typed {
+                    Some(altitude)
+                } else {
+                    location_csv.altitude.or(profile_csv.zero_altitude)
+                },
+                // MBA-1366: --density-altitude supersedes --altitude and
+                // --pressure/--pressure-type entirely (a CLI flag always wins over a
+                // --location/CSV DA/DENSITY_ALTITUDE column, matching every other CSV-backed
+                // field above). An explicit --temperature still wins over the
+                // ISA-at-density-altitude default; the FAA-rule DA is honored either way (see
+                // `atmosphere::resolve_atmosphere_for_density_altitude`'s doc comment for the
+                // back-solve). Values here are in DISPLAY units (feet/meters per --units), like
+                // the altitude; the actual back-solve runs in metric further down.
+                //
+                // MBA-1417: a profile-stored density_altitude is the third source, and it is
+                // the most invasive qualifier of the three, because DA does not merely describe
+                // a pressure, it SUPERSEDES the altitude and pressure entirely. So the resolver
+                // honours it only when the run has no present-tense pressure or altitude of its
+                // own to supersede: no explicit --pressure/--altitude, and nothing from a CSV.
+                density_altitude: density_altitude.or(location_csv.density_altitude),
+                dry: false,
             };
+            let station = resolve_profile_station(
+                &run_station,
+                saved_profile.as_deref().zip(saved_profile_data.as_ref()),
+                cli.units,
+            )?;
+            let final_temperature = station.temperature;
+            let final_pressure = station.pressure;
+            let final_pressure_type = station
+                .pressure_type
+                .unwrap_or(PressureReferenceMode::Absolute);
+            let temperature_supplied = station.temperature_supplied;
+            let pressure_supplied = station.pressure_supplied;
+            let final_humidity = station.humidity;
+            let final_altitude = station.altitude;
+            let final_density_altitude: Option<f64> =
+                station.density_altitude.map(|(value, _)| value);
             if final_density_altitude.is_some() && (pressure.is_some() || pressure_type.is_some()) {
                 eprintln!(
                     "note: --density-altitude supersedes --pressure/--pressure-type (station \
@@ -8048,15 +8509,24 @@ fn run() -> Result<(), Box<dyn Error>> {
             // humidity named where it came from.
             // Where the shot day's humidity came from, by the name the user can see it under;
             // the zero day names a humidity it inherits the same way.
-            let shot_humidity_label = if humidity_typed {
-                SHOT_AIR_FLAGS[0].to_string()
-            } else if location_csv.humidity_percent.is_some() {
-                "--location CSV column HUMIDITY".to_string()
-            } else if let Some(profile) = saved_profile_data.as_ref() {
-                format!("profile '{}' field humidity", profile.name)
-            } else {
-                SHOT_AIR_FLAGS[0].to_string()
+            // A reading the saved profile stored is named as its field; a --location CSV
+            // humidity as its column; every other one as its flag.
+            let shot_air_labels: [String; 4] = {
+                let [humidity_label, temperature_label, pressure_label, altitude_label] =
+                    station.air_labels();
+                let humidity_label = if !humidity_typed && location_csv.humidity_percent.is_some() {
+                    "--location CSV column HUMIDITY".to_string()
+                } else {
+                    humidity_label
+                };
+                [
+                    humidity_label,
+                    temperature_label,
+                    pressure_label,
+                    altitude_label,
+                ]
             };
+            let shot_humidity_label = shot_air_labels[0].clone();
             {
                 let entered = AtmosphericConditions {
                     temperature: UnitConverter::temperature_to_metric(final_temperature, cli.units),
@@ -8091,12 +8561,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     },
                     origin,
                     cli.units,
-                    [
-                        shot_humidity_label.as_str(),
-                        SHOT_AIR_FLAGS[1],
-                        SHOT_AIR_FLAGS[2],
-                        SHOT_AIR_FLAGS[3],
-                    ],
+                    shot_air_labels.each_ref().map(String::as_str),
                 )?;
             }
             // A pressure from a flag, a --location CSV or a saved profile alike: whichever one
@@ -8979,7 +9444,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                         if own {
                             ZERO_AIR_FLAGS[i]
                         } else {
-                            SHOT_AIR_FLAGS[i]
+                            shot_air_labels[i].as_str()
                         }
                     };
                     let humidity_label = if zero_humidity.is_some() {
@@ -10457,7 +10922,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 alt_ft,
                 station_presence,
                 units,
-                SHOT_AIR_FLAGS[0],
+                SHOT_AIR_FLAGS,
             )?;
 
             let drag_str = match drag_model {
@@ -11032,7 +11497,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 alt_ft,
                 station_presence,
                 units,
-                SHOT_AIR_FLAGS[0],
+                SHOT_AIR_FLAGS,
             )?;
             // --twist-rate is mm/turn in metric and inches/turn in imperial (MBA-970);
             // the engine treats twist as inches/turn everywhere.
@@ -11143,13 +11608,16 @@ fn run() -> Result<(), Box<dyn Error>> {
             zero_distance,
             zero_set,
             sight_height,
-            temperature,
-            pressure,
-            pressure_type,
-            humidity,
-            altitude,
+            temperature: _,
+            pressure: _,
+            pressure_type: _,
+            humidity: _,
+            altitude: _,
             output,
         } => {
+            // The station flags as typed (read from the matches, so a typed value equal to the
+            // default still counts), each checked as typed.
+            let typed_station = TypedStation::typed_in(&matches, cli.units)?;
             let profile_data = profile
                 .as_deref()
                 .map(|name| load_profile_for_units(name, cli.units))
@@ -11222,107 +11690,29 @@ fn run() -> Result<(), Box<dyn Error>> {
                     UnitSystem::Imperial => 2.0,
                     UnitSystem::Metric => 50.0,
                 });
-            // 0.49.0: presence follows the value in use: the flag, else the profile's marker
-            // (a profile written before 0.49.0 has none and keeps the legacy rule).
-            let profile_temperature_in_use = temperature.is_none() && profile_data.is_some();
-            let profile_pressure_in_use = pressure.is_none() && profile_data.is_some();
-            let temperature_supplied = temperature.is_some()
-                || (profile_temperature_in_use
-                    && profile_data
-                        .as_ref()
-                        .is_some_and(|p| p.temperature_supplied));
-            let pressure_supplied = pressure.is_some()
-                || (profile_pressure_in_use
-                    && profile_data.as_ref().is_some_and(|p| p.pressure_supplied));
-            // 0.49.0: a stored density altitude is honoured, exactly as `trajectory
-            // --saved-profile` honours it (MBA-1417), only when this run supplies no pressure
-            // or altitude of its own to supersede.
-            let stored_density_altitude = profile_data
-                .as_ref()
-                .and_then(|profile| profile.density_altitude)
-                .filter(|_| pressure.is_none() && altitude.is_none());
-            let temperature = UnitConverter::resolve_temperature(
-                temperature.or_else(|| profile_data.as_ref().map(|profile| profile.temperature)),
+            // 0.50.0: the station through the one resolver every command that takes a saved
+            // profile uses: each field a typed flag, else the profile's stored value, else the
+            // default. A stored density altitude is honoured, exactly as `trajectory
+            // --saved-profile` honours it (MBA-1417), only when this run supplies no pressure or
+            // altitude of its own to supersede, and flies its derived station authoritatively;
+            // otherwise a QNH (stored or typed type) is reduced at the altitude flown, and a
+            // stored QNH reading flies as a reading.
+            let station = flown_profile_station(
+                &typed_station,
+                profile.as_deref(),
+                profile_data.as_ref(),
                 cli.units,
             )?;
-            let humidity_flag = humidity;
-            let humidity = humidity
-                .or_else(|| profile_data.as_ref().map(|profile| profile.humidity))
-                .unwrap_or(DEFAULT_HUMIDITY_PERCENT);
-            // 0.49.0: the altitude is resolved (the flag, falling back to the profile) BEFORE the
-            // pressure mode is applied, so a declared QNH reduces at the altitude flown.
-            let altitude = altitude
-                .or_else(|| profile_data.as_ref().map(|profile| profile.altitude))
-                .unwrap_or(0.0);
-            let entered_pressure = UnitConverter::resolve_pressure(
-                pressure.or_else(|| profile_data.as_ref().map(|profile| profile.pressure)),
-                cli.units,
-            )?;
-            let (temperature, pressure, altitude, temperature_supplied, pressure_supplied) =
-                match stored_density_altitude {
-                    Some(da_display) => {
-                        if pressure_type.is_some() {
-                            eprintln!(
-                                "note: the saved profile's density altitude supersedes \
-                                 --pressure-type (station pressure is derived from density \
-                                 altitude instead)"
-                            );
-                        }
-                        let da_m = UnitConverter::altitude_to_metric(da_display, cli.units);
-                        let explicit_temp_c = temperature_supplied
-                            .then(|| UnitConverter::temperature_to_metric(temperature, cli.units));
-                        let (da_altitude_m, da_temp_c, da_pressure_hpa) =
-                            ballistics_engine::atmosphere::resolve_atmosphere_for_density_altitude(
-                                da_m,
-                                explicit_temp_c,
-                            );
-                        // The derived triple flies authoritatively, as on trajectory's
-                        // density-altitude path.
-                        (
-                            UnitConverter::temperature_from_metric(da_temp_c, cli.units),
-                            UnitConverter::pressure_from_metric(da_pressure_hpa, cli.units),
-                            UnitConverter::altitude_from_metric(da_altitude_m, cli.units),
-                            true,
-                            true,
-                        )
-                    }
-                    None => {
-                        // MBA-1416: honor --pressure-type here too. 0.49.0: with no
-                        // --pressure-type, a profile's stored mode applies when the profile's
-                        // pressure is the one in use (trajectory's `profile_supplied_pressure`
-                        // rule); a stored mode never describes a typed --pressure.
-                        let mode = match pressure_type {
-                            Some(mode) => Some(mode),
-                            None if profile_pressure_in_use => {
-                                Some(parse_pressure_reference_profile_field(
-                                    profile_data
-                                        .as_ref()
-                                        .and_then(|p| p.pressure_reference.as_deref()),
-                                )?)
-                            }
-                            None => None,
-                        };
-                        // A profile's pressure reading flown as a QNH (stored or typed mode)
-                        // flies its reduced value, as `trajectory --saved-profile` flies it. A
-                        // profile written before 0.49.0 has no marker, and its QNH 1031 hPa at
-                        // 150 m reduces to 1012.86 hPa, inside the legacy band; the Absolute
-                        // rule the pre-reduced value goes through would swap it for ICAO air.
-                        // A profile saved without --pressure stores the omitted default, which
-                        // stays omitted here exactly as with no profile.
-                        let profile_qnh_reading = profile_pressure_in_use
-                            && mode == Some(PressureReferenceMode::Qnh)
-                            && profile_data
-                                .as_ref()
-                                .is_some_and(|p| saved_pressure_is_reading(p, cli.units));
-                        (
-                            temperature,
-                            apply_pressure_mode(entered_pressure, altitude, mode, cli.units),
-                            altitude,
-                            temperature_supplied,
-                            pressure_supplied || profile_qnh_reading,
-                        )
-                    }
-                };
+            let (temperature, pressure, humidity, altitude) = (
+                station.temperature,
+                station.pressure,
+                station.humidity,
+                station.altitude,
+            );
+            let StationAtmospherePresence {
+                temperature_supplied,
+                pressure_supplied,
+            } = station.presence;
 
             let candidate_ranges = match range_grid.as_deref() {
                 Some(grid) => parse_truing_range_grid(grid)?,
@@ -11381,12 +11771,8 @@ fn run() -> Result<(), Box<dyn Error>> {
                 drop_unit,
             };
             // The air refused up front, before the progress line, in the CLI's words and
-            // naming where the humidity came from; the planner would otherwise report it as a
+            // naming where each reading came from; the planner would otherwise report it as a
             // request it cannot plan.
-            let humidity_label = match (&humidity_flag, profile_data.as_ref()) {
-                (None, Some(profile)) => format!("profile '{}' field humidity", profile.name),
-                _ => SHOT_AIR_FLAGS[0].to_string(),
-            };
             refuse_truing_cli_air(
                 request.model.temperature_f.value,
                 request.model.pressure_inhg.value,
@@ -11397,7 +11783,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     request.model.pressure_inhg,
                 ),
                 cli.units,
-                &humidity_label,
+                station.labels(),
             )?;
             eprintln!(
                 "Evaluating {} candidate ranges for a {}-station truing plan...",
@@ -11420,25 +11806,16 @@ fn run() -> Result<(), Box<dyn Error>> {
             zero_poi_up,
             zero_poi_right,
             sight_offset,
-            temperature,
-            pressure,
-            pressure_type,
-            humidity,
-            altitude,
+            temperature: _,
+            pressure: _,
+            pressure_type: _,
+            humidity: _,
+            altitude: _,
             output,
         } => {
-            // 0.49.0: presence from the flags, before the defaults collapse it.
-            let station_presence =
-                StationAtmospherePresence::new(temperature.is_some(), pressure.is_some());
-            let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
-            // MBA-1416: honor --pressure-type here too, so a QNH altimeter setting means
-            // the same thing on this command as it does on `trajectory`.
-            let pressure = apply_pressure_mode(
-                UnitConverter::resolve_pressure(pressure, cli.units)?,
-                altitude,
-                pressure_type,
-                cli.units,
-            );
+            // The station flags as typed (read from the matches, so a typed value equal to the
+            // default still counts), each checked as typed.
+            let typed_station = TypedStation::typed_in(&matches, cli.units)?;
             // Load profile if specified
             let profile_data = profile.as_ref().map(|name| {
                 load_profile_for_units(name, cli.units).unwrap_or_else(|e| {
@@ -11446,6 +11823,14 @@ fn run() -> Result<(), Box<dyn Error>> {
                     std::process::exit(1);
                 })
             });
+            // The air it flies: each reading typed, else stored in the profile, else the
+            // default (a stored humidity is checked here, where it is flown).
+            let station = flown_profile_station(
+                &typed_station,
+                profile.as_deref(),
+                profile_data.as_ref(),
+                cli.units,
+            )?;
 
             let final_velocity = resolve_param(velocity, &profile_data, |p| p.velocity)
                 .unwrap_or_else(|| {
@@ -11502,11 +11887,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 zero_poi_vertical_m,
                 zero_poi_horizontal_m,
                 sight_offset_lateral_m,
-                temperature,
-                pressure,
-                humidity,
-                altitude,
-                station_presence,
+                &station,
                 cli.units,
                 output,
             )?;
@@ -11532,33 +11913,32 @@ fn run() -> Result<(), Box<dyn Error>> {
             zero_poi_up,
             zero_poi_right,
             sight_offset,
-            temperature,
-            pressure,
-            pressure_type,
-            humidity,
-            altitude,
+            temperature: _,
+            pressure: _,
+            pressure_type: _,
+            humidity: _,
+            altitude: _,
             wind_speed,
             wind_direction,
             output,
         } => {
-            // 0.49.0: presence from the flags, before the defaults collapse it.
-            let station_presence =
-                StationAtmospherePresence::new(temperature.is_some(), pressure.is_some());
-            let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
-            // MBA-1416: honor --pressure-type here too, so a QNH altimeter setting means
-            // the same thing on this command as it does on `trajectory`.
-            let pressure = apply_pressure_mode(
-                UnitConverter::resolve_pressure(pressure, cli.units)?,
-                altitude,
-                pressure_type,
-                cli.units,
-            );
+            // The station flags as typed (read from the matches, so a typed value equal to the
+            // default still counts), each checked as typed.
+            let typed_station = TypedStation::typed_in(&matches, cli.units)?;
             let profile_data = profile.as_ref().map(|name| {
                 load_profile_for_units(name, cli.units).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 })
             });
+            // The air it flies: each reading typed, else stored in the profile, else the
+            // default (a stored humidity is checked here, where it is flown).
+            let station = flown_profile_station(
+                &typed_station,
+                profile.as_deref(),
+                profile_data.as_ref(),
+                cli.units,
+            )?;
 
             // MBA-1410: come-ups has no windage column, so --windage-click-value can never
             // do anything -- warn instead of silently accepting it (the MBA-1414 inert-flag
@@ -11697,11 +12077,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 zero_poi_vertical_m,
                 zero_poi_horizontal_m,
                 sight_offset_lateral_m,
-                temperature,
-                pressure,
-                humidity,
-                altitude,
-                station_presence,
+                &station,
                 wind_speed,
                 wind_direction.degrees,
                 cli.units,
@@ -11734,11 +12110,22 @@ fn run() -> Result<(), Box<dyn Error>> {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 });
-            // The profile's OWN air, which `dsf` flies, refused up front in the profile's
-            // words (`ProfileData::air_refusal`, the stored-air resolution this solve uses).
+            // The profile's OWN air, which `dsf` flies (it takes no station flags), through the
+            // one resolver: a stored humidity outside the band is refused there, naming the
+            // file to edit.
+            let station = resolve_profile_station(
+                &TypedStation::default(),
+                Some((&saved_profile, &profile)),
+                cli.units,
+            )?;
+            // Air that cannot exist refused up front in the profile's words
+            // (`ProfileData::air_refusal`, the stored-air resolution this solve uses).
             if let Some(refusal) = profile.air_refusal() {
                 return Err(refusal.message().into());
             }
+            // The re-save below writes the humidity the profile flies (a stored band reading
+            // as the end it reads as), as every flight of it echoes.
+            profile.humidity = station.humidity;
 
             let dist_unit = match cli.units {
                 UnitSystem::Imperial => "yd",
@@ -11902,11 +12289,11 @@ fn run() -> Result<(), Box<dyn Error>> {
             diameter,
             drag_model,
             sight_height,
-            temperature,
-            pressure,
-            pressure_type,
-            humidity,
-            altitude,
+            temperature: _,
+            pressure: _,
+            pressure_type: _,
+            humidity: _,
+            altitude: _,
             wind_speed,
             wind_direction,
             use_powder_sensitivity,
@@ -11924,24 +12311,23 @@ fn run() -> Result<(), Box<dyn Error>> {
             windage_cf,
             output,
         } => {
-            // 0.49.0: presence from the flags, before the defaults collapse it.
-            let station_presence =
-                StationAtmospherePresence::new(temperature.is_some(), pressure.is_some());
-            let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
-            // MBA-1416: honor --pressure-type here too, so a QNH altimeter setting means
-            // the same thing on this command as it does on `trajectory`.
-            let pressure = apply_pressure_mode(
-                UnitConverter::resolve_pressure(pressure, cli.units)?,
-                altitude,
-                pressure_type,
-                cli.units,
-            );
+            // The station flags as typed (read from the matches, so a typed value equal to the
+            // default still counts), each checked as typed.
+            let typed_station = TypedStation::typed_in(&matches, cli.units)?;
             let profile_data = profile.as_ref().map(|name| {
                 load_profile_for_units(name, cli.units).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 })
             });
+            // The air it flies: each reading typed, else stored in the profile, else the
+            // default (a stored humidity is checked here, where it is flown).
+            let station = flown_profile_station(
+                &typed_station,
+                profile.as_deref(),
+                profile_data.as_ref(),
+                cli.units,
+            )?;
 
             // MBA-1410: resolve the (windage) click graduation FIRST — before any of the
             // work below — so a missing graduation fails fast with a clear flag name, same
@@ -12043,11 +12429,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 final_diameter,
                 final_drag_model,
                 final_sight_height,
-                temperature,
-                pressure,
-                humidity,
-                altitude,
-                station_presence,
+                &station,
                 wind_speed,
                 wind_direction.degrees,
                 use_powder_sensitivity,
@@ -12152,31 +12534,30 @@ fn run() -> Result<(), Box<dyn Error>> {
             zero_poi_up,
             zero_poi_right,
             sight_offset,
-            temperature,
-            pressure,
-            pressure_type,
-            humidity,
-            altitude,
+            temperature: _,
+            pressure: _,
+            pressure_type: _,
+            humidity: _,
+            altitude: _,
             output,
         } => {
-            // 0.49.0: presence from the flags, before the defaults collapse it.
-            let station_presence =
-                StationAtmospherePresence::new(temperature.is_some(), pressure.is_some());
-            let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
-            // MBA-1416: honor --pressure-type here too, so a QNH altimeter setting means
-            // the same thing on this command as it does on `trajectory`.
-            let pressure = apply_pressure_mode(
-                UnitConverter::resolve_pressure(pressure, cli.units)?,
-                altitude,
-                pressure_type,
-                cli.units,
-            );
+            // The station flags as typed (read from the matches, so a typed value equal to the
+            // default still counts), each checked as typed.
+            let typed_station = TypedStation::typed_in(&matches, cli.units)?;
             let profile_data = profile.as_ref().map(|name| {
                 load_profile_for_units(name, cli.units).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 })
             });
+            // The air it flies: each reading typed, else stored in the profile, else the
+            // default (a stored humidity is checked here, where it is flown).
+            let station = flown_profile_station(
+                &typed_station,
+                profile.as_deref(),
+                profile_data.as_ref(),
+                cli.units,
+            )?;
 
             // MBA-1410: resolve the (windage) click graduation FIRST — before any of the
             // work below — so a missing graduation fails fast with a clear flag name.
@@ -12327,11 +12708,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 zero_poi_vertical_m,
                 zero_poi_horizontal_m,
                 sight_offset_lateral_m,
-                temperature,
-                pressure,
-                humidity,
-                altitude,
-                station_presence,
+                &station,
                 cli.units,
                 output,
             )?;
@@ -12344,34 +12721,44 @@ fn run() -> Result<(), Box<dyn Error>> {
             length,
             twist_rate,
             velocity,
-            temperature,
-            pressure,
-            pressure_type,
-            altitude,
+            temperature: _,
+            pressure: _,
+            pressure_type: _,
+            altitude: _,
             output,
         } => {
-            let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
-            // MBA-1416: honor --pressure-type here too, so a QNH altimeter setting means
-            // the same thing on this command as it does on `trajectory`.
-            let entered_pressure = UnitConverter::resolve_pressure(pressure, cli.units)?;
-            let pressure =
-                apply_pressure_mode(entered_pressure, altitude, pressure_type, cli.units);
-            // MBA-1605: a QNH with no station pressure at this altitude reduces to NaN. Every
-            // command that runs a solve refuses that in the solver's input check; this one never
-            // solves, so it refuses here rather than print a NaN stability factor.
-            if !pressure.is_finite() {
-                return Err(format!(
-                    "--pressure {entered_pressure} as a QNH has no station pressure at --altitude \
-                     {altitude}: the altimeter-setting reduction has no solution that high"
-                )
-                .into());
-            }
+            // The station flags as typed, each checked as typed. The Miller correction is
+            // dry, so no humidity is read, typed or stored.
+            let typed_station = TypedStation::typed_in(&matches, cli.units)?.dry();
             let profile_data = profile.as_ref().map(|name| {
                 load_profile_for_units(name, cli.units).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 })
             });
+            // The air it corrects for: each reading typed, else stored in the profile, else
+            // the default; a QNH reduced at the altitude flown (MBA-1416).
+            let resolved = resolve_profile_station(
+                &typed_station,
+                profile.as_deref().zip(profile_data.as_ref()),
+                cli.units,
+            )?;
+            let station = resolved.flown(cli.units);
+            let (temperature, pressure, altitude) =
+                (station.temperature, station.pressure, station.altitude);
+            // MBA-1605: a QNH with no station pressure at this altitude reduces to NaN. Every
+            // command that runs a solve refuses that in the solver's input check; this one never
+            // solves, so it refuses here rather than print a NaN stability factor, naming each
+            // reading where it came from.
+            if !pressure.is_finite() {
+                let labels = station.labels();
+                return Err(format!(
+                    "{} {} as a QNH has no station pressure at {} {altitude}: the \
+                     altimeter-setting reduction has no solution that high",
+                    labels[2], resolved.pressure, labels[3]
+                )
+                .into());
+            }
 
             let final_mass = resolve_param(mass, &profile_data, |p| p.mass).unwrap_or_else(|| {
                 eprintln!("Error: --mass is required (or use --profile)");
@@ -12425,31 +12812,30 @@ fn run() -> Result<(), Box<dyn Error>> {
             zero_poi_up,
             zero_poi_right,
             sight_offset,
-            temperature,
-            pressure,
-            pressure_type,
-            humidity,
-            altitude,
+            temperature: _,
+            pressure: _,
+            pressure_type: _,
+            humidity: _,
+            altitude: _,
             output,
         } => {
-            // 0.49.0: presence from the flags, before the defaults collapse it.
-            let station_presence =
-                StationAtmospherePresence::new(temperature.is_some(), pressure.is_some());
-            let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
-            // MBA-1416: honor --pressure-type here too, so a QNH altimeter setting means
-            // the same thing on this command as it does on `trajectory`.
-            let pressure = apply_pressure_mode(
-                UnitConverter::resolve_pressure(pressure, cli.units)?,
-                altitude,
-                pressure_type,
-                cli.units,
-            );
+            // The station flags as typed (read from the matches, so a typed value equal to the
+            // default still counts), each checked as typed.
+            let typed_station = TypedStation::typed_in(&matches, cli.units)?;
             let profile_data = profile.as_ref().map(|name| {
                 load_profile_for_units(name, cli.units).unwrap_or_else(|e| {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 })
             });
+            // The air it flies: each reading typed, else stored in the profile, else the
+            // default (a stored humidity is checked here, where it is flown).
+            let station = flown_profile_station(
+                &typed_station,
+                profile.as_deref(),
+                profile_data.as_ref(),
+                cli.units,
+            )?;
 
             // MBA-1410: resolve the independent windage unit and, if either axis needs
             // one, the turret click graduations — before any of the work below, so a
@@ -12567,11 +12953,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 zero_poi_vertical_m,
                 zero_poi_horizontal_m,
                 sight_offset_lateral_m,
-                temperature,
-                pressure,
-                humidity,
-                altitude,
-                station_presence,
+                &station,
                 cli.units,
                 output,
             )?;
@@ -12596,25 +12978,19 @@ fn run() -> Result<(), Box<dyn Error>> {
             zero_poi_up,
             zero_poi_right,
             sight_offset,
-            temperature,
-            pressure,
-            pressure_type,
-            humidity,
-            altitude,
+            temperature: _,
+            pressure: _,
+            pressure_type: _,
+            humidity: _,
+            altitude: _,
             output,
         } => {
-            // 0.49.0: presence from the flags, before the defaults collapse it.
-            let station_presence =
-                StationAtmospherePresence::new(temperature.is_some(), pressure.is_some());
-            let temperature = UnitConverter::resolve_temperature(temperature, cli.units)?;
-            // MBA-1416: honor --pressure-type here too, so a QNH altimeter setting means
-            // the same thing on this command as it does on `trajectory`.
-            let pressure = apply_pressure_mode(
-                UnitConverter::resolve_pressure(pressure, cli.units)?,
-                altitude,
-                pressure_type,
-                cli.units,
-            );
+            // The station flags as typed (read from the matches, so a typed value equal to the
+            // default still counts), each checked as typed. A `--load` spec flies them, else
+            // the defaults; a `--profile` load flies its own stored weather where they are not
+            // typed (MBA-1416: a declared QNH reduces at the altitude each load flies).
+            let typed_station = TypedStation::typed_in(&matches, cli.units)?;
+            let shared_air = flown_profile_station(&typed_station, None, None, cli.units)?;
 
             // MBA-1410: resolve the independent windage unit and, if either axis needs
             // one, the turret click graduations — before any of the work below. compare
@@ -12651,6 +13027,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             }
             for name in &profiles {
                 let p = load_profile_for_units(name, cli.units)?;
+                let air = flown_profile_station(&typed_station, Some(name), Some(&p), cli.units)?;
                 // MBA-1323 Phase 2 shape: a profile's velocity-BC segments / Mach-Cd
                 // drag curve, resolved to engine shapes and used by zeroing AND the
                 // sampled runs (the scalar-BC-only caveat is lifted for compare).
@@ -12676,6 +13053,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                     diameter: p.diameter,
                     bc_segments_data,
                     custom_drag_table,
+                    air: Some(air),
                 });
             }
             if compare_loads.len() < 2 {
@@ -12722,11 +13100,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 zero_poi_vertical_m,
                 zero_poi_horizontal_m,
                 sight_offset_lateral_m,
-                temperature,
-                pressure,
-                humidity,
-                altitude,
-                station_presence,
+                &shared_air,
                 cli.units,
                 output,
             )?;
@@ -13508,7 +13882,12 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
 
         Commands::Reticle { action } => {
-            handle_reticle(action, cli.units)?;
+            // Read here, checked only where `reticle hold --range` flies it.
+            handle_reticle(
+                action,
+                TypedStation::typed_in(&matches, cli.units),
+                cli.units,
+            )?;
         }
 
         Commands::HoldCorridor {
@@ -13523,11 +13902,11 @@ fn run() -> Result<(), Box<dyn Error>> {
             drag_model,
             zero_distance,
             sight_height,
-            temperature,
-            pressure,
-            pressure_type,
-            humidity,
-            altitude,
+            temperature: _,
+            pressure: _,
+            pressure_type: _,
+            humidity: _,
+            altitude: _,
             output,
         } => {
             handle_hold_corridor(
@@ -13542,11 +13921,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 drag_model,
                 zero_distance,
                 sight_height,
-                temperature,
-                pressure,
-                pressure_type,
-                humidity,
-                altitude,
+                TypedStation::typed_in(&matches, cli.units)?,
                 cli.units,
                 output,
             )?;
@@ -13572,6 +13947,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 zero_distance,
                 max_range,
                 load,
+                TypedStation::typed_in(&matches, cli.units)?,
                 cli.units,
                 output,
             )?;
@@ -13593,6 +13969,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 residual_warn,
                 zero_distance,
                 load,
+                TypedStation::typed_in(&matches, cli.units)?,
                 cli.units,
                 output,
             )?;
@@ -13604,7 +13981,14 @@ fn run() -> Result<(), Box<dyn Error>> {
             load,
             output,
         } => {
-            handle_optimal_zero(targets, vital, load, cli.units, output)?;
+            handle_optimal_zero(
+                targets,
+                vital,
+                load,
+                TypedStation::typed_in(&matches, cli.units)?,
+                cli.units,
+                output,
+            )?;
         }
 
         Commands::Explain {
@@ -13701,6 +14085,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         } => {
             handle_adaptive_card(
                 load,
+                TypedStation::typed_in(&matches, cli.units)?,
                 zero_distance,
                 start,
                 end,
@@ -18576,15 +18961,19 @@ fn handle_mpbr(
     // MBA-1396: lateral sight-mount offset, METERS (y-uncoupled physical geometry; rides
     // through the vertical vital-zone analysis unchanged).
     sight_offset_lateral_m: f64,
-    temperature: f64,
-    pressure: f64,
-    humidity: f64,
-    altitude: f64,
-    // 0.49.0: which of `temperature` / `pressure` were typed; a typed value flies as typed.
-    station_presence: StationAtmospherePresence,
+    // The station the command flies (`flown_profile_station`): each reading a typed flag, else
+    // the saved profile's stored value, else the default, with its presence and its name.
+    station: &FlownStation,
     units: UnitSystem,
     output: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
+    let (temperature, pressure, humidity, altitude, station_presence) = (
+        station.temperature,
+        station.pressure,
+        station.humidity,
+        station.altitude,
+        station.presence,
+    );
     // Convert everything to metric
     let velocity_m = UnitConverter::velocity_to_metric(velocity, units);
     let mass_kg = UnitConverter::mass_to_metric(mass, units);
@@ -18612,7 +19001,7 @@ fn handle_mpbr(
         },
         station_presence,
         units,
-        SHOT_AIR_FLAGS,
+        station.labels(),
     )?;
 
     // Binary search on zero distance to find the one where max ordinate ≈ half vital zone
@@ -19088,12 +19477,9 @@ fn handle_come_ups(
     // MBA-1396: lateral sight-mount offset, METERS (lateral-only; the elevation table is
     // unaffected, but the solve carries the true geometry).
     sight_offset_lateral_m: f64,
-    temperature: f64,
-    pressure: f64,
-    humidity: f64,
-    altitude: f64,
-    // 0.49.0: which of `temperature` / `pressure` were typed; a typed value flies as typed.
-    station_presence: StationAtmospherePresence,
+    // The station the command flies (`flown_profile_station`): each reading a typed flag, else
+    // the saved profile's stored value, else the default, with its presence and its name.
+    station: &FlownStation,
     wind_speed: f64,
     wind_direction: f64,
     units: UnitSystem,
@@ -19106,6 +19492,13 @@ fn handle_come_ups(
     // when --profile pointed at a profile carrying dsf_points.
     dsf_table: Option<DsfTable>,
 ) -> Result<(), Box<dyn Error>> {
+    let (temperature, pressure, humidity, altitude, station_presence) = (
+        station.temperature,
+        station.pressure,
+        station.humidity,
+        station.altitude,
+        station.presence,
+    );
     // Convert to metric
     let velocity_m = UnitConverter::velocity_to_metric(velocity, units);
     let mass_kg = UnitConverter::mass_to_metric(mass, units);
@@ -19149,7 +19542,7 @@ fn handle_come_ups(
         altitude: altitude_m,
     };
     // The air refused up front, in the CLI's words, before any solve.
-    refuse_cli_air(&atmosphere, station_presence, units, SHOT_AIR_FLAGS)?;
+    refuse_cli_air(&atmosphere, station_presence, units, station.labels())?;
 
     let zero_angle = ballistics_engine::calculate_zero_angle_with_station_presence(
         zero_inputs,
@@ -20056,12 +20449,9 @@ fn handle_lead(
     diameter: f64,
     drag_model: DragModel,
     sight_height: f64,
-    temperature: f64,
-    pressure: f64,
-    humidity: f64,
-    altitude: f64,
-    // 0.49.0: which of `temperature` / `pressure` were typed; a typed value flies as typed.
-    station_presence: StationAtmospherePresence,
+    // The station the command flies (`flown_profile_station`): each reading a typed flag, else
+    // the saved profile's stored value, else the default, with its presence and its name.
+    station: &FlownStation,
     wind_speed: f64,
     wind_direction: f64,
     use_powder_sensitivity: bool,
@@ -20093,6 +20483,13 @@ fn handle_lead(
     bc_segments_data: Option<Vec<BCSegmentData>>,
     custom_drag_table: Option<ballistics_engine::drag::DragTable>,
 ) -> Result<(), Box<dyn Error>> {
+    let (temperature, pressure, humidity, altitude, station_presence) = (
+        station.temperature,
+        station.pressure,
+        station.humidity,
+        station.altitude,
+        station.presence,
+    );
     // Convert to metric
     let velocity_m = UnitConverter::velocity_to_metric(velocity, units);
     let mass_kg = UnitConverter::mass_to_metric(mass, units);
@@ -20135,7 +20532,7 @@ fn handle_lead(
     );
     // The air refused up front, so a lead table whose every row would fail on it exits 1
     // with the cause instead of printing a table of failed rows and exiting 0.
-    refuse_cli_air(&atmosphere, station_presence, units, SHOT_AIR_FLAGS)?;
+    refuse_cli_air(&atmosphere, station_presence, units, station.labels())?;
 
     // Powder temperature (MBA-1325): identical resolution to `run_trajectory` so a
     // powder-temp-curve/-sensitivity muzzle-velocity correction reproduces exactly —
@@ -20448,15 +20845,19 @@ fn handle_wind_card(
     // MBA-1396: lateral sight-mount offset, METERS (drift starts offset left of the LOS
     // and converges to it at the zero distance).
     sight_offset_lateral_m: f64,
-    temperature: f64,
-    pressure: f64,
-    humidity: f64,
-    altitude: f64,
-    // 0.49.0: which of `temperature` / `pressure` were typed; a typed value flies as typed.
-    station_presence: StationAtmospherePresence,
+    // The station the command flies (`flown_profile_station`): each reading a typed flag, else
+    // the saved profile's stored value, else the default, with its presence and its name.
+    station: &FlownStation,
     units: UnitSystem,
     output: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
+    let (temperature, pressure, humidity, altitude, station_presence) = (
+        station.temperature,
+        station.pressure,
+        station.humidity,
+        station.altitude,
+        station.presence,
+    );
     // Convert to metric
     let velocity_m = UnitConverter::velocity_to_metric(velocity, units);
     let mass_kg = UnitConverter::mass_to_metric(mass, units);
@@ -20493,7 +20894,7 @@ fn handle_wind_card(
         altitude: altitude_m,
     };
     // The air refused up front, in the CLI's words, before any solve.
-    refuse_cli_air(&atmosphere, station_presence, units, SHOT_AIR_FLAGS)?;
+    refuse_cli_air(&atmosphere, station_presence, units, station.labels())?;
 
     let zero_angle = ballistics_engine::calculate_zero_angle_with_station_presence(
         zero_inputs,
@@ -20979,15 +21380,19 @@ fn handle_range_table(
     zero_poi_horizontal_m: f64,
     // MBA-1396: lateral sight-mount offset, METERS.
     sight_offset_lateral_m: f64,
-    temperature: f64,
-    pressure: f64,
-    humidity: f64,
-    altitude: f64,
-    // 0.49.0: which of `temperature` / `pressure` were typed; a typed value flies as typed.
-    station_presence: StationAtmospherePresence,
+    // The station the command flies (`flown_profile_station`): each reading a typed flag, else
+    // the saved profile's stored value, else the default, with its presence and its name.
+    station: &FlownStation,
     units: UnitSystem,
     output: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
+    let (temperature, pressure, humidity, altitude, station_presence) = (
+        station.temperature,
+        station.pressure,
+        station.humidity,
+        station.altitude,
+        station.presence,
+    );
     // Convert to metric
     let velocity_m = UnitConverter::velocity_to_metric(velocity, units);
     let mass_kg = UnitConverter::mass_to_metric(mass, units);
@@ -21025,7 +21430,7 @@ fn handle_range_table(
         altitude: altitude_m,
     };
     // The air refused up front, in the CLI's words, before any solve.
-    refuse_cli_air(&atmosphere, station_presence, units, SHOT_AIR_FLAGS)?;
+    refuse_cli_air(&atmosphere, station_presence, units, station.labels())?;
 
     let zero_angle = ballistics_engine::calculate_zero_angle_with_station_presence(
         zero_inputs,
@@ -21317,6 +21722,9 @@ struct CompareLoadSpec {
     diameter: f64,
     bc_segments_data: Option<Vec<BCSegmentData>>,
     custom_drag_table: Option<ballistics_engine::drag::DragTable>,
+    /// The air a load from a saved profile flies (its stored weather, each typed flag winning);
+    /// `None` for a `--load` spec, which flies the shared typed-or-default air.
+    air: Option<FlownStation>,
 }
 
 /// Parse a `--load` spec: `NAME:DRAG:BC:MASS:VELOCITY[:DIAMETER]` (MBA-735).
@@ -21376,7 +21784,20 @@ fn parse_compare_load_spec(
         diameter,
         bc_segments_data: None,
         custom_drag_table: None,
+        air: None,
     })
+}
+
+/// One load's air for `compare`'s note, in the run's units: `95 °F, 25.50 inHg, 90 %, 5000 ft`.
+fn air_summary(air: &FlownStation, units: UnitSystem) -> String {
+    let (temperature_unit, pressure_unit, pressure_digits, altitude_unit) = match units {
+        UnitSystem::Imperial => ("°F", "inHg", 2, "ft"),
+        UnitSystem::Metric => ("°C", "hPa", 1, "m"),
+    };
+    format!(
+        "{:.1} {temperature_unit}, {:.*} {pressure_unit}, {:.1} %, {:.0} {altitude_unit}",
+        air.temperature, pressure_digits, air.pressure, air.humidity, air.altitude
+    )
 }
 
 /// Side-by-side multi-load comparison (MBA-735): every load is zeroed independently at
@@ -21413,32 +21834,50 @@ fn handle_compare(
     zero_poi_horizontal_m: f64,
     // MBA-1396: lateral sight-mount offset, METERS; shared across loads like sight_height.
     sight_offset_lateral_m: f64,
-    temperature: f64,
-    pressure: f64,
-    humidity: f64,
-    altitude: f64,
-    // 0.49.0: which of `temperature` / `pressure` were typed; a typed value flies as typed.
-    station_presence: StationAtmospherePresence,
+    // The air a `--load` spec flies (`flown_profile_station` with no profile): the typed
+    // flags, else the defaults. A load from a saved profile carries its own (`load.air`): its
+    // stored weather, with each typed flag winning over the stored value.
+    shared_air: &FlownStation,
     units: UnitSystem,
     output: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
     // Shared conditions in metric
     let sight_height_m = UnitConverter::sight_height_to_metric(sight_height, units);
     let zero_distance_m = UnitConverter::distance_to_metric(zero_distance, units);
-    let temperature_c = UnitConverter::temperature_to_metric(temperature, units);
-    let pressure_hpa = UnitConverter::pressure_to_metric(pressure, units);
-    let altitude_m = UnitConverter::altitude_to_metric(altitude, units);
     let wind_speed_m = UnitConverter::wind_to_metric(wind_speed, units);
     let end_m = UnitConverter::distance_to_metric(end, units);
 
-    let atmosphere = AtmosphericConditions {
-        temperature: temperature_c,
-        pressure: pressure_hpa,
-        humidity,
-        altitude: altitude_m,
+    // The air each load flies, and the first load's (the delta baseline's), which the
+    // conditions block reports. A load that flies other air reports its own.
+    let air_of = |load: &CompareLoadSpec| -> FlownStation {
+        load.air.clone().unwrap_or_else(|| shared_air.clone())
     };
-    // The air refused up front, in the CLI's words, before any solve.
-    refuse_cli_air(&atmosphere, station_presence, units, SHOT_AIR_FLAGS)?;
+    let baseline_air = loads.first().map_or_else(|| shared_air.clone(), air_of);
+    let (temperature, pressure, humidity, altitude) = (
+        baseline_air.temperature,
+        baseline_air.pressure,
+        baseline_air.humidity,
+        baseline_air.altitude,
+    );
+    // Every load's air refused up front, in the CLI's words, before any solve.
+    for load in &loads {
+        let air = air_of(load);
+        refuse_cli_air(&air.metric(units), air.presence, units, air.labels())?;
+    }
+    if loads
+        .iter()
+        .any(|load| !air_of(load).same_air(&baseline_air))
+    {
+        let each: Vec<String> = loads
+            .iter()
+            .map(|load| format!("'{}' {}", load.name, air_summary(&air_of(load), units)))
+            .collect();
+        eprintln!(
+            "note: the loads fly different air, because a saved profile flies its stored weather \
+             for each of --temperature, --pressure, --humidity and --altitude not typed: {}",
+            each.join("; ")
+        );
+    }
 
     // Thin per-load result: the shared `ranges` grid below indexes both `rows` here and
     // every other load's `rows` identically, so `results[li].rows[ri]` is load `li` at
@@ -21465,6 +21904,15 @@ fn handle_compare(
     // to the shortest column can quote the reach of the load that set it.
     let mut reaches_m: Vec<f64> = Vec::new();
     for load in &loads {
+        let air = air_of(load);
+        let atmosphere = air.metric(units);
+        let station_presence = air.presence;
+        let (temperature_c, pressure_hpa, humidity, altitude_m) = (
+            atmosphere.temperature,
+            atmosphere.pressure,
+            atmosphere.humidity,
+            atmosphere.altitude,
+        );
         let velocity_m = UnitConverter::velocity_to_metric(load.velocity, units);
         let mass_kg = UnitConverter::mass_to_metric(load.mass, units);
         let diameter_m = UnitConverter::diameter_to_metric(load.diameter, units);
@@ -21665,7 +22113,7 @@ fn handle_compare(
             let mut json = serde_json::json!({
                 "compare": {
                     "loads": loads.iter().zip(zero_angles_deg.iter()).map(|(l, &zero_angle_deg)| {
-                        serde_json::json!({
+                        let mut entry = serde_json::json!({
                             "name": l.name,
                             "drag_model": l.drag_model.to_string(),
                             "bc": l.bc,
@@ -21675,7 +22123,20 @@ fn handle_compare(
                             "zero_angle_deg": zero_angle_deg,
                             "bc_segments": l.bc_segments_data.is_some(),
                             "custom_drag_curve": l.custom_drag_table.is_some(),
-                        })
+                        });
+                        // Only a load that flies other air than `conditions` (the first
+                        // load's) carries its own, so a run whose loads share one air is
+                        // byte-identical to 0.49.0.
+                        let air = air_of(l);
+                        if !air.same_air(&baseline_air) {
+                            entry["air"] = serde_json::json!({
+                                "temperature": air.temperature,
+                                "pressure": air.pressure,
+                                "humidity": air.humidity,
+                                "altitude": air.altitude,
+                            });
+                        }
+                        entry
                     }).collect::<Vec<_>>(),
                     "conditions": {
                         "zero_distance": zero_distance,
@@ -25030,11 +25491,8 @@ fn handle_hold_corridor(
     drag_model: DragModel,
     zero_distance: Option<f64>,
     sight_height: Option<f64>,
-    temperature: Option<f64>,
-    pressure: Option<f64>,
-    pressure_type: Option<PressureReferenceMode>,
-    humidity: f64,
-    altitude: f64,
+    // The station flags as typed (`TypedStation::typed_in`).
+    typed: TypedStation,
     units: UnitSystem,
     output: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
@@ -25080,8 +25538,10 @@ fn handle_hold_corridor(
         None => None,
     };
 
+    // Converted to the run's units like every other consumer's, so a profile saved in the
+    // other unit system flies its own bullet and air.
     let profile_data = match profile.as_deref() {
-        Some(name) => Some(load_profile(name)?),
+        Some(name) => Some(load_profile_for_units(name, units)?),
         None => None,
     };
     let require = |value: Option<f64>, flag: &str| -> Result<f64, Box<dyn Error>> {
@@ -25108,17 +25568,9 @@ fn handle_hold_corridor(
             UnitSystem::Imperial => 2.0,
             UnitSystem::Metric => 50.0,
         });
-    // 0.49.0: presence from the flags, before the defaults collapse it.
-    let station_presence =
-        StationAtmospherePresence::new(temperature.is_some(), pressure.is_some());
-    let temperature = UnitConverter::resolve_temperature(temperature, units)?;
-    // MBA-1416: a declared QNH reduces against this command's own --altitude.
-    let pressure = apply_pressure_mode(
-        UnitConverter::resolve_pressure(pressure, units)?,
-        altitude,
-        pressure_type,
-        units,
-    );
+    // The air flown: each reading typed, else stored in the profile, else the default; a
+    // declared QNH reduces at the altitude flown (MBA-1416).
+    let station = flown_profile_station(&typed, profile.as_deref(), profile_data.as_ref(), units)?;
 
     let mass_kg = UnitConverter::mass_to_metric(mass, units);
     let diameter_m = UnitConverter::diameter_to_metric(diameter, units);
@@ -25135,11 +25587,11 @@ fn handle_hold_corridor(
             bullet_length_m: fallback_bullet_length_m(diameter_m, mass_kg),
             zero_distance_m: UnitConverter::distance_to_metric(zero_distance, units),
             sight_height_m: UnitConverter::sight_height_to_metric(sight_height, units),
-            temperature_c: UnitConverter::temperature_to_metric(temperature, units),
-            pressure_hpa: UnitConverter::pressure_to_metric(pressure, units),
-            humidity_pct: humidity,
-            altitude_m: UnitConverter::altitude_to_metric(altitude, units),
-            station_presence,
+            temperature_c: UnitConverter::temperature_to_metric(station.temperature, units),
+            pressure_hpa: UnitConverter::pressure_to_metric(station.pressure, units),
+            humidity_pct: station.humidity,
+            altitude_m: UnitConverter::altitude_to_metric(station.altitude, units),
+            station_presence: station.presence,
         },
     };
     // The air refused up front, in the CLI's words, before any scenario is solved.
@@ -25152,7 +25604,7 @@ fn handle_hold_corridor(
         },
         request.load.station_presence,
         units,
-        SHOT_AIR_FLAGS,
+        station.labels(),
     )?;
 
     let report = solve_robust_hold(&request).map_err(|e| e.to_string())?;
@@ -25203,6 +25655,8 @@ fn handle_mark_to_range(
     zero_distance: Option<f64>,
     max_range: f64,
     load_args: InverseSolverLoadArgs,
+    // The station flags as typed (`TypedStation::typed_in`).
+    typed: TypedStation,
     units: UnitSystem,
     output: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
@@ -25269,7 +25723,7 @@ fn handle_mark_to_range(
     }
     let scale = reference_mag / mag;
 
-    let (load, _) = load_args.resolve(zero_distance, units)?;
+    let (load, _) = load_args.resolve(&typed, zero_distance, units)?;
     let max_range_m = UnitConverter::distance_to_metric(max_range, units);
     // Search a little past the requested limit so a mark landing exactly at it still
     // brackets.
@@ -25458,6 +25912,8 @@ fn handle_bdc_match(
     residual_warn: f64,
     zero_distance: Option<f64>,
     load_args: InverseSolverLoadArgs,
+    // The station flags as typed (`TypedStation::typed_in`).
+    typed: TypedStation,
     units: UnitSystem,
     output: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
@@ -25483,7 +25939,7 @@ fn handle_bdc_match(
         );
     }
 
-    let (load, _) = load_args.resolve(zero_distance, units)?;
+    let (load, _) = load_args.resolve(&typed, zero_distance, units)?;
     let furthest_m = pairs.iter().fold(0.0_f64, |acc, p| acc.max(p.range_m));
     let curve = HoldCurve::solve(&load, furthest_m * 1.05)?;
 
@@ -25672,6 +26128,8 @@ fn handle_optimal_zero(
     targets: Vec<String>,
     vital: Option<f64>,
     load_args: InverseSolverLoadArgs,
+    // The station flags as typed (`TypedStation::typed_in`).
+    typed: TypedStation,
     units: UnitSystem,
     output: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
@@ -25723,7 +26181,7 @@ fn handle_optimal_zero(
     // "no zero could be solved" later, and so the saved profile is read once rather than
     // once per search iteration. The zero distance handed in is a placeholder — this
     // command solves for it, and every candidate below overwrites it.
-    let (base_load, _) = load_args.resolve(Some(1.0), units)?;
+    let (base_load, _) = load_args.resolve(&typed, Some(1.0), units)?;
 
     // Holds at every target for one candidate zero: one solve, read at each range. The
     // error says why, so the final report below can name the cause (a refused air, say)
@@ -26051,7 +26509,14 @@ fn parse_reticle_bdc_drop(token: &str, units: UnitSystem) -> Result<(f64, f64, f
 }
 
 /// `reticle` dispatch (MBA-1361).
-fn handle_reticle(action: ReticleAction, units: UnitSystem) -> Result<(), Box<dyn Error>> {
+/// `typed` is the station as typed (`TypedStation::typed_in`). Only `reticle hold --range`
+/// flies air, so only it checks a typed temperature or pressure; every other action ignores
+/// them, as before.
+fn handle_reticle(
+    action: ReticleAction,
+    typed: Result<TypedStation, String>,
+    units: UnitSystem,
+) -> Result<(), Box<dyn Error>> {
     match action {
         ReticleAction::Generate { layout } => {
             let (mut description, common) = match layout {
@@ -26148,18 +26613,19 @@ fn handle_reticle(action: ReticleAction, units: UnitSystem) -> Result<(), Box<dy
             drag_model,
             zero_distance,
             sight_height,
-            temperature,
-            pressure,
-            pressure_type,
-            humidity,
-            altitude,
+            temperature: _,
+            pressure: _,
+            pressure_type: _,
+            humidity: _,
+            altitude: _,
             wind_speed,
             wind_direction,
             output,
         } => {
             let format = reticle_format(output)?;
+            // Converted to the run's units like every other consumer's.
             let profile_data = match profile.as_deref() {
-                Some(name) => Some(load_profile(name)?),
+                Some(name) => Some(load_profile_for_units(name, units)?),
                 None => None,
             };
 
@@ -26227,17 +26693,14 @@ fn handle_reticle(action: ReticleAction, units: UnitSystem) -> Result<(), Box<dy
                             UnitSystem::Imperial => 2.0,
                             UnitSystem::Metric => 50.0,
                         });
-                    // 0.49.0: presence from the flags, before the defaults collapse it.
-                    let station_presence =
-                        StationAtmospherePresence::new(temperature.is_some(), pressure.is_some());
-                    let temperature = UnitConverter::resolve_temperature(temperature, units)?;
-                    // MBA-1416: a declared QNH reduces against this command's own --altitude.
-                    let pressure = apply_pressure_mode(
-                        UnitConverter::resolve_pressure(pressure, units)?,
-                        altitude,
-                        pressure_type,
+                    // The air flown: each reading typed, else stored in the profile, else the
+                    // default; a declared QNH reduces at the altitude flown (MBA-1416).
+                    let station = flown_profile_station(
+                        &typed.clone()?,
+                        profile.as_deref(),
+                        profile_data.as_ref(),
                         units,
-                    );
+                    )?;
 
                     let load = HoldCurveLoad {
                         velocity_mps: UnitConverter::velocity_to_metric(velocity, units),
@@ -26247,13 +26710,16 @@ fn handle_reticle(action: ReticleAction, units: UnitSystem) -> Result<(), Box<dy
                         drag_model,
                         sight_height_m: UnitConverter::sight_height_to_metric(sight_height, units),
                         zero_distance_m: UnitConverter::distance_to_metric(zero_distance, units),
-                        temperature_c: UnitConverter::temperature_to_metric(temperature, units),
-                        pressure_hpa: UnitConverter::pressure_to_metric(pressure, units),
-                        humidity,
-                        altitude_m: UnitConverter::altitude_to_metric(altitude, units),
+                        temperature_c: UnitConverter::temperature_to_metric(
+                            station.temperature,
+                            units,
+                        ),
+                        pressure_hpa: UnitConverter::pressure_to_metric(station.pressure, units),
+                        humidity: station.humidity,
+                        altitude_m: UnitConverter::altitude_to_metric(station.altitude, units),
                         wind_speed_mps: UnitConverter::wind_to_metric(wind_speed, units),
                         wind_direction_deg: wind_direction.degrees,
-                        station_presence,
+                        station_presence: station.presence,
                     };
                     // The air refused up front, in the CLI's words, before the solve (it
                     // read "atmosphere.humidity = 100: ...", the solver's internal name).
@@ -26266,7 +26732,7 @@ fn handle_reticle(action: ReticleAction, units: UnitSystem) -> Result<(), Box<dy
                         },
                         load.station_presence,
                         units,
-                        SHOT_AIR_FLAGS,
+                        station.labels(),
                     )?;
                     let range_m = UnitConverter::distance_to_metric(range, units);
                     let curve = HoldCurve::solve(&load, range_m * 1.05)?;
@@ -28074,6 +28540,8 @@ fn adaptive_card_footer(
 )]
 fn handle_adaptive_card(
     load_args: InverseSolverLoadArgs,
+    // The station flags as typed (`TypedStation::typed_in`).
+    typed: TypedStation,
     zero_distance: Option<f64>,
     start: f64,
     end: f64,
@@ -28086,7 +28554,7 @@ fn handle_adaptive_card(
     units: UnitSystem,
     output: OutputFormat,
 ) -> Result<(), Box<dyn Error>> {
-    let (load, profile_data) = load_args.resolve(zero_distance, units)?;
+    let (load, profile_data) = load_args.resolve(&typed, zero_distance, units)?;
 
     // Optic is OPTIONAL here (unlike dial-plan): no --profile, or a --profile with no
     // turret/click data saved, both just mean "print exact, unquantized angles."

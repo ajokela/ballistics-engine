@@ -37,6 +37,11 @@ Apart from that change, `TrajectorySolver` output is byte-identical at every hum
 100 %, so the CLI, the browser terminal, the C ABI, the bridge and the apps built on them fly
 exactly as before. The kernels' own change is listed under Numeric shifts.
 
+One CLI behaviour changes on its own, under **Changed (behaviour)**: every command that takes a
+saved profile now flies the profile's stored weather (temperature, pressure and its type,
+humidity, altitude, density altitude), field by field. In 0.49.0 only `trajectory`,
+`plan-truing` and `dsf` did; the other thirteen flew the flags' defaults.
+
 ### Breaking (Rust API)
 - **The kernels take a `KernelAtmosphere`, which carries the humidity.** It replaces the
   `(f64, f64, f64, f64)` atmosphere tuple, which had no humidity in it:
@@ -192,6 +197,74 @@ relative (the 30° lob's time of flight at 100 %). Every run at 0 % is byte-iden
 table outputs round the change away.
 
 ### Changed (behaviour)
+- **BEHAVIOUR CHANGE: every command that takes a saved profile flies its stored weather.**
+  `profile save` stores a temperature, a pressure and its type, a humidity, an altitude and,
+  if one is given, a density altitude. In 0.49.0 only `trajectory --saved-profile`,
+  `plan-truing --profile` and `dsf --saved-profile` flew them. `come-ups`, `range-table`,
+  `wind-card`, `mpbr`, `lead`, `compare`, `hold-corridor`, `mark-to-range`, `bdc-match`,
+  `optimal-zero`, `adaptive-card`, `reticle hold` and `stability` loaded the profile's bullet
+  and zero and flew the flags' defaults (59 °F, 29.92 inHg, 50 %, sea level) with nothing said,
+  so one profile gave different dope on different commands. Now all sixteen resolve each
+  station field by one rule, in one resolver: a typed flag wins (a typed value equal to the
+  default too), then the stored value, then the command's documented default.
+  - Engine output, for a profile saved with `-v 2700 -b 0.475 -m 168 -d 0.308 --zero-distance
+    100 --temperature 95 --humidity 100`:
+
+    | `come-ups --profile hot`, 1000 yd | velocity | come-up |
+    |---|---|---|
+    | 0.49.0: the flags' defaults, 59 °F and 50 % | 1199.56 fps | 10.83 mil |
+    | 0.50.0: the stored weather, 95 °F and 100 % | 1273.61 fps | 10.27 mil |
+
+    `trajectory --saved-profile hot` flew the stored weather already and does not move. Typing
+    `--temperature 59 --humidity 50` gives the 0.49.0 numbers back.
+  - The qualifiers keep their MBA-1417 rules, now on every command. The stored pressure type
+    applies to the stored pressure only, never to a typed `--pressure`. A stored density
+    altitude flies its derived station unless the run gives a pressure or an altitude of its
+    own. A stored temperature or pressure keeps its presence marker. The zero is solved in the
+    same air.
+  - `compare` flies each `--profile` load in its own stored weather and each `--load` spec in
+    the typed or default air. When the loads fly different air it says so on stderr, and in
+    `-o json` each load that flies other air than the first carries an `air` object
+    (`temperature`, `pressure`, `humidity`, `altitude`). A run whose loads share one air is
+    byte-identical.
+  - `stability` flies the stored temperature, pressure, altitude and density altitude; its
+    Miller correction reads no humidity.
+  - A profile saved with no weather flags flies exactly what no profile flies, on every
+    command. The 59 °F / 29.92 inHg `profile save` stores for an omitted flag is no reading, so
+    the run's own default flies in its place. Output for such a profile, flown in the unit
+    system it was saved in, was byte-compared against the build before this change on all
+    seventeen commands that take a saved profile (`dial-plan` included), in both unit systems,
+    at sea level and at 5000 ft: identical. One case moves on `trajectory`,
+    `plan-truing` and `dsf`, which flew the stored value before: a profile saved in imperial
+    with no pressure, flown in a metric run, now flies the metric default of 1013.25 hPa, as no
+    profile does, instead of 29.92 inHg converted (1013.21 hPa). At sea level, where the
+    standard air does not replace it, `-u metric trajectory --saved-profile` of such a profile
+    moves from 551.2776 to 551.2691 m/s at 600 m.
+  - A stored value is checked where it flies, and only there.
+    - A stored humidity outside the sensor band is refused by every command that flies it,
+      naming the field and the file to edit. `trajectory` now prints that refusal as
+      `Error: ...`, not `Error loading saved profile: ...`.
+    - A run that types `--humidity`, `stability`, `dial-plan` and `reticle hold --drop-mil`
+      never read the stored humidity, and no longer refuse the profile for it.
+    - Stored air that cannot exist is refused naming the profile field each reading came from
+      (`profile 'p' field temperature`, `field pressure`, `field altitude`, or `field
+      density_altitude` for a stored density altitude's station). `trajectory` and
+      `plan-truing` named the `--temperature`, `--pressure` and `--altitude` flags for a
+      stored reading.
+    - `plan-truing` no longer range-checks a stored temperature or pressure against the typed
+      flags' ranges under the flag's name. It checks it as every command does, by the
+      impossible-air rule.
+  - On `trajectory`, a `--profile` CSV `ZERO_ALT` cell now stops a saved profile's stored
+    density altitude, as a typed `--altitude` or a `--location` CSV altitude does. In 0.49.0 the
+    stored density altitude superseded it.
+  - `hold-corridor`, `mark-to-range`, `bdc-match`, `optimal-zero`, `adaptive-card` and
+    `reticle hold` now convert a saved profile to the run's units, as every other command does.
+    They read a profile saved in the other unit system as if it were in the run's: a metric
+    profile's 823 m/s flew as 823 fps in an imperial run. For a profile saved with `-u metric -v
+    823 -b 0.475 -m 10.9 -d 7.82 --zero-distance 91.44`, `reticle hold --range 300` held 15.62
+    mil; it now holds 1.25 mil.
+  - Every consumer's `--help` names the profile as the fallback for each station flag
+    ("Omitted: the --profile's stored temperature, else ICAO standard at --altitude ...").
 - **A humidity outside the sensor band is refused, never clamped.**
   - The band is `HUMIDITY_SENSOR_TOLERANCE_PERCENT` = 5 points around 0-100 %, so a percent from
     -5 to 105, or a fraction from -0.05 to 1.05.
@@ -489,7 +562,8 @@ station's humidity, so the station and its zones fly one model.
 
 ### Byte-identical
 - **Every `TrajectorySolver` surface at every humidity from 0 to 100 %, apart from the aloft
-  change.** These are the CLI, the browser terminal and its JS builder, the C ABI (single solve
+  change and a saved profile's stored weather (under Changed (behaviour)).** These are the CLI,
+  the browser terminal and its JS builder, the C ABI (single solve
   and Monte Carlo), the bridge (`solve`, `card.*`, `true.*`, `profile.*`,
   `atmosphere.density_altitude`), solve-json, explain, error-budget, the cards and PDFs, truing,
   WEZ, moving target and BC estimation. Apps and services that fly through these surfaces see
@@ -613,7 +687,8 @@ These consumers pin or embed the engine and are not changed here:
   height, with the virtual-temperature lapse. The chapters that carry the old model are the
   primer, the atmosphere, the trajectory solver, weather integration, architecture, performance
   and the physics-constants appendix. The stability chapter's dry Miller listing stays: it is the
-  deliberate exception.
+  deliberate exception. Wherever it describes a command's `--profile`, say that every command
+  that takes a saved profile flies the profile's stored weather, flag by flag.
 - **Apps and services that embed the engine**: their numbers move with the aloft change at a
   humidity above 0, in high-angle fire and in shots far above or below the station. Re-baseline
   their goldens against 0.50.0, and fill a missing humidity with the 50 % default.
