@@ -2,6 +2,7 @@
 .coderabbit.yaml
 .git-blame-ignore-revs
 .gitattributes
+.githooks/commit-msg
 .githooks/pre-commit
 .gitignore
 .sensitive-patterns

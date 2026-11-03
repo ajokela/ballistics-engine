@@ -9,41 +9,203 @@
 #   2. No NEWLY ADDED file's content may name Applied Ballistics (existing
 #      tracked files legitimately cite AB's published research; new files that
 #      genuinely need to are the rare, eyes-open case).
+#   3. No ADDED line of the staged diff, in any file, may match a pattern in
+#      the clone's LOCAL private pattern list (below). Only added text is read:
+#      a line the commit keeps, carries along in a rename or removes is not,
+#      and binary files are skipped. A staged copy of the list is refused.
+#
+# The local private pattern list. Rules 1 and 2 cannot catch private-app
+# material (internals of the owner's private apps and services, private repo
+# names, local machine paths, session artifacts), and its patterns cannot go
+# into the tracked .sensitive-patterns: listing them there would publish them.
+# They live in an UNTRACKED file instead:
+#
+#     "$(git rev-parse --git-common-dir)/info/private-patterns"
+#
+# that is, .git/info/private-patterns of the main checkout. It is in the
+# clone's common git directory, so every worktree of the clone shares the one
+# list. `git config hooks.privatePatterns <path>` names another file (a ~/
+# path is expanded). One extended regex per line, matched case-insensitively;
+# surrounding whitespace is ignored, as are empty lines and lines starting
+# with #. Text is matched byte for byte whatever the locale, so a line that is
+# not valid UTF-8 is read too, and the case of ASCII letters only is ignored;
+# CDPATH and GREP_OPTIONS in the environment change nothing. A pattern grep
+# cannot compile refuses the commit rather than being skipped. No file means
+# rule 3 is off, so CI and other clones are unaffected; a configured path that
+# does not exist is reported and the rule is off. Matches are printed to this
+# terminal only. NEVER commit the list or copy it into the tree.
+# .githooks/commit-msg applies the same list to the message.
+#
 # Deliberate override for reviewed exceptions: SENSITIVE_OK=1 git commit ...
+# (it turns off every rule, in both hooks).
 set -euo pipefail
 [ "${SENSITIVE_OK:-0}" = "1" ] && exit 0
 TOP="$(git rev-parse --show-toplevel)"
 PATTERNS="$TOP/.sensitive-patterns"
-[ -f "$PATTERNS" ] || exit 0
+HOOK=pre-commit
 
 viol=0
-while IFS= read -r path; do
-    while IFS= read -r pat; do
-        case "$pat" in ''|'#'*) continue ;; esac
-        if printf '%s\n' "$path" | grep -qiE "$pat"; then
-            echo "pre-commit GUARD: staged path '$path' matches sensitive pattern '$pat'" >&2
+if [ -f "$PATTERNS" ]; then
+    while IFS= read -r path; do
+        while IFS= read -r pat; do
+            case "$pat" in ''|'#'*) continue ;; esac
+            if printf '%s\n' "$path" | grep -qiE "$pat"; then
+                echo "pre-commit GUARD: staged path '$path' matches sensitive pattern '$pat'" >&2
+                viol=1
+            fi
+        done < "$PATTERNS"
+    done < <(git diff --cached --name-only --diff-filter=ACMR)
+
+    while IFS= read -r path; do
+        # The guard's own files legitimately name the sensitive party; skip them.
+        case "$path" in .githooks/*|.sensitive-patterns) continue ;; esac
+        body="$(git show ":$path" 2>/dev/null | head -c 200000)"
+        if printf '%s' "$body" | grep -qiE 'applied[ _-]?ballistics'; then
+            echo "pre-commit GUARD: newly added '$path' names Applied Ballistics" >&2
             viol=1
         fi
-    done < "$PATTERNS"
-done < <(git diff --cached --name-only --diff-filter=ACMR)
+        # Same shape, same reasoning, different subject: a patent application on the
+        # BC5D solver is pending. The 31 files already tracked here that discuss BC5D
+        # are grandfathered by scoping this to ADDED files only -- editing them is
+        # ordinary maintenance; introducing a NEW one is the eyes-open case.
+        if printf '%s' "$body" | grep -qiE 'bc[ _-]?5d'; then
+            echo "pre-commit GUARD: newly added '$path' contains BC5D material (patent pending)" >&2
+            viol=1
+        fi
+    done < <(git diff --cached --name-only --diff-filter=A)
+fi
 
-while IFS= read -r path; do
-    # The guard's own files legitimately name the sensitive party; skip them.
-    case "$path" in .githooks/*|.sensitive-patterns) continue ;; esac
-    body="$(git show ":$path" 2>/dev/null | head -c 200000)"
-    if printf '%s' "$body" | grep -qiE 'applied[ _-]?ballistics'; then
-        echo "pre-commit GUARD: newly added '$path' names Applied Ballistics" >&2
-        viol=1
+# --- BEGIN shared block: the local private pattern list. This block is the
+# --- same in .githooks/pre-commit and .githooks/commit-msg; change both.
+
+# Print the list's path, or nothing when there is none (the check is then off).
+private_patterns_file() {
+    local configured file
+    configured="$(git config --path --get hooks.privatePatterns || true)"
+    if [ -n "$configured" ]; then
+        file="$configured"
+    else
+        # In the main checkout git names the directory by the relative ".git", which cd
+        # would look up through an exported CDPATH (and then print), so CDPATH is cleared.
+        file="$(CDPATH='' cd -- "$(git rev-parse --git-common-dir)" && pwd)/info/private-patterns"
     fi
-    # Same shape, same reasoning, different subject: a patent application on the
-    # BC5D solver is pending. The 31 files already tracked here that discuss BC5D
-    # are grandfathered by scoping this to ADDED files only -- editing them is
-    # ordinary maintenance; introducing a NEW one is the eyes-open case.
-    if printf '%s' "$body" | grep -qiE 'bc[ _-]?5d'; then
-        echo "pre-commit GUARD: newly added '$path' contains BC5D material (patent pending)" >&2
-        viol=1
+    if [ -f "$file" ]; then
+        printf '%s\n' "$file"
+    elif [ -n "$configured" ]; then
+        echo "$HOOK GUARD: hooks.privatePatterns names '$configured', which does not exist; the private pattern check is off" >&2
     fi
-done < <(git diff --cached --name-only --diff-filter=A)
+}
+
+# Read the list's patterns into PRIVATE_PATTERNS.
+load_private_patterns() {
+    local line
+    PRIVATE_PATTERNS=()
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        case "$line" in ''|'#'*) continue ;; esac
+        PRIVATE_PATTERNS+=("$line")
+    done < "$1"
+}
+
+# For every line of the file $1 that a pattern matches, print "<line number><TAB><pattern>",
+# in line order. Return 1, having said which, if grep cannot compile a pattern.
+# Matching is byte for byte (LC_ALL=C): in a UTF-8 locale the BSD grep of macOS silently
+# skips every line that is not valid UTF-8, such as a Latin-1 one. So -i folds ASCII letters
+# only. GREP_OPTIONS, which that grep obeys (-x, -w, -F, ...), is removed.
+private_pattern_hits() {
+    local pat rc status=0
+    : > "$WORK/hits.unsorted"
+    for pat in "${PRIVATE_PATTERNS[@]}"; do
+        rc=0
+        env -u GREP_OPTIONS LC_ALL=C grep -naiE -e "$pat" -- "$1" > "$WORK/match" 2>/dev/null || rc=$?
+        if [ "$rc" = 0 ]; then
+            PAT="$pat" LC_ALL=C awk -F : '{ print $1 "\t" ENVIRON["PAT"] }' "$WORK/match" >> "$WORK/hits.unsorted"
+        elif [ "$rc" != 1 ]; then
+            echo "$HOOK GUARD: private pattern '$pat' is not a valid extended regular expression" >&2
+            status=1
+        fi
+    done
+    LC_ALL=C sort -s -t "$(printf '\t')" -k1,1n "$WORK/hits.unsorted"
+    return "$status"
+}
+
+# Print one message per hit: "$HOOK GUARD: <where> <what> private pattern '<pattern>'", where
+# line N of the file $2 says where line N of the scanned file came from; at most 50, then a count.
+report_private_hits() {
+    WHAT="$3" HOOK="$HOOK" LC_ALL=C awk -F '\t' '
+        NR == FNR { where[FNR] = $0; next }
+        {
+            hits++
+            if (hits <= 50)
+                printf "%s GUARD: %s %s private pattern '\''%s'\''\n", ENVIRON["HOOK"],
+                    where[$1], ENVIRON["WHAT"], substr($0, length($1) + 2)
+        }
+        END { if (hits > 50) printf "%s GUARD: ... and %d more\n", ENVIRON["HOOK"], hits - 50 }
+    ' "$2" "$1" >&2
+}
+# --- END shared block.
+
+PRIVATE="$(private_patterns_file)"
+if [ -n "$PRIVATE" ]; then
+    WORK="$(mktemp -d "${TMPDIR:-/tmp}/$HOOK-guard.XXXXXX")"
+    trap 'rm -rf "$WORK"' EXIT
+    load_private_patterns "$PRIVATE"
+
+    # The list itself, staged anywhere: a regex need not match its own text, so the
+    # content check below would not see it.
+    if [ -s "$PRIVATE" ]; then
+        blob="$(git hash-object --no-filters -- "$PRIVATE")"
+        while IFS= read -r path; do
+            echo "pre-commit GUARD: staged '$path' is a copy of the private pattern file, which must never be committed" >&2
+            viol=1
+        done < <(git ls-files -s | awk -v blob="$blob" '$2 == blob { sub(/^[^\t]*\t/, ""); print }')
+    fi
+
+    if [ "${#PRIVATE_PATTERNS[@]}" -gt 0 ]; then
+        # Every added line of the staged diff, one per line of $WORK/added, and the
+        # "<path>:<line in the staged file>" it came from at the same line of $WORK/where.
+        # Pinned so no diff.* setting changes what is read: renames are found (so a
+        # renamed file's kept lines are not added), copies are not (so a copied file's
+        # lines are all added), and no external diff, textconv or prefix setting applies.
+        # Context lines are not read but are counted: GIT_DIFF_OPTS overrides -U0, and
+        # without --inter-hunk-context=0 diff.interHunkContext would add some too. With
+        # diff.suppressBlankEmpty a blank context line is an empty line, not " ".
+        : > "$WORK/added"
+        : > "$WORK/where"
+        if ! git -c core.quotePath=false diff --cached -U0 --inter-hunk-context=0 --no-color \
+            --no-ext-diff --no-textconv -M --src-prefix=a/ --dst-prefix=b/ |
+            ADDED="$WORK/added" WHERE="$WORK/where" LC_ALL=C awk '
+                /^diff --git / { inhunk = 0; path = ""; next }
+                !inhunk && /^\+\+\+ / {
+                    path = substr($0, 5)
+                    sub(/\t$/, "", path)
+                    if (path ~ /^"/) { path = substr(path, 2); sub(/"$/, "", path) }
+                    sub(/^b\//, "", path)
+                    next
+                }
+                /^@@ / {
+                    inhunk = 1
+                    line = match($0, /\+[0-9]+/) ? substr($0, RSTART + 1, RLENGTH - 1) + 0 : 0
+                    next
+                }
+                inhunk && /^\+/ {
+                    print substr($0, 2) > ENVIRON["ADDED"]
+                    print path ":" line > ENVIRON["WHERE"]
+                }
+                inhunk && (/^[+ ]/ || $0 == "") { line++ }
+            '
+        then
+            echo "pre-commit GUARD: could not read the staged diff for the private pattern check" >&2
+            viol=1
+        fi
+        private_pattern_hits "$WORK/added" > "$WORK/hits" || viol=1
+        if [ -s "$WORK/hits" ]; then
+            report_private_hits "$WORK/hits" "$WORK/where" "adds text matching"
+            viol=1
+        fi
+    fi
+fi
 
 if [ "$viol" = 1 ]; then
     echo "pre-commit GUARD: refusing this commit. This is the PUBLIC engine repo;" >&2
