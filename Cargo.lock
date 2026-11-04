@@ -196,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "ballistics-engine"
-version = "0.50.0"
+version = "0.50.1"
 dependencies = [
  "approx",
  "ballistics-engine 0.49.0",
