@@ -5,6 +5,22 @@ All notable changes to the ballistics-engine project will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+A patch release: no API change and no numeric change.
+
+### Security
+
+- **The engine no longer depends on `zip`.** `ndarray-npy` is now built without its default
+  `compressed_npz` feature: the engine only reads plain `.npy` drag tables (`read_npy`), never
+  `.npz` archives. `zip` 6 carries open advisories (a critical archive-cloaking / file-overwrite
+  issue, unbounded symlink targets, an AES HMAC bypass and a legacy-decoder denial of service),
+  none of which the engine could reach, but every crate, binding and app that built
+  ballistics-engine 0.50.0 compiled it and its lockfile flagged it. Building 0.50.1 removes it.
+  This repository's own lockfiles still list `zip` through two test-only reference crates (the
+  released 0.49.0 engine used by the byte-identity tests, and the 0.21.5 engine the differential
+  fuzzer compares against); neither is shipped.
+
 ## [0.50.0] - 2026-11-03
 
 A minor bump, because the Rust API breaks below.

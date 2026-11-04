@@ -130,7 +130,7 @@ validation = []
 [dependencies]
 nalgebra = "0.35"
 ndarray = "0.17"
-ndarray-npy = "0.10"
+ndarray-npy = { version = "0.10", default-features = false }  # plain .npy only: npz pulls in zip
 serde = { version = "1.0", features = ["derive"] }
 # float_roundtrip: the bridge (src/bridge/) round-trips request/response floats
 # through serde_json::Value; without this feature serde_json's fast float parser
