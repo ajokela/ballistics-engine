@@ -42,6 +42,13 @@ chk "GH release assets (38 = 16 bins + 16 sha + 6 provenance)" "$(gh release vie
 chk "GCS objects" "$(gsutil ls "gs://ballistics-releases/$V/" 2>/dev/null | wc -l | tr -d ' ')" "38"
 chk "live terminal badge" "$(curl -s https://ballistics.rs/sh/ | grep -o "Ballistics Engine v[0-9.]*" | head -1)" "Ballistics Engine v$V"
 chk "docs" "$(curl -sL https://docs-ballistics-rs.web.app/generated-docs/ballistics_engine/index.html | grep -coF "$V" | awk '{print ($1>0)?"yes":"no"}')" "yes"
+# The two ways to get the CLI without cargo: the install script, which installs
+# whatever latest-version.txt names, and the ballistics.zip download page. Both
+# fell behind for months with nothing here to say so -- latest-version.txt sat at
+# 0.33.1 and every link on the page pointed at 0.25.0. The page check wants every
+# download link on this version and nothing else; one stale link fails it.
+chk "installer's latest-version.txt" "$(curl -s "https://storage.googleapis.com/ballistics-releases/latest-version.txt?v=$V-$$" | tr -d '[:space:]')" "$V"
+chk "ballistics.zip download links" "$(curl -s "https://ballistics.zip/?v=$V-$$" | grep -oE 'ballistics-releases/[0-9.]+/' | sort -u | tr -d '\n')" "ballistics-releases/$V/"
 # wasm byte-parity: live vs local copy
 LOCAL="$HOME/projects/ballistics.rs/ballistics-rs-site/sh/wasm/ballistics_engine_bg.wasm"
 if [ -f "$LOCAL" ]; then
